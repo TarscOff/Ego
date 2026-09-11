@@ -1,0 +1,486 @@
+// Loads and validates the authored control plane. Every problem is collected and reported together; any problem
+// fails the load so a malformed file can never silently weaken enforcement (decision Q10).
+import { join, basename } from 'node:path';
+import { readdirSync } from 'node:fs';
+import { parseMarkdown, findSection, requireString, optionalBoolean, optionalNumber, optionalString, optionalStringList, type MarkdownDoc, type Section } from '../util/markdown.ts';
+import { readText, isFile, isDir, toPosix } from '../util/fs.ts';
+import { sha256Hex } from '../util/hash.ts';
+import type { YamlValue } from '../util/yaml.ts';
+import {
+  ControlPlaneValidationError,
+  type AuthorityMode,
+  type CapabilityDecl,
+  type CapabilityDoc,
+  type ControlPlane,
+  type CoordinationConstants,
+  type GrantsDoc,
+  type Intent,
+  type LayerName,
+  type Matcher,
+  type MatcherTool,
+  type ModelFlagPolicy,
+  type OwnerWeakeningPolicy,
+  type Profile,
+  type ReleaseKey,
+  type ReleaseKeysDoc,
+  type SecretDetector,
+  type SecretsDoc,
+  type ShellUncertainPolicy,
+  type UnavailablePolicy,
+  type Verdict,
+} from './types.ts';
+
+const SECTION_VERDICTS: Array<{ keys: string[]; verdict: Verdict }> = [
+  { keys: ['allowed', 'allow'], verdict: 'ALLOW' },
+  { keys: ['requires human approval', 'ask', 'requires approval', 'human approval'], verdict: 'ASK' },
+  { keys: ['denied', 'deny'], verdict: 'DENY' },
+];
+
+const CAP_ID_RE = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
+
+function listMarkdown(dir: string): string[] {
+  if (!isDir(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.md') && f.toLowerCase() !== 'readme.md')
+    .sort()
+    .map((f) => join(dir, f));
+}
+
+function asRecord(v: YamlValue | undefined): Record<string, YamlValue> | null {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, YamlValue>) : null;
+}
+
+export function parseCapabilityDoc(file: string, source: string, layer: LayerName, problems: string[]): CapabilityDoc | null {
+  let doc: MarkdownDoc;
+  try {
+    doc = parseMarkdown(file, source);
+  } catch (e) {
+    problems.push((e as Error).message);
+    return null;
+  }
+  const schema = optionalString(doc, 'schema');
+  if (schema !== 'ego.capabilities/1') {
+    problems.push(`${file}: schema must be ego.capabilities/1`);
+    return null;
+  }
+  const id = requireString(doc, 'id');
+  const family = requireString(doc, 'family');
+  const title = doc.title ?? optionalString(doc, 'title') ?? id;
+  const absolute = optionalBoolean(doc, 'absolute', false);
+  const capabilities: CapabilityDecl[] = [];
+  const seen = new Map<string, Verdict>();
+  const visit = (sec: Section) => {
+    const match = SECTION_VERDICTS.find((s) => s.keys.includes(sec.key));
+    if (match) {
+      if (absolute && match.verdict !== 'DENY') problems.push(`${file}:${sec.line}: an absolute file may only contain a Denied section`);
+      for (const item of sec.items) {
+        if (!item.id) {
+          problems.push(`${file}:${item.line}: checklist item has no \`identifier\``);
+          continue;
+        }
+        if (!CAP_ID_RE.test(item.id)) {
+          problems.push(`${file}:${item.line}: invalid capability identifier "${item.id}"`);
+          continue;
+        }
+        if (seen.has(item.id)) {
+          problems.push(`${file}:${item.line}: capability "${item.id}" appears in more than one section`);
+          continue;
+        }
+        seen.set(item.id, match.verdict);
+        if (!item.checked) continue; // documented but inactive at this layer
+        capabilities.push({ id: item.id, verdict: match.verdict, description: item.text, family, file, line: item.line, absolute });
+      }
+    }
+    sec.children.forEach(visit);
+  };
+  doc.sections.forEach(visit);
+  return { id, family, title, absolute, layer, file, capabilities };
+}
+
+function parseMatchers(file: string, problems: string[]): Matcher[] {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.matchers/1') {
+    problems.push(`${file}: schema must be ego.matchers/1`);
+    return [];
+  }
+  const raw = doc.frontmatter['matchers'];
+  if (!Array.isArray(raw)) {
+    problems.push(`${file}: frontmatter "matchers" must be a list`);
+    return [];
+  }
+  const out: Matcher[] = [];
+  raw.forEach((entry, index) => {
+    const m = asRecord(entry);
+    if (!m) {
+      problems.push(`${file}: matcher #${index + 1} is not a map`);
+      return;
+    }
+    const capability = typeof m['capability'] === 'string' ? m['capability'] : '';
+    const tool = typeof m['tool'] === 'string' ? (m['tool'] as MatcherTool) : 'any';
+    if (!capability) problems.push(`${file}: matcher #${index + 1} has no capability`);
+    if (!['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'any'].includes(tool)) problems.push(`${file}: matcher #${index + 1} has invalid tool "${tool}"`);
+    const matcher: Matcher = { capability, tool, index, file };
+    const cmd = m['command'];
+    const path = m['path'];
+    const url = m['url'];
+    if (typeof cmd === 'string') {
+      try {
+        matcher.command = new RegExp(cmd, 'i');
+        matcher.commandSource = cmd;
+      } catch (e) {
+        problems.push(`${file}: matcher #${index + 1} has an invalid command regex: ${(e as Error).message}`);
+      }
+    }
+    if (typeof path === 'string') matcher.path = path;
+    if (typeof url === 'string') {
+      try {
+        matcher.url = new RegExp(url, 'i');
+        matcher.urlSource = url;
+      } catch (e) {
+        problems.push(`${file}: matcher #${index + 1} has an invalid url regex: ${(e as Error).message}`);
+      }
+    }
+    if (!matcher.command && !matcher.path && !matcher.url) problems.push(`${file}: matcher #${index + 1} has no command, path or url`);
+    out.push(matcher);
+  });
+  return out;
+}
+
+function parseGrants(file: string, problems: string[]): GrantsDoc {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.grants/1') problems.push(`${file}: schema must be ego.grants/1`);
+  const negations = optionalStringList(doc, 'negations').map((n) => normalizePhrase(n));
+  const window = optionalNumber(doc, 'negation_window_tokens') ?? 4;
+  const raw = doc.frontmatter['grants'];
+  const grants: GrantsDoc['grants'] = [];
+  if (!Array.isArray(raw)) problems.push(`${file}: frontmatter "grants" must be a list`);
+  else {
+    raw.forEach((entry, i) => {
+      const g = asRecord(entry);
+      if (!g || typeof g['capability'] !== 'string' || !Array.isArray(g['phrases'])) {
+        problems.push(`${file}: grant #${i + 1} must have capability and phrases`);
+        return;
+      }
+      const phrases = (g['phrases'] as YamlValue[]).filter((p): p is string => typeof p === 'string').map(normalizePhrase);
+      if (phrases.length === 0) problems.push(`${file}: grant #${i + 1} has no phrases`);
+      grants.push({ capability: g['capability'], phrases });
+    });
+  }
+  return { negationWindowTokens: window, negations, grants, file };
+}
+
+/** Normalization shared by the grant recogniser: lowercase, accents folded, punctuation collapsed to spaces. */
+export function normalizePhrase(s: string): string {
+  return s
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function parseProfile(file: string, problems: string[]): Profile | null {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.profile/1') {
+    problems.push(`${file}: schema must be ego.profile/1`);
+    return null;
+  }
+  const id = requireString(doc, 'id');
+  const enumField = <T extends string>(key: string, allowed: readonly T[], def: T): T => {
+    const v = optionalString(doc, key) ?? def;
+    if (!allowed.includes(v as T)) {
+      problems.push(`${file}: ${key} must be one of ${allowed.join(', ')}`);
+      return def;
+    }
+    return v as T;
+  };
+  const narrow: Profile['narrow'] = [];
+  const rawNarrow = doc.frontmatter['narrow'];
+  if (Array.isArray(rawNarrow)) {
+    rawNarrow.forEach((n, i) => {
+      const r = asRecord(n);
+      const cap = r?.['capability'];
+      const verdict = r?.['verdict'];
+      if (typeof cap !== 'string' || (verdict !== 'ASK' && verdict !== 'DENY')) {
+        problems.push(`${file}: narrow #${i + 1} must have capability and verdict ASK or DENY`);
+        return;
+      }
+      narrow.push({ capability: cap, verdict });
+    });
+  } else if (rawNarrow !== undefined && rawNarrow !== null) {
+    problems.push(`${file}: narrow must be a list`);
+  }
+  return {
+    id,
+    title: doc.title ?? id,
+    contextBudgetTokens: optionalNumber(doc, 'context_budget_tokens') ?? 2500,
+    organizationCeilingTokens: optionalNumber(doc, 'organization_ceiling_tokens') ?? 4000,
+    requiresSignedReleaseTrust: optionalBoolean(doc, 'requires_signed_release_trust', false),
+    requiresManagedTier: optionalBoolean(doc, 'requires_managed_tier', false),
+    requiresRemoteVerifyBackstop: optionalBoolean(doc, 'requires_remote_verify_backstop', false),
+    grillingReviewUnavailable: enumField<UnavailablePolicy>('grilling_review_unavailable', ['CONTINUE_WITH_DISCLOSURE', 'BLOCK_DONE'], 'CONTINUE_WITH_DISCLOSURE'),
+    forgeUnreachableAtDone: enumField<UnavailablePolicy>('forge_unreachable_at_done', ['CONTINUE_WITH_DISCLOSURE', 'BLOCK_DONE'], 'CONTINUE_WITH_DISCLOSURE'),
+    shellUncertainMutation: enumField<ShellUncertainPolicy>('shell_uncertain_mutation_with_foreign_live_session', ['DETECT_AFTER', 'DENY', 'REQUIRE_ISOLATION'], 'DETECT_AFTER'),
+    ownerWeakeningPlainPolicy: enumField<OwnerWeakeningPolicy>('owner_weakening_plain_policy', ['AUTO_WITH_INFORM', 'DECISION'], 'AUTO_WITH_INFORM'),
+    modelFlaggedConflictOnControl: enumField<ModelFlagPolicy>('model_flagged_conflict_on_control', ['INFORM', 'DECISION_WITH_KEEP'], 'INFORM'),
+    narrow,
+    file,
+  };
+}
+
+function parseMode(file: string, problems: string[]): AuthorityMode | null {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.mode/1') {
+    problems.push(`${file}: schema must be ego.mode/1`);
+    return null;
+  }
+  if (optionalString(doc, 'kind') !== 'authority') problems.push(`${file}: kind must be "authority" for a mode`);
+  const overrides: AuthorityMode['overrides'] = [];
+  const raw = doc.frontmatter['overrides'];
+  if (Array.isArray(raw)) {
+    raw.forEach((n, i) => {
+      const r = asRecord(n);
+      const cap = r?.['capability'];
+      const verdict = r?.['verdict'];
+      if (typeof cap !== 'string' || (verdict !== 'ALLOW' && verdict !== 'ASK' && verdict !== 'DENY')) {
+        problems.push(`${file}: override #${i + 1} must have capability and verdict`);
+        return;
+      }
+      overrides.push({ capability: cap, verdict });
+    });
+  }
+  return {
+    id: requireString(doc, 'id'),
+    title: doc.title ?? requireString(doc, 'id'),
+    isDefault: optionalBoolean(doc, 'default', false),
+    onlyInEgoRepository: optionalBoolean(doc, 'only_in_ego_repository', false),
+    overrides,
+    file,
+  };
+}
+
+function parseIntent(file: string, problems: string[]): Intent | null {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.intent/1') {
+    problems.push(`${file}: schema must be ego.intent/1`);
+    return null;
+  }
+  if (optionalBoolean(doc, 'changes_authority', false)) problems.push(`${file}: an intent may not change authority`);
+  return { id: requireString(doc, 'id'), title: doc.title ?? requireString(doc, 'id'), routesSkills: optionalStringList(doc, 'routes_skills'), file };
+}
+
+function parseSecrets(file: string, problems: string[], layer: LayerName): SecretsDoc | null {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.secrets/1') {
+    problems.push(`${file}: schema must be ego.secrets/1`);
+    return null;
+  }
+  const family = requireString(doc, 'family');
+  const detectors: SecretDetector[] = [];
+  const raw = doc.frontmatter['detectors'];
+  if (Array.isArray(raw)) {
+    raw.forEach((entry, i) => {
+      const d = asRecord(entry);
+      if (!d || typeof d['id'] !== 'string' || typeof d['pattern'] !== 'string') {
+        problems.push(`${file}: detector #${i + 1} must have id and pattern`);
+        return;
+      }
+      const severity = d['severity'] === 'warn' ? 'warn' : d['severity'] === 'block' ? 'block' : null;
+      if (!severity) {
+        problems.push(`${file}: detector ${d['id']} severity must be block or warn`);
+        return;
+      }
+      const flags = typeof d['flags'] === 'string' ? d['flags'] : 'gi';
+      let re: RegExp;
+      try {
+        re = new RegExp(d['pattern'], flags.includes('g') ? flags : `g${flags}`);
+      } catch (e) {
+        problems.push(`${file}: detector ${d['id']} has an invalid pattern: ${(e as Error).message}`);
+        return;
+      }
+      detectors.push({
+        id: d['id'],
+        family,
+        name: typeof d['name'] === 'string' ? d['name'] : d['id'],
+        pattern: re,
+        patternSource: d['pattern'],
+        flags: re.flags,
+        group: typeof d['group'] === 'number' ? d['group'] : 0,
+        severity,
+        locked: layer === 'core' ? d['locked'] !== false : false,
+        replacement: typeof d['replacement'] === 'string' ? d['replacement'] : '[REDACTED]',
+        wholeDocument: d['whole_document'] === true,
+        onlyForFiles: d['only_for_files'] === true,
+        file,
+      });
+    });
+  }
+  return { family, title: doc.title ?? family, sensitiveFiles: optionalStringList(doc, 'sensitive_files'), detectors, file };
+}
+
+function parseReleaseKeys(file: string, problems: string[]): ReleaseKeysDoc {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.release-keys/1') problems.push(`${file}: schema must be ego.release-keys/1`);
+  if (!optionalBoolean(doc, 'absolute', false)) problems.push(`${file}: release-keys must be marked absolute: true`);
+  const keys: ReleaseKey[] = [];
+  const raw = doc.frontmatter['keys'];
+  if (Array.isArray(raw)) {
+    raw.forEach((entry, i) => {
+      const k = asRecord(entry);
+      if (!k || typeof k['id'] !== 'string' || typeof k['publicKey'] !== 'string' || typeof k['fingerprint'] !== 'string') {
+        problems.push(`${file}: key #${i + 1} must have id, publicKey and fingerprint`);
+        return;
+      }
+      const status = k['status'];
+      if (status !== 'active' && status !== 'standby' && status !== 'revoked') {
+        problems.push(`${file}: key ${k['id']} status must be active, standby or revoked`);
+        return;
+      }
+      if (k['algorithm'] !== 'ed25519') problems.push(`${file}: key ${k['id']} algorithm must be ed25519`);
+      const key: ReleaseKey = { id: k['id'], algorithm: 'ed25519', publicKey: k['publicKey'], fingerprint: k['fingerprint'].toLowerCase(), status };
+      if (typeof k['validFrom'] === 'string') key.validFrom = k['validFrom'];
+      keys.push(key);
+    });
+  } else if (raw !== undefined && raw !== null) {
+    problems.push(`${file}: keys must be a list`);
+  }
+  return { keys, independentChannel: optionalString(doc, 'independent_channel') ?? '', file };
+}
+
+function parseCoordination(file: string, problems: string[]): CoordinationConstants {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.coordination/1') problems.push(`${file}: schema must be ego.coordination/1`);
+  const num = (key: string, def: number) => {
+    const v = optionalNumber(doc, key);
+    if (v !== undefined && v <= 0) problems.push(`${file}: ${key} must be positive`);
+    return v ?? def;
+  };
+  return {
+    heartbeatTtlSeconds: num('heartbeat_ttl_seconds', 900),
+    heartbeatTtlWithoutPidSeconds: num('heartbeat_ttl_without_pid_seconds', 3600),
+    handoffGraceSeconds: num('handoff_grace_seconds', 1800),
+    lockTimeoutMs: num('lock_timeout_ms', 3000),
+    lockStaleBreakMs: num('lock_stale_break_ms', 30000),
+    gcEndedSessionsDays: num('gc_ended_sessions_days', 7),
+    gcUnheldClaimsDays: num('gc_unheld_claims_days', 30),
+    file,
+  };
+}
+
+export function loadControlPlane(root: string): ControlPlane {
+  const problems: string[] = [];
+  const sourceHashes: Record<string, string> = {};
+  const rec = (file: string) => {
+    sourceHashes[toPosix(file.slice(root.length + 1))] = sha256Hex(readText(file));
+  };
+  const req = (rel: string): string => {
+    const f = join(root, rel);
+    if (!isFile(f)) {
+      problems.push(`missing required control-plane file: ${rel}`);
+      return '';
+    }
+    rec(f);
+    return f;
+  };
+
+  const absFile = req('permissions/absolute-denies.md');
+  const absoluteDenies = absFile ? parseCapabilityDoc(absFile, readText(absFile), 'core', problems) : null;
+  if (absoluteDenies && !absoluteDenies.absolute) problems.push(`${absFile}: must declare absolute: true`);
+
+  const capabilityDocs: CapabilityDoc[] = [];
+  for (const f of listMarkdown(join(root, 'permissions', 'capabilities'))) {
+    rec(f);
+    const d = parseCapabilityDoc(f, readText(f), 'core', problems);
+    if (d) {
+      if (d.absolute) problems.push(`${f}: only absolute-denies.md may be absolute`);
+      capabilityDocs.push(d);
+    }
+  }
+  if (capabilityDocs.length === 0) problems.push('no capability documents found under permissions/capabilities/');
+
+  const matchersFile = req('permissions/matchers.md');
+  const matchers = matchersFile ? parseMatchers(matchersFile, problems) : [];
+  const grantsFile = req('permissions/grants.md');
+  const grants = grantsFile ? parseGrants(grantsFile, problems) : { negationWindowTokens: 4, negations: [], grants: [], file: '' };
+  const keysFile = req('permissions/release-keys.md');
+  const releaseKeys = keysFile ? parseReleaseKeys(keysFile, problems) : { keys: [], independentChannel: '', file: '' };
+
+  const profiles = listMarkdown(join(root, 'profiles')).map((f) => (rec(f), parseProfile(f, problems))).filter((p): p is Profile => p !== null);
+  const modes = listMarkdown(join(root, 'modes')).map((f) => (rec(f), parseMode(f, problems))).filter((m): m is AuthorityMode => m !== null);
+  const intents = listMarkdown(join(root, 'intents')).map((f) => (rec(f), parseIntent(f, problems))).filter((m): m is Intent => m !== null);
+  const secrets = listMarkdown(join(root, 'secrets')).map((f) => (rec(f), parseSecrets(f, problems, 'core'))).filter((s): s is SecretsDoc => s !== null);
+  const coordFile = req('workspace/coordination.md');
+  const coordination = coordFile ? parseCoordination(coordFile, problems) : parseCoordinationDefaults();
+
+  // cross-document validation
+  const allIds = new Map<string, string>();
+  const register = (doc: CapabilityDoc | null) => {
+    if (!doc) return;
+    for (const c of doc.capabilities) {
+      const prev = allIds.get(c.id);
+      if (prev) problems.push(`${c.file}:${c.line}: capability "${c.id}" is already declared in ${prev}`);
+      else allIds.set(c.id, `${c.file}:${c.line}`);
+    }
+  };
+  register(absoluteDenies);
+  capabilityDocs.forEach(register);
+  for (const m of matchers) if (m.capability && !allIds.has(m.capability)) problems.push(`${m.file}: matcher #${m.index + 1} references unknown capability "${m.capability}"`);
+  for (const g of grants.grants) if (!allIds.has(g.capability)) problems.push(`${grants.file}: grant references unknown capability "${g.capability}"`);
+  for (const p of profiles) for (const n of p.narrow) if (!allIds.has(n.capability)) problems.push(`${p.file}: narrow references unknown capability "${n.capability}"`);
+  const absoluteIds = new Set(absoluteDenies?.capabilities.map((c) => c.id) ?? []);
+  for (const m of modes) {
+    for (const o of m.overrides) {
+      if (!allIds.has(o.capability)) problems.push(`${m.file}: override references unknown capability "${o.capability}"`);
+      if (absoluteIds.has(o.capability)) problems.push(`${m.file}: mode may not override absolute deny "${o.capability}"`);
+    }
+  }
+  for (const g of grants.grants) if (absoluteIds.has(g.capability)) problems.push(`${grants.file}: grant may not reference absolute deny "${g.capability}"`);
+  if (profiles.length === 0) problems.push('no profiles found under profiles/');
+  if (!modes.some((m) => m.isDefault)) problems.push('no default authority mode declared (default: true)');
+  const dup = (items: Array<{ id: string; file: string }>, kind: string) => {
+    const seen = new Map<string, string>();
+    for (const it of items) {
+      if (seen.has(it.id)) problems.push(`${it.file}: duplicate ${kind} id "${it.id}" (also in ${seen.get(it.id)})`);
+      seen.set(it.id, it.file);
+    }
+  };
+  dup(profiles, 'profile');
+  dup(modes, 'mode');
+  dup(intents, 'intent');
+  dup(secrets.flatMap((s) => s.detectors), 'detector');
+  for (const s of secrets) for (const d of s.detectors) if (d.group > 0 && !/\(/.test(d.patternSource)) problems.push(`${d.file}: detector ${d.id} declares group ${d.group} but has no capture group`);
+
+  if (problems.length) throw new ControlPlaneValidationError(problems);
+  return {
+    root,
+    absoluteDenies: absoluteDenies!,
+    capabilityDocs,
+    matchers,
+    grants,
+    profiles,
+    modes,
+    intents,
+    secrets,
+    releaseKeys,
+    coordination,
+    sourceHashes,
+  };
+}
+
+function parseCoordinationDefaults(): CoordinationConstants {
+  return { heartbeatTtlSeconds: 900, heartbeatTtlWithoutPidSeconds: 3600, handoffGraceSeconds: 1800, lockTimeoutMs: 3000, lockStaleBreakMs: 30000, gcEndedSessionsDays: 7, gcUnheldClaimsDays: 30, file: '' };
+}
+
+/** Loads an overlay capability document (organization policy or product overlay). Returns null when the file is absent. */
+export function loadOverlayCapabilities(file: string, layer: 'organization' | 'overlay'): CapabilityDoc | null {
+  if (!isFile(file)) return null;
+  const problems: string[] = [];
+  const doc = parseCapabilityDoc(file, readText(file), layer, problems);
+  if (problems.length) throw new ControlPlaneValidationError(problems);
+  if (doc && doc.absolute) throw new ControlPlaneValidationError([`${file}: an overlay may not be absolute`]);
+  return doc;
+}
+
+export function overlayFileName(file: string): string {
+  return basename(file);
+}

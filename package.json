@@ -1,0 +1,53 @@
+{
+  "name": "@tarscoff/ego",
+  "version": "0.1.0",
+  "description": "EGO — organization-grade, model-agnostic Agentic Engineering Control Plane kernel",
+  "private": false,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
+  "type": "module",
+  "bin": {
+    "harness": "bin/harness.js",
+    "ego": "bin/harness.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "control-plane/",
+    "policies/",
+    "skills/core/",
+    "templates/",
+    "runtime/posix/",
+    "docs/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint packages scripts",
+    "format": "prettier --check .",
+    "test": "node --test --test-reporter=spec packages/*/test/**/*.test.ts tests/**/*.test.ts",
+    "test:unit": "node --test packages/*/test/**/*.test.ts",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "prepublishOnly": "node scripts/guard-publish.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.4",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.10.0",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

@@ -1,0 +1,1 @@
+{ "name": "@tarscoff/ego-cli", "version": "0.1.0", "private": true, "type": "module", "description": "EGO cli package (internal; built into the single distribution)" }

@@ -1,0 +1,178 @@
+// Canonical types for the authored control plane after loading and validation.
+
+export type Verdict = 'ALLOW' | 'ASK' | 'DENY';
+
+export const VERDICT_RANK: Record<Verdict, number> = { ALLOW: 0, ASK: 1, DENY: 2 };
+
+export type LayerName = 'core' | 'organization' | 'profile' | 'overlay';
+
+export interface CapabilityDecl {
+  id: string;
+  verdict: Verdict;
+  description: string;
+  family: string;
+  file: string;
+  line: number;
+  absolute: boolean;
+}
+
+export interface CapabilityDoc {
+  id: string;
+  family: string;
+  title: string;
+  absolute: boolean;
+  layer: LayerName;
+  file: string;
+  capabilities: CapabilityDecl[];
+}
+
+export type MatcherTool = 'Bash' | 'Read' | 'Write' | 'Edit' | 'WebFetch' | 'any';
+
+export interface Matcher {
+  capability: string;
+  tool: MatcherTool;
+  command?: RegExp;
+  commandSource?: string;
+  path?: string;
+  url?: RegExp;
+  urlSource?: string;
+  index: number;
+  file: string;
+}
+
+export interface GrantRule {
+  capability: string;
+  phrases: string[];
+}
+
+export interface GrantsDoc {
+  negationWindowTokens: number;
+  negations: string[];
+  grants: GrantRule[];
+  file: string;
+}
+
+export interface ProfileNarrow {
+  capability: string;
+  verdict: Verdict;
+}
+
+export type UnavailablePolicy = 'CONTINUE_WITH_DISCLOSURE' | 'BLOCK_DONE';
+export type ShellUncertainPolicy = 'DETECT_AFTER' | 'DENY' | 'REQUIRE_ISOLATION';
+export type OwnerWeakeningPolicy = 'AUTO_WITH_INFORM' | 'DECISION';
+export type ModelFlagPolicy = 'INFORM' | 'DECISION_WITH_KEEP';
+
+export interface Profile {
+  id: string;
+  title: string;
+  contextBudgetTokens: number;
+  organizationCeilingTokens: number;
+  requiresSignedReleaseTrust: boolean;
+  requiresManagedTier: boolean;
+  requiresRemoteVerifyBackstop: boolean;
+  grillingReviewUnavailable: UnavailablePolicy;
+  forgeUnreachableAtDone: UnavailablePolicy;
+  shellUncertainMutation: ShellUncertainPolicy;
+  ownerWeakeningPlainPolicy: OwnerWeakeningPolicy;
+  modelFlaggedConflictOnControl: ModelFlagPolicy;
+  narrow: ProfileNarrow[];
+  file: string;
+}
+
+export interface ModeOverride {
+  capability: string;
+  verdict: Verdict;
+}
+
+export interface AuthorityMode {
+  id: string;
+  title: string;
+  isDefault: boolean;
+  onlyInEgoRepository: boolean;
+  overrides: ModeOverride[];
+  file: string;
+}
+
+export interface Intent {
+  id: string;
+  title: string;
+  routesSkills: string[];
+  file: string;
+}
+
+export type Severity = 'block' | 'warn';
+
+export interface SecretDetector {
+  id: string;
+  family: string;
+  name: string;
+  pattern: RegExp;
+  patternSource: string;
+  flags: string;
+  group: number;
+  severity: Severity;
+  locked: boolean;
+  replacement: string;
+  wholeDocument: boolean;
+  onlyForFiles: boolean;
+  file: string;
+}
+
+export interface SecretsDoc {
+  family: string;
+  title: string;
+  sensitiveFiles: string[];
+  detectors: SecretDetector[];
+  file: string;
+}
+
+export interface ReleaseKey {
+  id: string;
+  algorithm: 'ed25519';
+  publicKey: string;
+  fingerprint: string;
+  status: 'active' | 'standby' | 'revoked';
+  validFrom?: string;
+}
+
+export interface ReleaseKeysDoc {
+  keys: ReleaseKey[];
+  independentChannel: string;
+  file: string;
+}
+
+export interface CoordinationConstants {
+  heartbeatTtlSeconds: number;
+  heartbeatTtlWithoutPidSeconds: number;
+  handoffGraceSeconds: number;
+  lockTimeoutMs: number;
+  lockStaleBreakMs: number;
+  gcEndedSessionsDays: number;
+  gcUnheldClaimsDays: number;
+  file: string;
+}
+
+export interface ControlPlane {
+  root: string;
+  absoluteDenies: CapabilityDoc;
+  capabilityDocs: CapabilityDoc[];
+  matchers: Matcher[];
+  grants: GrantsDoc;
+  profiles: Profile[];
+  modes: AuthorityMode[];
+  intents: Intent[];
+  secrets: SecretsDoc[];
+  releaseKeys: ReleaseKeysDoc;
+  coordination: CoordinationConstants;
+  /** sha256 of every authored file, keyed by path relative to root, for provenance and freshness */
+  sourceHashes: Record<string, string>;
+}
+
+export class ControlPlaneValidationError extends Error {
+  readonly problems: string[];
+  constructor(problems: string[]) {
+    super(`control plane failed validation (${problems.length} problem${problems.length === 1 ? '' : 's'}):\n- ${problems.join('\n- ')}`);
+    this.name = 'ControlPlaneValidationError';
+    this.problems = problems;
+  }
+}

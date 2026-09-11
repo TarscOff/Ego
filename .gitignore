@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.harness/runtime/
+.harness/generated/
+*.tgz
+coverage/
+.DS_Store
