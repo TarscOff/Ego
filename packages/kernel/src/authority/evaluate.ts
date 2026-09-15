@@ -251,6 +251,12 @@ export function normalizeSegment(segment: string): string[] {
           idx++;
           continue;
         }
+        // `env -S '<command>'` / `--split-string=<command>` re-splits its argument into a command line and runs it,
+        // exactly like `bash -c`: the whole string is the command, not an opaque option value
+        if (t === 'env' && (tok === '-S' || tok === '--split-string' || tok.startsWith('-S') || tok.startsWith('--split-string='))) {
+          const value = tok === '-S' || tok === '--split-string' ? (tokens[idx + 1] ?? '') : tok.startsWith('--split-string=') ? tok.slice('--split-string='.length) : tok.slice(2);
+          return [...extra, ...splitShellSegments(value).flatMap(normalizeSegment)];
+        }
         if (tok.startsWith('-')) {
           idx++;
           if (valueOpt && valueOpt.test(tok) && !tok.includes('=')) idx++;
@@ -310,6 +316,12 @@ export function normalizeSegment(segment: string): string[] {
   return [...extra, ...normalizeTail(rest)];
 }
 
+/** Rejoins argv tokens into a command string, re-quoting any token that carries whitespace or a shell operator, so a
+ *  carried `sh -c "git push"` keeps its body as one token when the payload is re-tokenized. */
+function requote(tokens: string[]): string {
+  return tokens.map((t) => (/[\s;&|<>$`"']/.test(t) ? `'${t.replace(/'/g, `'\\''`)}'` : t)).join(' ');
+}
+
 /** `find … -exec CMD {} \;` / `-execdir` / `-ok` / `-okdir` / `fd -x|--exec CMD` / `-delete`: the payload runs, so it is classified. */
 function findPayloads(rest: string[]): string[] {
   const out: string[] = [];
@@ -324,7 +336,7 @@ function findPayloads(rest: string[]): string[] {
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '\\;' && rest[j] !== '+')
           cmd.push(rest[j++]!);
         // `{}` stands for a match under the search root: the root is the most specific path the kernel can see
-        if (cmd.length) out.push(cmd.map((c) => (c === '{}' ? searchRoot : c)).join(' '));
+        if (cmd.length) out.push(requote(cmd.map((c) => (c === '{}' ? searchRoot : c))));
         i = j;
       } else if (t === '-delete') {
         // predicates narrow a deletion: only a search root that is itself a protected tree is judged as deleting it
@@ -343,7 +355,7 @@ function findPayloads(rest: string[]): string[] {
         const cmd: string[] = [];
         let j = i + 1;
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '\\;') cmd.push(rest[j++]!);
-        if (cmd.length) out.push(cmd.filter((c) => !/^\{.*\}$/.test(c)).join(' '));
+        if (cmd.length) out.push(requote(cmd.filter((c) => !/^\{.*\}$/.test(c))));
         i = j;
       }
     }
@@ -368,7 +380,7 @@ function findPayloads(rest: string[]): string[] {
       after.push(t);
     }
     const payload = after.filter((t) => t !== replstr && !/^\{.*\}$/.test(t) && t !== ':::');
-    if (payload.length) out.push(payload.join(' '));
+    if (payload.length) out.push(requote(payload));
   }
   return out;
 }
@@ -1471,9 +1483,9 @@ function classifyShellPaths(
         }
         if (!t.startsWith('-')) operands.push(t);
       }
-      // cpio -p and pax -rw copy INTO the first operand (the file list comes on stdin); cp/mv write the last operand
+      // cpio -p reads its file list from stdin and copies INTO its sole operand; cp/mv/pax write the last operand
       dest = operands.length
-        ? head === 'cpio' || (head === 'pax' && tokens.includes('-rw'))
+        ? head === 'cpio'
           ? operands[0]!
           : operands[operands.length - 1]!
         : null;

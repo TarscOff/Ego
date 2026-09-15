@@ -438,3 +438,17 @@ test('authority diff: grant phrases, protections and a wider new mode cell are M
   );
   assert.equal(classifyAuthorityChanges(cm, m), 'major');
 });
+
+test('CommonMark "+" list marker is honored under a section (a "+ [x]" deny never silently vanishes)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-cp-plus-'));
+  cpSync(ROOT, dir, { recursive: true });
+  const abs = join(dir, 'permissions', 'absolute-denies.md');
+  const original = readFileSync(abs, 'utf8');
+  // a checked deny written with the "+" marker under the recognised heading must still compile to an absolute deny
+  writeFileSync(abs, original.replace('- [x] `production.storage.mutate`', '+ [x] `production.storage.mutate`'));
+  const denies = compileAuthority(loadControlPlane(dir)).absoluteDenies;
+  assert.ok(denies.includes('production.storage.mutate'), 'a "+ [x]" deny must be registered, not dropped');
+  // and a "+" bullet WITHOUT a checkbox under the heading must still fail closed, like "-"/"*"
+  writeFileSync(abs, original.replace('- [x] `production.storage.mutate`', '+ `production.storage.mutate`'));
+  assert.throws(() => loadControlPlane(dir), /"production.storage.mutate" under "Denied" has no checkbox/);
+});

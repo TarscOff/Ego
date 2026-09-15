@@ -69,8 +69,12 @@ input=""
 if [ "${name}" = "pre-push" ]; then input="$(cat)"; fi
 for chained in "$here/${name}.pre-ego" "$here/${name}.pre-ego".*; do
   [ -f "$chained" ] || continue
-  if [ -x "$chained" ]; then run="$chained"; else run="sh $chained"; fi
-  if [ "${name}" = "pre-push" ]; then printf '%s\\n' "$input" | $run "$@" || exit $?; else $run "$@" </dev/null || exit $?; fi
+  # keep "$chained" quoted: a hooks directory whose path contains spaces must not be word-split
+  if [ "${name}" = "pre-push" ]; then
+    if [ -x "$chained" ]; then printf '%s\\n' "$input" | "$chained" "$@" || exit $?; else printf '%s\\n' "$input" | sh "$chained" "$@" || exit $?; fi
+  else
+    if [ -x "$chained" ]; then "$chained" "$@" </dev/null || exit $?; else sh "$chained" "$@" </dev/null || exit $?; fi
+  fi
 done
 exit 0
 `;

@@ -9,10 +9,16 @@ if [ "$name" = "pre-push" ]; then input="$(cat)"; fi
 if [ -n "$hooksdir" ]; then
   for chained in "$hooksdir/$name.pre-ego" "$hooksdir/$name.pre-ego".*; do
     [ -f "$chained" ] || continue
-    # husky user hooks need not be executable: run those with sh
-    if [ -x "$chained" ]; then run="$chained"; else run="sh $chained"; fi
-    if [ "$name" = "pre-push" ]; then printf '%s\n' "$input" | $run "$@" || exit $?
-    else $run "$@" </dev/null || exit $?
+    # husky user hooks need not be executable: run those with sh. Keep "$chained" quoted so a hooks directory
+    # whose path contains spaces is not word-split (the chained hook must run, and the commit must not abort).
+    if [ "$name" = "pre-push" ]; then
+      if [ -x "$chained" ]; then printf '%s\n' "$input" | "$chained" "$@" || exit $?
+      else printf '%s\n' "$input" | sh "$chained" "$@" || exit $?
+      fi
+    else
+      if [ -x "$chained" ]; then "$chained" "$@" </dev/null || exit $?
+      else sh "$chained" "$@" </dev/null || exit $?
+      fi
     fi
   done
 fi

@@ -85,7 +85,10 @@ matchers:
     command: '^git\s+push\b'
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+(commit|push|merge)\b.*(\s--no-verify\b|\s-n\b)'
+    command: '^git\s+commit\b.*(\s--no-verify\b|\s-n\b)'
+  - capability: git.hooks.bypass
+    tool: Bash
+    command: '^git\s+(push|merge)\b.*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(-c\s+core\.hooksPath|config\b.*core\.hooksPath)'
@@ -137,7 +140,11 @@ matchers:
     command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*\bmutation\b)'
   - capability: forge.api.mutate
     tool: Bash
-    command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=)))'
+    # graphql body loaded from a file/stdin (field=@path): cannot inspect it, so a mutation cannot be ruled out -> fail closed
+    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*=@)'
+  - capability: forge.api.mutate
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
   - capability: forge.repo.read
     tool: Bash
     command: '^(gh\s+(repo\s+view|api)|glab\s+(repo\s+view|api))\b'

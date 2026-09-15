@@ -53,8 +53,8 @@ export function sectionKey(title: string): string {
     .trim();
 }
 
-const CHECK_RE = /^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/;
-const BULLET_RE = /^\s*[-*]\s+(?!\[( |x|X)\])(.*)$/;
+const CHECK_RE = /^\s*[-*+]\s+\[( |x|X)\]\s+(.*)$/;
+const BULLET_RE = /^\s*[-*+]\s+(?!\[( |x|X)\])(.*)$/;
 const HEADING_RE = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
 const CODE_ID_RE = /`([^`]+)`/;
 

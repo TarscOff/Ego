@@ -6,7 +6,11 @@ substitutes for an independent-agent review; a deferred check is never marked pa
 
 ## Phase 0 — repository skeleton, toolchain, frozen baseline (commit b9434b3, 2026-09-11)
 
-- DETERMINISTIC CHECKS: PASSED (typecheck, lint, prettier config)
+- DETERMINISTIC CHECKS: PARTIAL — typecheck and prettier config PASSED; the lint target committed at this phase
+  (`eslint packages scripts`) in fact exits 2, because `scripts/` holds only `.mjs` files and the flat config
+  ignores `**/*.mjs`, so eslint is handed no lintable file and errors. Corrected in phase 1 to `eslint packages tests`
+  (exit 0). This line is recorded PARTIAL, not PASSED: the original claim was wrong and is left visible rather than
+  rewritten, per "honest over fake parity / never mark a check passed that did not pass".
 - IN-SESSION REVIEW: PASSED
 - INDEPENDENT-AGENT REVIEW: DEFERRED_BUDGET (subagent budget exhausted at the time; re-run folded into the phase 1 review below)
 - CONFORMANCE: NOT RUN (nothing to conform yet)
@@ -81,7 +85,37 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     and new mode cells (all MAJOR); the loader rejects a capability bullet without a checkbox and a null `narrow`; a
     symlink planted in the immutable cache fails verification; the session lock breaks a dead holder's lock by rename;
     the release build refuses an untagged or dirty tree; the Azure DevOps `*.visualstudio.com` remote parses correctly.
-- **Round 4**: an independent re-verification of the round-3 fixes is running; recorded here when it completes.
+- **Round 4** (workflow `ego-phase1-review-round4`, one skeptic per open round-3 finding, fresh adversarial reviewers,
+  conformance + build-log audit): of the round-3 fixes, 19 were verified fully fixed; the rest reported a sideways
+  variant of the SAME class rather than a new class, plus fresh confirmed findings. Eight confirmed items (2 HIGH,
+  4 MEDIUM, 2 LOW) were fixed and pinned this round:
+  - **`env -S` / `--split-string`** (HIGH, `evaluate.ts`): the wrapper no longer swallows the split-string value as an
+    opaque option; it re-tokenizes the value as leading `NAME=value` assignments plus the inner command and classifies
+    it, so `env -S "git push origin main"` and the `--split-string=` form deny like `env -- …` and `bash -c`.
+  - **File-loaded GraphQL mutation** (HIGH, `matchers.md`): a `gh|glab api graphql` whose body is loaded from a file or
+    stdin (`field=@path`) can no longer be proven a read, so it routes to `forge.api.mutate` (DENY) instead of falling
+    through to `forge.repo.read`; inline read queries are unaffected.
+  - **Glued short forge fields** (MEDIUM, `matchers.md`): the field-flag separator accepts the glued `gh api -ftitle=x`
+    spelling gh/cobra accept, closing the `-f`/`-F` mutation route that required a space or `=`.
+  - **`pax` copy destination** (MEDIUM, `evaluate.ts`): pax copy mode writes to its LAST operand (the destination
+    directory), like `cp`/`mv`; only `cpio -p` takes its sole operand. `pax -rw src .harness/generated` now denies.
+  - **Carried `sh -c` body** (MEDIUM, `evaluate.ts`): `find -exec` / `xargs -I` / `parallel` payloads are re-quoted
+    before re-tokenization, so a carried `sh -c "git push"` body survives and is classified.
+  - **Chained hooks on a spaced path** (MEDIUM, `git-hook.sh` + `githooks.ts` `shimScript`): the chained hook is invoked
+    as a quoted path, not an unquoted `run=` string, so a hooks directory whose path contains a space no longer
+    word-splits (which had silently skipped the user's hook and aborted every commit/push).
+  - **`git merge -n`** (LOW, `matchers.md`): `-n` means `--no-stat` for merge, not `--no-verify`; the hook-bypass
+    matcher now scopes the `-n` short form to `git commit` and keeps `--no-verify` for push/merge, removing the false
+    DENY on an ordinary `git merge -n`.
+  - **Retry hard stop** (LOW, `handle.ts`): the failure-map eviction never drops a step that has already reached its
+    retry cap (it evicts the least-failed uncapped key), and the step key is normalised (whitespace, trailing
+    separators, trailing comments) so cosmetic variants of a capped command stay capped.
+  Also this round: the Phase 0 lint check line was corrected to PARTIAL (the committed `eslint packages scripts`
+  target could not pass), and the delegated-entry latency claim was corrected — only the in-process kernel path is a
+  sub-60 ms budget; the delegated entry path is bounded by a contention-robust ceiling, not asserted at 60 ms. Every
+  fix above is pinned by a test (`bypass.test.ts` round-4 residuals, `control-plane.test.ts` CommonMark `+`,
+  `hooks.test.ts` retry-stop normalisation and no-evict-cap, `githooks.test.ts` spaced-path chained hook).
+- **Round 5**: an independent re-verification of the round-4 fixes is running; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -91,18 +125,29 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 
 ### Check lines
 
-- DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test` (126 tests),
-  `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted phase-1 tree; the
-  release build refuses a dirty or untagged tree). Hook latency: the in-process kernel path is pinned under 60 ms by
-  `hooks.test.ts` (median ~25 ms), and the delegated in-process path (a hook served by a cached runtime of a different
-  identity through the exec contract) is pinned under 60 ms by `tests/integration/cli.test.ts` when a bundle is built
-  (K26/Q19, both paths). Process wall-clock through `node dist/ego.js hook`, including Node start-up, is 70–80 ms:
-  above 60 ms at the process level, reported as such, and not the kernel budget.
+- DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
+  (131 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
+  - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
+    pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
+    claims, and it holds under full-suite parallel load.
+  - The **delegated-entry path** (a hook served by a cached runtime of a different identity through the exec
+    contract) is NOT a sub-60 ms path and is no longer claimed as one. After the first (cached) dynamic import it
+    still re-runs the pinned bundle's whole `main()` — self-identity, index, control-plane load + compile, the
+    kernel, and the session/ledger writes — i.e. the same work a fresh process does. In isolation its floor lands
+    under 60 ms, but because `node:test` runs every test file in parallel it inflates to ~70–90 ms under
+    full-suite CPU contention. `tests/integration/cli.test.ts` therefore pins it under a generous, contention-robust
+    250 ms ceiling (min-of-N) that catches a real regression (a re-parse per call, an O(n) blow-up) without asserting
+    the kernel budget on a path that legitimately does more than the kernel.
+  - Process wall-clock through `node dist/ego.js hook`, including Node start-up, is 70–80 ms: above 60 ms at the
+    process level, reported as such, and not the kernel budget.
+  (An earlier revision of this line claimed both the in-process and the delegated path were "pinned under 60 ms";
+  that was wrong for the delegated path and is corrected here rather than left standing — honest over fake parity.)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1, 2 and 3 done, every confirmed HIGH/MEDIUM fixed and pinned; round 4
-  (re-verification of the round-3 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–4 done, every confirmed HIGH/MEDIUM fixed and pinned; round 5
+  (re-verification of the round-4 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

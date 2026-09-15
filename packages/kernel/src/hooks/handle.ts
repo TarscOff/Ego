@@ -301,7 +301,7 @@ function handleLocked(
       }
       const summary = summarizeInput(tool.name, tool.input, cpRoot);
       // retry hard stop (alignment item 8): the same step may not run again once it failed more than the profile's retries
-      const stepKey = `${tool.name}:${summary.slice(0, 80)}`;
+      const stepKey = `${tool.name}:${normalizeStep(summary).slice(0, 80)}`;
       const failures = session.counters.failuresByStep[stepKey] ?? 0;
       if (failures > budgets.maxRetriesPerStep && evaluation.verdict !== 'DENY') {
         writeSession(root, session);
@@ -362,19 +362,37 @@ function handleLocked(
       const summary = summarizeInput(tool.name, tool.input, cpRoot);
       const failed = toolFailed(tool.response);
       if (failed) {
-        const key = `${tool.name}:${summary.slice(0, 80)}`;
+        const key = `${tool.name}:${normalizeStep(summary).slice(0, 80)}`;
         const n = (session.counters.failuresByStep[key] ?? 0) + 1;
         session.counters.failuresByStep[key] = n;
         session.counters.maxRetriesForOneStep = Math.max(session.counters.maxRetriesForOneStep, n - 1);
-        const keys = Object.keys(session.counters.failuresByStep);
-        if (keys.length > 200) delete session.counters.failuresByStep[keys[0]!];
+        const failsMap = session.counters.failuresByStep;
+        const keys = Object.keys(failsMap);
+        if (keys.length > 200) {
+          // Never evict a step that has already reached its retry cap: dropping it would reset the
+          // counter and let the verbatim identical step run again (alignment item 8). Evict the
+          // least-failed still-uncapped key instead; if every key is capped, let the map grow (it is
+          // bounded by the tool-call budget anyway).
+          const cap = budgetsFor(cache, rt.pin.profile, session).maxRetriesPerStep;
+          let victim: string | null = null;
+          let victimN = Infinity;
+          for (const k of keys) {
+            const c = failsMap[k]!;
+            if (c > cap) continue;
+            if (c < victimN) {
+              victimN = c;
+              victim = k;
+            }
+          }
+          if (victim) delete failsMap[victim];
+        }
       }
       writeSession(root, session);
       ledger('tool.post', { tool: tool.name, summary, failed });
       const decision: HookDecision = { event: ev.event, action: 'continue', exitCode: 0 };
       const budgets = budgetsFor(cache, rt.pin.profile, session);
       const stepFailures = failed
-        ? (session.counters.failuresByStep[`${tool.name}:${summary.slice(0, 80)}`] ?? 0)
+        ? (session.counters.failuresByStep[`${tool.name}:${normalizeStep(summary).slice(0, 80)}`] ?? 0)
         : 0;
       if (failed && stepFailures > budgets.maxRetriesPerStep) {
         decision.context = `EGO: this step has failed ${stepFailures} times, the profile allows ${budgets.maxRetriesPerStep} retries; the next identical attempt is ${budgets.onExceed === 'BLOCK' ? 'blocked' : 'escalated'}. Report the failure and ask for a decision.`;
@@ -457,6 +475,16 @@ function depthOf(session: SessionRecord, agentId: string): number {
     cur = parent;
   }
   return depth;
+}
+
+// Collapse cosmetic differences so a step that only varies by whitespace, a trailing separator, or a
+// trailing shell comment maps to the same retry key (alignment item 8: the identical step stays capped).
+function normalizeStep(s: string): string {
+  return s
+    .replace(/(^|\s)#.*$/s, '$1')
+    .replace(/[;&|]+\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function summarizeInput(tool: string, input: Record<string, unknown>, cpRoot: string): string {

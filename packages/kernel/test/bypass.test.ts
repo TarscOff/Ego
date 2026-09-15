@@ -437,3 +437,51 @@ test('round-3 residuals: search tools, escapes, ancestor globs, cd into protecte
   assert.equal(write('.github/workflows/ci.yml').verdict, 'ALLOW');
   assert.equal(bash('cd src && cp a.ts b.ts', c).verdict, 'ALLOW');
 });
+
+test('round-4 residuals: env -S command carrier, pax destination, carried sh -c, glued and file-loaded forge fields', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  // env -S / --split-string re-splits its value into a command line: the wrapped verb must still be classified
+  for (const cmd of [
+    'env -S "git push origin main"',
+    'env --split-string="git push origin main"',
+    'env -S"git push origin main"',
+    'nice env -S "git push origin main"',
+    'env -S "gh pr merge 3"',
+    'env -S "kubectl delete pod x -n production"',
+    'env -S "cat ~/.ssh/id_rsa"',
+    'env -S "harness hook claude-code UserPromptSubmit"',
+    'env -S "cp forged.json .harness/generated/policy.json"',
+  ]) {
+    const r = bash(cmd, c);
+    assert.equal(r.verdict, 'DENY', `${cmd} -> ${r.verdict} ${r.decisive?.capability}`);
+    assert.notEqual(r.decisive?.capability, 'command.unknown', cmd);
+  }
+  // pax copy mode writes to its LAST operand (the destination directory), like cp/mv — not the first
+  assert.equal(bash('pax -rw src .harness/generated', c).verdict, 'DENY');
+  assert.equal(bash('pax -r -w a b .git/hooks', c).verdict, 'DENY');
+  // a carried sh -c body must survive re-tokenization when it is reconstructed from replace-string payloads
+  for (const cmd of [
+    'echo x | xargs -I % sh -c "git push origin %"',
+    'echo main | xargs -I{} sh -c "git push origin {}"',
+    'find . -maxdepth 0 -exec sh -c "git push origin main" \\;',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // forge.api.mutate: glued short field flags (-ftitle=x) and file-loaded graphql bodies (query=@file) are mutations
+  for (const cmd of [
+    'gh api repos/o/r/pulls -ftitle=x -fhead=b -fbase=main',
+    'gh api -Ftitle=x repos/o/r/pulls',
+    'glab api -fbody=x projects/1/issues',
+    'gh api graphql -F query=@mutation.graphql -f owner=x',
+    'gh api graphql -f query=@m.graphql',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'forge.api.mutate', cmd);
+  }
+  // false positives that must NOT be denied
+  assert.equal(bash('git merge -n feature', c).verdict, 'ALLOW'); // merge -n is --no-stat, not --no-verify
+  assert.equal(bash('git merge --no-stat feature', c).verdict, 'ALLOW');
+  assert.equal(bash('git commit -n -m x', c).decisive?.capability, 'git.hooks.bypass'); // commit -n IS --no-verify
+  assert.equal(bash('gh api repos/o/r/pulls', c).verdict, 'ALLOW'); // a read stays a read
+  assert.equal(bash('gh api graphql -f query="{viewer{login}}"', c).verdict, 'ALLOW'); // inline read query
+});
