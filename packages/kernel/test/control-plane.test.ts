@@ -466,3 +466,16 @@ test('fail closed: a capability declared with an unsupported list marker (ordere
   writeFileSync(abs, original); // the original "- [x]" form still loads
   assert.ok(compileAuthority(loadControlPlane(dir)).absoluteDenies.includes('production.storage.mutate'));
 });
+
+test('fail closed: a bullet with a malformed checkbox never silently drops the capability', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-cp-badbox-'));
+  cpSync(ROOT, dir, { recursive: true });
+  const abs = join(dir, 'permissions', 'absolute-denies.md');
+  const original = readFileSync(abs, 'utf8');
+  for (const bad of ['- [-] `production.storage.mutate`', '- [~] `production.storage.mutate`', '- [ x] `production.storage.mutate`']) {
+    writeFileSync(abs, original.replace('- [x] `production.storage.mutate`', bad));
+    assert.throws(() => loadControlPlane(dir), /malformed checkbox/, bad);
+  }
+  writeFileSync(abs, original);
+  assert.ok(compileAuthority(loadControlPlane(dir)).absoluteDenies.includes('production.storage.mutate'));
+});

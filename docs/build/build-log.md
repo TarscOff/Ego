@@ -155,7 +155,42 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     as prose and disappeared with no error; the loader now fails closed on a mislaid capability declaration.
   Each fix is pinned (`bypass.test.ts` round-5 residuals, `control-plane.test.ts` ordered-list, `hooks.test.ts`
   retry no-op, `tests/integration/cli.test.ts` planted-ref pre-push). Suite: 135 tests.
-- **Round 6**: an independent re-verification of the round-5 fixes is running; recorded here when it completes.
+- **Round 6** (workflow `ego-phase1-review-round6`, 42 agents, adversarial refutation): the round-5 fixes held; 16
+  confirmed findings surfaced (13 HIGH/MEDIUM, 3 LOW) — sideways variants of the round-5 classes plus deeper
+  pre-existing gaps. All fixed and pinned:
+  - **Sideways archivers** (2 HIGH + 1 MEDIUM, `evaluate.ts`): `zip` had no write-destination branch; `bsdtar`/`gtar`
+    were absent from WRITE_HEADS; tar extract honoured only `-C`, not `--directory`/`--cd`. All now resolve the
+    archive/extract destination and DENY into a protected tree.
+  - **Trust store via glob / parent** (1 HIGH + 1 MEDIUM, `evaluate.ts`): `rm -rf ~/.ego/*`, `~/.ego/trust*`,
+    `~/.ego/trus[t]` and a recursive `cp -r ~/.ego` escaped the strict-descendant check; a glob/parent reachability
+    guard now denies them (`reachesTrustStore`).
+  - **Glued-digit redirect** (1 HIGH, `evaluate.ts`): `echo x2>PATH` (a word ending in a digit glued to `>`) is
+    un-glued and classified as a write.
+  - **ANSI-C quoting** (1 HIGH, `evaluate.ts`): the tokenizer now expands `$'...'` (`$'delete'`, `$'\x70ush'`), so a
+    locked verb hidden in ANSI-C quoting is seen.
+  - **Inline-interpreter newline** (1 HIGH, `matchers.md`): the body matchers' trailing wildcard is now newline-tolerant
+    (`[\s\S]*`), so a newline before the protected path no longer downgrades the deny. (Fully-obfuscated bodies —
+    string concatenation, char-codes — still reach ASK, the human gate; that floor is by design, not a silent ALLOW.)
+  - **GraphQL from a variable/substitution** (1 HIGH, `matchers.md`): an opaque `gh api graphql -f query=$VAR` / `=$(…)`
+    body cannot be inspected, so it fails closed to `forge.api.mutate`.
+  - **AWS S3 verbs** (1 MEDIUM, `matchers.md`): `s3 rm|mv|cp|sync|rb|mb` and s3api/ecr mutations added to
+    `production.cloud.mutate`.
+  - **`git commit -nm` precision** (1 LOW→fixed as correctness, `matchers.md` + `evaluate.ts`): the message-scanning
+    matcher is replaced by a quote-aware evaluator check, so a combined `-nm`/`-nam` denies but a `-n` inside the `-m`
+    message does not (removes a false-positive DENY while keeping the bypass caught).
+  - **`.harness/hooks/**` on the file tool** (1 MEDIUM, `matchers.md`): the enforcement shims are the absolute
+    `harness.runtime.tamper` on Write/Edit too, not the weaker `fs.hook-config.write`.
+  - **Retry-stop leading no-op** (1 LOW, `handle.ts`): the key now normalises to the first REAL command, so a prepended
+    `: ;`/`true &&`/`x=1 ` no-op cannot mint a fresh key either.
+  - **Malformed checkbox** (1 LOW, `load.ts`): a bullet with a malformed checkbox (`- [-]`, `- [~]`, `- [ x]`) fails
+    closed instead of silently dropping the capability.
+  - **HARNESS_MAINTENANCE spoof** (1 MEDIUM, `handle.ts`): the mode is gated on the unforgeable signal that the running
+    kernel's control-plane lives inside the repo (`pathInside`), not on package files an agent can forge.
+  - **Worktree fail-open** (1 MEDIUM, `githooks.ts`): a linked worktree's shim now resolves `.harness` in the main
+    worktree via the git common dir, so governance runs (it previously fell through to "not governed").
+  Each fix is pinned (`bypass.test.ts` round-6 residuals; `control-plane.test.ts` malformed-checkbox; `hooks.test.ts`
+  retry-prepend + maintenance-spoof; `githooks.test.ts` linked-worktree). Suite: 140 tests.
+- **Round 7**: an independent re-verification of the round-6 fixes is running; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -166,7 +201,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 ### Check lines
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
-  (135 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  (140 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
   phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
   - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
     pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
@@ -186,8 +221,8 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–5 done, every confirmed HIGH/MEDIUM fixed and pinned; round 6
-  (re-verification of the round-5 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–6 done, every confirmed HIGH/MEDIUM fixed and pinned; round 7
+  (re-verification of the round-6 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

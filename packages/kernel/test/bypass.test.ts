@@ -564,3 +564,79 @@ test('round-5 residuals: env -S options, archive-create writes, mv source, glued
   assert.equal(bash('cd src && cp a.ts b.ts', c).verdict, 'ALLOW');
   assert.equal(bash(`node -e "process.stdout.write(String(1+1))"`, c).verdict, 'ASK'); // benign inline interpreter, nothing protected named
 })
+
+test('round-6 residuals: archivers, trust globs/parent, glued redirects, ANSI-C, graphql substitution, aws s3, interpreter newline', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  mkdirSync(join(repo, '.harness', 'runtime'), { recursive: true });
+  mkdirSync(join(repo, '.harness', 'hooks'), { recursive: true });
+  const NL = '\n';
+  // [1][13] sideways archivers write their output/-C archive into a protected tree
+  for (const cmd of [
+    'zip -r .harness/generated/evil.zip a',
+    'zip .harness/runtime/x.zip a',
+    'tar -xf a.tar --directory=.harness/generated',
+    'tar -xf a.tar --directory .harness/generated',
+    'bsdtar -xf /tmp/e.tar -C .harness/generated/',
+    'gtar -xf /tmp/e.tar -C .harness/generated/',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [3][4] the EGO_HOME trust store reached by a glob or a recursive parent op
+  const ego = c.egoHome!;
+  for (const cmd of [
+    `rm -rf ${ego}/*`,
+    `rm -rf ${ego}/trust*`,
+    `rm -rf ${ego}/trus[t]`,
+    `mv ${ego}/trus[t] /tmp/x`,
+    `cp -r ${ego} /tmp/x`,
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'harness.trust.tamper', cmd);
+  }
+  // [5] a redirection glued to a word ending in a digit is still a write
+  for (const cmd of [
+    'echo x2>.harness/generated/policy.json',
+    'printf zzz9>>.harness/hooks/pre-commit',
+    'echo boom5>.harness/runtime/ledger.json',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [11] ANSI-C $'...' quoting unwraps a locked verb
+  assert.equal(bash("kubectl --context prod $'delete' pod x", c).decisive?.capability, 'production.k8s.mutate');
+  assert.equal(bash("git $'push' origin main", c).verdict, 'DENY');
+  // [6] a graphql body from a shell variable/substitution cannot be inspected -> mutate
+  for (const cmd of [
+    'gh api graphql -f query="$MUT"',
+    'gh api graphql -f query=$MUT',
+    'gh api graphql -f query="$(cat m.gql)"',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'forge.api.mutate', cmd);
+  }
+  // [7] AWS S3 high-level state-change verbs
+  for (const cmd of ['aws s3 rb s3://prod-bucket --force', 'aws s3 rm s3://prod/x', 'aws s3 sync ./d s3://prod/']) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'production.cloud.mutate', cmd);
+  }
+  // [0] a newline in an interpreter body before the protected path no longer defeats the matcher
+  assert.equal(
+    bash(`node -e "let a=1;${NL}require('fs').writeFileSync(process.env.HOME+'/.ssh/id_rsa','x')"`, c).decisive
+      ?.capability,
+    'fs.credential-store.write',
+  );
+  assert.equal(
+    bash(`python3 -c "a=1;${NL}open('.git/hooks/pre-commit','w')"`, c).decisive?.capability,
+    'fs.hook-config.write',
+  );
+  // [8] git commit hook-bypass is precise: real bypass flags DENY, a -n inside the message does NOT
+  assert.equal(bash('git commit -nm msg', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(bash('git -C . commit -vnm msg', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(bash('git commit -m "add support for -n flag"', c).verdict, 'ALLOW');
+  // [14] the enforcement shims under .harness/hooks are an absolute write, on the file tool too
+  const w = (f: string) => evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, f) } });
+  assert.equal(w('.harness/hooks/git-hook.sh').decisive?.capability, 'harness.runtime.tamper');
+  assert.ok(w('.harness/hooks/ego-hook.sh').decisive?.absolute);
+  // controls that must NOT be denied
+  assert.equal(bash('zip -r out.zip src', c).verdict, 'ALLOW');
+  assert.equal(bash('tar -xf a.tar -C build', c).verdict, 'ALLOW');
+  assert.equal(bash('gh api graphql -f query="{viewer{login}}"', c).verdict, 'ALLOW');
+  assert.equal(bash('git commit -am "message"', c).verdict, 'ALLOW');
+})

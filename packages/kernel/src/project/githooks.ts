@@ -58,12 +58,29 @@ export function shimScript(name: string): string {
 ${MARK}
 top="$(git rev-parse --show-toplevel)"
 here="$(cd "$(dirname "$0")" && pwd)"
-shim="$top/.harness/hooks/git-hook.sh"
-if [ -f "$shim" ]; then exec sh "$shim" ${name} "$here" "$@"; fi
-if [ -f "$top/.harness/harness.md" ]; then
-  echo "EGO: $shim is missing in a checkout pinned to EGO; failing closed (run harness init)" >&2
-  exit 1
-fi
+# A linked worktree shares .git/hooks with the main worktree but keeps its OWN (untracked) .harness/, so the pin and
+# the shim live in the MAIN worktree. Resolve it from the shared git common dir and check both, or EGO governance
+# would silently not run in every linked worktree (fail open).
+common="$(git rev-parse --git-common-dir 2>/dev/null)"
+case "$common" in
+  "") ;;
+  /*) ;;
+  *) common="$top/$common" ;;
+esac
+maintop=""
+if [ -n "$common" ]; then maintop="$(CDPATH= cd "$(dirname "$common")" 2>/dev/null && pwd)"; fi
+for base in "$top" "$maintop"; do
+  [ -n "$base" ] || continue
+  shim="$base/.harness/hooks/git-hook.sh"
+  if [ -f "$shim" ]; then exec sh "$shim" ${name} "$here" "$@"; fi
+done
+for base in "$top" "$maintop"; do
+  [ -n "$base" ] || continue
+  if [ -f "$base/.harness/harness.md" ]; then
+    echo "EGO: $base/.harness/hooks/git-hook.sh is missing in a checkout pinned to EGO; failing closed (run harness init)" >&2
+    exit 1
+  fi
+done
 echo "EGO: this checkout is not governed by EGO (no .harness/harness.md); only the chained hooks run" >&2
 input=""
 if [ "${name}" = "pre-push" ]; then input="$(cat)"; fi

@@ -71,3 +71,31 @@ test('chained hooks run and do not word-split when the repository path contains 
   assert.ok(existsSync(marker2), 'ungoverned shimScript must run the chained hook on a spaced path');
   assert.doesNotMatch(String(run2.stderr), /No such file or directory/, 'no spaced-path split error');
 });
+
+test('a linked worktree still runs EGO governance: the shim finds .harness in the main worktree', () => {
+  const noGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k)));
+  const base = mkdtempSync(join(tmpdir(), 'ego-wt-'));
+  const main = join(base, 'main');
+  mkdirSync(main, { recursive: true });
+  spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: main, env: noGit() });
+  spawnSync('git', ['config', 'user.email', 't@e.com'], { cwd: main, env: noGit() });
+  spawnSync('git', ['config', 'user.name', 't'], { cwd: main, env: noGit() });
+  writeFileSync(join(main, 'a.txt'), 'x');
+  spawnSync('git', ['add', '-A'], { cwd: main, env: noGit() });
+  spawnSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'init'], { cwd: main, env: noGit() });
+  // install the shim, then place a fake governed git-hook.sh that proves the governed path ran, plus the pin
+  installGitHooks(main, null);
+  const marker = join(base, 'GOVERNED_RAN');
+  writeFileSync(join(main, '.harness', 'hooks', 'git-hook.sh'), `#!/bin/sh\ntouch '${marker}'\nexit 0\n`);
+  chmodSync(join(main, '.harness', 'hooks', 'git-hook.sh'), 0o755);
+  writeFileSync(join(main, '.harness', 'harness.md'), 'pin\n');
+  // add a linked worktree (shares .git/hooks; keeps its own untracked .harness, i.e. none)
+  const linked = join(base, 'wt');
+  const add = spawnSync('git', ['worktree', 'add', '-q', linked, '-b', 'feature'], { cwd: main, env: noGit() });
+  assert.equal(add.status, 0, `worktree add: ${add.stderr}`);
+  assert.ok(!existsSync(join(linked, '.harness', 'hooks', 'git-hook.sh')), 'the linked worktree has no .harness of its own');
+  // run the shared pre-commit shim with cwd = the linked worktree
+  const run = spawnSync('sh', [join(main, '.git', 'hooks', 'pre-commit')], { cwd: linked, env: noGit() });
+  assert.ok(existsSync(marker), `EGO governance must run in a linked worktree (stderr: ${run.stderr})`);
+  assert.doesNotMatch(String(run.stderr), /not governed by EGO/, 'must not fail open as ungoverned');
+});

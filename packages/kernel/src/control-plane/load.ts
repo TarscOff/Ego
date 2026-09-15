@@ -136,6 +136,13 @@ export function parseCapabilityDoc(
           problems.push(
             `${file}: capability "${bm[1]}" under "${sec.title}" has no checkbox (write \`- [x]\` to activate it or \`- [ ]\` to document it)`,
           );
+        // a bullet whose checkbox is malformed (`- [-]`, `- [~]`, `- [ x]`, `- [xx]`) is not parsed as active and would
+        // vanish: only `[ ]`, `[x]`, `[X]` count. Fail closed rather than silently drop the capability.
+        const mm = /^\[[^\]]*\]\s*`([^`]+)`/.exec(b);
+        if (mm && CAP_ID_RE.test(mm[1]!))
+          problems.push(
+            `${file}: capability "${mm[1]}" under "${sec.title}" has a malformed checkbox (only \`[ ]\`, \`[x]\`, \`[X]\` are valid)`,
+          );
       }
       // a capability declaration written with an unsupported marker (ordered list `1.`/`1)`, or a stray checkbox) is
       // parsed as prose and would vanish with no error: fail closed rather than silently drop a deny

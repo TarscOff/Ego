@@ -1,6 +1,6 @@
 // Hook handlers: one kernel for every host. Deterministic, no model, fail closed on any internal error (the adapter
 // converts a thrown error into exit 2 with a one-line message).
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { evaluate, type EvaluationContext } from '../authority/evaluate.ts';
 import { evaluateBudget, applyBudgetExtension, type BudgetCounters } from '../authority/budget.ts';
 import type { ExecutionBudgets } from '../control-plane/types.ts';
@@ -23,6 +23,7 @@ import { readPin, type Pin } from '../launcher/pin.ts';
 import { isEgoSourceRepository, controlPlaneDir, selfIdentity, selfVersion } from '../launcher/self.ts';
 import { egoHome } from '../launcher/home.ts';
 import { isFile } from '../util/fs.ts';
+import { realpathSync } from 'node:fs';
 import type { HookEvent, HookDecision } from './events.ts';
 import { frameForContext, provenance } from '../context/trust.ts';
 import { resolveOnPath } from '../util/path-resolve.ts';
@@ -133,9 +134,14 @@ function handleLocked(
   const session = loadSession(root, ev, rt, cache);
   const now = rt.now();
   session.heartbeatAt = now;
-  const inEgo = isEgoSourceRepository(rt.projectRoot);
+  // The three files isEgoSourceRepository checks (root package.json name, control-plane/…/absolute-denies.md,
+  // packages/kernel/package.json) are all writable in a consumer repo, so an agent could forge them to unlock the
+  // authority-widening HARNESS_MAINTENANCE mode. The unforgeable signal is that the RUNNING kernel's control-plane
+  // lives inside this repo (the EGO source repo runs its own dev build); a consumer runs the installed/cached kernel,
+  // whose control-plane is elsewhere. An agent cannot relocate the running kernel, so it cannot satisfy this.
+  const inEgo = isEgoSourceRepository(rt.projectRoot) && pathInside(cpRoot, rt.projectRoot);
   // the session record is not trusted to widen authority: a mode the record names is honoured only when it exists in
-  // the compiled table and, for HARNESS_MAINTENANCE, only inside the EGO source repository
+  // the compiled table and, for HARNESS_MAINTENANCE, only inside the EGO source repository (never a governed repo)
   const knownModes = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {});
   const effectiveMode =
     knownModes.includes(session.mode) && !(session.mode === 'HARNESS_MAINTENANCE' && !inEgo)
@@ -479,19 +485,47 @@ function depthOf(session: SessionRecord, agentId: string): number {
 
 // Collapse cosmetic differences so a step that only varies by whitespace, a trailing separator, or a
 // trailing shell comment maps to the same retry key (alignment item 8: the identical step stays capped).
+/** Strip a shell command segment down to its command: leading grouping/whitespace, trailing grouping/whitespace, and
+ *  any leading `VAR=value` environment assignments (so `x=1 npm test` keys the same as `npm test`). */
+function stripToCommand(seg: string): string {
+  let t = seg.replace(/^[\s({]+/, '').replace(/[\s)}]+$/, '');
+  for (;;) {
+    const m = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+(?=\S)/.exec(t);
+    if (!m) break;
+    t = t.slice(m[0].length);
+  }
+  return t.trim();
+}
+
 function normalizeStep(s: string): string {
-  // The retry key must not be evadable by appending a no-op to the same failing command. Key on the FIRST command of
-  // the line: strip a leading shell grouping (`{ … ; }`, `( … )`), cut at the first top-level separator so an appended
-  // `; #c`, `&& :` or `|| true` cannot mint a fresh key, drop any trailing comment, and collapse whitespace. The
-  // summary is `Tool: <command>`; the tool prefix is preserved so different tools never collide.
+  // The retry key must not be evadable by wrapping the same failing command in no-ops. Key on the first REAL command:
+  // strip a trailing comment, split into shell segments, drop leading no-ops (`:`/`true`/`false`/assignments/grouping)
+  // both APPENDED (`npm test; #c`, `&& :`, `|| true`) and PREPENDED (`: ; npm test`, `x=1 npm test`), and collapse
+  // whitespace. The summary is `Tool: <command>`; the tool prefix is preserved so different tools never collide.
   const colon = s.indexOf(': ');
   const prefix = colon >= 0 ? s.slice(0, colon + 2) : '';
   let cmd = colon >= 0 ? s.slice(colon + 2) : s;
-  cmd = cmd.replace(/^[\s({]+/, '');
-  cmd = cmd.split(/[;&|]/)[0] ?? cmd;
   cmd = cmd.replace(/(^|\s)#.*$/s, '$1');
-  cmd = cmd.replace(/[\s)}]+$/, '');
-  return (prefix + cmd).replace(/\s+/g, ' ').trim();
+  const segs = cmd
+    .split(/[;&|]+/)
+    .map(stripToCommand)
+    .filter(Boolean);
+  const real = segs.find((x) => !/^(:|true|false)$/.test(x)) ?? segs[0] ?? '';
+  return (prefix + real).replace(/\s+/g, ' ').trim();
+}
+
+/** Whether `child` (a directory) lies at or inside `parent`, resolving symlinks so /var vs /private/var agree. */
+function pathInside(child: string, parent: string): boolean {
+  const real = (x: string): string => {
+    try {
+      return realpathSync(resolve(x));
+    } catch {
+      return resolve(x);
+    }
+  };
+  const c = real(child);
+  const p = real(parent);
+  return c === p || c.startsWith(p + sep);
 }
 
 function summarizeInput(tool: string, input: Record<string, unknown>, cpRoot: string): string {

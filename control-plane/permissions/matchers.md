@@ -60,6 +60,9 @@ matchers:
     path: '.harness/generated/**'
   - capability: harness.runtime.tamper
     tool: Write
+    path: '.harness/hooks/**'
+  - capability: harness.runtime.tamper
+    tool: Write
     path: '.harness/harness.md'
   - capability: harness.trust.tamper
     tool: Write
@@ -85,7 +88,7 @@ matchers:
     command: '^git\s+push\b'
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+commit\b.*(\s--no-verify\b|\s-[A-Za-z]*n[A-Za-z]*\b)'
+    command: '^git\s+commit\b.*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(push|merge)\b.*\s--no-verify\b'
@@ -141,7 +144,7 @@ matchers:
   - capability: forge.api.mutate
     tool: Bash
     # graphql body loaded from a file/stdin (field=@path): cannot inspect it, so a mutation cannot be ruled out -> fail closed
-    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*(=@|\s--input\b|\s-i\s+\S))'
+    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*(=@|\s--input\b|\s-i\s+\S|=\s*\$))'
   - capability: forge.api.mutate
     tool: Bash
     command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
@@ -157,7 +160,7 @@ matchers:
     command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
   - capability: production.cloud.mutate
     tool: Bash
-    command: '^(terraform\s+(apply|destroy)|pulumi\s+(up|destroy)|aws\s+\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|invoke|publish|associate|disassociate|attach|detach|authorize|revoke)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
+    command: '^(terraform\s+(apply|destroy)|pulumi\s+(up|destroy)|aws\s+\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|cp|sync|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
   - capability: production.deploy
     tool: Bash
     command: '^(argocd\s+app\s+(sync|delete|set|rollback)|flux\s+(reconcile|suspend|resume)|kubectl\s+argo\s+rollouts)\b'
@@ -278,9 +281,6 @@ matchers:
   - capability: fs.hook-config.write
     tool: Write
     path: '.codex/**'
-  - capability: fs.hook-config.write
-    tool: Write
-    path: '.harness/hooks/**'
   - capability: fs.hook-config.write
     tool: Write
     path: '~/.claude/settings.json'
@@ -431,19 +431,19 @@ matchers:
   # inline interpreters are opaque, so a body that NAMES a protected store fails closed to the same deny the literal verb receives
   - capability: fs.credential-store.write
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*(\.ssh/|\.aws/credentials|\.aws/config|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.kube/|\.git-credentials|\.docker/config|id_rsa|id_ed25519|id_ecdsa|id_dsa)'
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.ssh/|\.aws/credentials|\.aws/config|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.kube/|\.git-credentials|\.docker/config|id_rsa|id_ed25519|id_ecdsa|id_dsa)'
   - capability: harness.trust.tamper
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*\.ego/(trust|runtimes|releases|index)\b'
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.ego/(trust|runtimes|releases|index)\b'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*(\.git/hooks|\.husky/|\.harness/hooks|core\.hooksPath|\.claude/settings|\.codex/)'
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.git/hooks|\.husky/|\.harness/hooks|core\.hooksPath|\.claude/settings|\.codex/)'
   - capability: harness.runtime.tamper
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*\.harness/(generated|runtime)\b'
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.harness/(generated|runtime)\b'
   - capability: fs.git-internals.write
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*\.git/(refs|objects|config|HEAD|packed-refs|info|logs)'
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.git/(refs|objects|config|HEAD|packed-refs|info|logs)'
   - capability: command.interpreter-inline
     tool: Bash
     command: '^(node\s+(-e|--eval|-p|--print)|python3?\s+-c|ruby\s+-e|perl\s+-e|php\s+-r)\b'

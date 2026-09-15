@@ -595,7 +595,7 @@ export function redirectionTargets(segment: string): string[] {
   const out: string[] = [];
   // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
-  const unglued = segment.replace(/([^\s\d&<>|=-])(>{1,2})/g, '$1 $2');
+  const unglued = segment.replace(/([^\s&|<>])(\d*>{1,2})/g, '$1 $2');
   const re = /(?:^|\s)(?:\d?>>?|&>>?|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(unglued))) {
@@ -628,6 +628,13 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
       else cur += ch;
       continue;
     }
+    const ansi = ch === '$' ? ansiCAt(s, i) : null;
+    if (ansi) {
+      // ANSI-C `$'...'` yields an ordinary word (a possible command head), so it is NOT marked quoted
+      cur += ansi.text;
+      i = ansi.end;
+      continue;
+    }
     if (ch === "'" || ch === '"') {
       quote = ch;
       wasQuoted = true;
@@ -641,6 +648,69 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
   }
   flush();
   return out;
+}
+
+// Decode a bash ANSI-C `$'...'` body: the shell expands its escapes and yields an ordinary (unquoted) word, so a
+// locked verb hidden as `$'push'` / `$'\\x70ush'` must be seen literally by the classifier.
+function decodeAnsiC(b: string): string {
+  let out = '';
+  for (let i = 0; i < b.length; i++) {
+    if (b[i] !== '\\') {
+      out += b[i];
+      continue;
+    }
+    const c = b[++i];
+    if (c === undefined) {
+      out += '\\';
+      break;
+    }
+    if (c === 'n') out += '\n';
+    else if (c === 't') out += '\t';
+    else if (c === 'r') out += '\r';
+    else if (c === 'a') out += '\x07';
+    else if (c === 'b') out += '\b';
+    else if (c === 'f') out += '\f';
+    else if (c === 'v') out += '\v';
+    else if (c === 'e' || c === 'E') out += '\x1b';
+    else if (c === '\\' || c === "'" || c === '"') out += c;
+    else if (c === 'x') {
+      const m = /^[0-9a-fA-F]{1,2}/.exec(b.slice(i + 1));
+      if (m) {
+        out += String.fromCharCode(parseInt(m[0], 16));
+        i += m[0].length;
+      } else out += 'x';
+    } else if (c === 'u') {
+      const m = /^[0-9a-fA-F]{1,4}/.exec(b.slice(i + 1));
+      if (m) {
+        out += String.fromCharCode(parseInt(m[0], 16));
+        i += m[0].length;
+      } else out += 'u';
+    } else if (c >= '0' && c <= '7') {
+      const m = /^[0-7]{1,3}/.exec(b.slice(i));
+      if (m) {
+        out += String.fromCharCode(parseInt(m[0], 8) & 0xff);
+        i += m[0].length - 1;
+      }
+    } else out += c;
+  }
+  return out;
+}
+/** Consume a `$'...'` ANSI-C literal starting at s[i] (which is `$`); returns the decoded word and the index of the
+ *  closing quote, or null if s[i] does not start an ANSI-C quote. */
+function ansiCAt(s: string, i: number): { text: string; end: number } | null {
+  if (s[i] !== '$' || s[i + 1] !== "'") return null;
+  let j = i + 2;
+  let body = '';
+  while (j < s.length && s[j] !== "'") {
+    if (s[j] === '\\' && j + 1 < s.length) {
+      body += s[j]! + s[j + 1]!;
+      j += 2;
+    } else {
+      body += s[j]!;
+      j++;
+    }
+  }
+  return { text: decodeAnsiC(body), end: j };
 }
 
 function tokenize(s: string): string[] {
@@ -657,6 +727,12 @@ function tokenize(s: string): string[] {
     if (quote) {
       if (ch === quote) quote = null;
       else cur += ch;
+      continue;
+    }
+    const ansi = ch === '$' ? ansiCAt(s, i) : null;
+    if (ansi) {
+      cur += ansi.text;
+      i = ansi.end;
       continue;
     }
     if (ch === "'" || ch === '"') {
@@ -749,6 +825,17 @@ const TRUST_STORE_DIRS = ['trust', 'index', 'releases', 'runtimes'];
 function underTrustDir(posix: string, home: string): boolean {
   return TRUST_STORE_DIRS.some((d) => posix === `${home}/${d}` || posix.startsWith(`${home}/${d}/`));
 }
+/** Whether a path (or a glob's literal prefix) reaches the EGO_HOME trust store: at/under a trust dir; a glob that
+ *  completes to one; or the EGO_HOME root itself under a glob or a recursive whole-tree op (parent copy/delete). */
+function reachesTrustStore(prefixPosix: string, home: string, isGlob: boolean, recursive: boolean): boolean {
+  if (prefixPosix === home) return isGlob || recursive;
+  return TRUST_STORE_DIRS.some((d) => {
+    const dir = `${home}/${d}`;
+    if (prefixPosix === dir || prefixPosix.startsWith(dir + '/')) return true;
+    if (isGlob && (dir.startsWith(prefixPosix + '/') || dir.startsWith(prefixPosix))) return true;
+    return false;
+  });
+}
 /** tools whose locked operations are searched for in argument position (see classifyCommand) */
 const LOCKED_HEADS = new Set([
   'git',
@@ -809,6 +896,8 @@ const WRITE_HEADS = new Set([
   'python3',
   'node',
   'tar',
+  'bsdtar',
+  'gtar',
   'unzip',
   'zip',
   'cpio',
@@ -1508,9 +1597,18 @@ function classifyShellPaths(
         const arc = archiveFileOperand(tokens);
         dest = arc && arc !== '-' ? arc : null; // creating the archive is a write to that path
       } else if (extract) {
-        const i = tokens.indexOf('-C');
-        dest = i > 0 && tokens[i + 1] ? tokens[i + 1]! : '.'; // extracts into -C dir, else the working directory
+        // the change-directory flag has several spellings: -C DIR, --directory DIR, --directory=DIR, --cd DIR
+        const eq = tokens.find((t) => t.startsWith('--directory='));
+        const fi = tokens.findIndex((t) => t === '-C' || t === '--directory' || t === '--cd');
+        dest = eq
+          ? eq.slice('--directory='.length)
+          : fi >= 0 && tokens[fi + 1]
+            ? tokens[fi + 1]!
+            : '.'; // extracts into the change-directory target, else the working directory
       } else dest = null; // list / compare: read-only
+    } else if (head === 'zip') {
+      const operands = bareOperands();
+      dest = operands.length ? operands[0]! : null; // zip writes its archive: the first non-option operand
     } else if (head === 'unzip') {
       const i = tokens.indexOf('-d');
       dest = i > 0 && tokens[i + 1] ? tokens[i + 1]! : '.';
@@ -1634,6 +1732,29 @@ function classifyShellPaths(
       continue;
     }
     const posix = p.abs.split(sep).join('/');
+    // A glob that expands into the EGO_HOME trust store (`~/.ego/*`, `~/.ego/trust*`, `~/.ego/trus[t]`) or a recursive
+    // op over the store's parent (`cp -r ~/.ego …`, `rm -rf ~/.ego`) tampers with / exfiltrates the trust material,
+    // which the strict-descendant check misses. The literal prefix is recomputed from the raw token (dest='ALL' and
+    // recursive loops store the un-truncated glob in p.abs).
+    if (ctx.egoHome) {
+      const egoPosix = canonicalPath(ctx.egoHome).split(sep).join('/');
+      const expandedRaw = expandHome(p.raw);
+      if (expandedRaw !== null) {
+        const rawGlob = /[*?[{]/.test(expandedRaw);
+        const lit = rawGlob ? expandedRaw.slice(0, expandedRaw.search(/[*?[{]/)) : expandedRaw;
+        const litPosix = canonicalPath(isAbsolute(lit) ? lit : resolve(cwd, lit))
+          .split(sep)
+          .join('/');
+        if (reachesTrustStore(litPosix, egoPosix, rawGlob, recursive))
+          hits.push({
+            capability: 'harness.trust.tamper',
+            verdict: verdictFor(table, ctx, 'harness.trust.tamper'),
+            via: `EGO_HOME trust store (${rawGlob ? 'glob' : recursive ? 'recursive' : 'path'} ${p.raw})`,
+            segment: seg,
+            absolute: true,
+          });
+      }
+    }
     const isDest =
       dest === 'ALL' ||
       (dest === 'AFTER_DASHDASH' && tokens.indexOf(p.raw) > tokens.indexOf('--')) ||
@@ -1778,6 +1899,33 @@ export function classifyCommand(
           absolute: false,
         });
       continue;
+    }
+    // `git commit` hook bypass: --no-verify, or a short-flag cluster containing `n` (`-n`, `-nm`, `-nam`, `-vn`).
+    // Scanned on quote-aware tokens so a `-n` inside the `-m` message (a quoted token) is never a false positive.
+    {
+      const marked = tokenizeMarked(seg);
+      const gi = marked.findIndex(
+        (t) => !t.quoted && t.text.slice(t.text.lastIndexOf('/') + 1) === 'git',
+      );
+      if (gi >= 0) {
+        const ci = marked.findIndex((t, i) => i > gi && !t.quoted && t.text === 'commit');
+        if (ci >= 0) {
+          for (let k = ci + 1; k < marked.length; k++) {
+            const t = marked[k]!;
+            if (t.quoted) continue; // the -m/-F message is a quoted token, never a flag
+            if (t.text === '--no-verify' || /^-[A-Za-z]*n[A-Za-z]*$/.test(t.text)) {
+              hits.push({
+                capability: 'git.hooks.bypass',
+                verdict: verdictFor(table, ctx, 'git.hooks.bypass'),
+                via: `git commit hook-bypass flag ${t.text}`,
+                segment: seg,
+                absolute: isAbsoluteCap(table, 'git.hooks.bypass'),
+              });
+              break;
+            }
+          }
+        }
+      }
     }
     const effectiveCwd = cwd === '\0dynamic' ? (ctx.cwd ?? process.cwd()) : cwd;
     for (const norm of normalizeSegment(seg)) {
