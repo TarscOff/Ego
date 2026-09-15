@@ -116,7 +116,8 @@ export const CLAUDE_HOOK_EVENTS: HookEventName[] = [
 ];
 
 export function hookCommand(event: HookEventName): string {
-  return `sh "$CLAUDE_PROJECT_DIR/.harness/hooks/ego-hook.sh" claude-code ${event}`;
+  // a missing shim must block (exit 2), not fail open with sh's 127
+  return `sh -c 'f="$CLAUDE_PROJECT_DIR/.harness/hooks/ego-hook.sh"; [ -f "$f" ] || { echo "EGO: hook shim missing; failing closed" >&2; exit 2; }; sh "$f" claude-code ${event}'`;
 }
 
 type HookGroup = { matcher?: string; hooks: Array<{ type: string; command: string; timeout?: number }> };

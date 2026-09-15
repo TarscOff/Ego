@@ -1,6 +1,5 @@
 // `harness doctor`: every guarantee reported as SATISFIED / NOT SATISFIED / SKIPPED / UNVERIFIED, never claimed.
-import { dirname, join, resolve, sep } from 'node:path';
-import { statSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { detectProject } from './detect.ts';
 import { readPin, hasPin, type Pin } from '../launcher/pin.ts';
 import {
@@ -15,7 +14,7 @@ import { loadTrustStore, revokedKeyIds } from '../launcher/trust.ts';
 import { policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
 import { runtimeRootDir } from '../runtime/root.ts';
 import { readGeneratedManifest } from './init.ts';
-import { gitHooksDir } from './githooks.ts';
+import { gitHookStatus } from './githooks.ts';
 import { gitConfigScope } from '../util/git.ts';
 import { isFile, readJsonIfExists, readTextIfExists } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
@@ -173,6 +172,14 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     fresh.fresh ? 'fresh' : fresh.reasons.join('; '),
   );
   const cache = readPolicyCache(root);
+  if (cache?.pendingWidening)
+    add(
+      'policy',
+      'pending widening',
+      'NOT SATISFIED',
+      `${cache.pendingWidening.widenings.length} widening(s) in the layer files are not applied until a human runs \`harness init\` from their own terminal: ${cache.pendingWidening.widenings.slice(0, 3).join('; ')}`,
+      false,
+    );
   if (cache) {
     add(
       'policy',
@@ -256,46 +263,21 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     isFile(shim) ? 'SATISFIED' : 'NOT SATISFIED',
     isFile(shim) ? '.harness/hooks/ego-hook.sh' : 'missing',
   );
-  // the directory git actually runs hooks from, with the husky user-hook layout resolved
-  const gitRuns = gitHooksDir(root, null);
-  const hooksDir = /[\\/]\.husky[\\/]_$/.test(gitRuns) ? dirname(gitRuns) : gitRuns;
-  const hookState = ['pre-commit', 'pre-push'].map((n) => {
-    const path = join(hooksDir, n);
-    const text = readTextIfExists(path);
-    let executable: boolean;
-    try {
-      executable = (statSync(path).mode & 0o111) !== 0;
-    } catch {
-      executable = false;
-    }
-    return {
-      n,
-      present: text !== null && text.includes('ego-hook'),
-      executable,
-      prependedAfterExit: text !== null && /^(exit|exec)\b/m.test(text.split('# ego-hook')[0] ?? ''),
-    };
-  });
-  // linked worktrees run the hooks of the main worktree's common git directory
+  // the directory git actually runs hooks from (husky user hooks resolved), the shim and the husky runner
+  const hooks = gitHookStatus(root);
   const insideRepo =
-    resolveInside(root, hooksDir) ||
-    resolveInside(det.mainWorktree ?? root, hooksDir) ||
-    gitConfigScope(root, 'core.hooksPath') === 'local';
-  const okHooks = insideRepo && hookState.every((h) => h.present && h.executable && !h.prependedAfterExit);
+    resolveInside(root, hooks.dir) ||
+    resolveInside(det.mainWorktree ?? root, hooks.dir) ||
+    gitConfigScope(root, 'core.hooksPath') !== 'global';
   add(
     'hooks',
     'git hooks',
-    okHooks ? 'SATISFIED' : 'NOT SATISFIED',
+    insideRepo && hooks.ok ? 'SATISFIED' : 'NOT SATISFIED',
     !insideRepo
-      ? `core.hooksPath comes from the global git configuration and resolves outside this repository (${hooksDir}); EGO never writes there. Set a repository-local hooks path and run \`harness init\``
-      : okHooks
-        ? `${hooksDir.startsWith(root) ? hooksDir.slice(root.length + 1) : hooksDir}/pre-commit, pre-push (bypassable with --no-verify: backstop is \`harness verify --range\` on a protected branch, phase 6)`
-        : hookState
-            .filter((h) => !(h.present && h.executable && !h.prependedAfterExit))
-            .map(
-              (h) =>
-                `${h.n}: ${!h.present ? 'missing EGO line' : !h.executable ? 'not executable' : 'EGO line after an exit/exec'}`,
-            )
-            .join(', ') + ' (run `harness init`)',
+      ? `core.hooksPath comes from the global git configuration and resolves outside this repository (${hooks.dir}); EGO never writes there. Set a repository-local hooks path and run \`harness init\``
+      : hooks.ok
+        ? `${hooks.dir.startsWith(root) ? hooks.dir.slice(root.length + 1) : hooks.dir}/pre-commit, pre-push (bypassable with --no-verify: backstop is \`harness verify --range\` on a protected branch, phase 6)`
+        : `${hooks.problems.join('; ')} (run \`harness init\`)`,
     true,
   );
 

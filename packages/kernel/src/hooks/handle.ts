@@ -134,9 +134,16 @@ function handleLocked(
   const now = rt.now();
   session.heartbeatAt = now;
   const inEgo = isEgoSourceRepository(rt.projectRoot);
+  // the session record is not trusted to widen authority: a mode the record names is honoured only when it exists in
+  // the compiled table and, for HARNESS_MAINTENANCE, only inside the EGO source repository
+  const knownModes = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {});
+  const effectiveMode =
+    knownModes.includes(session.mode) && !(session.mode === 'HARNESS_MAINTENANCE' && !inEgo)
+      ? session.mode
+      : cache.table.defaultMode;
   const ctx: EvaluationContext = {
     profile: rt.pin.profile,
-    mode: session.mode,
+    mode: effectiveMode,
     repoRoots: [rt.projectRoot, root.workspaceRoot],
     egoHome: egoHome(rt.env ?? process.env).root,
     grants: session.grants,
@@ -152,8 +159,7 @@ function handleLocked(
 
   switch (ev.event) {
     case 'SessionStart': {
-      if (ev.source === 'startup' || ev.source === 'clear' || ev.source === undefined)
-        session.counters.iterations = 0; // compact / resume continue the same budget
+      if (ev.source === 'startup' || ev.source === 'clear') session.counters.iterations = 0; // compact / resume continue the same budget
       writeSession(root, session);
       const launcher = resolveOnPath('harness', rt.env ?? process.env);
       const lines = [
@@ -273,7 +279,8 @@ function handleLocked(
       // execution budgets (alignment item 8): breach blocks or escalates until a human extends
       const budgets = budgetsFor(cache, rt.pin.profile, session);
       const bv = evaluateBudget(budgets, countersOf(session, now));
-      if (bv.action !== 'CONTINUE') {
+      // a DENY is never weakened into an escalation: budgets only ever tighten what the table allows
+      if (bv.action !== 'CONTINUE' && evaluation.verdict !== 'DENY') {
         session.budgetState = {
           action: bv.action,
           breaches: bv.breaches,
@@ -296,7 +303,7 @@ function handleLocked(
       // retry hard stop (alignment item 8): the same step may not run again once it failed more than the profile's retries
       const stepKey = `${tool.name}:${summary.slice(0, 80)}`;
       const failures = session.counters.failuresByStep[stepKey] ?? 0;
-      if (failures > budgets.maxRetriesPerStep) {
+      if (failures > budgets.maxRetriesPerStep && evaluation.verdict !== 'DENY') {
         writeSession(root, session);
         ledger('budget.retry-stop', {
           step: stepKey,

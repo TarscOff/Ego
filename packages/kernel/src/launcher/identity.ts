@@ -116,7 +116,9 @@ export function verifyRuntimeDirectory(
     : computeInternalManifest(dir);
   const listed = new Set(manifest.files.map((f) => f.path));
   // every byte in the cache directory counts, including node_modules/.git planted after materialization
-  const present = walkFiles(dir, { skipDirs: [] }).filter((f) => f !== 'manifest.internal.json');
+  const present = walkFiles(dir, { skipDirs: [], includeSymlinks: true }).filter(
+    (f) => f !== 'manifest.internal.json',
+  );
   const unlisted = present.filter((p) => !listed.has(p));
   const recomputed = computeInternalManifest(dir);
   const actual = identityFromManifest(recomputed);

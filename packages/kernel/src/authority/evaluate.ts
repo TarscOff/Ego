@@ -66,7 +66,63 @@ const WRAPPERS = new Set([
   'unbuffer',
   'nocorrect',
   'noglob',
+  'chrt',
+  'taskset',
+  'numactl',
+  'prlimit',
+  'cpulimit',
+  'eatmydata',
+  'fakeroot',
+  'proxychains',
+  'proxychains4',
+  'torsocks',
+  'rlwrap',
+  'sem',
+  'arch',
+  'daemonize',
+  'xvfb-run',
+  'firejail',
+  'unshare',
+  'nsenter',
+  'systemd-run',
+  'sandbox-exec',
+  'busybox',
+  'doas',
+  'gtimeout',
 ]);
+/** wrapper options that consume the next token as their value (the command starts after it) */
+const WRAPPER_VALUE_OPTS: Record<string, RegExp> = {
+  env: /^(-u|--unset|-C|--chdir|-S|--split-string)$/,
+  nice: /^(-n|--adjustment)$/,
+  ionice: /^(-c|-n|-p|--class|--classdata)$/,
+  watch: /^(-n|--interval|-d)$/,
+  stdbuf: /^-[ioe]$/,
+  strace: /^-[opesEu]$/,
+  ltrace: /^-[opesu]$/,
+  valgrind: /^--tool$/,
+  time: /^(-o|--output|-f|--format)$/,
+  chrt: /^(-p|--pid)$/,
+  taskset: /^(-p|--pid)$/,
+  numactl: /^(-C|-N|-m|-p|--physcpubind|--cpunodebind|--membind|--preferred)$/,
+  prlimit: /^(-p|--pid)$/,
+  cpulimit: /^(-l|--limit|-p|--pid|-e|--exe)$/,
+  'xvfb-run': /^(-n|-s|-e|-f|--server-num|--server-args)$/,
+  'systemd-run': /^(-p|--property|-u|--unit|-E|--setenv|-M|--machine)$/,
+  'sandbox-exec': /^(-f|-p|-n|-D)$/,
+  nsenter: /^(-t|--target)$/,
+  sem: /^(-j|--jobs|--id)$/,
+  doas: /^(-u|-C)$/,
+  gtimeout: /^(-s|--signal|-k|--kill-after)$/,
+  timeout: /^(-s|--signal|-k|--kill-after)$/,
+};
+/** wrappers whose leading positional operands (a priority, a cpu mask, an architecture) precede the command */
+const WRAPPER_POSITIONALS: Record<string, RegExp> = {
+  chrt: /^\d+$/,
+  taskset: /^(0x[0-9a-fA-F]+|[0-9,-]+)$/,
+  timeout: /^\d+(\.\d+)?[smhd]?$/,
+  gtimeout: /^\d+(\.\d+)?[smhd]?$/,
+  arch: /^-?(arm64|arm64e|x86_64|i386)$/,
+};
 /** wrappers whose first argument is their own operand, not the command: the command starts after it */
 const WRAPPERS_WITH_OPERAND = new Set(['flock', 'su', 'runuser']);
 /** environment assignments that change what a command executes or where governance looks: never silently stripped */
@@ -115,10 +171,20 @@ export function splitShellSegments(command: string): string[] {
         let depth = 1;
         let j = i + 2;
         let inner = '';
+        let q: string | null = null;
         while (j < command.length && depth > 0) {
           const c = command[j]!;
-          if (c === '(') depth++;
-          if (c === ')') depth--;
+          // quotes and escapes inside the substitution body never close it
+          if (c === '\\' && q !== "'") {
+            inner += c + (command[j + 1] ?? '');
+            j += 2;
+            continue;
+          }
+          if (q) {
+            if (c === q) q = null;
+          } else if (c === "'" || c === '"') q = c;
+          else if (c === '(') depth++;
+          else if (c === ')') depth--;
           if (depth > 0) inner += c;
           j++;
         }
@@ -161,49 +227,45 @@ export function normalizeSegment(segment: string): string[] {
   for (;;) {
     const t = tokens[idx];
     if (t === undefined) break;
-    if (WRAPPERS.has(t)) {
+    if (WRAPPERS.has(t) || t === 'timeout') {
       idx++;
-      if (
-        t === 'nice' ||
-        t === 'ionice' ||
-        t === 'watch' ||
-        t === 'stdbuf' ||
-        t === 'env' ||
-        t === 'setsid' ||
-        t === 'strace' ||
-        t === 'ltrace' ||
-        t === 'valgrind'
-      ) {
-        while (
-          idx < tokens.length &&
-          (tokens[idx]!.startsWith('-') || (t === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)))
-        ) {
-          const opt = tokens[idx]!;
+      const valueOpt = WRAPPER_VALUE_OPTS[t];
+      const positional = WRAPPER_POSITIONALS[t];
+      while (idx < tokens.length) {
+        const tok = tokens[idx]!;
+        if (tok === '--') {
           idx++;
-          if (
-            (t === 'nice' && opt === '-n') ||
-            (t === 'ionice' && (opt === '-c' || opt === '-n')) ||
-            (t === 'watch' && (opt === '-n' || opt === '--interval')) ||
-            (t === 'stdbuf' && /^-[ioe]$/.test(opt)) ||
-            (t === 'strace' && /^-[opes]$/.test(opt)) ||
-            (t === 'valgrind' && opt === '--tool')
-          )
-            idx++;
+          // after `env --` assignments may still follow: they are judged, then the command starts
+          if (t === 'env')
+            while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) {
+              const name = tokens[idx]!.slice(0, tokens[idx]!.indexOf('='));
+              if (ENV_INJECT_RE.test(name)) extra.push(`env-inject ${name}`);
+              idx++;
+            }
+          break;
         }
+        if (t === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) {
+          // assignments passed through `env` are judged exactly like leading assignments
+          const name = tok.slice(0, tok.indexOf('='));
+          if (ENV_INJECT_RE.test(name)) extra.push(`env-inject ${name}`);
+          idx++;
+          continue;
+        }
+        if (tok.startsWith('-')) {
+          idx++;
+          if (valueOpt && valueOpt.test(tok) && !tok.includes('=')) idx++;
+          continue;
+        }
+        if (positional && positional.test(tok)) {
+          idx++;
+          continue;
+        }
+        break;
       }
       continue;
     }
-    if (t === 'timeout') {
-      idx++;
-      while (
-        idx < tokens.length &&
-        (tokens[idx]!.startsWith('-') || /^\d+(\.\d+)?[smhd]?$/.test(tokens[idx]!))
-      )
-        idx++;
-      continue;
-    }
     if (WRAPPERS_WITH_OPERAND.has(t)) {
-      // flock <file> cmd, su [-] user -c cmd: the command is opaque unless it follows -c
+      // flock [opts] <file> cmd | flock [opts] <file> -c 'cmd', su [-] user -c cmd, runuser -u user -- cmd
       const c = tokens.indexOf('-c', idx);
       if (c > 0 && tokens[c + 1])
         return [
@@ -212,8 +274,18 @@ export function normalizeSegment(segment: string): string[] {
           tokens.slice(idx).join(' '),
         ];
       idx++;
-      while (idx < tokens.length && tokens[idx]!.startsWith('-')) idx++;
-      if (t === 'flock') idx++; // the lock file
+      while (idx < tokens.length && tokens[idx]!.startsWith('-')) {
+        const opt = tokens[idx]!;
+        idx++;
+        if (/^(-w|--timeout|-E|--conflict-exit-code|-u|--user|-g|--group)$/.test(opt)) idx++;
+        if (opt === '--') break;
+      }
+      if (
+        t === 'flock' ||
+        t === 'su' ||
+        (t === 'runuser' && tokens[idx] !== undefined && !tokens[idx]!.startsWith('-'))
+      )
+        idx++; // lock file / user
       continue;
     }
     break;
@@ -254,7 +326,14 @@ function findPayloads(rest: string[]): string[] {
         // `{}` stands for a match under the search root: the root is the most specific path the kernel can see
         if (cmd.length) out.push(cmd.map((c) => (c === '{}' ? searchRoot : c)).join(' '));
         i = j;
-      } else if (t === '-delete') out.push(`rm -r ${searchRoot}`);
+      } else if (t === '-delete') {
+        // predicates narrow a deletion: only a search root that is itself a protected tree is judged as deleting it
+        out.push(
+          /(^|\/)\.(harness|git|husky|claude|codex|ssh|aws|kube|gnupg)(\/|$)/i.test(searchRoot)
+            ? `rm -r ${searchRoot}`
+            : `rm -r ${searchRoot.replace(/\/$/, '')}/FIND_MATCH`,
+        );
+      }
     }
   }
   if (head === 'fd' || head === 'fdfind') {
@@ -270,8 +349,26 @@ function findPayloads(rest: string[]): string[] {
     }
   }
   if (head === 'parallel' || head === 'xargs') {
-    const after = rest.slice(1).filter((t) => !t.startsWith('-') && !/^\{.*\}$/.test(t));
-    if (after.length) out.push(after.join(' '));
+    const after: string[] = [];
+    let replstr: string | null = null;
+    for (let i = 1; i < rest.length; i++) {
+      const t = rest[i]!;
+      if (after.length === 0 && t.startsWith('-')) {
+        // -I R / -J R / --replace=R: R is a placeholder, not the command; other value options consume their value
+        const m = /^(-I|-J|--replace|-i)(?:=?(.+))?$/.exec(t);
+        if (m) {
+          if (m[2]) replstr = m[2];
+          else if (m[1] === '-I' || m[1] === '-J') replstr = rest[++i] ?? null;
+          else replstr = '{}';
+          continue;
+        }
+        if (/^(-n|-L|-P|-s|-E|-d|-a|--max-args|--max-procs|--delimiter|--arg-file|-j|--jobs)$/.test(t)) i++;
+        continue;
+      }
+      after.push(t);
+    }
+    const payload = after.filter((t) => t !== replstr && !/^\{.*\}$/.test(t) && t !== ':::');
+    if (payload.length) out.push(payload.join(' '));
   }
   return out;
 }
@@ -300,10 +397,7 @@ function normalizeTail(rest: string[]): string[] {
     // the carrier itself stays classified (find/fd/parallel are read-only listings); every payload is judged on its own
     return [rest.join(' '), ...payloads.flatMap((p) => splitShellSegments(p).flatMap(normalizeSegment))];
   }
-  if (head === 'xargs') {
-    const after = rest.slice(1).filter((t) => !t.startsWith('-'));
-    if (after.length) return [after.join(' ')];
-  }
+
   if (head === 'sudo' || head === 'doas') {
     const after = rest.slice(1).filter((t, i) => !(i === 0 && t.startsWith('-')));
     return [rest.join(' '), ...(after.length ? [after.join(' ')] : [])];
@@ -419,6 +513,15 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
       const name = eq > 0 ? t.slice(0, eq) : t;
       if (GIT_GLOBAL_WITH_ARG.has(name)) {
         const value = eq > 0 ? t.slice(eq + 1) : (tokens[i + 1] ?? '');
+        if (
+          name === '--git-dir' ||
+          name === '--work-tree' ||
+          name === '--namespace' ||
+          name === '--exec-path'
+        )
+          extra.push(
+            `env-inject ${name === '--git-dir' ? 'GIT_DIR' : name === '--work-tree' ? 'GIT_WORK_TREE' : name === '--namespace' ? 'GIT_NAMESPACE' : 'GIT_EXEC_PATH'}`,
+          );
         if (name === '-c' || name === '--config-env') {
           // an inline alias redefines a verb: `git -c alias.p=push p …` is `git push …`; an alias whose body is not a
           // literal (config-env) is an execution override the kernel cannot see
@@ -486,12 +589,54 @@ export function redirectionTargets(segment: string): string[] {
   return out;
 }
 
+/** Like tokenize, but records whether each token contained a quote (quoted words are data, not command heads). */
+function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
+  const out: Array<{ text: string; quoted: boolean }> = [];
+  let cur = '';
+  let quote: string | null = null;
+  let wasQuoted = false;
+  const flush = () => {
+    if (cur || wasQuoted) out.push({ text: cur, quoted: wasQuoted });
+    cur = '';
+    wasQuoted = false;
+  };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === '\\' && quote !== "'" && i + 1 < s.length) {
+      cur += s[++i]!;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      wasQuoted = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush();
+      continue;
+    }
+    cur += ch;
+  }
+  flush();
+  return out;
+}
+
 function tokenize(s: string): string[] {
   const out: string[] = [];
   let cur = '';
   let quote: string | null = null;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
+    // a backslash escape is removed the way the shell removes it (`.ss\h` is `.ssh`), except inside single quotes
+    if (ch === '\\' && quote !== "'" && i + 1 < s.length) {
+      cur += s[++i]!;
+      continue;
+    }
     if (quote) {
       if (ch === quote) quote = null;
       else cur += ch;
@@ -522,7 +667,7 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
     base = home.split(sep).join('/');
   }
   const re = globToRegExp(pat);
-  if (base) return re.test(posix.startsWith(base + '/') ? posix.slice(base.length + 1) : ' ');
+  if (base) return re.test(posix.startsWith(base + '/') ? posix.slice(base.length + 1) : '\0');
   // repo-relative patterns: test against every registered root, then against the cwd root
   const roots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
     canonicalPath(r).split(sep).join('/'),
@@ -549,7 +694,7 @@ export function globToRegExp(glob: string): RegExp {
     else if ('\\^$.|+()[]{}'.includes(ch)) re += `\\${ch}`;
     else re += ch;
   }
-  return new RegExp(re + '$');
+  return new RegExp(re + '$', 'i');
 }
 
 function verdictFor(table: CompiledAuthorityTable, ctx: EvaluationContext, capability: string): Verdict {
@@ -583,6 +728,31 @@ function insideRoots(absPath: string, ctx: EvaluationContext): boolean {
 }
 
 const TRUST_STORE_DIRS = ['trust', 'index', 'releases', 'runtimes'];
+/** tools whose locked operations are searched for in argument position (see classifyCommand) */
+const LOCKED_HEADS = new Set([
+  'git',
+  'gh',
+  'glab',
+  'az',
+  'kubectl',
+  'oc',
+  'helm',
+  'terraform',
+  'pulumi',
+  'aws',
+  'gcloud',
+  'argocd',
+  'flux',
+  'vault',
+  'rm',
+  'harness',
+  'ego',
+  'claude',
+  'codex',
+  'npx',
+  'bunx',
+  'pnpx',
+]);
 
 /** The OS temporary directory is scratch space: neither workspace nor protected. */
 export function isScratchPath(abs: string): boolean {
@@ -620,6 +790,16 @@ const WRITE_HEADS = new Set([
   'tar',
   'unzip',
   'zip',
+  'cpio',
+  'pax',
+  'gcp',
+  'gmv',
+  'ditto',
+  'rename',
+  'shred',
+  'unlink',
+  'patch',
+  'git',
 ]);
 
 export function classifyPath(
@@ -1279,16 +1459,109 @@ function classifyShellPaths(
       else if (!tokens.some((t) => /^-[a-zA-Z]*x/.test(t) || t === '--extract')) dest = null;
       else dest = '.';
     } else if (head === 'dd') dest = tokens.find((t) => t.startsWith('of='))?.slice(3) ?? null;
-    else if (['cp', 'mv', 'ln', 'install', 'rsync', 'scp'].includes(head))
-      dest = paths.length ? paths[paths.length - 1]!.raw : null;
-    else if (
-      ['tee', 'truncate', 'touch', 'chmod', 'chown', 'rm', 'mkdir', 'rmdir', 'sed', 'perl'].includes(head)
+    else if (['cp', 'mv', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio', 'pax'].includes(head)) {
+      // ignore redirections (`< list`, `2> err`) and their targets, then take the destination operand even when it is
+      // a bare name (`cd .harness/generated && cp x policy.json`)
+      const operands: string[] = [];
+      for (let i = 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (/^\d*[<>]{1,2}$/.test(t) || t === '&>' || t === '>|') {
+          if (!t.includes('/') && i + 1 < tokens.length) i++;
+          continue;
+        }
+        if (!t.startsWith('-')) operands.push(t);
+      }
+      // cpio -p and pax -rw copy INTO the first operand (the file list comes on stdin); cp/mv write the last operand
+      dest = operands.length
+        ? head === 'cpio' || (head === 'pax' && tokens.includes('-rw'))
+          ? operands[0]!
+          : operands[operands.length - 1]!
+        : null;
+    } else if (head === 'git') {
+      // `git checkout|restore <ref> -- <paths>` writes the paths
+      const sub = tokens[1];
+      const dd = tokens.indexOf('--');
+      dest = (sub === 'checkout' || sub === 'restore') && dd > 0 ? 'AFTER_DASHDASH' : null;
+    } else if (
+      [
+        'tee',
+        'truncate',
+        'touch',
+        'chmod',
+        'chown',
+        'rm',
+        'mkdir',
+        'rmdir',
+        'sed',
+        'perl',
+        'ln',
+        'shred',
+        'unlink',
+        'rename',
+        'patch',
+      ].includes(head)
     )
-      dest = 'ALL';
+      dest = 'ALL'; // for ln every operand counts: a link TARGET inside a protected tree opens a route into it
+  }
+  if (dest && dest !== 'ALL' && dest !== 'AFTER_DASHDASH' && !paths.some((p) => p.raw === dest)) {
+    const expanded = expandHome(dest);
+    if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: dest, abs: null, glob: false });
+    else {
+      const glob = /[*?[{]/.test(expanded);
+      const literal = glob ? expanded.slice(0, expanded.search(/[*?[{]/)) : expanded;
+      paths.push({
+        raw: dest,
+        abs: canonicalPath(isAbsolute(literal) ? literal : resolve(cwd, literal)),
+        glob,
+      });
+    }
+  }
+  if (dest === 'ALL') {
+    for (const t of tokens.slice(1)) {
+      if (t.startsWith('-') || paths.some((p) => p.raw === t) || /^[sy]\/|^\d+$/.test(t)) continue;
+      const expanded = expandHome(t);
+      if (expanded === null || /[$`]/.test(expanded)) continue;
+      paths.push({
+        raw: t,
+        abs: canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)),
+        glob: /[*?[{]/.test(expanded),
+      });
+    }
+  }
+  if (dest === 'AFTER_DASHDASH') {
+    for (const t of tokens.slice(tokens.indexOf('--') + 1)) {
+      const expanded = expandHome(t);
+      if (expanded === null || /[$`]/.test(expanded)) continue;
+      paths.push({
+        raw: t,
+        abs: canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)),
+        glob: false,
+      });
+    }
   }
   // an implicit destination (archive extracted into the working directory) is a path the command never spells out
   if (dest === '.' && !paths.some((p) => p.raw === '.'))
     paths.push({ raw: '.', abs: canonicalPath(cwd), glob: false });
+  // a recursive read names its roots as bare operands too (`cd / && grep -r KEY Users`): an operand that is HOME or one of
+  // its ancestors reaches the credential stores
+  if (recursive) {
+    for (const t of tokens.slice(1)) {
+      if (t.startsWith('-')) continue;
+      const expanded = expandHome(t);
+      if (expanded === null || /[$`*?[{]/.test(expanded)) continue;
+      const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded))
+        .split(sep)
+        .join('/');
+      if (abs === home || home.startsWith(abs.replace(/\/$/, '') + '/'))
+        hits.push({
+          capability: 'fs.credential-store.read',
+          verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+          via: `recursive read of ${t} reaches credential stores`,
+          segment: seg,
+          absolute: false,
+        });
+    }
+  }
   if (paths.length === 0) return hits;
   for (const p of paths) {
     if (p.abs === null) {
@@ -1302,12 +1575,30 @@ function classifyShellPaths(
       continue;
     }
     const posix = p.abs.split(sep).join('/');
-    const isDest = dest === 'ALL' || (dest !== null && p.raw === dest);
+    const isDest =
+      dest === 'ALL' ||
+      (dest === 'AFTER_DASHDASH' && tokens.indexOf(p.raw) > tokens.indexOf('--')) ||
+      (dest !== null && p.raw === dest);
     // reads: credential stores (any spelling, canonicalized), env files; recursive reads of HOME or `/` reach them too
     if (!write || !isDest) {
       const r = classifyPath(table, ctx, 'Read', p.abs);
       if (r.via.startsWith('matcher path') || r.capability.startsWith('fs.credential'))
         hits.push({ ...r, via: `path argument ${p.raw} (${r.via})`, segment: seg });
+      // a glob whose literal part is an ancestor of HOME (`/U*/me/.ssh/id_rsa`) can expand into a credential store too
+      if (
+        p.glob &&
+        home.startsWith(posix) &&
+        /(^|\/)\.([A-Za-z-]{0,16}[*?[{]|ssh|aws|kube|gnupg|azure|docker|netrc|npmrc|pypirc|git-credentials|config)/i.test(
+          p.raw,
+        )
+      )
+        hits.push({
+          capability: 'fs.credential-store.read',
+          verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+          via: `glob ${p.raw} can expand into a credential store`,
+          segment: seg,
+          absolute: false,
+        });
       if (p.glob && globCouldReachCredentials(p.abs))
         hits.push({
           capability: 'fs.credential-store.read',
@@ -1351,6 +1642,7 @@ function classifyShellPaths(
       for (const pp of table.protectedPaths) {
         if (pp.tool === 'Read') continue;
         const prefix = pp.path
+          .replace(/^\*\*\//, '')
           .replace(/^~\//, home + '/')
           .split(/[*?[{]/)[0]!
           .replace(/\/$/, '');
@@ -1424,8 +1716,39 @@ export function classifyCommand(
     }
     const effectiveCwd = cwd === '\0dynamic' ? (ctx.cwd ?? process.cwd()) : cwd;
     for (const norm of normalizeSegment(seg)) {
-      for (const h of classifyNormalized(table, ctx, compiled, norm, { depth: 0, seen: new Set() }))
-        hits.push(h);
+      const normHits = classifyNormalized(table, ctx, compiled, norm, { depth: 0, seen: new Set() });
+      for (const h of normHits) hits.push(h);
+      // a locked operation carried by any wrapper, launcher or placeholder the normalizer does not know is still found:
+      // every suffix of the token list that starts with a governed tool is matched against the locked matchers
+      if (!normHits.some((h) => h.verdict === 'DENY')) {
+        const marked = tokenizeMarked(seg);
+        for (let k = 1; k < marked.length; k++) {
+          if (marked[k]!.quoted) continue; // a verb inside quotes is data
+          const name = marked[k]!.text.slice(marked[k]!.text.lastIndexOf('/') + 1);
+          if (!LOCKED_HEADS.has(name)) continue;
+          const suffix = [name, ...marked.slice(k + 1).map((t) => t.text)].join(' ');
+          for (const sub of normalizeSegment(suffix)) {
+            for (const { m, re } of compiled) {
+              if (!re.test(sub)) continue;
+              const lock = table.capabilities[m.capability]?.lock;
+              if (
+                lock === 'absolute' ||
+                lock === 'organization' ||
+                m.capability === 'command.env-inject' ||
+                m.capability === 'harness.gate.bypass'
+              )
+                hits.push({
+                  capability: m.capability,
+                  verdict: verdictFor(table, ctx, m.capability),
+                  via: `locked operation carried in argument position: ${sub}`,
+                  segment: norm,
+                  absolute: isAbsoluteCap(table, m.capability),
+                });
+              break;
+            }
+          }
+        }
+      }
       // path arguments of the normalized command (after wrappers and global flags are stripped)
       for (const h of classifyShellPaths(table, ctx, norm, effectiveCwd)) hits.push(h);
     }
@@ -1524,6 +1847,33 @@ export function evaluate(
   } else if (tool === 'Read') {
     const p = typeof req.input['file_path'] === 'string' ? req.input['file_path'] : '';
     if (p) hits = [classifyPath(table, ctx, 'Read', p)];
+  } else if (tool === 'Grep' || tool === 'Glob' || tool === 'LS') {
+    // search tools read file contents or names under a path: the path (default: the working directory) is a read, and a
+    // pattern that names a credential store is judged like one
+    const base =
+      typeof req.input['path'] === 'string' && req.input['path']
+        ? req.input['path']
+        : (ctx.cwd ?? process.cwd());
+    const expanded = expandHome(base) ?? base;
+    hits = [classifyPath(table, ctx, 'Read', expanded)];
+    const home = canonicalPath(homedir()).split(sep).join('/');
+    const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(ctx.cwd ?? process.cwd(), expanded))
+      .split(sep)
+      .join('/');
+    const pattern = typeof req.input['pattern'] === 'string' ? req.input['pattern'] : '';
+    const glob = typeof req.input['glob'] === 'string' ? req.input['glob'] : '';
+    if (
+      abs === home ||
+      home.startsWith(abs + '/') ||
+      abs === '/' ||
+      globCouldReachCredentials(abs + '/' + (tool === 'Glob' ? pattern : glob))
+    )
+      hits.push({
+        capability: 'fs.credential-store.read',
+        verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+        via: `${tool} over ${base} can reach credential stores`,
+        absolute: false,
+      });
   } else if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit') {
     const p =
       typeof req.input['file_path'] === 'string'

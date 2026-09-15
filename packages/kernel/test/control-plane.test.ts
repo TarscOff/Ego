@@ -388,3 +388,53 @@ test('authority diff: an inserted matcher that shadows existing ones is MAJOR; w
   t3.sanitizerLockedMinimums['oauth.jwt'] = 'warn';
   assert.ok(diffAuthorityTables(t0, t3).some((c) => c.kind === 'sanitizer-weakened'));
 });
+
+test('fail closed: checkbox-less capability bullets, starred preamble items and a null narrow key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-cp-r3-'));
+  cpSync(ROOT, dir, { recursive: true });
+  const abs = join(dir, 'permissions', 'absolute-denies.md');
+  const original = readFileSync(abs, 'utf8');
+  writeFileSync(abs, original.replace('- [x] `production.storage.mutate`', '- `production.storage.mutate`'));
+  assert.throws(() => loadControlPlane(dir), /"production.storage.mutate" under "Denied" has no checkbox/);
+  writeFileSync(
+    abs,
+    original
+      .replace('- [x] `production.storage.mutate` — production storage mutation.\n', '')
+      .replace(
+        '# Absolute core denies',
+        '* [x] `production.storage.mutate` — moved\n\n# Absolute core denies',
+      ),
+  );
+  assert.throws(() => loadControlPlane(dir), /appears before the first heading/);
+  writeFileSync(abs, original);
+  const strict = join(dir, 'profiles', 'strict.md');
+  writeFileSync(strict, readFileSync(strict, 'utf8').replace(/narrow:\n( {2}- [\s\S]*?)(?=---)/, 'narrow:\n'));
+  assert.throws(() => loadControlPlane(dir), /narrow must be a list/);
+});
+
+test('authority diff: grant phrases, protections and a wider new mode cell are MAJOR', () => {
+  const t0 = compileAuthority(loadControlPlane(ROOT));
+  const g = structuredClone(t0);
+  g.grants[0]!.phrases.push('just do it');
+  assert.equal(classifyAuthorityChanges(diffAuthorityTables(t0, g), g), 'major');
+  const n = structuredClone(t0);
+  n.grantNegations = n.grantNegations.slice(1);
+  assert.equal(classifyAuthorityChanges(diffAuthorityTables(t0, n), n), 'major');
+  const pp = structuredClone(t0);
+  pp.protectedPaths = pp.protectedPaths.slice(1);
+  assert.ok(diffAuthorityTables(t0, pp).some((c) => c.kind === 'protection-removed'));
+  assert.equal(classifyAuthorityChanges(diffAuthorityTables(t0, pp), pp), 'major');
+  const pd = structuredClone(t0);
+  pd.preDeniedCommandClasses = pd.preDeniedCommandClasses.slice(1);
+  assert.equal(classifyAuthorityChanges(diffAuthorityTables(t0, pd), pd), 'major');
+  const m = structuredClone(t0);
+  m.profiles['STRICT']!.modes['LOOSE'] = {
+    ...m.profiles['STRICT']!.modes[m.defaultMode]!,
+    'fs.env-file.write': 'ALLOW',
+  };
+  const cm = diffAuthorityTables(t0, m);
+  assert.ok(
+    cm.some((c) => c.kind === 'changed' && c.capability === 'fs.env-file.write' && c.cell === 'STRICT/LOOSE'),
+  );
+  assert.equal(classifyAuthorityChanges(cm, m), 'major');
+});

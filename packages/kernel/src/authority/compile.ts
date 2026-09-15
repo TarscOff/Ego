@@ -287,7 +287,10 @@ export interface AuthorityChange {
     | 'matcher-added'
     | 'lock-changed'
     | 'budget-changed'
-    | 'sanitizer-weakened';
+    | 'sanitizer-weakened'
+    | 'grants-widened'
+    | 'grants-narrowed'
+    | 'protection-removed';
   /** profile/mode cell where a verdict change was observed (first one found); absent for table-wide changes */
   cell?: string;
   from?: Verdict;
@@ -337,6 +340,19 @@ export function diffAuthorityTables(
         cell,
         detail: `profile/mode cell ${cell} ${a ? 'removed' : 'added'}`,
       });
+      // a new cell is judged against the default mode of its profile: any capability it makes wider is a verdict change
+      const base = b ? next.profiles[p]?.modes[next.defaultMode] : undefined;
+      if (b && base)
+        for (const id of Object.keys(b).sort())
+          if (base[id] && VERDICT_RANK[b[id]!] < VERDICT_RANK[base[id]!])
+            push({
+              capability: id,
+              kind: 'changed',
+              cell,
+              from: base[id]!,
+              to: b[id]!,
+              detail: `new cell ${cell} is wider than ${p}/${next.defaultMode}`,
+            });
       continue;
     }
     for (const id of [...ids].sort()) {
@@ -380,6 +396,39 @@ export function diffAuthorityTables(
         detail: `${k}: ${y.capability} -> ${x.capability}`,
       });
   });
+  // grant phrases turn ASK into ALLOW: a new phrase or a removed negation widens, a removed phrase narrows
+  const phrases = (t: CompiledAuthorityTable) =>
+    new Set(t.grants.flatMap((g) => g.phrases.map((ph) => `${g.capability}|${ph}`)));
+  const gp = phrases(prev);
+  const gn = phrases(next);
+  for (const k of gn)
+    if (!gp.has(k))
+      push({ capability: k.split('|')[0]!, kind: 'grants-widened', detail: `grant phrase added: ${k}` });
+  for (const k of gp)
+    if (!gn.has(k))
+      push({ capability: k.split('|')[0]!, kind: 'grants-narrowed', detail: `grant phrase removed: ${k}` });
+  for (const n of prev.grantNegations)
+    if (!next.grantNegations.includes(n))
+      push({ capability: '*', kind: 'grants-widened', detail: `grant negation removed: ${n}` });
+  if (next.grantNegationWindowTokens < prev.grantNegationWindowTokens)
+    push({
+      capability: '*',
+      kind: 'grants-widened',
+      detail: `negation window ${prev.grantNegationWindowTokens} -> ${next.grantNegationWindowTokens}`,
+    });
+  const pp = (t: CompiledAuthorityTable) =>
+    new Set(t.protectedPaths.map((x) => `${x.tool}|${x.path}|${x.capability}`));
+  const nextPp = pp(next);
+  for (const k of pp(prev))
+    if (!nextPp.has(k))
+      push({
+        capability: k.split('|')[2]!,
+        kind: 'protection-removed',
+        detail: `protected path removed: ${k}`,
+      });
+  for (const c of prev.preDeniedCommandClasses)
+    if (!next.preDeniedCommandClasses.includes(c))
+      push({ capability: c, kind: 'protection-removed', detail: `pre-denied command class removed: ${c}` });
   // locked redaction minimums are part of the contract: a removed or lowered minimum is a MAJOR change
   for (const [id, sev] of Object.entries(prev.sanitizerLockedMinimums)) {
     const now = next.sanitizerLockedMinimums[id];
@@ -426,7 +475,9 @@ export function classifyAuthorityChanges(
       c.kind === 'matcher-repartitioned' ||
       c.kind === 'matcher-removed' ||
       c.kind === 'lock-changed' ||
-      c.kind === 'sanitizer-weakened'
+      c.kind === 'sanitizer-weakened' ||
+      c.kind === 'grants-widened' ||
+      c.kind === 'protection-removed'
     )
       level = 'major';
     if (c.kind === 'added' && c.to === 'ALLOW') level = 'major';

@@ -1,7 +1,7 @@
 // Runtime root `.harness/runtime/` per logical workspace (section E): stamp, sessions, ledger. Never canonical, never
 // pushed. Record classes have one writer class each: session records owner-written, ledger append-only.
 import { join } from 'node:path';
-import { appendFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, readdirSync, rmSync, statSync, renameSync, existsSync } from 'node:fs';
 import {
   ensureDir,
   isDir,
@@ -252,7 +252,16 @@ export function withSessionLock<T>(
       const holder = Number((readTextIfExists(lock) ?? '').split(' ')[0]);
       // a lock whose holder is dead (killed hook) is broken at once; a live holder is waited for up to the stale limit
       if (age > stale || (Number.isFinite(holder) && holder > 0 && !processAlive(holder))) {
-        rmSync(lock, { force: true });
+        // break by rename: only the waiter whose rename wins removes it, and only if it is still the lock it judged
+        const judged = readTextIfExists(lock);
+        const aside = `${lock}.broken-${process.pid}-${Date.now()}`;
+        try {
+          renameSync(lock, aside);
+        } catch {
+          continue;
+        }
+        if (readTextIfExists(aside) !== judged && !existsSync(lock)) renameSync(aside, lock);
+        else rmSync(aside, { force: true });
         continue;
       }
     } catch {

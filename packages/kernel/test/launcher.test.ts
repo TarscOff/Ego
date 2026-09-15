@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -558,3 +558,32 @@ function await_home() {
 function await_identity() {
   return { nodeSatisfies: nodeSatisfiesImport };
 }
+
+test('a symlink planted in the immutable cache fails verification; bootstrap doctor names the launcher own identity conflict', () => {
+  const home = egoHome({ EGO_HOME: tmp('ego-home-') });
+  const pkg = fakePackage(tmp('ego-pkg-'), '4.0.0');
+  const id = computeRuntimeIdentity(pkg).runtimeSha256;
+  materializeRuntime(home, pkg, id);
+  assert.ok(verifyRuntimeDirectory(runtimeDir(home, id), id).ok);
+  symlinkSync('/etc', join(runtimeDir(home, id), 'dist', 'planted'));
+  const v = verifyRuntimeDirectory(runtimeDir(home, id), id);
+  assert.ok(!v.ok);
+  assert.ok(v.unlisted.includes('dist/planted'));
+  // bootstrap doctor with the launcher identity colliding with another name's entry for the same version
+  const home2 = egoHome({ EGO_HOME: tmp('ego-home-') });
+  ensureHome(home2);
+  indexAdd(
+    home2,
+    '@other/ego',
+    '5.0.0',
+    'b'.repeat(64),
+    { source: 'x', trust: 'registry (unsigned)', cachedAt: NOW },
+    NOW,
+  );
+  const r = bootstrapDoctor(home2, CP, NOW, {
+    reverify: false,
+    launcher: { name: '@tarscoff/ego', version: '5.0.0', identity: 'a'.repeat(64) },
+  });
+  assert.ok(!r.ok);
+  assert.match(r.lines.join('\n'), /IDENTITY_CONFLICT: the launcher itself/);
+});

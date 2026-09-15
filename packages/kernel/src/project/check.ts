@@ -4,6 +4,7 @@ import { readPin } from '../launcher/pin.ts';
 import { selfIdentity, selfVersion, controlPlaneDir } from '../launcher/self.ts';
 import { policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
 import { readGeneratedManifest } from './init.ts';
+import { gitHookStatus } from './githooks.ts';
 import { isFile, readTextIfExists } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
 import { approxTokens } from '../context/root-instructions.ts';
@@ -49,6 +50,12 @@ export function runCheck(projectRoot: string): CheckReport {
     pinOk = false;
     items.push({ name: 'pin', ok: false, detail: (e as Error).message });
   }
+  const hooks = gitHookStatus(projectRoot);
+  items.push({
+    name: 'git hooks',
+    ok: hooks.ok,
+    detail: hooks.ok ? `installed in ${hooks.dir}` : hooks.problems.join('; '),
+  });
   const manifest = readGeneratedManifest(projectRoot);
   if (!manifest)
     items.push({ name: 'generated artifacts', ok: false, detail: 'manifest missing; run `harness init`' });

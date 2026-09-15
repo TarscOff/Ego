@@ -32,3 +32,4 @@ Moving an identifier between this file and `../absolute-denies.md` is a MAJOR re
 - [x] `forge.issue.edit` — edit issue title, body, labels or milestone.
 - [x] `forge.issue.transition` — change issue state or workflow column.
 - [x] `forge.issue.close` — close issues.
+- [x] `forge.api.mutate` — any mutating call through the forge API escape hatch (`gh api -X POST|PUT|PATCH|DELETE`, field flags, GraphQL mutations); the specific operation cannot be told apart from a PR merge or an issue edit.

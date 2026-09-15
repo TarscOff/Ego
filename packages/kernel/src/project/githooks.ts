@@ -2,7 +2,7 @@
 // agent shells. Installed as thin shims chaining any pre-existing hook; husky-managed hooks gain one line instead.
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { chmodSync, existsSync, renameSync, copyFileSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, renameSync, copyFileSync, realpathSync, statSync } from 'node:fs';
 import { ensureDir, isFile, readTextIfExists, writeAtomic } from '../util/fs.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigScope } from '../util/git.ts';
@@ -52,18 +52,36 @@ function insideProject(projectRoot: string, dir: string): boolean {
   return d === root || d.startsWith(root + sep);
 }
 
-/** Inserts the EGO line after the shebang of a hooks-directory script (never after an `exit`/`exec`), once. */
-function ensureEgoLine(path: string, name: string): void {
-  const line = `${MARK}\nsh "$(git rev-parse --show-toplevel)/.harness/hooks/git-hook.sh" ${name} "" "$@" || exit $?`;
-  const text = readTextIfExists(path);
-  if (text === null) writeAtomic(path, `#!/bin/sh\n${line}\n`);
-  else if (!text.includes(MARK)) {
-    const lines = text.split('\n');
-    const at = lines[0]?.startsWith('#!') ? 1 : 0;
-    lines.splice(at, 0, line);
-    writeAtomic(path, lines.join('\n').replace(/\n*$/, '\n'));
-  }
-  chmodSync(path, 0o755);
+/** The generated hook: runs the EGO shim, or (in a checkout that is not governed by EGO) the chained user hooks only. */
+export function shimScript(name: string): string {
+  return `#!/bin/sh
+${MARK}
+top="$(git rev-parse --show-toplevel)"
+here="$(cd "$(dirname "$0")" && pwd)"
+shim="$top/.harness/hooks/git-hook.sh"
+if [ -f "$shim" ]; then exec sh "$shim" ${name} "$here" "$@"; fi
+if [ -f "$top/.harness/harness.md" ]; then
+  echo "EGO: $shim is missing in a checkout pinned to EGO; failing closed (run harness init)" >&2
+  exit 1
+fi
+echo "EGO: this checkout is not governed by EGO (no .harness/harness.md); only the chained hooks run" >&2
+input=""
+if [ "${name}" = "pre-push" ]; then input="$(cat)"; fi
+for chained in "$here/${name}.pre-ego" "$here/${name}.pre-ego".*; do
+  [ -f "$chained" ] || continue
+  if [ -x "$chained" ]; then run="$chained"; else run="sh $chained"; fi
+  if [ "${name}" = "pre-push" ]; then printf '%s\\n' "$input" | $run "$@" || exit $?; else $run "$@" </dev/null || exit $?; fi
+done
+exit 0
+`;
+}
+
+/** Husky keeps its runner in `<dir>/_` (with `h`) and the user hooks in `<dir>`; returns the user-hook directory. */
+export function huskyUserDir(gitRunsDir: string): string | null {
+  if (!/[\\/]_$/.test(gitRunsDir)) return null;
+  const parent = dirname(gitRunsDir);
+  if (isFile(join(gitRunsDir, 'h')) || /[\\/]\.husky$/.test(parent)) return parent;
+  return null;
 }
 
 export function installGitHooks(projectRoot: string, hooksPath: string | null): GitHookInstallResult {
@@ -83,49 +101,69 @@ export function installGitHooks(projectRoot: string, hooksPath: string | null): 
     copyFileSync(join(packageRoot(), 'runtime', 'posix', 'git-hook.sh'), shim);
     chmodSync(shim, 0o755);
   }
-  const gitDir = gitHooksDir(projectRoot, null); // what git itself resolves, core.hooksPath included
-  if (hooksPath) {
-    const resolved = resolveHooksPath(projectRoot, hooksPath);
-    if (gitConfigScope(projectRoot, 'core.hooksPath') === 'global' && !insideProject(projectRoot, resolved)) {
-      // a machine-wide core.hooksPath (global or system git config) is never written: it would govern every repository
-      const refused = `git hooks NOT installed: core.hooksPath=${hooksPath} comes from the global git configuration and resolves outside this repository (${resolved}); set a repository-local hooks path (\`git config core.hooksPath .githooks\`) and run \`harness init\` again`;
-      notes.push(refused);
-      return { installed, notes, refused };
-    }
-    // husky (v9 keeps the runner in .husky/_ and the user hooks one level up; older layouts run the scripts in place)
-    const huskyGenerated = /[\\/]\.husky[\\/]_$/.test(resolved);
-    const dir = huskyGenerated ? dirname(resolved) : resolved;
-    ensureDir(dir);
-    for (const name of GIT_HOOK_NAMES) {
-      const path = join(dir, name);
-      ensureEgoLine(path, name);
-      installed.push(path);
-    }
-    notes.push(
-      `git hooks: EGO checks inserted in ${dir.startsWith(projectRoot) ? dir.slice(projectRoot.length + 1) : dir}/pre-commit and pre-push (core.hooksPath=${hooksPath}${huskyGenerated ? ', husky layout' : ''})`,
-    );
-    return { installed, notes, refused: null };
+  // the directory git itself runs hooks from (core.hooksPath expanded by git, ~user included)
+  const gitDir = gitHooksDir(projectRoot, null);
+  if (
+    hooksPath &&
+    gitConfigScope(projectRoot, 'core.hooksPath') === 'global' &&
+    !insideProject(projectRoot, gitDir)
+  ) {
+    // a machine-wide core.hooksPath (global or system git config) is never written: it would govern every repository
+    const refused = `git hooks NOT installed: core.hooksPath=${hooksPath} comes from the global git configuration and resolves outside this repository (${gitDir}); set a repository-local hooks path (\`git config core.hooksPath .githooks\`) and run \`harness init\` again`;
+    notes.push(refused);
+    return { installed, notes, refused };
   }
-  const dir = gitDir;
+  const husky = huskyUserDir(gitDir);
+  const dir = husky ?? gitDir;
   ensureDir(dir);
   for (const name of GIT_HOOK_NAMES) {
     const path = join(dir, name);
     const existing = readTextIfExists(path);
     if (existing !== null && !existing.includes(MARK)) {
+      // the user's hook keeps working unchanged, whatever its language: it is chained, never edited
       let backup = `${path}.pre-ego`;
       for (let n = 1; isFile(backup); n++) backup = `${path}.pre-ego.${n}`;
       renameSync(path, backup);
       notes.push(`git hooks: existing ${name} kept as ${backup.slice(dir.length + 1)} and chained`);
     }
-    // the chained hooks live next to this script: the directory is passed to the shim, which runs every <name>.pre-ego*
-    writeAtomic(
-      path,
-      `#!/bin/sh\n${MARK}\nshim="$(git rev-parse --show-toplevel)/.harness/hooks/git-hook.sh"\nif [ ! -f "$shim" ]; then echo "EGO: this checkout has no .harness/hooks (branch without EGO?); EGO git checks skipped" >&2; exit 0; fi\nexec sh "$shim" ${name} "$(cd "$(dirname "$0")" && pwd)" "$@"\n`,
-    );
+    writeAtomic(path, shimScript(name));
     chmodSync(path, 0o755);
     installed.push(path);
   }
+  if (husky && !isFile(join(gitDir, 'h')))
+    notes.push(
+      `git hooks: husky runner ${gitDir}/h is missing (run \`npx husky\` or \`npm install\`); until then git runs no hooks`,
+    );
+  if (hooksPath)
+    notes.push(
+      `git hooks: installed in ${dir.startsWith(projectRoot) ? dir.slice(projectRoot.length + 1) : dir} (core.hooksPath=${hooksPath}${husky ? ', husky layout' : ''})`,
+    );
   return { installed, notes, refused: null };
+}
+
+/** What doctor and check need to know about the installed git hooks. */
+export function gitHookStatus(projectRoot: string): { ok: boolean; dir: string; problems: string[] } {
+  const gitDir = gitHooksDir(projectRoot, null);
+  const husky = huskyUserDir(gitDir);
+  const dir = husky ?? gitDir;
+  const problems: string[] = [];
+  if (!isFile(join(projectRoot, '.harness', 'hooks', 'git-hook.sh')))
+    problems.push('.harness/hooks/git-hook.sh missing');
+  if (husky && !isFile(join(gitDir, 'h')))
+    problems.push(`husky runner ${gitDir}/h missing (git runs no hooks)`);
+  for (const name of GIT_HOOK_NAMES) {
+    const path = join(dir, name);
+    const text = readTextIfExists(path);
+    let executable: boolean;
+    try {
+      executable = (statSync(path).mode & 0o111) !== 0;
+    } catch {
+      executable = false;
+    }
+    if (text === null || !text.includes(MARK)) problems.push(`${name}: EGO hook missing`);
+    else if (!executable && !husky) problems.push(`${name}: not executable`);
+  }
+  return { ok: problems.length === 0, dir, problems };
 }
 
 export interface GitHookResult {
@@ -146,6 +184,25 @@ export function isAgentShell(env: NodeJS.ProcessEnv): boolean {
 }
 
 const SCAN_MAX_BUFFER = 256 * 1024 * 1024;
+
+/** generated dependency lockfiles (integrity hashes trip detectors); any other *.lock file is scanned */
+const LOCKFILE_EXCLUDES = [
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'bun.lockb',
+  'Cargo.lock',
+  'poetry.lock',
+  'Pipfile.lock',
+  'uv.lock',
+  'Gemfile.lock',
+  'composer.lock',
+  'go.sum',
+  'mix.lock',
+  'flake.lock',
+  'packages.lock.json',
+].map((n) => `:(exclude,glob)**/${n}`);
 
 function pushVerdict(projectRoot: string): string {
   try {
@@ -172,12 +229,16 @@ export function runGitHook(
   const cp = loadControlPlane(controlPlaneDir());
   const detectors = allDetectors(cp.secrets).filter((d) => d.severity === 'block');
   if (name === 'pre-commit') {
-    const staged = git(['diff', '--cached', '--name-only', '--diff-filter=ACMR'], projectRoot, {
-      maxBuffer: SCAN_MAX_BUFFER,
-    });
+    const staged = git(
+      ['-c', 'core.quotePath=false', 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRT'],
+      projectRoot,
+      {
+        maxBuffer: SCAN_MAX_BUFFER,
+      },
+    );
     if (!staged.ok)
       return { ok: false, messages: [`refused: cannot list staged files (${staged.stderr || 'git error'})`] };
-    const files = staged.stdout.split('\n').filter(Boolean);
+    const files = staged.stdout.split('\0').filter(Boolean);
     for (const f of files) {
       if (f.startsWith('.harness/runtime/') || f.startsWith('.harness/generated/'))
         messages.push(`refused: ${f} is runtime or generated state and is never committed`);
@@ -216,7 +277,7 @@ export function runGitHook(
         remoteSha && !/^0+$/.test(remoteSha)
           ? ['log', '-p', '-m', '--text', '--format=commit %H', `${remoteSha}..${localSha}`]
           : ['log', '-p', '-m', '--text', '--format=commit %H', localSha, '--not', '--remotes'];
-      const log = git([...args, '--', '.', ':!*.lock', ':!package-lock.json'], projectRoot, {
+      const log = git([...args, '--', '.', ...LOCKFILE_EXCLUDES], projectRoot, {
         timeoutMs: 120_000,
         maxBuffer: SCAN_MAX_BUFFER,
       });

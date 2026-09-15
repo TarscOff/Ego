@@ -22,7 +22,7 @@ import {
   isRuntimeCached,
   listIndexEntries,
 } from '../launcher/home.ts';
-import { compileProjectPolicy, writePolicyCache } from '../policy/cache.ts';
+import { ensurePolicyCache, POLICY_CACHE_RELATIVE } from '../policy/cache.ts';
 import { generateRootInstructions, STANDING_RULES_RELATIVE } from '../context/root-instructions.ts';
 import { openRuntimeRoot } from '../runtime/root.ts';
 import {
@@ -36,7 +36,7 @@ import {
 import { sha256Hex } from '../util/hash.ts';
 import { writeClaudeSettings, writeSlashCommands } from '../../../adapter-claude-code/src/dialect.ts';
 import { writeCodexHooks } from '../../../adapter-codex-cli/src/dialect.ts';
-import { installGitHooks } from './githooks.ts';
+import { installGitHooks, isAgentShell } from './githooks.ts';
 import { promoteTrustFromSources } from '../launcher/sync.ts';
 import { runDoctor, formatDoctor } from './doctor.ts';
 
@@ -140,6 +140,10 @@ export function initProject(opts: InitOptions): InitReport {
     if (ts && !TASK_SOURCES.includes(ts))
       throw new Error(`task source must be ${TASK_SOURCES.join(', ')} (got ${ts})`);
     if (ts) base.taskSource = ts;
+    if ((profile !== existing.profile || ts !== existing.taskSource) && isAgentShell(env))
+      throw new Error(
+        'refused: changing the profile or the task source of a pinned project is a human act from your own terminal, never from an agent shell',
+      );
     pin = profile !== existing.profile || ts !== existing.taskSource ? writePin(projectRoot, base) : existing;
     pinned = 'kept';
     notes.push(
@@ -152,6 +156,11 @@ export function initProject(opts: InitOptions): InitReport {
   } else {
     const profile = opts.profile ?? (dev || isEgo ? 'STANDARD' : 'STRICT');
     validateProfile(profile, dev, isEgo);
+    const own = readIndex(home, self.name, version);
+    if (own?.state === 'TAMPERED' || own?.state === 'REVOKED')
+      throw new Error(
+        `refused: the executing runtime ${self.runtimeSha256.slice(0, 12)}… is ${own.state} in the index; a pin written now would be refused by every launch (see \`harness bootstrap doctor\`)`,
+      );
     const clash = listIndexEntries(home).find(
       (e) => e.version === version && e.identity !== self.runtimeSha256,
     );
@@ -264,11 +273,18 @@ export function initProject(opts: InitOptions): InitReport {
 
   // ---- runtime root and policy cache
   openRuntimeRoot(projectRoot, { runtimeSha256: self.runtimeSha256, version }, now());
-  const cache = compileProjectPolicy(controlPlaneDir(), projectRoot, {
-    runtimeSha256: self.runtimeSha256,
-    version,
-  });
-  generated.push(rel(projectRoot, writePolicyCache(projectRoot, cache)));
+  const agentShell = isAgentShell(env);
+  const { cache } = ensurePolicyCache(
+    controlPlaneDir(),
+    projectRoot,
+    { runtimeSha256: self.runtimeSha256, version },
+    { acceptWidening: !agentShell },
+  );
+  generated.push(rel(projectRoot, join(projectRoot, POLICY_CACHE_RELATIVE)));
+  if (cache.pendingWidening)
+    notes.push(
+      `policy widening NOT applied (${cache.pendingWidening.widenings.length} cell(s)): widenings take effect only when a human runs \`harness init\` from their own terminal`,
+    );
 
   // ---- generated root instructions
   const root = generateRootInstructions({
@@ -306,14 +322,14 @@ export function initProject(opts: InitOptions): InitReport {
     chmodSync(dst, 0o755);
     generated.push(rel(projectRoot, dst));
   }
-  generated.push(rel(projectRoot, writeClaudeSettings(projectRoot).path));
+  writeClaudeSettings(projectRoot); // co-owned with the user: doctor checks the EGO hook entries, never the whole file hash
   for (const p of writeSlashCommands(projectRoot)) generated.push(rel(projectRoot, p));
   generated.push(rel(projectRoot, writeCodexHooks(projectRoot).path));
   const gh = installGitHooks(projectRoot, detection.hooksPath);
   // hooks in a custom hooks directory are co-owned scripts (husky, custom): reported, not hashed as generated
   if (!detection.hooksPath) generated.push(...gh.installed.map((p) => rel(projectRoot, p)));
   notes.push(...gh.notes);
-  ensureGitignore(projectRoot, generated);
+  ensureGitignore(projectRoot);
 
   // ---- generated manifest (freshness)
   const manifest: GeneratedManifest = {
@@ -358,7 +374,7 @@ function rel(root: string, p: string): string {
   return relative(root, p).split('\\').join('/');
 }
 
-function ensureGitignore(projectRoot: string, generated: string[]): void {
+function ensureGitignore(projectRoot: string): void {
   const path = join(projectRoot, '.gitignore');
   const text = readTextIfExists(path) ?? '';
   const wanted = ['.harness/runtime/', '.harness/generated/'];
@@ -370,7 +386,7 @@ function ensureGitignore(projectRoot: string, generated: string[]): void {
       path,
       `${text.trimEnd()}${text.trim() ? '\n' : ''}# EGO runtime and generated artifacts are never committed\n${missing.join('\n')}\n`,
     );
-    generated.push('.gitignore');
+    // user-owned: the appended lines are reported, never hashed as a generated artifact
   }
 }
 

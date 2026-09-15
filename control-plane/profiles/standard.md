@@ -27,7 +27,7 @@ narrow: []
 ---
 # STANDARD
 
-A reasonable engineering baseline. Deterministic enforcement of absolute denies is still required; what STANDARD
+A reasonable engineering baseline. Deterministic enforcement of absolute and organization-locked denies is still required; what STANDARD
 relaxes is ceremony, not authority. Where a guarantee cannot be met, STANDARD continues with explicit disclosure in
 `doctor`, `status` and the receipt: unsigned runtime trust, relayed presentation, an unavailable model-assisted review,
 a stale forge snapshot.
@@ -39,4 +39,4 @@ Execution budgets (`budgets`) bound one task: wall-clock duration, agent iterati
 delegation depth, concurrent subagents and network operations. Token and cost limits apply only where the host reports
 them (`null` = not observable). Exceeding a budget stops the task with `on_exceed`: BLOCK refuses further governed tool
 calls until a human extends the budget (`harness.budget.extend`, ASK); ESCALATE raises a decision and continues only
-with an answer. Repeated failure of one step never loops: the retry limit is a hard stop.
+with an answer. Repeated failure of one step never loops: once a step has used its retries, BLOCK profiles refuse the next identical attempt and ESCALATE profiles require a human decision for it.

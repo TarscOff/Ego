@@ -351,3 +351,89 @@ test('round-2 residuals: copies, archives and globs into protected paths resolve
   assert.equal(bash('echo x > /tmp/out.txt', c).verdict, 'ALLOW');
   assert.equal(bash('cp a.ts /tmp/b.ts', c).verdict, 'ALLOW');
 });
+
+test('round-3 residuals: forge API writes, argument-position locked verbs, env wrapper, replace strings, quoted substitutions', () => {
+  for (const cmd of [
+    'gh api -X PUT repos/o/r/pulls/3/merge',
+    'gh api --method POST repos/o/r/pulls -f title=x -f head=b -f base=main',
+    'gh api repos/o/r/pulls -f title=x -f head=b -f base=main',
+    'glab api -X PUT projects/1/merge_requests/3/merge',
+    'gh api graphql -f query="mutation{mergePullRequest(input:{pullRequestId:\\"x\\"}){clientMutationId}}"',
+    'echo main | xargs -I % git push origin %',
+    'echo x | xargs -J % git push origin %',
+    'env LD_PRELOAD=/tmp/evil.so ls',
+    'env GIT_CONFIG_PARAMETERS="\'core.hooksPath=scripts\'" git commit -m x',
+    'nice env LD_PRELOAD=/tmp/e.so ls',
+    'env -- LD_PRELOAD=/tmp/e.so ls',
+    'x=$(printf ")"; git push origin main)',
+    'diff <(echo "a)"; git push) <(echo)',
+    'chrt -f 10 git push',
+    'chrt 10 kubectl delete pod x -n production',
+    'flock -w 3 /tmp/l git push',
+    'timeout -s KILL 5 git push',
+    'time -p git push',
+    'caffeinate -i git push',
+    'env -u X git push',
+    'cpulimit -l 50 -- git push origin main',
+    'cpx git push origin main',
+    'mkdirp git push',
+    'some-launcher --flag git push origin main',
+    'git --git-dir=sub/.git --work-tree=. commit -m x',
+    'git checkout HEAD -- .git/hooks',
+  ]) {
+    const r = bash(cmd);
+    assert.equal(r.verdict, 'DENY', `${cmd} -> ${r.decisive?.capability}`);
+  }
+  // reads through the API and ordinary commands stay allowed or ask
+  assert.equal(bash('gh api repos/o/r/pulls').verdict, 'ALLOW');
+  assert.equal(bash('gh api -X GET repos/o/r/pulls/3').verdict, 'ALLOW');
+  assert.equal(bash('gh api graphql -f query="{viewer{login}}"').verdict, 'ALLOW');
+  assert.notEqual(bash('mvn deploy').verdict, 'ALLOW', 'not a local mutation by prefix');
+  assert.equal(bash('echo "remember to git push later"').verdict, 'ALLOW', 'a quoted string is data');
+  assert.equal(bash('find . -name "*.log" -delete').decisive?.capability, 'command.destructive');
+  assert.equal(bash('find .harness -delete').verdict, 'DENY');
+});
+
+test('round-3 residuals: search tools, escapes, ancestor globs, cd into protected trees, links, cpio, case and nested .git', () => {
+  const c = ctx();
+  const tool = (name: string, input: Record<string, unknown>) => evaluate(table, c, { tool: name, input });
+  assert.equal(
+    tool('Grep', { pattern: 'KEY', path: join(homedir(), '.ssh'), output_mode: 'content' }).verdict,
+    'DENY',
+  );
+  assert.equal(tool('Grep', { pattern: 'KEY', path: '~/.aws/credentials' }).verdict, 'DENY');
+  assert.equal(tool('Glob', { pattern: '.ssh/*', path: homedir() }).verdict, 'DENY');
+  assert.equal(tool('Grep', { pattern: 'TODO', path: repo }).verdict, 'ALLOW');
+  assert.equal(tool('Glob', { pattern: 'src/**/*.ts' }).verdict, 'ALLOW');
+  const homeTop = homedir().split('/').filter(Boolean)[0]!; // the top-level directory that contains HOME (Users / home)
+  for (const cmd of [
+    'cat ~/.ss\\h/id_rsa',
+    `cat /${homeTop[0]}*/${homedir().split('/').pop()}/.ssh/id_rsa`,
+    `cd / && grep -r KEY ${homeTop}`,
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  mkdirSync(join(repo, '.harness', 'runtime', 'sessions'), { recursive: true });
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  for (const cmd of [
+    'cd .harness/generated && cp /tmp/p.json policy.json',
+    'cd .harness/runtime/sessions && cp ../../../forged.json s1.json',
+    'cd .git/hooks && cp /tmp/x pre-commit',
+    'cp forged.json .harness/r\\untime/sessions/s1.json',
+    'cpio -pdm .harness/generated < list',
+    'cpio -pdmu .git/hooks < list',
+    `ln -s ${repo}/.harness /tmp/ego-x-link && cp /tmp/forged.json /tmp/ego-x-link/generated/policy.json`,
+    'tar -xf h.tar -C .git',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', `${cmd} -> ${bash(cmd, c).decisive?.capability}`);
+  }
+  const write = (p: string) => evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, p) } });
+  assert.equal(write('.GIT/hooks/pre-commit').verdict, 'DENY');
+  assert.equal(write('.Husky/pre-commit').verdict, 'DENY');
+  assert.equal(write('sub/.git/hooks/pre-commit').verdict, 'DENY');
+  assert.equal(write('policies/organization/permissions.md').verdict, 'DENY');
+  assert.equal(write('.harness/mcp-trust.md').verdict, 'ASK');
+  assert.equal(write('.gitignore').verdict, 'ALLOW');
+  assert.equal(write('.github/workflows/ci.yml').verdict, 'ALLOW');
+  assert.equal(bash('cd src && cp a.ts b.ts', c).verdict, 'ALLOW');
+});

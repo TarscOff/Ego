@@ -31,7 +31,7 @@ narrow:
 ---
 # STRICT
 
-The enterprise default. Every absolute deny must be enforced deterministically by a blocking hook or the repo-side
+The enterprise default. Every absolute and organization-locked deny must be enforced deterministically by a blocking hook or the repo-side
 layer; governed mutation begins only once the pinned runtime identity has signed-release trust; a human decision is
 accepted only through a conformance-verified presentation and input channel; DONE is blocked while the forge snapshot
 is unverified or the model-assisted Grilling review is unavailable; uncertain shell mutations are denied when a
@@ -44,4 +44,4 @@ Execution budgets (`budgets`) bound one task: wall-clock duration, agent iterati
 delegation depth, concurrent subagents and network operations. Token and cost limits apply only where the host reports
 them (`null` = not observable). Exceeding a budget stops the task with `on_exceed`: BLOCK refuses further governed tool
 calls until a human extends the budget (`harness.budget.extend`, ASK); ESCALATE raises a decision and continues only
-with an answer. Repeated failure of one step never loops: the retry limit is a hard stop.
+with an answer. Repeated failure of one step never loops: once a step has used its retries, BLOCK profiles refuse the next identical attempt and ESCALATE profiles require a human decision for it.

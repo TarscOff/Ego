@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -12,6 +12,7 @@ import {
   parseClaudeCodeEvent,
   renderClaudeCodeOutput,
   mergeClaudeSettings,
+  hookCommand,
 } from '../../adapter-claude-code/src/dialect.ts';
 import {
   parseCodexEvent,
@@ -20,16 +21,29 @@ import {
   writeCodexHooks,
   CODEX_HOOK_EVENTS,
 } from '../../adapter-codex-cli/src/dialect.ts';
-import { readSession, writeSession, openRuntimeRoot, readLedger } from '../src/runtime/root.ts';
+import {
+  readSession,
+  writeSession,
+  openRuntimeRoot,
+  readLedger,
+  withSessionLock,
+  sessionPath,
+} from '../src/runtime/root.ts';
 import { recognizeGrants, recognizeCorrection, recognizeModeMarker } from '../src/session/grants.ts';
 import { loadControlPlane } from '../src/control-plane/load.ts';
 import { compileAuthority } from '../src/authority/compile.ts';
 
 const CP = new URL('../../../control-plane/', import.meta.url).pathname;
 
+function gitEnv(): NodeJS.ProcessEnv {
+  const e: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/.test(k)) e[k] = v;
+  return e;
+}
+
 function project(profile = 'STANDARD'): { root: string; rt: HookRuntime } {
   const root = mkdtempSync(join(tmpdir(), 'ego-hooks-'));
-  spawnSync('git', ['init', '-q'], { cwd: root });
+  spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: root });
   writeFileSync(
     join(root, 'package.json'),
     JSON.stringify({ name: 'demo', scripts: { deploy: 'git push', ship: 'gh pr create' } }),
@@ -296,7 +310,7 @@ export { mkdirSync };
 function egoLikeProject(): { root: string; rt: HookRuntime } {
   // a fake EGO source repository: package name, control-plane marker and kernel package (isEgoSourceRepository)
   const root = mkdtempSync(join(tmpdir(), 'ego-fake-src-'));
-  spawnSync('git', ['init', '-q'], { cwd: root });
+  spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: root });
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@tarscoff/ego', version: '0.0.1' }));
   mkdirSync(join(root, 'control-plane', 'permissions'), { recursive: true });
   writeFileSync(join(root, 'control-plane', 'permissions', 'absolute-denies.md'), '# x\n');
@@ -549,7 +563,7 @@ test('codex-cli renderer fails closed on every non-ALLOW verdict for every event
 
 test('generated codex hooks.json finds the shim from any subdirectory and exits 2 when the shim is missing', () => {
   const root = mkdtempSync(join(tmpdir(), 'ego-codex-cmd-'));
-  spawnSync('git', ['init', '-q'], { cwd: root });
+  spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: root });
   const { content } = writeCodexHooks(root);
   const hooks = (
     JSON.parse(content) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> }
@@ -581,4 +595,69 @@ test('generated codex hooks.json finds the shim from any subdirectory and exits 
   });
   assert.equal(found.status, 0, found.stderr);
   assert.match(found.stdout, /SHIM codex-cli PreToolUse/);
+});
+
+test('a budget breach never weakens a DENY into an escalation; a forged maintenance mode outside EGO is not honoured', () => {
+  const { root, rt } = project('STANDARD');
+  const rr = openRuntimeRoot(root, { runtimeSha256: rt.pin.integrity, version: rt.pin.version }, rt.now());
+  handleHook(ev(root, 'SessionStart', { source: 'startup' }), rt);
+  const s = readSession(rr, 's1')!;
+  s.counters.iterations = 1000; // far past STANDARD maxIterations: on_exceed ESCALATE
+  s.mode = 'HARNESS_MAINTENANCE'; // written by something other than the prompt hook
+  writeSession(rr, s);
+  const deny = handleHook(
+    ev(root, 'PreToolUse', { tool: { name: 'Bash', input: { command: 'rm -rf /' } } }),
+    rt,
+  );
+  assert.equal(deny.action, 'deny', 'an absolute deny stays a deny under a breach');
+  const allowOther = handleHook(
+    ev(root, 'PreToolUse', { tool: { name: 'Bash', input: { command: 'ls' } } }),
+    rt,
+  );
+  assert.equal(allowOther.action, 'ask', 'an allowed call escalates under a breach');
+  const s2 = readSession(rr, 's1')!;
+  delete s2.budgetState;
+  s2.counters.iterations = 0;
+  writeSession(rr, s2);
+  // HARNESS_MAINTENANCE would soften fs.hook-config.write from DENY to ASK; outside the EGO repository it must not
+  const hookCfg = handleHook(
+    ev(root, 'PreToolUse', {
+      tool: { name: 'Write', input: { file_path: join(root, '.claude', 'settings.json') } },
+    }),
+    rt,
+  );
+  assert.equal(
+    hookCfg.action,
+    'deny',
+    'HARNESS_MAINTENANCE overrides do not apply outside the EGO repository',
+  );
+});
+
+test('the generated Claude Code hook command fails closed (exit 2) when the shim is missing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-noshim-'));
+  const r = spawnSync('/bin/sh', ['-c', hookCommand('PreToolUse')], {
+    encoding: 'utf8',
+    input: '{}',
+    env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin', CLAUDE_PROJECT_DIR: dir },
+  });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /hook shim missing; failing closed/);
+});
+
+test('session lock: a lock left by a dead process is broken; a live holder times out cleanly', () => {
+  const { root, rt } = project('STANDARD');
+  const rr = openRuntimeRoot(root, { runtimeSha256: rt.pin.integrity, version: rt.pin.version }, rt.now());
+  const lock = `${sessionPath(rr, 'L1')}.lock`;
+  writeFileSync(lock, '999999 2026-09-15T00:00:00.000Z\n');
+  assert.equal(
+    withSessionLock(rr, 'L1', () => 42, { timeoutMs: 1000 }),
+    42,
+  );
+  assert.ok(!existsSync(lock), 'the lock is released after use');
+  writeFileSync(lock, `${process.pid} 2026-09-15T00:00:00.000Z\n`);
+  assert.throws(
+    () => withSessionLock(rr, 'L1', () => 1, { timeoutMs: 150 }),
+    /locked by another hook invocation/,
+  );
+  rmSync(lock, { force: true });
 });

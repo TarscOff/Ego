@@ -11,7 +11,7 @@ substitutes for an independent-agent review; a deferred check is never marked pa
 - INDEPENDENT-AGENT REVIEW: DEFERRED_BUDGET (subagent budget exhausted at the time; re-run folded into the phase 1 review below)
 - CONFORMANCE: NOT RUN (nothing to conform yet)
 
-## Phase 1 — kernel core (2026-09-14 → 2026-09-15)
+## Phase 1 — kernel core (2026-09-14 → 2026-09-15; local commits 257e2d9, ff122a0, and the round-3 fix commit)
 
 Scope delivered: control-plane parser and loader (fail-closed), policy compiler and compiled authority table with lock
 tiers (Q98), authority evaluation with effect-based and path-aware command classification (package scripts, shell
@@ -53,9 +53,35 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   `packages/kernel/test/bypass.test.ts`, `hooks.test.ts`, `control-plane.test.ts`, `launcher.test.ts`,
   `tests/integration/cli.test.ts`) before round 3.
 - **Round 3** (workflow `ego-phase1-review-round3`, one skeptic per open round-2 finding, 2 fresh reviewers with
-  double verification, conformance and build-log audit): the first two launches were cut off by the session limit
-  and then by exhausted usage credits (1 of 55 agents completed: the Codex dialect fix verified, with two missing
-  pinning tests and a host-matrix note, both added). Relaunched on 2026-09-15; results recorded here when it completes.
+  double verification, conformance and build-log audit; two launches were lost to the session and credit limits and a
+  third completed all 83 agents): of 52 open findings 19 were verified fully fixed, the rest reported a sideways
+  variant of the same class; 14 fresh confirmed findings, plus one HIGH conformance defect (D1: an agent could write
+  the organization or overlay policy file the hook compiles from, widening authority on the next call). Every
+  confirmed HIGH and MEDIUM was fixed and pinned by a test this round:
+  - **Effect evaluation** (`evaluate.ts`): the shell tokenizer removes backslash escapes; command and process
+    substitution bodies are quote-aware; `env` and every transparent wrapper (`chrt`, `taskset`, `setsid`,
+    `cpulimit`, `flock`, `timeout -s`, …) surface their environment injections and never mask the wrapped command;
+    `xargs -I`/`-J` replace strings no longer de-anchor the payload; a locked verb carried in argument position
+    through an unknown launcher is found; write destinations are resolved after `cd`, through the destination flags of
+    `cp`/`cpio`/`tar`, and a `ln` target or an archive extracted into a directory containing a protected tree is
+    caught; path globs match case-insensitively; nested `.git` and `.husky` are protected; `find … -delete` is a
+    scoped deletion, not a whole-tree wipe; Grep/Glob/LS over a credential store or HOME are denied.
+  - **Authority never widens from the working tree** (D1, `policy/cache.ts`): a hook applies a layer edit that
+    narrows at once, but an edit that widens anything is clamped to the last human-accepted table and recorded as
+    pending; only `harness init` from a human terminal accepts it. `policies/organization/**` and `.harness/mcp-trust.md`
+    are protected paths; `harness init --profile`/`--task-source` on a pinned project is refused from an agent shell.
+  - **Budgets and modes** (`hooks/handle.ts`): a budget breach or retry cap never turns a DENY into an ASK; the
+    session-record mode is honoured only when it exists in the compiled table (HARNESS_MAINTENANCE only in the EGO
+    repository); the iteration counter resets only on a real session start.
+  - **Git hooks** (`githooks.ts`, `git-hook.sh`): one chaining shim in every layout (default, custom `core.hooksPath`,
+    husky), so a pre-existing hook keeps its stdin and its language and a missing shim in a pinned checkout fails
+    closed; the pre-commit scan lists NUL-separated names and includes type changes; the pre-push scan excludes only
+    known dependency lockfiles.
+  - **Diff, loader, launcher, misc**: the authority diff covers grant phrases, protected paths, pre-denied classes
+    and new mode cells (all MAJOR); the loader rejects a capability bullet without a checkbox and a null `narrow`; a
+    symlink planted in the immutable cache fails verification; the session lock breaks a dead holder's lock by rename;
+    the release build refuses an untagged or dirty tree; the Azure DevOps `*.visualstudio.com` remote parses correctly.
+- **Round 4**: an independent re-verification of the round-3 fixes is running; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -65,15 +91,19 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 
 ### Check lines
 
-- DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test` (112 tests),
-  `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty` while the tree is dirty). Hook latency: the
-  in-process kernel path is pinned under 60 ms by `hooks.test.ts` (K26); process wall-clock including Node start-up
-  is measured by the conformance audit and reported as a number, not claimed against the kernel budget.
+- DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test` (126 tests),
+  `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted phase-1 tree; the
+  release build refuses a dirty or untagged tree). Hook latency: the in-process kernel path is pinned under 60 ms by
+  `hooks.test.ts` (median ~25 ms), and the delegated in-process path (a hook served by a cached runtime of a different
+  identity through the exec contract) is pinned under 60 ms by `tests/integration/cli.test.ts` when a bundle is built
+  (K26/Q19, both paths). Process wall-clock through `node dist/ego.js hook`, including Node start-up, is 70–80 ms:
+  above 60 ms at the process level, reported as such, and not the kernel budget.
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
-  repositories, and every round-1/round-2 finding reproduced before being fixed.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1 and 2 recorded above; round 3 (verification of the round-2
-  residual fixes plus a fresh pass) pending. This line becomes PASSED only when a round ends with no confirmed HIGH
-  or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
+  repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
+  end to end against the built bundle.
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1, 2 and 3 done, every confirmed HIGH/MEDIUM fixed and pinned; round 4
+  (re-verification of the round-3 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
+  with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked
   SUPPORTED in the host matrix rest on the pre-build verification recorded in the baseline (section C), `codex-cli`

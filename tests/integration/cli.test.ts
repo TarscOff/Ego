@@ -17,6 +17,13 @@ import { main } from '../../packages/cli/src/main.ts';
 
 const REPO = new URL('../../', import.meta.url).pathname;
 
+/** fixture git processes never inherit GIT_DIR, GIT_WORK_TREE or config injection from the developer's shell */
+function gitEnv(): NodeJS.ProcessEnv {
+  const e: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/.test(k)) e[k] = v;
+  return e;
+}
+
 function cleanEnv(home: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env['PATH'],
@@ -34,10 +41,10 @@ function hostEnv(env: NodeJS.ProcessEnv, dir: string): NodeJS.ProcessEnv {
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'ego-cli-'));
-  spawnSync('git', ['init', '-q'], { cwd: dir });
-  spawnSync('git', ['config', 'user.email', 't@example.com'], { cwd: dir });
-  spawnSync('git', ['config', 'user.name', 't'], { cwd: dir });
-  spawnSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/demo.git'], { cwd: dir });
+  spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['config', 'user.email', 't@example.com'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['config', 'user.name', 't'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/demo.git'], { env: gitEnv(), cwd: dir });
   writeFileSync(
     join(dir, 'package.json'),
     JSON.stringify({
@@ -50,8 +57,8 @@ function repo(): string {
   writeFileSync(join(dir, 'AGENTS.md'), '# Demo rules\n\nAlways run the tests before committing.\n');
   mkdirSync(join(dir, '.git', 'hooks'), { recursive: true });
   writeFileSync(join(dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho existing\n');
-  spawnSync('git', ['add', '-A'], { cwd: dir });
-  spawnSync('git', ['commit', '-qm', 'init'], { cwd: dir });
+  spawnSync('git', ['add', '-A'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['commit', '-qm', 'init'], { env: gitEnv(), cwd: dir });
   return dir;
 }
 
@@ -231,7 +238,7 @@ test('generated artifact edits and overlay changes are caught by check; overlay 
   assert.match(widened.err, /widen/);
 });
 
-test('git hooks: agent-shell pushes refused, secrets in staged files refused, human pushes scanned', async () => {
+test('git hooks: agent-shell pushes refused, secrets in staged files refused, clean commits pass', async () => {
   const dir = repo();
   const env = cleanEnv(mkdtempSync(join(tmpdir(), 'ego-home-')));
   await run(['init'], dir, env);
@@ -247,13 +254,13 @@ test('git hooks: agent-shell pushes refused, secrets in staged files refused, hu
     join(dir, 'config.ts'),
     'export const token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef012345";\n',
   );
-  spawnSync('git', ['add', 'config.ts'], { cwd: dir });
+  spawnSync('git', ['add', 'config.ts'], { env: gitEnv(), cwd: dir });
   const pc = await run(['hook', 'git', 'pre-commit'], dir, env);
   assert.equal(pc.code, 1);
   assert.match(pc.err, /config.ts contains/);
-  spawnSync('git', ['reset', '-q', 'config.ts'], { cwd: dir });
+  spawnSync('git', ['reset', '-q', 'config.ts'], { env: gitEnv(), cwd: dir });
   writeFileSync(join(dir, 'clean.ts'), 'export const a = 1;\n');
-  spawnSync('git', ['add', 'clean.ts'], { cwd: dir });
+  spawnSync('git', ['add', 'clean.ts'], { env: gitEnv(), cwd: dir });
   assert.equal((await run(['hook', 'git', 'pre-commit'], dir, env)).code, 0);
 });
 
@@ -426,7 +433,7 @@ test('git hooks: absolute core.hooksPath, husky v9 layout, linked worktrees, cha
   const env = cleanEnv(mkdtempSync(join(tmpdir(), 'ego-home-')));
   // absolute hooksPath
   const hooksAbs = mkdtempSync(join(tmpdir(), 'ego-hooks-'));
-  spawnSync('git', ['config', 'core.hooksPath', hooksAbs], { cwd: dir });
+  spawnSync('git', ['config', 'core.hooksPath', hooksAbs], { env: gitEnv(), cwd: dir });
   const init = await run(['init'], dir, env);
   assert.equal(init.code, 0, init.out);
   assert.ok(existsSync(join(hooksAbs, 'pre-commit')), 'hook installed at the absolute hooks path');
@@ -436,19 +443,22 @@ test('git hooks: absolute core.hooksPath, husky v9 layout, linked worktrees, cha
   );
   const doc = await run(['doctor'], dir, env);
   assert.match(doc.out, /SATISFIED {5}git hooks/);
-  spawnSync('git', ['config', '--unset', 'core.hooksPath'], { cwd: dir });
+  spawnSync('git', ['config', '--unset', 'core.hooksPath'], { env: gitEnv(), cwd: dir });
   // husky v9: core.hooksPath=.husky/_ with the runner h; user hooks live in .husky/
   mkdirSync(join(dir, '.husky', '_'), { recursive: true });
   writeFileSync(join(dir, '.husky', '_', 'h'), '#!/bin/sh\n');
   writeFileSync(join(dir, '.husky', 'pre-commit'), 'npx lint-staged\n');
-  spawnSync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: dir });
+  spawnSync('git', ['config', 'core.hooksPath', '.husky/_'], { env: gitEnv(), cwd: dir });
   const husky = await run(['init'], dir, env);
   assert.match(husky.out, /husky layout/);
-  const preCommit = readFileSync(join(dir, '.husky', 'pre-commit'), 'utf8');
-  assert.match(preCommit, /npx lint-staged/);
-  assert.match(preCommit, /ego-hook/);
+  assert.match(
+    readFileSync(join(dir, '.husky', 'pre-commit.pre-ego'), 'utf8'),
+    /npx lint-staged/,
+    'the user hook is kept unchanged and chained',
+  );
+  assert.match(readFileSync(join(dir, '.husky', 'pre-commit'), 'utf8'), /ego-hook/);
   assert.ok(!existsSync(join(dir, '.husky', '_', 'pre-commit')), 'generated husky shims are never edited');
-  spawnSync('git', ['config', '--unset', 'core.hooksPath'], { cwd: dir });
+  spawnSync('git', ['config', '--unset', 'core.hooksPath'], { env: gitEnv(), cwd: dir });
   // chained pre-existing hook actually runs from the hooks directory
   const chained = await run(['init'], dir, env);
   assert.equal(chained.code, 0);
@@ -456,7 +466,7 @@ test('git hooks: absolute core.hooksPath, husky v9 layout, linked worktrees, cha
   writeFileSync(join(hooksDir, 'pre-commit.pre-ego'), '#!/bin/sh\necho CHAINED-RAN\nexit 0\n');
   spawnSync('chmod', ['+x', join(hooksDir, 'pre-commit.pre-ego')]);
   const shim = readFileSync(join(hooksDir, 'pre-commit'), 'utf8');
-  assert.match(shim, /exec sh "\$shim" pre-commit "\$\(cd "\$\(dirname "\$0"\)" && pwd\)"/);
+  assert.match(shim, /exec sh "\$shim" pre-commit "\$here"/);
   const shimRun = spawnSync(
     '/bin/sh',
     ['-c', `cd ${dir} && /bin/sh .harness/hooks/git-hook.sh pre-commit ${hooksDir}`],
@@ -466,7 +476,7 @@ test('git hooks: absolute core.hooksPath, husky v9 layout, linked worktrees, cha
   assert.notEqual(shimRun.status, 0, 'fails closed when harness is missing from PATH');
   // linked worktree: init and doctor resolve the common hooks dir instead of throwing on .git being a file
   const wt = join(mkdtempSync(join(tmpdir(), 'ego-wt-')), 'wt');
-  spawnSync('git', ['worktree', 'add', '-q', '-b', 'feature', wt], { cwd: dir });
+  spawnSync('git', ['worktree', 'add', '-q', '-b', 'feature', wt], { env: gitEnv(), cwd: dir });
   const wtInit = await run(['init'], wt, env);
   assert.equal(wtInit.code, 0, wtInit.out + wtInit.err);
   const wtDoctor = await run(['doctor'], wt, env);
@@ -477,12 +487,19 @@ test('git hooks: absolute core.hooksPath, husky v9 layout, linked worktrees, cha
     join(dir, 'leak.ts'),
     'const k = "AKIAIOSFODNN7EXAMPLE";\nconst s = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";\n',
   );
-  spawnSync('git', ['checkout', '-q', '-b', 'leaky'], { cwd: dir });
-  spawnSync('git', ['add', 'leak.ts'], { cwd: dir });
-  spawnSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'leak'], { cwd: dir });
-  spawnSync('git', ['rm', '-q', 'leak.ts'], { cwd: dir });
-  spawnSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'remove'], { cwd: dir });
-  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).stdout.trim();
+  spawnSync('git', ['checkout', '-q', '-b', 'leaky'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['add', 'leak.ts'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'leak'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['rm', '-q', 'leak.ts'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'remove'], {
+    env: gitEnv(),
+    cwd: dir,
+  });
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], {
+    env: gitEnv(),
+    cwd: dir,
+    encoding: 'utf8',
+  }).stdout.trim();
   const push = await run(
     ['hook', 'git', 'pre-push'],
     dir,
@@ -580,6 +597,29 @@ test('delegation: a pin on a DIFFERENT cached runtime identity is served by that
   assert.match(status.out, /OTHER-RUNTIME/, 'the cached runtime, not the launcher, produced the output');
   const version = await run(['version'], dir, env);
   assert.match(version.out, new RegExp(`pinned +${otherId.version.replace(/\./g, '\\.')}`));
+  // K26/Q19: the delegated-path hook budget. The dynamic import is judged in-process, so per-call latency after the
+  // first delegation is the kernel cost plus one dynamic-import lookup, well under the 60 ms budget.
+  const payload = JSON.stringify({
+    session_id: 'lat',
+    cwd: dir,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: { command: 'ls -la' },
+  });
+  await run(['hook', 'claude-code', 'PreToolUse'], dir, env, payload); // warm the delegated runtime and caches
+  const samples: number[] = [];
+  for (let i = 0; i < 9; i++) {
+    const t0 = performance.now();
+    const r = await run(['hook', 'claude-code', 'PreToolUse'], dir, env, payload);
+    samples.push(performance.now() - t0);
+    assert.equal(r.code, 0);
+  }
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)]!;
+  assert.ok(
+    median < 60,
+    `delegated in-process hook median ${median.toFixed(1)} ms exceeds the 60 ms kernel budget`,
+  );
 });
 
 test('a machine-wide core.hooksPath is never written; doctor reports the hooks NOT SATISFIED with the remedy', async () => {
@@ -604,7 +644,7 @@ test('a machine-wide core.hooksPath is never written; doctor reports the hooks N
     assert.match(init.out, /NOT SATISFIED git hooks: core.hooksPath comes from the global git configuration/);
     // a repository-local absolute path is the user's explicit choice for this repository and is honoured
     const localHooks = mkdtempSync(join(tmpdir(), 'ego-local-hooks-'));
-    spawnSync('git', ['config', 'core.hooksPath', localHooks], { cwd: dir });
+    spawnSync('git', ['config', 'core.hooksPath', localHooks], { env: gitEnv(), cwd: dir });
     const again = await run(['init'], dir, { ...env, GIT_CONFIG_GLOBAL: globalConfig });
     assert.equal(again.code, 0, again.out);
     assert.ok(existsSync(join(localHooks, 'pre-commit')));
@@ -614,7 +654,7 @@ test('a machine-wide core.hooksPath is never written; doctor reports the hooks N
   }
 });
 
-test('chained pre-existing pre-push hook cannot eat the ref list; an EGO line is inserted before an early exit', async () => {
+test('chained pre-existing pre-push hook cannot eat the ref list; a user hook with an early exit is chained unchanged', async () => {
   const dir = repo();
   const env = cleanEnv(mkdtempSync(join(tmpdir(), 'ego-home-')));
   await run(['init'], dir, env);
@@ -648,12 +688,14 @@ test('chained pre-existing pre-push hook cannot eat the ref list; an EGO line is
   // husky-style hooks directory: the EGO line goes after the shebang, before an early exit
   mkdirSync(join(dir, '.githooks'));
   writeFileSync(join(dir, '.githooks', 'pre-commit'), '#!/bin/sh\nexit 0\necho never\n');
-  spawnSync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: dir });
+  spawnSync('git', ['config', 'core.hooksPath', '.githooks'], { env: gitEnv(), cwd: dir });
   await run(['init'], dir, env);
-  const lines = readFileSync(join(dir, '.githooks', 'pre-commit'), 'utf8').split('\n');
-  assert.equal(lines[0], '#!/bin/sh');
-  assert.equal(lines[1], '# ego-hook');
-  assert.match(lines[2]!, /git-hook\.sh" pre-commit/);
+  // the user's hook (early exit included) is chained unchanged as pre-commit.pre-ego; the EGO shim runs first
+  assert.match(readFileSync(join(dir, '.githooks', 'pre-commit.pre-ego'), 'utf8'), /exit 0\necho never/);
+  assert.match(
+    readFileSync(join(dir, '.githooks', 'pre-commit'), 'utf8'),
+    /# ego-hook\n[\s\S]*exec sh "\$shim" pre-commit "\$here"/,
+  );
   const doc = await run(['doctor'], dir, env);
   assert.match(doc.out, /SATISFIED {5}git hooks/);
 });
@@ -695,4 +737,230 @@ test('init: --repin replaces a hand-edited pin only from a human shell; task sou
   const stale = await run(['check'], dir, env);
   assert.equal(stale.code, 1);
   assert.match(stale.out, /standing-rules.md changed since generation/);
+});
+
+test('fixtures never write into a repository named by an ambient GIT_DIR', () => {
+  const sentinel = mkdtempSync(join(tmpdir(), 'ego-sentinel-'));
+  spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: sentinel });
+  const previous = process.env['GIT_DIR'];
+  process.env['GIT_DIR'] = join(sentinel, '.git');
+  try {
+    const dir = repo();
+    assert.ok(existsSync(join(dir, '.git')), 'the fixture repository is initialized in its own directory');
+  } finally {
+    if (previous === undefined) delete process.env['GIT_DIR'];
+    else process.env['GIT_DIR'] = previous;
+  }
+  const log = spawnSync('git', ['log', '--oneline'], { env: gitEnv(), cwd: sentinel, encoding: 'utf8' });
+  assert.notEqual(log.status, 0, 'the sentinel repository has no commits');
+  const cfg = spawnSync('git', ['config', '--local', '--get', 'remote.origin.url'], {
+    env: gitEnv(),
+    cwd: sentinel,
+    encoding: 'utf8',
+  });
+  assert.equal(cfg.stdout.trim(), '');
+});
+
+test('a policy widening in the layer files never applies from the working tree; a human init accepts it', async () => {
+  const dir = repo();
+  const env = cleanEnv(mkdtempSync(join(tmpdir(), 'ego-home-')));
+  await run(['init'], dir, env);
+  const decide = async (command: string, session: string) =>
+    JSON.parse(
+      (
+        await run(
+          ['hook', 'claude-code', 'PreToolUse'],
+          dir,
+          env,
+          JSON.stringify({
+            session_id: session,
+            cwd: dir,
+            hook_event_name: 'PreToolUse',
+            tool_name: 'Bash',
+            tool_input: { command },
+          }),
+        )
+      ).out,
+    ).hookSpecificOutput.permissionDecision;
+  // the organization file is a protected path for agents
+  const write = await run(
+    ['hook', 'claude-code', 'PreToolUse'],
+    dir,
+    env,
+    JSON.stringify({
+      session_id: 'w1',
+      cwd: dir,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Write',
+      tool_input: { file_path: join(dir, 'policies', 'organization', 'permissions.md') },
+    }),
+  );
+  assert.equal(JSON.parse(write.out).hookSpecificOutput.permissionDecision, 'deny');
+  // an out-of-band edit widening an organization-locked deny is clamped
+  mkdirSync(join(dir, 'policies', 'organization'), { recursive: true });
+  writeFileSync(
+    join(dir, 'policies', 'organization', 'permissions.md'),
+    '---\nschema: ego.capabilities/1\nid: organization\nfamily: organization\n---\n# Org\n\n## Requires human approval\n\n- [x] `git.remote.push` — delegated to reviewed feature branches\n',
+  );
+  assert.equal(await decide('git push origin main', 'w1'), 'deny', 'not applied from the working tree');
+  const doctor = await run(['doctor'], dir, env);
+  assert.match(doctor.out, /pending widening/);
+  assert.equal((await run(['check'], dir, env)).code, 1);
+  // an agent shell cannot accept it
+  const agentInit = await run(['init'], dir, { ...env, CLAUDECODE: '1' });
+  assert.match(agentInit.out, /policy widening NOT applied/);
+  assert.equal(await decide('git push origin main', 'w1'), 'deny');
+  // a human init accepts it
+  const humanInit = await run(['init'], dir, env);
+  assert.doesNotMatch(humanInit.out, /policy widening NOT applied/);
+  assert.equal(await decide('git push origin main', 'w1'), 'ask');
+  // removing a human narrowing is a widening too
+  writeFileSync(
+    join(dir, '.harness', 'permissions.md'),
+    '---\nschema: ego.capabilities/1\nid: overlay\nfamily: overlay\n---\n# o\n\n## Requires human approval\n\n- [x] `git.local.commit` — reviewed\n',
+  );
+  assert.equal(await decide('git commit -m x', 'w2'), 'ask', 'a narrowing applies at once');
+  writeFileSync(
+    join(dir, '.harness', 'permissions.md'),
+    '---\nschema: ego.capabilities/1\nid: overlay\nfamily: overlay\n---\n# o\n',
+  );
+  assert.equal(
+    await decide('git commit -m x', 'w2'),
+    'ask',
+    'removing the narrowing does not apply without a human',
+  );
+  await run(['init'], dir, env);
+  assert.equal(await decide('git commit -m x', 'w2'), 'allow');
+});
+
+test('init refuses agent-shell profile or task-source changes and a TAMPERED executing identity; co-owned files stay editable', async () => {
+  const dir = repo();
+  const home = mkdtempSync(join(tmpdir(), 'ego-home-'));
+  const env = cleanEnv(home);
+  await run(['init'], dir, env);
+  const agent = await run(['init', '--task-source', 'ad-hoc'], dir, { ...env, CLAUDECODE: '1' });
+  assert.equal(agent.code, 2);
+  assert.match(agent.err, /changing the profile or the task source of a pinned project is a human act/);
+  assert.equal((await run(['init', '--task-source', 'ad-hoc'], dir, env)).code, 0);
+  assert.match((await run(['init', '--task-source', 'bogus'], dir, env)).err, /task source must be/);
+  // user edits to co-owned files never fail check
+  writeFileSync(join(dir, '.gitignore'), readFileSync(join(dir, '.gitignore'), 'utf8') + 'node_modules/\n');
+  const settings = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  settings['permissions'] = { allow: ['Bash(ls:*)'] };
+  writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify(settings, null, 2));
+  const check = await run(['check'], dir, env);
+  assert.equal(check.code, 0, check.out);
+  // a pin-creating init refuses when the executing identity is TAMPERED in the index
+  const fresh = repo();
+  const home2 = mkdtempSync(join(tmpdir(), 'ego-home-'));
+  const { egoHome, indexAdd, setIdentityState } = await import('../../packages/kernel/src/launcher/home.ts');
+  const { selfIdentity, selfVersion } = await import('../../packages/kernel/src/launcher/self.ts');
+  const h = egoHome({ EGO_HOME: home2 });
+  const id = selfIdentity();
+  indexAdd(
+    h,
+    id.name,
+    selfVersion(),
+    id.runtimeSha256,
+    { source: 'test', trust: 'local-tarball (unsigned)', cachedAt: '2026-09-15T00:00:00.000Z' },
+    '2026-09-15T00:00:00.000Z',
+  );
+  setIdentityState(h, id.name, selfVersion(), 'TAMPERED');
+  const refused = await run(['init'], fresh, cleanEnv(home2));
+  assert.equal(refused.code, 2);
+  assert.match(refused.err, /is TAMPERED in the index/);
+  assert.ok(!existsSync(join(fresh, '.harness', 'harness.md')), 'no pin written');
+});
+
+test('git hook scans: type changes, non-ASCII names, custom lockfile names; a pinned checkout without the shim fails closed', async () => {
+  const dir = repo();
+  const env = cleanEnv(mkdtempSync(join(tmpdir(), 'ego-home-')));
+  await run(['init'], dir, env);
+  const key =
+    'aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n';
+  const nohooks = ['-c', 'core.hooksPath=/dev/null'];
+  // type change: a committed symlink replaced by a file holding a key
+  symlinkSync('package.json', join(dir, 'link'));
+  spawnSync('git', ['add', 'link'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', [...nohooks, 'commit', '-qm', 'link'], { env: gitEnv(), cwd: dir });
+  rmSync(join(dir, 'link'));
+  writeFileSync(join(dir, 'link'), key);
+  spawnSync('git', ['add', 'link'], { env: gitEnv(), cwd: dir });
+  const tc = await run(['hook', 'git', 'pre-commit'], dir, env);
+  assert.equal(tc.code, 1);
+  assert.match(tc.err, /link contains/);
+  spawnSync('git', ['reset', '-q', 'link'], { env: gitEnv(), cwd: dir });
+  // a harmless non-ASCII file name passes
+  writeFileSync(join(dir, 'café.txt'), 'hello\n');
+  spawnSync('git', ['add', 'café.txt'], { env: gitEnv(), cwd: dir });
+  const na = await run(['hook', 'git', 'pre-commit'], dir, env);
+  assert.equal(na.code, 0, na.err);
+  // a key in a *.lock file that is not a known dependency lockfile is scanned on push
+  spawnSync('git', ['checkout', '-q', '-b', 'locks'], { env: gitEnv(), cwd: dir });
+  writeFileSync(join(dir, 'creds.lock'), key);
+  spawnSync('git', ['add', 'creds.lock'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', [...nohooks, 'commit', '-qm', 'lock'], { env: gitEnv(), cwd: dir });
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], {
+    env: gitEnv(),
+    cwd: dir,
+    encoding: 'utf8',
+  }).stdout.trim();
+  const push = await run(
+    ['hook', 'git', 'pre-push'],
+    dir,
+    env,
+    `refs/heads/locks ${head} refs/heads/locks ${'0'.repeat(40)}`,
+  );
+  assert.equal(push.code, 1);
+  assert.match(push.err, /contain/);
+  // pinned checkout whose git-hook.sh is gone: the generated hook fails closed with an EGO message
+  rmSync(join(dir, '.harness', 'hooks', 'git-hook.sh'));
+  const r = spawnSync('/bin/sh', [join(dir, '.git', 'hooks', 'pre-commit')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: gitEnv() as Record<string, string>,
+  });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /missing in a checkout pinned to EGO; failing closed/);
+  assert.equal((await run(['check'], dir, env)).code, 1, 'check reports the missing shim');
+});
+
+test('custom hooks directory: user hooks keep their stdin and their language', async () => {
+  const dir = repo();
+  const env = cleanEnv(mkdtempSync(join(tmpdir(), 'ego-home-')));
+  mkdirSync(join(dir, '.githooks'));
+  writeFileSync(join(dir, '.githooks', 'pre-push'), `#!/bin/sh\ncat > "${dir}/lfs-stdin.log"\n`);
+  writeFileSync(
+    join(dir, '.githooks', 'pre-commit'),
+    `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(join(dir, 'node-ran'))}, '1')\n`,
+  );
+  spawnSync('chmod', ['+x', join(dir, '.githooks', 'pre-push'), join(dir, '.githooks', 'pre-commit')]);
+  spawnSync('git', ['config', 'core.hooksPath', '.githooks'], { env: gitEnv(), cwd: dir });
+  const init = await run(['init'], dir, env);
+  assert.equal(init.code, 0, init.out);
+  const fakeBin = mkdtempSync(join(tmpdir(), 'ego-fakebin-'));
+  writeFileSync(join(fakeBin, 'harness'), '#!/bin/sh\ncat >/dev/null\nexit 0\n');
+  spawnSync('chmod', ['+x', join(fakeBin, 'harness')]);
+  const pathEnv = { ...gitEnv(), PATH: `${fakeBin}:${process.env['PATH'] ?? '/usr/bin:/bin'}` } as Record<
+    string,
+    string
+  >;
+  const pp = spawnSync('/bin/sh', [join(dir, '.githooks', 'pre-push'), 'origin', 'url'], {
+    cwd: dir,
+    encoding: 'utf8',
+    input: 'refs/heads/x abc refs/heads/x 000\n',
+    env: pathEnv,
+  });
+  assert.equal(pp.status, 0, pp.stderr);
+  assert.match(readFileSync(join(dir, 'lfs-stdin.log'), 'utf8'), /refs\/heads\/x abc/);
+  const pc = spawnSync('/bin/sh', [join(dir, '.githooks', 'pre-commit')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: pathEnv,
+  });
+  assert.equal(pc.status, 0, pc.stderr);
+  assert.ok(existsSync(join(dir, 'node-ran')), 'the node hook ran unchanged');
 });

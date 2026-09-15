@@ -69,7 +69,7 @@ function preambleItems(source: string): Array<{ id: string; line: number }> {
       continue;
     }
     if (/^#{1,6}\s/.test(line)) break;
-    const m = /^\s*- \[[ xX]\] `([^`]+)`/.exec(line);
+    const m = /^\s*[-*+]\s+(?:\[[ xX]\]\s+)?`([^`]+)`/.exec(line);
     if (m) out.push({ id: m[1]!, line: i + 1 });
   }
   return out;
@@ -129,6 +129,14 @@ export function parseCapabilityDoc(
           );
     }
     if (match) {
+      // a bullet that names a capability without a checkbox would vanish silently: fail closed
+      for (const b of sec.bullets) {
+        const bm = /^`([^`]+)`/.exec(b);
+        if (bm && CAP_ID_RE.test(bm[1]!))
+          problems.push(
+            `${file}: capability "${bm[1]}" under "${sec.title}" has no checkbox (write \`- [x]\` to activate it or \`- [ ]\` to document it)`,
+          );
+      }
       if (lock !== 'none' && match.verdict !== 'DENY')
         problems.push(`${file}:${sec.line}: a locked file may only contain a Denied section`);
       for (const item of sec.items) {
@@ -413,8 +421,8 @@ function parseProfile(file: string, problems: string[]): Profile | null {
       }
       narrow.push({ capability: cap, verdict });
     });
-  } else if (rawNarrow !== undefined && rawNarrow !== null) {
-    problems.push(`${file}: narrow must be a list`);
+  } else if (rawNarrow !== undefined) {
+    problems.push(`${file}: narrow must be a list (write \`narrow: []\` for none)`);
   }
   return {
     id,

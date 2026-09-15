@@ -90,8 +90,9 @@ export function parseRemote(name: string, url: string): RemoteIdentity {
         /^([^.]+)\.visualstudio\.com$/.exec(host) ?? /^vs-ssh\.visualstudio\.com$/.exec(host);
       const m = /^(?:v3\/)?([^/]+)\/([^/]+)\/(?:_git\/)?([^/]+)$/.exec(path);
       const legacy = /^(?:DefaultCollection\/)?([^/]+)\/_git\/([^/]+)$/.exec(path);
-      if (m) out.path = `${m[1]}/${m[2]}/${m[3]}`;
-      else if (legacyHost && legacy) out.path = `${legacyHost[1] ?? 'unknown'}/${legacy[1]}/${legacy[2]}`;
+      // the legacy *.visualstudio.com form carries the organization in the host: it must win over the generic form
+      if (legacyHost && legacy) out.path = `${legacyHost[1] ?? 'unknown'}/${legacy[1]}/${legacy[2]}`;
+      else if (m && m[2] !== '_git') out.path = `${m[1]}/${m[2]}/${m[3]}`;
     } else {
       const segs = path.split('/').filter(Boolean);
       if (segs.length >= 2) out.path = segs.slice(-2).join('/');

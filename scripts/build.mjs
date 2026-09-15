@@ -20,6 +20,24 @@ const dirty = (() => {
   }
 })();
 const isRelease = process.env.EGO_RELEASE_BUILD === '1';
+if (isRelease) {
+  // an official version is built only from a clean tree whose HEAD carries the matching tag (Q83)
+  const tags = (() => {
+    try {
+      return execSync('git tag --points-at HEAD', { encoding: 'utf8' })
+        .split('\n')
+        .map((t) => t.trim());
+    } catch {
+      return [];
+    }
+  })();
+  if (dirty || !tags.includes(`v${pkg.version}`)) {
+    console.error(
+      `release build refused: ${dirty ? 'the working tree is dirty' : `HEAD is not tagged v${pkg.version}`}`,
+    );
+    process.exit(2);
+  }
+}
 if (!isRelease && dirty && process.env.EGO_ALLOW_DIRTY !== '1') {
   console.error(
     'build refused: working tree is dirty and this is not a release build (set EGO_ALLOW_DIRTY=1 for a throwaway local build)',

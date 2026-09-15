@@ -8,7 +8,10 @@ import { installGitHooks } from '../src/project/githooks.ts';
 
 test('git hooks are never installed into an enclosing repository of a non-toplevel directory', () => {
   const outer = mkdtempSync(join(tmpdir(), 'ego-outer-'));
-  spawnSync('git', ['init', '-q'], { cwd: outer });
+  spawnSync('git', ['init', '-q'], {
+    cwd: outer,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k))),
+  });
   const inner = join(outer, 'not-a-repo');
   mkdirSync(inner);
   const r = installGitHooks(inner, null);

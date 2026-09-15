@@ -8,11 +8,15 @@ import { compileAuthority, type CompiledAuthorityTable, type CompiledMatcher } f
 import { parseMarkdown, optionalString } from '../util/markdown.ts';
 import { isFile, readJsonIfExists, readText, writeJsonAtomic } from '../util/fs.ts';
 import { sha256Hex, sha256Canonical } from '../util/hash.ts';
-import { ControlPlaneValidationError } from '../control-plane/types.ts';
+import { ControlPlaneValidationError, VERDICT_RANK } from '../control-plane/types.ts';
 import type { YamlValue } from '../util/yaml.ts';
 
 export interface PolicyCache {
   schema: 'ego.policy-cache/1';
+  /** layer hashes whose widenings a human accepted (init from a human terminal) */
+  acceptedLayerSources?: Record<string, string>;
+  /** widenings found in the current layer files and not applied until a human accepts them */
+  pendingWidening?: { layerSources: Record<string, string>; widenings: string[] };
   runtimeSha256: string;
   runtimeVersion: string;
   controlPlaneRoot: string;
@@ -139,7 +143,11 @@ export function policyCacheFreshness(
       reasons: [...reasons, `recompilation failed: ${(e as Error).message.split('\n')[0]}`],
     };
   }
-  if (fresh.table.tableHash !== cached.table.tableHash)
+  if (cached.pendingWidening)
+    reasons.push(
+      `policy widening pending human acceptance (${cached.pendingWidening.widenings.length}: ${cached.pendingWidening.widenings.slice(0, 3).join('; ')}${cached.pendingWidening.widenings.length > 3 ? '; …' : ''}); a human runs \`harness init\` from their own terminal to accept`,
+    );
+  else if (fresh.table.tableHash !== cached.table.tableHash)
     reasons.push('compiled authority table differs from the cache (control plane or overlay changed)');
   const keys = new Set([...Object.keys(fresh.layerSources), ...Object.keys(cached.layerSources)]);
   for (const k of keys)
@@ -148,24 +156,102 @@ export function policyCacheFreshness(
 }
 
 /** Loads the cache, compiling and writing it when missing or stale. Hooks call this: a stale cache is never used silently. */
+/** Every (profile/mode, capability) cell and effective verdict where `next` is wider than `baseline`. */
+export function tableWidenings(baseline: CompiledAuthorityTable, next: CompiledAuthorityTable): string[] {
+  const out: string[] = [];
+  for (const [cap, v] of Object.entries(next.effective)) {
+    const b = baseline.effective[cap];
+    if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) out.push(`effective ${cap}: ${b} -> ${v}`);
+  }
+  for (const [p, prof] of Object.entries(next.profiles))
+    for (const [m, cells] of Object.entries(prof.modes)) {
+      const base = baseline.profiles[p]?.modes[m];
+      if (!base) continue;
+      for (const [cap, v] of Object.entries(cells)) {
+        const b = base[cap];
+        if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) out.push(`${p}/${m} ${cap}: ${b} -> ${v}`);
+      }
+    }
+  return out.sort();
+}
+
+/** `next` with every cell raised to at least the baseline verdict: narrowings apply, widenings do not. */
+export function clampToBaseline(
+  next: CompiledAuthorityTable,
+  baseline: CompiledAuthorityTable,
+): CompiledAuthorityTable {
+  const t = structuredClone(next);
+  for (const [cap, v] of Object.entries(t.effective)) {
+    const b = baseline.effective[cap];
+    if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) t.effective[cap] = b;
+  }
+  for (const [p, prof] of Object.entries(t.profiles))
+    for (const [m, cells] of Object.entries(prof.modes)) {
+      const base = baseline.profiles[p]?.modes[m];
+      if (!base) continue;
+      for (const [cap, v] of Object.entries(cells)) {
+        const b = base[cap];
+        if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) cells[cap] = b;
+      }
+    }
+  const { tableHash: _old, ...body } = t;
+  return { ...body, tableHash: sha256Canonical(body) } as CompiledAuthorityTable;
+}
+
+function sameSources(a: Record<string, string> | undefined, b: Record<string, string>): boolean {
+  if (!a) return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) if (a[k] !== b[k]) return false;
+  return true;
+}
+
+/**
+ * Loads the cache, recompiling when the runtime or a layer file changed. A layer edit that NARROWS applies at once. A
+ * layer edit that WIDENS anything (an organization widening, a removed overlay narrowing) is never applied from the
+ * working tree by a hook: the table is clamped to the last accepted one (or to the core table when none was accepted)
+ * and the widening is recorded as pending until a human runs `harness init` from their own terminal (Q98, K1).
+ */
 export function ensurePolicyCache(
   controlPlaneRoot: string,
   projectRoot: string,
   self: { runtimeSha256: string; version: string },
+  opts: { acceptWidening?: boolean } = {},
 ): { cache: PolicyCache; regenerated: boolean } {
   const cached = readPolicyCache(projectRoot);
-  if (cached && cached.runtimeSha256 === self.runtimeSha256) {
-    // cheap freshness: layer source hashes only (full recompilation is `check`'s job)
-    let stale = false;
-    for (const rel of Object.values(LAYER_FILES)) {
-      const f = join(projectRoot, rel);
-      const key = rel.split('\\').join('/');
-      const current = isFile(f) ? sha256Hex(readText(f)) : undefined;
-      if (current !== cached.layerSources[key]) stale = true;
-    }
-    if (!stale) return { cache: cached, regenerated: false };
+  const currentSources: Record<string, string> = {};
+  for (const rel of Object.values(LAYER_FILES)) {
+    const f = join(projectRoot, rel);
+    if (isFile(f)) currentSources[rel.split('\\').join('/')] = sha256Hex(readText(f));
   }
+  if (
+    cached &&
+    cached.runtimeSha256 === self.runtimeSha256 &&
+    sameSources(cached.layerSources, currentSources) &&
+    !(opts.acceptWidening && cached.pendingWidening)
+  )
+    return { cache: cached, regenerated: false };
   const fresh = compileProjectPolicy(controlPlaneRoot, projectRoot, self);
-  writePolicyCache(projectRoot, fresh);
-  return { cache: fresh, regenerated: true };
+  if (opts.acceptWidening || sameSources(cached?.acceptedLayerSources, fresh.layerSources)) {
+    fresh.acceptedLayerSources = { ...fresh.layerSources };
+    writePolicyCache(projectRoot, fresh);
+    return { cache: fresh, regenerated: true };
+  }
+  const baseline =
+    cached && cached.runtimeSha256 === self.runtimeSha256
+      ? cached.table
+      : compileAuthority(loadControlPlane(controlPlaneRoot), { projectRoot });
+  const widenings = tableWidenings(baseline, fresh.table);
+  if (widenings.length === 0) {
+    fresh.acceptedLayerSources = { ...fresh.layerSources };
+    writePolicyCache(projectRoot, fresh);
+    return { cache: fresh, regenerated: true };
+  }
+  const clamped: PolicyCache = {
+    ...fresh,
+    table: clampToBaseline(fresh.table, baseline),
+    acceptedLayerSources: cached?.acceptedLayerSources ?? {},
+    pendingWidening: { layerSources: { ...fresh.layerSources }, widenings },
+  };
+  writePolicyCache(projectRoot, clamped);
+  return { cache: clamped, regenerated: true };
 }

@@ -132,9 +132,15 @@ matchers:
   - capability: forge.issue.read
     tool: Bash
     command: '^(gh\s+issue\s+(view|list|status)|glab\s+issue\s+(view|list))\b'
+  - capability: forge.api.mutate
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*\bmutation\b)'
+  - capability: forge.api.mutate
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=)))'
   - capability: forge.repo.read
     tool: Bash
-    command: '^(gh\s+(repo\s+view|api\s+-X\s+GET|api\s+(?!-X))|glab\s+(repo\s+view|api))\b'
+    command: '^(gh\s+(repo\s+view|api)|glab\s+(repo\s+view|api))\b'
   # --- production (absolute; contexts named production/prod) ---
   - capability: production.k8s.mutate
     tool: Bash
@@ -250,6 +256,12 @@ matchers:
     tool: Bash
     command: '(^|\s|=)\.(ssh|aws|kube|gnupg)/'
   # --- hook and control-plane protection ---
+  - capability: harness.control-plane.edit
+    tool: Write
+    path: 'policies/organization/**'
+  - capability: harness.mcp-trust.edit
+    tool: Write
+    path: '.harness/mcp-trust.md'
   - capability: fs.hook-config.write
     tool: Write
     path: '.claude/settings.json'
@@ -267,16 +279,16 @@ matchers:
     path: '~/.claude/settings.json'
   - capability: fs.hook-config.write
     tool: Write
-    path: '.git/hooks/**'
+    path: '**/.git/hooks/**'
   - capability: fs.hook-config.write
     tool: Write
-    path: '.husky/**'
+    path: '**/.husky/**'
   - capability: fs.hook-config.write
     tool: Write
     path: '.claude/settings.local.json'
   - capability: fs.git-internals.write
     tool: Write
-    path: '.git/**'
+    path: '**/.git/**'
   - capability: fs.hook-config.write
     tool: Bash
     command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(\.git/hooks|\.husky/|\.harness/hooks|\.claude/settings|\.codex/|core\.hooksPath)'
@@ -417,7 +429,7 @@ matchers:
     command: '^(node|python3?|tsx|ts-node|bun|deno\s+run|ruby|perl|php)\s+(?!-)[^\s]+\.(js|mjs|cjs|ts|mts|py|rb|pl|php)\b'
   - capability: command.local-mutation
     tool: Bash
-    command: '^(npm\s+(install|i|ci|uninstall|update|run\s+(format:fix|lint:fix|generate|codegen))|npx\s+(prettier|eslint)\b.*(--write|--fix)|pnpm\s+(install|add|remove)|yarn\s+(add|remove|install)|pip\s+install|poetry\s+(install|add)|go\s+(mod|get)|cargo\s+(add|update)|mkdir|touch|cp|mv|ln|chmod\s+[0-7+]|tar|zip|unzip|node\b|python3?\b|tsx\b|ts-node\b)'
+    command: '^(npm\s+(install|i|ci|uninstall|update|run\s+(format:fix|lint:fix|generate|codegen))|npx\s+(prettier|eslint)\b.*(--write|--fix)|pnpm\s+(install|add|remove)|yarn\s+(add|remove|install)|pip\s+install|poetry\s+(install|add)|go\s+(mod|get)|cargo\s+(add|update)|(mkdir|touch|cp|mv|ln|tar|zip|unzip)\b|chmod\s+[0-7+]|node\b|python3?\b|tsx\b|ts-node\b)'
   # --- network classes (WebFetch / MCP url tools) ---
   - capability: network.localhost
     tool: WebFetch

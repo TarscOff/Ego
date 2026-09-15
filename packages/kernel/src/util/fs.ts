@@ -103,6 +103,8 @@ export function removeRecursive(path: string): void {
 export interface WalkOptions {
   /** directory names to skip anywhere in the tree */
   skipDirs?: string[];
+  /** list symbolic links as entries (never followed); used to detect links planted in immutable directories */
+  includeSymlinks?: boolean;
   /** maximum depth (root = 0); undefined = unlimited */
   maxDepth?: number;
 }
@@ -121,7 +123,7 @@ export function walkFiles(root: string, opts: WalkOptions = {}): string[] {
       if (ent.isDirectory()) {
         if (skip.has(ent.name)) continue;
         visit(full, depth + 1);
-      } else if (ent.isFile()) {
+      } else if (ent.isFile() || (opts.includeSymlinks && ent.isSymbolicLink())) {
         out.push(relative(root, full).split(sep).join('/'));
       }
     }
