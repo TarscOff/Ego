@@ -56,10 +56,16 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   double verification, conformance and build-log audit): the first two launches were cut off by the session limit
   and then by exhausted usage credits (1 of 55 agents completed: the Codex dialect fix verified, with two missing
   pinning tests and a host-matrix note, both added). Relaunched on 2026-09-15; results recorded here when it completes.
+- **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
+  into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
+  failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
+  toplevel, and git resolved the hooks path upward to the enclosing repository. The stray hooks were moved to the
+  session scratchpad, and `installGitHooks` now refuses any directory that is not the top level of its own
+  repository (pinned by `packages/kernel/test/githooks.test.ts`).
 
 ### Check lines
 
-- DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test` (111 tests),
+- DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test` (112 tests),
   `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty` while the tree is dirty). Hook latency: the
   in-process kernel path is pinned under 60 ms by `hooks.test.ts` (K26); process wall-clock including Node start-up
   is measured by the conformance audit and reported as a number, not claimed against the kernel budget.

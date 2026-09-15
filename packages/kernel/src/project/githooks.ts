@@ -2,7 +2,7 @@
 // agent shells. Installed as thin shims chaining any pre-existing hook; husky-managed hooks gain one line instead.
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { chmodSync, existsSync, renameSync, copyFileSync } from 'node:fs';
+import { chmodSync, existsSync, renameSync, copyFileSync, realpathSync } from 'node:fs';
 import { ensureDir, isFile, readTextIfExists, writeAtomic } from '../util/fs.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigScope } from '../util/git.ts';
@@ -38,6 +38,14 @@ export interface GitHookInstallResult {
   refused: string | null;
 }
 
+function canonical(p: string): string {
+  try {
+    return realpathSync(resolve(p));
+  } catch {
+    return resolve(p);
+  }
+}
+
 function insideProject(projectRoot: string, dir: string): boolean {
   const root = resolve(projectRoot);
   const d = resolve(dir);
@@ -61,8 +69,17 @@ function ensureEgoLine(path: string, name: string): void {
 export function installGitHooks(projectRoot: string, hooksPath: string | null): GitHookInstallResult {
   const installed: string[] = [];
   const notes: string[] = [];
+  // git resolves hooks upward to an enclosing repository: a directory that is not itself a git toplevel would get its
+  // hooks written into whatever repository contains it. Refuse instead.
+  const top = git(['rev-parse', '--show-toplevel'], projectRoot);
+  if (!top.ok || !top.stdout || canonical(top.stdout) !== canonical(projectRoot)) {
+    const refused = `git hooks NOT installed: ${projectRoot} is not the top level of a git repository${top.ok && top.stdout ? ` (enclosing repository: ${top.stdout})` : ''}`;
+    notes.push(refused);
+    return { installed, notes, refused };
+  }
   const shim = join(projectRoot, '.harness', 'hooks', 'git-hook.sh');
   if (!isFile(shim)) {
+    ensureDir(join(projectRoot, '.harness', 'hooks'));
     copyFileSync(join(packageRoot(), 'runtime', 'posix', 'git-hook.sh'), shim);
     chmodSync(shim, 0o755);
   }
