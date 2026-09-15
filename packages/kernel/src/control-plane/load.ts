@@ -137,6 +137,15 @@ export function parseCapabilityDoc(
             `${file}: capability "${bm[1]}" under "${sec.title}" has no checkbox (write \`- [x]\` to activate it or \`- [ ]\` to document it)`,
           );
       }
+      // a capability declaration written with an unsupported marker (ordered list `1.`/`1)`, or a stray checkbox) is
+      // parsed as prose and would vanish with no error: fail closed rather than silently drop a deny
+      for (const para of sec.paragraphs) {
+        const pm = /^(\d+[.)]\s+)?(\[[ xX]\]\s+)?`([^`]+)`/.exec(para);
+        if (pm && (pm[1] || pm[2]) && CAP_ID_RE.test(pm[3]!))
+          problems.push(
+            `${file}: capability "${pm[3]}" under "${sec.title}" uses an unsupported list marker or layout (write it as \`- [x]\` / \`- [ ]\`); as written it would not be enforced`,
+          );
+      }
       if (lock !== 'none' && match.verdict !== 'DENY')
         problems.push(`${file}:${sec.line}: a locked file may only contain a Denied section`);
       for (const item of sec.items) {

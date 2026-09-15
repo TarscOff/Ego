@@ -480,11 +480,18 @@ function depthOf(session: SessionRecord, agentId: string): number {
 // Collapse cosmetic differences so a step that only varies by whitespace, a trailing separator, or a
 // trailing shell comment maps to the same retry key (alignment item 8: the identical step stays capped).
 function normalizeStep(s: string): string {
-  return s
-    .replace(/(^|\s)#.*$/s, '$1')
-    .replace(/[;&|]+\s*$/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  // The retry key must not be evadable by appending a no-op to the same failing command. Key on the FIRST command of
+  // the line: strip a leading shell grouping (`{ … ; }`, `( … )`), cut at the first top-level separator so an appended
+  // `; #c`, `&& :` or `|| true` cannot mint a fresh key, drop any trailing comment, and collapse whitespace. The
+  // summary is `Tool: <command>`; the tool prefix is preserved so different tools never collide.
+  const colon = s.indexOf(': ');
+  const prefix = colon >= 0 ? s.slice(0, colon + 2) : '';
+  let cmd = colon >= 0 ? s.slice(colon + 2) : s;
+  cmd = cmd.replace(/^[\s({]+/, '');
+  cmd = cmd.split(/[;&|]/)[0] ?? cmd;
+  cmd = cmd.replace(/(^|\s)#.*$/s, '$1');
+  cmd = cmd.replace(/[\s)}]+$/, '');
+  return (prefix + cmd).replace(/\s+/g, ' ').trim();
 }
 
 function summarizeInput(tool: string, input: Record<string, unknown>, cpRoot: string): string {

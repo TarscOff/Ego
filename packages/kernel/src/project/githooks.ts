@@ -273,14 +273,28 @@ export function runGitHook(
         return { ok: false, messages };
       }
     }
-    for (const line of stdin.split('\n').filter(Boolean)) {
-      const [, localSha, , remoteSha] = line.split(' ');
+    const pushLines = stdin
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.split(' '));
+    // Baseline for new-branch scans: the remote SHAs git itself reported for this push (computed from the real remote
+    // during negotiation, so not forgeable locally). We deliberately do NOT use `--remotes`: a local remote-tracking
+    // ref (`refs/remotes/origin/*`) can be planted by an agent to cover a secret commit and make `--not --remotes`
+    // skip it. With no trustworthy baseline a new branch is scanned in full (correctness over speed for a secret scan).
+    const remoteBaseline = pushLines
+      .map((p) => p[3])
+      .filter((s): s is string => !!s && !/^0+$/.test(s));
+    for (const parts of pushLines) {
+      const localSha = parts[1];
+      const remoteSha = parts[3];
       if (!localSha || /^0+$/.test(localSha)) continue; // a branch deletion pushes nothing
       // every pushed commit's own patch is scanned (net-zero ranges and new branches included), never the working tree
       const args =
         remoteSha && !/^0+$/.test(remoteSha)
           ? ['log', '-p', '-m', '--text', '--format=commit %H', `${remoteSha}..${localSha}`]
-          : ['log', '-p', '-m', '--text', '--format=commit %H', localSha, '--not', '--remotes'];
+          : remoteBaseline.length
+            ? ['log', '-p', '-m', '--text', '--format=commit %H', localSha, '--not', ...remoteBaseline]
+            : ['log', '-p', '-m', '--text', '--format=commit %H', localSha];
       const log = git([...args, '--', '.', ...LOCKFILE_EXCLUDES], projectRoot, {
         timeoutMs: 120_000,
         maxBuffer: SCAN_MAX_BUFFER,

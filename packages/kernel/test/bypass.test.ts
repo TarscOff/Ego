@@ -485,3 +485,82 @@ test('round-4 residuals: env -S command carrier, pax destination, carried sh -c,
   assert.equal(bash('gh api repos/o/r/pulls', c).verdict, 'ALLOW'); // a read stays a read
   assert.equal(bash('gh api graphql -f query="{viewer{login}}"', c).verdict, 'ALLOW'); // inline read query
 });
+
+test('round-5 residuals: env -S options, archive-create writes, mv source, glued redirects, cd options, trust dir node, forge/k8s/cloud/interpreter', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  mkdirSync(join(repo, '.harness', 'runtime'), { recursive: true });
+  // [0] env -S whose split value begins with an env option (-u/-C/-i) still classifies the carried command
+  for (const cmd of [
+    'env -S "-u X git push origin main"',
+    'env -S "-C /tmp kubectl delete pod y -n production"',
+    'env -S "-i git push origin main"',
+    'env --split-string="-u X git push origin main"',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [1][2] archive-create modes write the archive/-f operand into a protected tree
+  for (const cmd of [
+    'pax -w -f .harness/generated/policy.json a.txt',
+    'pax -wf .harness/generated/x.tar a.txt',
+    'tar -cf .harness/generated/policy.json a.txt',
+    'tar --create --file .harness/generated/policy.json a.txt',
+    'tar -czf .git/hooks/pre-commit a',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [14] mv relocates a protected directory (its SOURCE is removed): a write to that tree
+  assert.equal(bash('mv .harness /tmp/h', c).decisive?.capability, 'harness.gate.bypass');
+  assert.equal(bash('mv .harness/generated/policy.json /tmp/x', c).verdict, 'DENY');
+  // [7] a redirection glued to the preceding word is still a write
+  for (const cmd of [
+    'echo x>.harness/generated/policy.json',
+    'printf yes>>.harness/runtime/ledger.json',
+    'echo approved>.harness/runtime/decisions/d1.json',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [8] cd with options / -- still tracks the working directory
+  assert.equal(bash('cd -- .harness/generated && cp /tmp/evil policy.json', c).verdict, 'DENY');
+  assert.equal(bash('cd -P .harness/generated && cp /tmp/evil policy.json', c).verdict, 'DENY');
+  // [10][11][13] the EGO_HOME trust store: the directory node itself, not only strict descendants
+  const ego = c.egoHome!;
+  for (const cmd of [
+    `mv ${ego}/trust /tmp/stolen`,
+    `cp -r ${ego}/trust /tmp/copy`,
+    `rm -rf ${ego}/runtimes`,
+    `mv ${ego}/releases /tmp/r`,
+    `tee ${ego}/trust/keys.json`,
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'harness.trust.tamper', cmd);
+  }
+  // [3] forge graphql with a file/stdin body (--input / -i) is a mutation; [4] combined commit -nm bypasses hooks
+  assert.equal(bash('gh api graphql --input payload.json', c).decisive?.capability, 'forge.api.mutate');
+  assert.equal(bash('gh api graphql -i -', c).decisive?.capability, 'forge.api.mutate');
+  assert.equal(bash('git commit -nm msg', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(bash('git commit -nam msg', c).decisive?.capability, 'git.hooks.bypass');
+  // [9] production kubectl verbs debug/certificate; [12] cloud aws lifecycle verbs
+  assert.equal(bash('kubectl --context prod debug node/n1 --image busybox', c).decisive?.capability, 'production.k8s.mutate');
+  assert.equal(bash('kubectl -n prod certificate approve csr-1', c).decisive?.capability, 'production.k8s.mutate');
+  assert.equal(bash('aws ec2 run-instances --image-id ami', c).decisive?.capability, 'production.cloud.mutate');
+  assert.equal(bash('aws ec2 stop-instances --instance-ids i-1', c).decisive?.capability, 'production.cloud.mutate');
+  // [15][16][17] an inline interpreter whose body names a protected store fails closed to the matching deny
+  assert.equal(
+    bash(`node -e "require('fs').writeFileSync(require('os').homedir()+'/.ssh/id_rsa','k')"`, c).decisive?.capability,
+    'fs.credential-store.write',
+  );
+  assert.equal(
+    bash(`python3 -c "open(__import__('os').path.expanduser('~/.ego/trust/k'),'w')"`, c).decisive?.capability,
+    'harness.trust.tamper',
+  );
+  assert.equal(
+    bash(`node -e "require('fs').writeFileSync('.git/hooks/pre-commit','x')"`, c).decisive?.capability,
+    'fs.hook-config.write',
+  );
+  // controls that must NOT be denied
+  assert.equal(bash('tar -cf out.tar a.txt b.txt', c).verdict, 'ALLOW'); // archive into a scratch path
+  assert.equal(bash('git merge -n feature', c).verdict, 'ALLOW');
+  assert.equal(bash('gh api graphql -f query="{viewer{login}}"', c).verdict, 'ALLOW');
+  assert.equal(bash('cd src && cp a.ts b.ts', c).verdict, 'ALLOW');
+  assert.equal(bash(`node -e "process.stdout.write(String(1+1))"`, c).verdict, 'ASK'); // benign inline interpreter, nothing protected named
+})

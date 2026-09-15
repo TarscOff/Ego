@@ -85,7 +85,7 @@ matchers:
     command: '^git\s+push\b'
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+commit\b.*(\s--no-verify\b|\s-n\b)'
+    command: '^git\s+commit\b.*(\s--no-verify\b|\s-[A-Za-z]*n[A-Za-z]*\b)'
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(push|merge)\b.*\s--no-verify\b'
@@ -141,7 +141,7 @@ matchers:
   - capability: forge.api.mutate
     tool: Bash
     # graphql body loaded from a file/stdin (field=@path): cannot inspect it, so a mutation cannot be ruled out -> fail closed
-    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*=@)'
+    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*(=@|\s--input\b|\s-i\s+\S))'
   - capability: forge.api.mutate
     tool: Bash
     command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
@@ -151,13 +151,13 @@ matchers:
   # --- production (absolute; contexts named production/prod) ---
   - capability: production.k8s.mutate
     tool: Bash
-    command: '^(kubectl|oc)\b(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))(?=.*\s(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward)\b)'
+    command: '^(kubectl|oc)\b(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))(?=.*\s(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward|debug|certificate|proxy)\b)'
   - capability: production.helm.mutate
     tool: Bash
     command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
   - capability: production.cloud.mutate
     tool: Bash
-    command: '^(terraform\s+(apply|destroy)|pulumi\s+(up|destroy)|aws\s+\S+\s+(create|delete|update|put|terminate|modify)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
+    command: '^(terraform\s+(apply|destroy)|pulumi\s+(up|destroy)|aws\s+\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|invoke|publish|associate|disassociate|attach|detach|authorize|revoke)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
   - capability: production.deploy
     tool: Bash
     command: '^(argocd\s+app\s+(sync|delete|set|rollback)|flux\s+(reconcile|suspend|resume)|kubectl\s+argo\s+rollouts)\b'
@@ -428,6 +428,22 @@ matchers:
   - capability: command.read-only
     tool: Bash
     command: '^(ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|find|fd|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|sort|uniq|cut|awk(?!.*-i)|sed(?!\s+-i)|jq|yq|xargs\s+(ls|cat|grep|rg|wc)|node\s+(-v|--version|-e\s+["'']?console\.log)|npm\s+(ls|view|--version|-v|outdated|why|explain)|python3?\s+(--version|-V|-c\s+["'']?print\()|tsc\s+--version|git\s+--version|history)\b'
+  # inline interpreters are opaque, so a body that NAMES a protected store fails closed to the same deny the literal verb receives
+  - capability: fs.credential-store.write
+    tool: Bash
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*(\.ssh/|\.aws/credentials|\.aws/config|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.kube/|\.git-credentials|\.docker/config|id_rsa|id_ed25519|id_ecdsa|id_dsa)'
+  - capability: harness.trust.tamper
+    tool: Bash
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*\.ego/(trust|runtimes|releases|index)\b'
+  - capability: fs.hook-config.write
+    tool: Bash
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*(\.git/hooks|\.husky/|\.harness/hooks|core\.hooksPath|\.claude/settings|\.codex/)'
+  - capability: harness.runtime.tamper
+    tool: Bash
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*\.harness/(generated|runtime)\b'
+  - capability: fs.git-internals.write
+    tool: Bash
+    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b.*\.git/(refs|objects|config|HEAD|packed-refs|info|logs)'
   - capability: command.interpreter-inline
     tool: Bash
     command: '^(node\s+(-e|--eval|-p|--print)|python3?\s+-c|ruby\s+-e|perl\s+-e|php\s+-r)\b'

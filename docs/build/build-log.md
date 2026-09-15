@@ -115,7 +115,47 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   sub-60 ms budget; the delegated entry path is bounded by a contention-robust ceiling, not asserted at 60 ms. Every
   fix above is pinned by a test (`bypass.test.ts` round-4 residuals, `control-plane.test.ts` CommonMark `+`,
   `hooks.test.ts` retry-stop normalisation and no-evict-cap, `githooks.test.ts` spaced-path chained hook).
-- **Round 5**: an independent re-verification of the round-4 fixes is running; recorded here when it completes.
+- **Round 5** (workflow `ego-phase1-review-round5`, 48 agents: cluster skeptics per round-4 fix plus fresh adversarial
+  reviewers, each finding reproduced by two adversarial refuters before it counted): the six round-4 fixes all HELD,
+  but the pass surfaced 19 confirmed findings — mostly sideways variants of the same classes one step out, plus
+  pre-existing gaps earlier rounds had not reached. 15 HIGH / 2 MEDIUM / 2 LOW, every one fixed and pinned this round:
+  - **Inline-interpreter body writes** (2 HIGH + 1 MEDIUM, `matchers.md`): `node -e` / `python -c` / `ruby -e` / `perl`
+    whose body NAMES a protected store (`~/.ssh`, `~/.ego/trust`, `.git/hooks`, `.harness/generated`) was ASK
+    `command.interpreter-inline`; it now fails closed to the same deny the literal `cp`/`tee` receives
+    (credential-store, trust, hook-config, git-internals, harness-runtime). Ordered before `command.interpreter-inline`
+    because `classifyNormalized` takes the first matching matcher.
+  - **Archive-create destinations** (2 HIGH, `evaluate.ts`): `tar -cf <archive>` (create) and `pax -w -f <archive>`
+    write the archive path; the destination resolver treated tar as extract-only (`-C`) and pax as last-operand, so a
+    write into `.harness/generated` / `.git/hooks` was ALLOW/ASK. A mode-aware resolver now takes the `-f`/`--file`
+    operand (including combined `-cf`/`-wf`) as the write in create/write mode.
+  - **`mv` source containment** (1 HIGH, `evaluate.ts`): `mv .harness /tmp` relocates the whole control tree at ALLOW —
+    only the destination was checked. `mv`/`rename` now treat every operand as a write (the source is removed).
+  - **EGO_HOME trust dir node** (2 HIGH + 1 MEDIUM, `evaluate.ts`): the trust-store check required a strict descendant
+    (`<home>/trust/…`), so `mv ~/.ego/trust /tmp`, `cp -r ~/.ego/runtimes …` and `rm -rf ~/.ego/releases` escaped; the
+    directory node itself now counts, across trust/index/releases/runtimes.
+  - **`env -S` leading option** (1 HIGH, `evaluate.ts`): `env -S "-u X git push"` began the split value with env's own
+    option, which the re-parser took as the command head → ASK. The split value is now re-parsed through a synthetic
+    `env` so its leading options/assignments are stripped and the real command is classified.
+  - **Glued redirection** (1 HIGH, `evaluate.ts`): `echo x>.harness/generated/policy.json` (no space) was not seen as a
+    redirect; the target scanner now un-glues an operator stuck to the preceding word.
+  - **Multi-token `cd`** (1 MEDIUM, `evaluate.ts`): `cd -- .harness/generated && cp …` desynced the tracked cwd; the cd
+    parser now skips `--` and options and takes the last positional.
+  - **File-loaded GraphQL via `--input`/`-i`** (1 HIGH, `matchers.md`): the round-4 `=@` fix missed `--input`/`-i -`;
+    both now route a graphql body to `forge.api.mutate`.
+  - **Combined `git commit -nm`** (1 MEDIUM, `matchers.md`): `-nm` parses as `-n -m` (`--no-verify`); the hook-bypass
+    matcher now matches a short-flag cluster containing `n`.
+  - **Missing production verbs** (1 HIGH k8s + 1 MEDIUM cloud, `matchers.md`): `kubectl … debug|certificate` and more
+    state-changing `aws` verbs (EC2 lifecycle, `s3 rm`, `lambda invoke`, …) are added to the production matchers.
+  - **Pre-push decoy ref** (1 MEDIUM, `githooks.ts`): the new-branch scan used `--not --remotes`, and a planted
+    `refs/remotes/origin/*` hid a secret; it now excludes only the remote SHAs git itself reports for the push
+    (unforgeable), scanning the branch in full when there is no trustworthy baseline.
+  - **Retry-stop no-op escape** (1 LOW, `handle.ts`): `npm test;#1` / `&& :` / `|| true` / `{ … }` minted fresh retry
+    keys; the key now normalises to the first command of the line. No authority is granted either way.
+  - **Ordered-list deny vanish** (1 LOW, `load.ts`): a capability written with an unsupported marker (`1.`/`1)`) parsed
+    as prose and disappeared with no error; the loader now fails closed on a mislaid capability declaration.
+  Each fix is pinned (`bypass.test.ts` round-5 residuals, `control-plane.test.ts` ordered-list, `hooks.test.ts`
+  retry no-op, `tests/integration/cli.test.ts` planted-ref pre-push). Suite: 135 tests.
+- **Round 6**: an independent re-verification of the round-5 fixes is running; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -126,7 +166,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 ### Check lines
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
-  (131 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  (135 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
   phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
   - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
     pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
@@ -146,8 +186,8 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–4 done, every confirmed HIGH/MEDIUM fixed and pinned; round 5
-  (re-verification of the round-4 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–5 done, every confirmed HIGH/MEDIUM fixed and pinned; round 6
+  (re-verification of the round-5 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

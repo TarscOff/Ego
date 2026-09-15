@@ -970,3 +970,22 @@ test('custom hooks directory: user hooks keep their stdin and their language', a
   assert.equal(pc.status, 0, pc.stderr);
   assert.ok(existsSync(join(dir, 'node-ran')), 'the node hook ran unchanged');
 });
+
+test('pre-push secret scan cannot be blinded by a planted remote-tracking ref (no reliance on --remotes)', async () => {
+  const dir = repo();
+  const env = cleanEnv(mkdtempSync(join(tmpdir(), 'ego-home-')));
+  await run(['init'], dir, env);
+  writeFileSync(join(dir, 'leak.ts'), 'const k = "AKIAIOSFODNN7EXAMPLE";\n');
+  spawnSync('git', ['checkout', '-q', '-b', 'leaky'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['add', 'leak.ts'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'leak'], { env: gitEnv(), cwd: dir });
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { env: gitEnv(), cwd: dir, encoding: 'utf8' }).stdout.trim();
+  const pushLine = `refs/heads/leaky ${head} refs/heads/leaky ${'0'.repeat(40)}`;
+  const before = await run(['hook', 'git', 'pre-push'], dir, env, pushLine);
+  assert.equal(before.code, 1, 'the leaked key is caught on a new-branch push');
+  // plant a remote-tracking ref that covers the leaking commit: `--not --remotes` would now skip it
+  spawnSync('git', ['update-ref', 'refs/remotes/origin/decoy', head], { env: gitEnv(), cwd: dir });
+  const after = await run(['hook', 'git', 'pre-push'], dir, env, pushLine);
+  assert.equal(after.code, 1, 'a planted remote-tracking ref must not blind the scan');
+  assert.match(after.err, /pushed commits up to .* contain/);
+});

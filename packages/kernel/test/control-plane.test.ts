@@ -452,3 +452,17 @@ test('CommonMark "+" list marker is honored under a section (a "+ [x]" deny neve
   writeFileSync(abs, original.replace('- [x] `production.storage.mutate`', '+ `production.storage.mutate`'));
   assert.throws(() => loadControlPlane(dir), /"production.storage.mutate" under "Denied" has no checkbox/);
 });
+
+test('fail closed: a capability declared with an unsupported list marker (ordered list) never silently vanishes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-cp-ord-'));
+  cpSync(ROOT, dir, { recursive: true });
+  const abs = join(dir, 'permissions', 'absolute-denies.md');
+  const original = readFileSync(abs, 'utf8');
+  // an ordered-list marker ("1." / "1)") is not a checklist bullet: the deny would parse as prose and disappear
+  writeFileSync(abs, original.replace('- [x] `production.storage.mutate`', '1. [x] `production.storage.mutate`'));
+  assert.throws(() => loadControlPlane(dir), /unsupported list marker/);
+  writeFileSync(abs, original.replace('- [x] `production.storage.mutate`', '1) [x] `production.storage.mutate`'));
+  assert.throws(() => loadControlPlane(dir), /unsupported list marker/);
+  writeFileSync(abs, original); // the original "- [x]" form still loads
+  assert.ok(compileAuthority(loadControlPlane(dir)).absoluteDenies.includes('production.storage.mutate'));
+});

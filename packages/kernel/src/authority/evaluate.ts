@@ -255,7 +255,9 @@ export function normalizeSegment(segment: string): string[] {
         // exactly like `bash -c`: the whole string is the command, not an opaque option value
         if (t === 'env' && (tok === '-S' || tok === '--split-string' || tok.startsWith('-S') || tok.startsWith('--split-string='))) {
           const value = tok === '-S' || tok === '--split-string' ? (tokens[idx + 1] ?? '') : tok.startsWith('--split-string=') ? tok.slice('--split-string='.length) : tok.slice(2);
-          return [...extra, ...splitShellSegments(value).flatMap(normalizeSegment)];
+          // the split value is env's OWN argv: leading -u/-C/-i/-0 options and VAR=val assignments precede the command,
+          // so re-parse it through the env wrapper again rather than treating its first token as the command head
+          return [...extra, ...splitShellSegments('env ' + value).flatMap(normalizeSegment)];
         }
         if (tok.startsWith('-')) {
           idx++;
@@ -591,9 +593,12 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
 /** Output redirection targets of a segment (`> f`, `>> f`, `2> f`, `&> f`), quotes removed; heredocs and fd dups excluded. */
 export function redirectionTargets(segment: string): string[] {
   const out: string[] = [];
+  // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
+  // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
+  const unglued = segment.replace(/([^\s\d&<>|=-])(>{1,2})/g, '$1 $2');
   const re = /(?:^|\s)(?:\d?>>?|&>>?|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(segment))) {
+  while ((m = re.exec(unglued))) {
     const target = m[1]!.replace(/^["']|["']$/g, '');
     if (target.startsWith('&') || target === '/dev/null' || target.startsWith('/dev/')) continue;
     out.push(target);
@@ -740,6 +745,10 @@ function insideRoots(absPath: string, ctx: EvaluationContext): boolean {
 }
 
 const TRUST_STORE_DIRS = ['trust', 'index', 'releases', 'runtimes'];
+/** true when a posix path IS one of the EGO_HOME trust-store directories or lies within it (the dir node itself counts). */
+function underTrustDir(posix: string, home: string): boolean {
+  return TRUST_STORE_DIRS.some((d) => posix === `${home}/${d}` || posix.startsWith(`${home}/${d}/`));
+}
 /** tools whose locked operations are searched for in argument position (see classifyCommand) */
 const LOCKED_HEADS = new Set([
   'git',
@@ -824,7 +833,7 @@ export function classifyPath(
   if (tool !== 'Read' && ctx.egoHome && 'harness.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
-    if (TRUST_STORE_DIRS.some((d) => posix.startsWith(`${home}/${d}/`))) {
+    if (underTrustDir(posix, home)) {
       return {
         capability: 'harness.trust.tamper',
         verdict: verdictFor(table, ctx, 'harness.trust.tamper'),
@@ -1356,7 +1365,20 @@ const CREDENTIAL_DIRS = [
   '.config',
   '.docker',
 ];
-const DEST_FLAGS: Record<string, string> = { tar: '-C', unzip: '-d', bsdtar: '-C', gtar: '-C' };
+/** The archive file an archiver writes/reads: `-f X`, `--file=X`, a combined short cluster ending in `f` (`-cf X`,
+ *  `-czf X`, `-wf X`), or a glued value (`-fX`). Returns the archive path, or null (stdin/stdout `-` handled by caller). */
+function archiveFileOperand(tokens: string[]): string | null {
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t === '-f' || t === '--file' || t === '-F' || t === '-O') return tokens[i + 1] ?? null;
+    const eq = /^--file=(.*)$/.exec(t);
+    if (eq) return eq[1]!;
+    if (/^-[A-Za-z]*[fF]$/.test(t)) return tokens[i + 1] ?? null; // -cf / -czf / -wf: archive is the next operand
+    const glued = /^-[A-Za-z]*[fF]([^-].*)$/.exec(t); // -fARCHIVE
+    if (glued) return glued[1]!;
+  }
+  return null;
+}
 
 function isPathLike(tok: string, cwdIsSensitive = false): boolean {
   if (cwdIsSensitive && /^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/.test(tok)) return true; // bare names resolve inside HOME
@@ -1463,17 +1485,9 @@ function classifyShellPaths(
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
   if (write) {
-    const flag = DEST_FLAGS[head];
-    if (flag) {
-      const i = tokens.indexOf(flag);
-      if (i > 0 && tokens[i + 1]) dest = tokens[i + 1]!;
-      else if (head === 'unzip' && !tokens.includes('-d')) dest = '.';
-      else if (!tokens.some((t) => /^-[a-zA-Z]*x/.test(t) || t === '--extract')) dest = null;
-      else dest = '.';
-    } else if (head === 'dd') dest = tokens.find((t) => t.startsWith('of='))?.slice(3) ?? null;
-    else if (['cp', 'mv', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio', 'pax'].includes(head)) {
-      // ignore redirections (`< list`, `2> err`) and their targets, then take the destination operand even when it is
-      // a bare name (`cd .harness/generated && cp x policy.json`)
+    const bareOperands = (): string[] => {
+      // ignore redirections (`< list`, `2> err`) and their targets, then keep the bare operands even when a
+      // destination is a bare name (`cd .harness/generated && cp x policy.json`)
       const operands: string[] = [];
       for (let i = 1; i < tokens.length; i++) {
         const t = tokens[i]!;
@@ -1483,7 +1497,40 @@ function classifyShellPaths(
         }
         if (!t.startsWith('-')) operands.push(t);
       }
-      // cpio -p reads its file list from stdin and copies INTO its sole operand; cp/mv/pax write the last operand
+      return operands;
+    };
+    if (head === 'tar' || head === 'bsdtar' || head === 'gtar') {
+      const create = tokens.some((t) => t === '--create' || /^-[A-Za-z]*c/.test(t));
+      const extract = tokens.some(
+        (t) => t === '--extract' || t === '--get' || /^-[A-Za-z]*x/.test(t),
+      );
+      if (create) {
+        const arc = archiveFileOperand(tokens);
+        dest = arc && arc !== '-' ? arc : null; // creating the archive is a write to that path
+      } else if (extract) {
+        const i = tokens.indexOf('-C');
+        dest = i > 0 && tokens[i + 1] ? tokens[i + 1]! : '.'; // extracts into -C dir, else the working directory
+      } else dest = null; // list / compare: read-only
+    } else if (head === 'unzip') {
+      const i = tokens.indexOf('-d');
+      dest = i > 0 && tokens[i + 1] ? tokens[i + 1]! : '.';
+    } else if (head === 'dd') dest = tokens.find((t) => t.startsWith('of='))?.slice(3) ?? null;
+    else if (head === 'pax') {
+      const wmode = tokens.some((t) => t === '-w' || /^-[A-Za-z]*w/.test(t)); // -w, -rw, -wf all write
+      const arc = archiveFileOperand(tokens);
+      if (wmode && arc) dest = arc !== '-' ? arc : null; // `pax -w -f ARCHIVE`: writes the archive
+      else {
+        const operands = bareOperands();
+        // `pax -r -w SRC... DEST` copies into the last operand; `-r` alone (extract) has no path destination here
+        dest = wmode && operands.length ? operands[operands.length - 1]! : null;
+      }
+    } else if (head === 'mv' || head === 'rename') {
+      // mv/rename remove the source AND create the destination: every operand is a write (moving `.harness` away,
+      // renaming a protected file over another) — the source side is not merely a read
+      dest = 'ALL';
+    } else if (['cp', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio'].includes(head)) {
+      const operands = bareOperands();
+      // cpio -p reads its file list from stdin and copies INTO its sole operand; cp/rsync/... write the last operand
       dest = operands.length
         ? head === 'cpio'
           ? operands[0]!
@@ -1704,10 +1751,16 @@ export function classifyCommand(
   }));
   let cwd = ctx.cwd ?? process.cwd();
   for (const seg of splitShellSegments(command)) {
-    // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown)
-    const cd = /^(?:cd|pushd)\s+("[^"]*"|'[^']*'|\S+)\s*$/.exec(seg.trim());
-    if (cd) {
-      const target = expandHome(cd[1]!.replace(/^["']|["']$/g, ''));
+    // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
+    // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
+    const cdTrimmed = seg.trim();
+    const cdArgs = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed)
+      ? tokenize(cdTrimmed)
+          .slice(1)
+          .filter((a) => a !== '--' && !a.startsWith('-'))
+      : null;
+    if (cdArgs && cdArgs.length) {
+      const target = expandHome(cdArgs[cdArgs.length - 1]!);
       cwd =
         target === null || /[$`*?]/.test(target)
           ? '\0dynamic'
@@ -1772,7 +1825,7 @@ export function classifyCommand(
           if (!tok.includes('/') || /^-/.test(tok)) continue;
           const abs = canonicalPath(tok.replace(/^~(?=\/|$)/, homedir()));
           const home = canonicalPath(ctx.egoHome).split(sep).join('/');
-          if (TRUST_STORE_DIRS.some((d) => abs.split(sep).join('/').startsWith(`${home}/${d}/`))) {
+          if (underTrustDir(abs.split(sep).join('/'), home)) {
             hits.push({
               capability: 'harness.trust.tamper',
               verdict: verdictFor(table, ctx, 'harness.trust.tamper'),

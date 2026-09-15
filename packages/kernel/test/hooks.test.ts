@@ -715,3 +715,40 @@ test('retry hard stop: flooding the failure map with distinct steps never evicts
     'the identical capped step must not be un-capped by eviction',
   );
 });
+
+test('retry hard stop: a no-op appended after a separator or comment cannot mint a fresh retry key', () => {
+  const { root, rt } = project('STANDARD');
+  const strict: HookRuntime = {
+    ...rt,
+    pin: { ...rt.pin, profile: 'STRICT' },
+    env: { EGO_HOME: mkdtempSync(join(tmpdir(), 'ego-h-')), CLAUDE_PROJECT_DIR: root },
+  };
+  const fail = () =>
+    handleHook(
+      ev(root, 'PostToolUse', {
+        tool: { name: 'Bash', input: { command: 'npm test' }, response: { exit_code: 1 } },
+      }),
+      strict,
+    );
+  for (let i = 0; i < 4; i++) fail(); // cap `npm test`
+  // an appended no-op (comment after a separator, `&& :`, `|| true`, a brace group) is the same first command: stay capped
+  for (const v of [
+    'npm test;#1',
+    'npm test;#2',
+    'npm test ;# again',
+    'npm test&&:',
+    'npm test || true',
+    'npm test | cat',
+    '{ npm test; }',
+    '( npm test )',
+  ]) {
+    const r = handleHook(ev(root, 'PreToolUse', { tool: { name: 'Bash', input: { command: v } } }), strict);
+    assert.equal(r.action, 'deny', `variant "${v}" must stay capped`);
+  }
+  // a genuinely different first command still runs
+  assert.equal(
+    handleHook(ev(root, 'PreToolUse', { tool: { name: 'Bash', input: { command: 'npm run build' } } }), strict)
+      .action,
+    'allow',
+  );
+});
