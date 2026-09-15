@@ -190,7 +190,24 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     worktree via the git common dir, so governance runs (it previously fell through to "not governed").
   Each fix is pinned (`bypass.test.ts` round-6 residuals; `control-plane.test.ts` malformed-checkbox; `hooks.test.ts`
   retry-prepend + maintenance-spoof; `githooks.test.ts` linked-worktree). Suite: 140 tests.
-- **Round 7**: an independent re-verification of the round-6 fixes is running; recorded here when it completes.
+- **Round 7** (workflow `ego-phase1-review-round7`, adversarial refutation, with an explicit floor rule: an opaque
+  command reaching ASK is the designed human gate, not a bypass — report only reaches to ALLOW or a concrete missed
+  DENY spelling): **incomplete — the session usage limit interrupted 13 of 16 agents** (all four fresh surfaces, three
+  verify clusters, and every refuter). The three verify clusters that finished each reported one HIGH reach to ALLOW,
+  which the interrupted refuters could not vote on; all three were reproduced by hand and fixed and pinned:
+  - **Dash-less tar** (HIGH, `evaluate.ts`): traditional `tar xf`/`cf`/`czf` (function letters with no leading `-`) was
+    not recognised as create/extract, so `tar cf .harness/generated/x a` and `tar xf a -C .harness/generated` reached
+    ALLOW. The resolver now reads the dash-less mode operand and its archive (tokens[2]).
+  - **`mv` of the EGO_HOME parent** (HIGH, `evaluate.ts`): `mv <EGO_HOME> /tmp` relocates the whole trust tree without a
+    recursive flag and reached ALLOW; `mv`/`rename` are now treated as whole-tree ops in the trust-parent guard.
+  - **`git commit` bypass via a carrier** (HIGH, `evaluate.ts`): `env -S 'git commit -nm x'`, `--split-string=…` and
+    `bash|sh -c '…'` hid the hook-bypass flag in a quoted value; the quote-aware check now scans the carrier's inner
+    command too (`env -S 'git commit -m "fix -n"'` still correctly ALLOWs).
+  Pinned by `bypass.test.ts` round-7 residuals. This round is NOT a clean pass: the fresh surfaces (redaction,
+  budgets/cache, launcher/exec-contract, containment) and the remaining verify clusters were not run. Round 8 re-runs
+  them once the usage limit resets. Suite: 141 tests.
+- **Round 8**: pending — re-runs the round-7 surfaces that the usage limit cut short, plus re-verification of the
+  round-7 fixes; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -201,7 +218,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 ### Check lines
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
-  (140 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  (141 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
   phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
   - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
     pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
@@ -221,8 +238,9 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–6 done, every confirmed HIGH/MEDIUM fixed and pinned; round 7
-  (re-verification of the round-6 fixes plus a fresh pass) running. This line becomes PASSED only when a round ends
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–6 done and round 7 partial (usage limit cut it short); every
+  confirmed HIGH/MEDIUM fixed and pinned so far. Round 8 re-runs the interrupted round-7 surfaces. This line becomes
+  PASSED only when a COMPLETE round ends with no confirmed HIGH or MEDIUM finding. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

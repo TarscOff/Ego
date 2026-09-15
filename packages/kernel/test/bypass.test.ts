@@ -640,3 +640,35 @@ test('round-6 residuals: archivers, trust globs/parent, glued redirects, ANSI-C,
   assert.equal(bash('gh api graphql -f query="{viewer{login}}"', c).verdict, 'ALLOW');
   assert.equal(bash('git commit -am "message"', c).verdict, 'ALLOW');
 })
+
+test('round-7 residuals: dash-less tar, mv of the EGO_HOME parent, git commit bypass carried through env -S / -c', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  const ego = c.egoHome!;
+  // [R7-2] traditional dash-less tar syntax (tar xf / cf / czf) resolves the archive/extract destination
+  for (const cmd of [
+    'tar xf a.tar -C .harness/generated',
+    'tar cf .harness/generated/x.tar a',
+    'tar czf .harness/generated/x.tgz a',
+    'tar xzf a.tgz --directory=.harness/generated',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [R7-1] mv/rename relocate a whole tree without a recursive flag: moving EGO_HOME away is trust tamper
+  assert.equal(bash(`mv ${ego} /tmp/stolen`, c).decisive?.capability, 'harness.trust.tamper');
+  assert.equal(bash(`rename ${ego} /tmp/x`, c).decisive?.capability, 'harness.trust.tamper');
+  assert.equal(bash(`mv ${ego}/trust /tmp/x`, c).decisive?.capability, 'harness.trust.tamper');
+  // [R7-3] a git commit hook bypass carried in a quoted env -S / --split-string / bash -c value is still caught
+  for (const cmd of [
+    `env -S 'git commit -nm x'`,
+    `env --split-string='git commit -nm x'`,
+    `bash -c 'git commit -nm x'`,
+    `sh -c 'git commit --no-verify -m x'`,
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'git.hooks.bypass', cmd);
+  }
+  // controls: a -n inside the carried message is NOT a bypass; a dash-less tar to a scratch path is fine
+  assert.equal(bash(`env -S 'git commit -m "fix -n bug"'`, c).verdict, 'ALLOW');
+  assert.equal(bash('tar xf a.tar -C build', c).verdict, 'ALLOW');
+  assert.equal(bash('tar tf a.tar', c).verdict, 'ALLOW'); // list mode is read-only
+})

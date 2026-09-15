@@ -1589,12 +1589,17 @@ function classifyShellPaths(
       return operands;
     };
     if (head === 'tar' || head === 'bsdtar' || head === 'gtar') {
-      const create = tokens.some((t) => t === '--create' || /^-[A-Za-z]*c/.test(t));
-      const extract = tokens.some(
-        (t) => t === '--extract' || t === '--get' || /^-[A-Za-z]*x/.test(t),
-      );
+      // traditional tar also takes a DASH-LESS function-letter operand as its first argument: `tar xf a`, `tar cf a`,
+      // `tar czf a` — recognise it alongside the dashed `-cf`/`-xf` forms
+      const modeTok = tokens[1] && !tokens[1].startsWith('-') && /^[a-z]+$/i.test(tokens[1]) ? tokens[1] : '';
+      const create = tokens.some((t) => t === '--create' || /^-[A-Za-z]*c/.test(t)) || /c/.test(modeTok);
+      const extract =
+        tokens.some((t) => t === '--extract' || t === '--get' || /^-[A-Za-z]*x/.test(t)) ||
+        /x/.test(modeTok);
       if (create) {
-        const arc = archiveFileOperand(tokens);
+        // dash-less `cf`/`czf`: the archive is the operand right after the function-letter token (tokens[2])
+        const arc =
+          archiveFileOperand(tokens) ?? (modeTok && /f/.test(modeTok) ? (tokens[2] ?? null) : null);
         dest = arc && arc !== '-' ? arc : null; // creating the archive is a write to that path
       } else if (extract) {
         // the change-directory flag has several spellings: -C DIR, --directory DIR, --directory=DIR, --cd DIR
@@ -1745,7 +1750,10 @@ function classifyShellPaths(
         const litPosix = canonicalPath(isAbsolute(lit) ? lit : resolve(cwd, lit))
           .split(sep)
           .join('/');
-        if (reachesTrustStore(litPosix, egoPosix, rawGlob, recursive))
+        // mv/rename relocate a whole directory tree without a recursive flag, so moving EGO_HOME (or a trust dir) away
+        // is a whole-tree op even though `recursive` is false for them
+        const wholeTree = recursive || head === 'mv' || head === 'rename';
+        if (reachesTrustStore(litPosix, egoPosix, rawGlob, wholeTree))
           hits.push({
             capability: 'harness.trust.tamper',
             verdict: verdictFor(table, ctx, 'harness.trust.tamper'),
@@ -1859,6 +1867,36 @@ function classifyShellPaths(
   return hits;
 }
 
+/** Whether a command string is a `git commit` with a hook-bypass flag (--no-verify, or a short-flag cluster
+ *  containing `n`: -n/-nm/-nam/-vnm). Quote-aware: a `-n` inside the quoted -m/-F message is never a false positive. */
+function commitBypassFlag(cmdStr: string): boolean {
+  const m = tokenizeMarked(cmdStr);
+  const gi = m.findIndex((t) => !t.quoted && t.text.slice(t.text.lastIndexOf('/') + 1) === 'git');
+  if (gi < 0) return false;
+  const ci = m.findIndex((t, i) => i > gi && !t.quoted && t.text === 'commit');
+  if (ci < 0) return false;
+  for (let k = ci + 1; k < m.length; k++) {
+    const t = m[k]!;
+    if (t.quoted) continue; // the -m/-F message is a quoted token, never a flag
+    if (t.text === '--no-verify' || /^-[A-Za-z]*n[A-Za-z]*$/.test(t.text)) return true;
+  }
+  return false;
+}
+
+/** The command strings carried in a quoted `env -S`/`--split-string`/`-c` value, whose inner quoting is preserved so a
+ *  carried `git commit` can be scanned the same way as a top-level one. */
+function carrierCommandValues(seg: string): string[] {
+  const m = tokenizeMarked(seg);
+  const out: string[] = [];
+  for (let i = 0; i < m.length; i++) {
+    const t = m[i]!.text;
+    if ((t === '-c' || t === '-S' || t === '--split-string') && m[i + 1]) out.push(m[i + 1]!.text);
+    else if (t.startsWith('--split-string=')) out.push(t.slice('--split-string='.length));
+    else if (t.startsWith('-S') && t.length > 2 && !t.startsWith('--')) out.push(t.slice(2));
+  }
+  return out;
+}
+
 export function classifyCommand(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -1901,32 +1939,17 @@ export function classifyCommand(
       continue;
     }
     // `git commit` hook bypass: --no-verify, or a short-flag cluster containing `n` (`-n`, `-nm`, `-nam`, `-vn`).
-    // Scanned on quote-aware tokens so a `-n` inside the `-m` message (a quoted token) is never a false positive.
-    {
-      const marked = tokenizeMarked(seg);
-      const gi = marked.findIndex(
-        (t) => !t.quoted && t.text.slice(t.text.lastIndexOf('/') + 1) === 'git',
-      );
-      if (gi >= 0) {
-        const ci = marked.findIndex((t, i) => i > gi && !t.quoted && t.text === 'commit');
-        if (ci >= 0) {
-          for (let k = ci + 1; k < marked.length; k++) {
-            const t = marked[k]!;
-            if (t.quoted) continue; // the -m/-F message is a quoted token, never a flag
-            if (t.text === '--no-verify' || /^-[A-Za-z]*n[A-Za-z]*$/.test(t.text)) {
-              hits.push({
-                capability: 'git.hooks.bypass',
-                verdict: verdictFor(table, ctx, 'git.hooks.bypass'),
-                via: `git commit hook-bypass flag ${t.text}`,
-                segment: seg,
-                absolute: isAbsoluteCap(table, 'git.hooks.bypass'),
-              });
-              break;
-            }
-          }
-        }
-      }
-    }
+    // Scanned on quote-aware tokens so a `-n` inside the `-m` message (a quoted token) is never a false positive. The
+    // command carried in a quoted `env -S`/`--split-string`/`bash|sh -c` value is scanned too (its inner quoting is
+    // preserved), so `env -S 'git commit -nm x'` is caught while `env -S 'git commit -m "fix -n"'` is not.
+    if ([seg, ...carrierCommandValues(seg)].some((s) => commitBypassFlag(s)))
+      hits.push({
+        capability: 'git.hooks.bypass',
+        verdict: verdictFor(table, ctx, 'git.hooks.bypass'),
+        via: 'git commit hook-bypass flag',
+        segment: seg,
+        absolute: isAbsoluteCap(table, 'git.hooks.bypass'),
+      });
     const effectiveCwd = cwd === '\0dynamic' ? (ctx.cwd ?? process.cwd()) : cwd;
     for (const norm of normalizeSegment(seg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { depth: 0, seen: new Set() });
