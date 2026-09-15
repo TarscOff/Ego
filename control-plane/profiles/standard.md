@@ -12,6 +12,17 @@ forge_unreachable_at_done: CONTINUE_WITH_DISCLOSURE
 shell_uncertain_mutation_with_foreign_live_session: DETECT_AFTER
 owner_weakening_plain_policy: AUTO_WITH_INFORM
 model_flagged_conflict_on_control: INFORM
+budgets:
+  max_duration_minutes: 480
+  max_iterations: 100
+  max_tool_calls: 3000
+  max_retries_per_step: 3
+  max_delegation_depth: 3
+  max_concurrent_subagents: 5
+  max_network_operations: 500
+  max_tokens: null
+  max_cost_usd: null
+  on_exceed: ESCALATE
 narrow: []
 ---
 # STANDARD
@@ -23,3 +34,9 @@ a stale forge snapshot.
 
 `narrow` lists capability identifiers this profile moves toward DENY relative to the core table; STANDARD narrows
 nothing.
+
+Execution budgets (`budgets`) bound one task: wall-clock duration, agent iterations, tool calls, retries of one step,
+delegation depth, concurrent subagents and network operations. Token and cost limits apply only where the host reports
+them (`null` = not observable). Exceeding a budget stops the task with `on_exceed`: BLOCK refuses further governed tool
+calls until a human extends the budget (`harness.budget.extend`, ASK); ESCALATE raises a decision and continues only
+with an answer. Repeated failure of one step never loops: the retry limit is a hard stop.

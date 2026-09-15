@@ -12,6 +12,17 @@ forge_unreachable_at_done: BLOCK_DONE
 shell_uncertain_mutation_with_foreign_live_session: REQUIRE_ISOLATION
 owner_weakening_plain_policy: DECISION
 model_flagged_conflict_on_control: DECISION_WITH_KEEP
+budgets:
+  max_duration_minutes: 180
+  max_iterations: 40
+  max_tool_calls: 1000
+  max_retries_per_step: 2
+  max_delegation_depth: 1
+  max_concurrent_subagents: 2
+  max_network_operations: 50
+  max_tokens: null
+  max_cost_usd: null
+  on_exceed: BLOCK
 narrow:
   - capability: git.local.commit
     verdict: ASK
@@ -32,3 +43,9 @@ prompt text: the context budget is the same as STRICT.
 
 `doctor` reports every requirement of this profile as SATISFIED or NOT SATISFIED; the profile never claims a
 guarantee its host cannot verify.
+
+Execution budgets (`budgets`) bound one task: wall-clock duration, agent iterations, tool calls, retries of one step,
+delegation depth, concurrent subagents and network operations. Token and cost limits apply only where the host reports
+them (`null` = not observable). Exceeding a budget stops the task with `on_exceed`: BLOCK refuses further governed tool
+calls until a human extends the budget (`harness.budget.extend`, ASK); ESCALATE raises a decision and continues only
+with an answer. Repeated failure of one step never loops: the retry limit is a hard stop.

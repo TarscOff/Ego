@@ -1,7 +1,7 @@
 {
   "name": "@tarscoff/ego",
   "version": "0.1.0",
-  "description": "EGO — organization-grade, model-agnostic Agentic Engineering Control Plane kernel",
+  "description": "EGO \u2014 organization-grade, model-agnostic Agentic Engineering Control Plane kernel",
   "private": false,
   "license": "UNLICENSED",
   "engines": {
@@ -31,10 +31,10 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint packages scripts",
+    "lint": "eslint packages tests",
     "format": "prettier --check .",
-    "test": "node --test --test-reporter=spec packages/*/test/**/*.test.ts tests/**/*.test.ts",
-    "test:unit": "node --test packages/*/test/**/*.test.ts",
+    "test": "node --test --test-reporter=spec 'packages/*/test/**/*.test.ts' 'tests/**/*.test.ts'",
+    "test:unit": "node --test 'packages/*/test/**/*.test.ts'",
     "check": "npm run typecheck && npm run lint && npm run test",
     "prepublishOnly": "node scripts/guard-publish.mjs"
   },

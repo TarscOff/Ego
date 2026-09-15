@@ -1,4 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, statSync, readdirSync, openSync, closeSync, fsyncSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  existsSync,
+  statSync,
+  readdirSync,
+  openSync,
+  closeSync,
+  fsyncSync,
+  rmSync,
+} from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -101,7 +113,9 @@ export function walkFiles(root: string, opts: WalkOptions = {}): string[] {
   const out: string[] = [];
   const visit = (dir: string, depth: number) => {
     if (opts.maxDepth !== undefined && depth > opts.maxDepth) return;
-    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+    );
     for (const ent of entries) {
       const full = join(dir, ent.name);
       if (ent.isDirectory()) {

@@ -73,13 +73,23 @@ export function parseMarkdown(file: string, source: string): MarkdownDoc {
       }
       frontmatter = parsed;
     } catch (e) {
-      if (e instanceof YamlSyntaxError) throw new ControlPlaneSyntaxError(file, `frontmatter: ${e.message}`, e.line + 1);
+      if (e instanceof YamlSyntaxError)
+        throw new ControlPlaneSyntaxError(file, `frontmatter: ${e.message}`, e.line + 1);
       throw e;
     }
     i = end + 1;
   }
   const body = lines.slice(i).join('\n');
-  const root: Section = { level: 0, title: '', key: '', line: i + 1, items: [], bullets: [], paragraphs: [], children: [] };
+  const root: Section = {
+    level: 0,
+    title: '',
+    key: '',
+    line: i + 1,
+    items: [],
+    bullets: [],
+    paragraphs: [],
+    children: [],
+  };
   const stack: Section[] = [root];
   const all: Section[] = [];
   let title: string | null = null;
@@ -106,7 +116,16 @@ export function parseMarkdown(file: string, source: string): MarkdownDoc {
       const level = h[1]!.length;
       const t = h[2]!.trim();
       if (level === 1 && title === null) title = t;
-      const sec: Section = { level, title: t, key: sectionKey(t), line: no, items: [], bullets: [], paragraphs: [], children: [] };
+      const sec: Section = {
+        level,
+        title: t,
+        key: sectionKey(t),
+        line: no,
+        items: [],
+        bullets: [],
+        paragraphs: [],
+        children: [],
+      };
       while (stack.length > 1 && stack[stack.length - 1]!.level >= level) stack.pop();
       stack[stack.length - 1]!.children.push(sec);
       stack.push(sec);
@@ -119,7 +138,12 @@ export function parseMarkdown(file: string, source: string): MarkdownDoc {
       const text = c[2]!.trim();
       const idm = CODE_ID_RE.exec(text);
       const id = idm ? idm[1]!.trim() : null;
-      const rest = idm ? text.replace(idm[0], '').replace(/^\s*[—–-]\s*/, '').trim() : text;
+      const rest = idm
+        ? text
+            .replace(idm[0], '')
+            .replace(/^\s*[—–-]\s*/, '')
+            .trim()
+        : text;
       stack[stack.length - 1]!.items.push({ checked: c[1] !== ' ', id, text: rest, line: no });
       continue;
     }
@@ -155,7 +179,8 @@ export function requireString(doc: MarkdownDoc, key: string): string {
 export function optionalString(doc: MarkdownDoc, key: string): string | undefined {
   const v = doc.frontmatter[key];
   if (v === undefined || v === null) return undefined;
-  if (typeof v !== 'string') throw new ControlPlaneSyntaxError(doc.file, `frontmatter field "${key}" must be a string`, 1);
+  if (typeof v !== 'string')
+    throw new ControlPlaneSyntaxError(doc.file, `frontmatter field "${key}" must be a string`, 1);
   return v;
 }
 
@@ -171,13 +196,15 @@ export function optionalStringList(doc: MarkdownDoc, key: string): string[] {
 export function optionalBoolean(doc: MarkdownDoc, key: string, def = false): boolean {
   const v = doc.frontmatter[key];
   if (v === undefined || v === null) return def;
-  if (typeof v !== 'boolean') throw new ControlPlaneSyntaxError(doc.file, `frontmatter field "${key}" must be a boolean`, 1);
+  if (typeof v !== 'boolean')
+    throw new ControlPlaneSyntaxError(doc.file, `frontmatter field "${key}" must be a boolean`, 1);
   return v;
 }
 
 export function optionalNumber(doc: MarkdownDoc, key: string): number | undefined {
   const v = doc.frontmatter[key];
   if (v === undefined || v === null) return undefined;
-  if (typeof v !== 'number') throw new ControlPlaneSyntaxError(doc.file, `frontmatter field "${key}" must be a number`, 1);
+  if (typeof v !== 'number')
+    throw new ControlPlaneSyntaxError(doc.file, `frontmatter field "${key}" must be a number`, 1);
   return v;
 }

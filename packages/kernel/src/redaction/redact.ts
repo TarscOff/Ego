@@ -38,7 +38,11 @@ function effectiveSeverity(d: SecretDetector, overlay?: Record<string, Severity>
   return requested;
 }
 
-export function redact(input: string, detectors: SecretDetector[], opts: RedactOptions = {}): RedactionResult {
+export function redact(
+  input: string,
+  detectors: SecretDetector[],
+  opts: RedactOptions = {},
+): RedactionResult {
   const findings = new Map<string, RedactionFinding>();
   const note = (id: string, family: string, severity: Severity, n = 1) => {
     const f = findings.get(id);
@@ -52,7 +56,10 @@ export function redact(input: string, detectors: SecretDetector[], opts: RedactO
   for (const d of list) {
     if (d.onlyForFiles && !opts.isFile) continue;
     const severity = effectiveSeverity(d, opts.overlaySeverities);
-    const re = new RegExp(d.pattern.source, d.pattern.flags.includes('g') ? d.pattern.flags : d.pattern.flags + 'g');
+    const re = new RegExp(
+      d.pattern.source,
+      d.pattern.flags.includes('g') ? d.pattern.flags : d.pattern.flags + 'g',
+    );
     if (d.wholeDocument) {
       if (re.test(text)) {
         note(d.id, d.family, severity);

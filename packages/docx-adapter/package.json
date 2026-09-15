@@ -1,1 +1,7 @@
-{ "name": "@tarscoff/ego-docx-adapter", "version": "0.1.0", "private": true, "type": "module", "description": "EGO docx-adapter package (internal; built into the single distribution)" }
+{
+  "name": "@tarscoff/ego-docx-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "EGO docx-adapter package (internal; built into the single distribution)"
+}

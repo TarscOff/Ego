@@ -34,6 +34,8 @@ transmission. Network endpoints are classified; the class decides.
 ## Denied
 
 - [x] `mcp.unknown` — any server or tool not listed in the trust file.
+- [x] `mcp.local.privileged` — privileged or destructive tools of a local server (host mutation, credential access, deletion of non-disposable data).
+- [x] `mcp.remote.privileged` — privileged or destructive tools of a remote server.
 - [x] `network.public-write` — public write endpoints.
 - [x] `network.production` — production endpoints.
 - [x] `network.unknown` — endpoints that match no configured class.

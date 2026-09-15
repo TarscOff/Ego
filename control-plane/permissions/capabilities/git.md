@@ -6,8 +6,9 @@ title: Git local and remote
 ---
 # Git local and remote
 
-Local history is the agent's working material. Remote mutation is never the agent's decision; the absolute denies in
-`../absolute-denies.md` cover push, force push, remote tags and remote branch deletion.
+Local history is the agent's working material. Remote mutation is never the agent's decision; the organization-locked
+denies in `organization-locked.md` cover push, force push, remote tags and remote branch deletion (DENY unless the
+organization policy layer says otherwise, Q98).
 
 ## Allowed
 
@@ -38,3 +39,4 @@ Local history is the agent's working material. Remote mutation is never the agen
 ## Denied
 
 - [x] `git.hooks.bypass` — `--no-verify`, `-n` on commit, `core.hooksPath` changes, plumbing that skips hooks.
+- [x] `git.alias.inline` — an inline alias (`git -c alias.x=…`, `--config-env=alias.x=…`) redefines what a git verb runs; the aliased verb is judged as what it expands to, and a shell or opaque alias is refused.

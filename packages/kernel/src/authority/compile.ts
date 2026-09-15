@@ -1,13 +1,24 @@
 // Compiles the authored control plane plus overlays into the compiled authority table: the single generated object
 // that hooks evaluate, `harness capabilities` renders, `explain capability` justifies and CI diffs for
 // `authority_changes` (decision Q84). Deterministic and reproducible: no timestamps, sorted keys.
+import { basename } from 'node:path';
 import { sha256Canonical } from '../util/hash.ts';
-import { ControlPlaneValidationError, VERDICT_RANK, type CapabilityDoc, type ControlPlane, type Verdict } from '../control-plane/types.ts';
+import {
+  ControlPlaneValidationError,
+  VERDICT_RANK,
+  type CapabilityDoc,
+  type CapabilityLock,
+  type ControlPlane,
+  type ExecutionBudgets,
+  type Verdict,
+} from '../control-plane/types.ts';
 
 export interface CompiledCapability {
   family: string;
   description: string;
   absolute: boolean;
+  /** lock tier (Q98): absolute, organization (widenable only by the organization layer) or none */
+  lock: CapabilityLock;
   /** verdict from the core layer before any narrowing */
   core: Verdict;
 }
@@ -34,12 +45,24 @@ export interface CompiledAuthorityTable {
   sourceHashes: Record<string, string>;
   capabilities: Record<string, CompiledCapability>;
   absoluteDenies: string[];
+  /** organization-locked denies: DENY at the core, widenable only by the organization layer (Q98) */
+  organizationLocked: string[];
   /** effective verdict after core → organization → overlay, before profile and mode */
   effective: Record<string, Verdict>;
   /** provenance per capability: which layer set the effective verdict */
   provenance: Record<string, LayerTrace[]>;
   /** per profile × mode → capability → verdict */
-  profiles: Record<string, { budgetTokens: number; ceilingTokens: number; requiresSignedReleaseTrust: boolean; requiresManagedTier: boolean; modes: Record<string, Record<string, Verdict>> }>;
+  profiles: Record<
+    string,
+    {
+      budgetTokens: number;
+      ceilingTokens: number;
+      requiresSignedReleaseTrust: boolean;
+      requiresManagedTier: boolean;
+      budgets: ExecutionBudgets;
+      modes: Record<string, Record<string, Verdict>>;
+    }
+  >;
   defaultMode: string;
   matchers: CompiledMatcher[];
   grants: Array<{ capability: string; phrases: string[] }>;
@@ -47,7 +70,7 @@ export interface CompiledAuthorityTable {
   grantNegationWindowTokens: number;
   /** path patterns whose read or write is DENY at the core layer (credential stores, hook config, generated) */
   protectedPaths: Array<{ path: string; tool: string; capability: string }>;
-  /** capabilities matched by Bash matchers that are absolute denies (pre-denied command classes) */
+  /** capabilities matched by Bash matchers that are absolute or organization-locked and effectively DENY (pre-denied command classes) */
   preDeniedCommandClasses: string[];
   /** command regex sources for read-only commands (STRICT shell allowlist base) */
   readOnlyCommandPatterns: string[];
@@ -59,6 +82,8 @@ export interface CompileOptions {
   organization?: CapabilityDoc | null;
   overlay?: CapabilityDoc | null;
   overlayMatchers?: CompiledMatcher[];
+  /** project root used to relativize layer file paths so the table hash never depends on the checkout location */
+  projectRoot?: string;
 }
 
 export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): CompiledAuthorityTable {
@@ -67,22 +92,42 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
   const effective: Record<string, Verdict> = {};
   const provenance: Record<string, LayerTrace[]> = {};
   const absoluteDenies: string[] = [];
+  const organizationLocked: string[] = [];
 
   for (const c of cp.absoluteDenies.capabilities) {
-    capabilities[c.id] = { family: c.family, description: c.description, absolute: true, core: 'DENY' };
+    capabilities[c.id] = {
+      family: c.family,
+      description: c.description,
+      absolute: true,
+      lock: 'absolute',
+      core: 'DENY',
+    };
     effective[c.id] = 'DENY';
     provenance[c.id] = [{ layer: 'absolute', file: rel(cp.root, c.file), verdict: 'DENY' }];
     absoluteDenies.push(c.id);
   }
   for (const doc of cp.capabilityDocs) {
     for (const c of doc.capabilities) {
-      capabilities[c.id] = { family: c.family, description: c.description, absolute: false, core: c.verdict };
+      capabilities[c.id] = {
+        family: c.family,
+        description: c.description,
+        absolute: false,
+        lock: c.lock,
+        core: c.verdict,
+      };
       effective[c.id] = c.verdict;
-      provenance[c.id] = [{ layer: 'core', file: rel(cp.root, c.file), verdict: c.verdict }];
+      provenance[c.id] = [
+        {
+          layer: c.lock === 'organization' ? 'organization-locked' : 'core',
+          file: rel(cp.root, c.file),
+          verdict: c.verdict,
+        },
+      ];
+      if (c.lock === 'organization') organizationLocked.push(c.id);
     }
   }
 
-  const applyLayer = (doc: CapabilityDoc | null | undefined, layerName: string) => {
+  const applyLayer = (doc: CapabilityDoc | null | undefined, layerName: 'organization' | 'overlay') => {
     if (!doc) return;
     for (const c of doc.capabilities) {
       if (!(c.id in capabilities)) {
@@ -94,12 +139,20 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
         continue;
       }
       const current = effective[c.id]!;
-      if (VERDICT_RANK[c.verdict] < VERDICT_RANK[current]) {
-        problems.push(`${c.file}:${c.line}: ${layerName} layer attempts to widen "${c.id}" from ${current} to ${c.verdict}; lower layers may only narrow`);
+      const widening = VERDICT_RANK[c.verdict] < VERDICT_RANK[current];
+      // Q98: only the organization layer may widen an organization-locked deny; nothing else may widen anything.
+      if (widening && !(layerName === 'organization' && capabilities[c.id]!.lock === 'organization')) {
+        problems.push(
+          `${c.file}:${c.line}: ${layerName} layer attempts to widen "${c.id}" from ${current} to ${c.verdict}; lower layers may only narrow`,
+        );
         continue;
       }
       effective[c.id] = c.verdict;
-      provenance[c.id]!.push({ layer: layerName, file: c.file, verdict: c.verdict });
+      provenance[c.id]!.push({
+        layer: widening ? 'organization (widened organization-locked deny)' : layerName,
+        file: opts.projectRoot ? rel(opts.projectRoot, c.file) : basename(c.file),
+        verdict: c.verdict,
+      });
     }
   };
   applyLayer(opts.organization, 'organization');
@@ -136,6 +189,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       ceilingTokens: p.organizationCeilingTokens,
       requiresSignedReleaseTrust: p.requiresSignedReleaseTrust,
       requiresManagedTier: p.requiresManagedTier,
+      budgets: { ...p.budgets },
       modes,
     };
   }
@@ -154,19 +208,38 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       continue;
     }
     if (v === 'ALLOW') {
-      problems.push(`overlay matcher may not map "${om.command ?? om.path ?? om.url}" to ALLOW capability "${om.capability}"; overlay matchers only narrow`);
+      problems.push(
+        `overlay matcher may not map "${om.command ?? om.path ?? om.url}" to ALLOW capability "${om.capability}"; overlay matchers only narrow`,
+      );
       continue;
     }
     matchers.push({ ...om, layer: 'overlay' });
   }
 
   const protectedPaths = matchers
-    .filter((m) => m.path && (m.tool === 'Read' || m.tool === 'Write' || m.tool === 'Edit') && effective[m.capability] === 'DENY')
+    .filter(
+      (m) =>
+        m.path &&
+        (m.tool === 'Read' || m.tool === 'Write' || m.tool === 'Edit') &&
+        effective[m.capability] === 'DENY',
+    )
     .map((m) => ({ path: m.path!, tool: m.tool, capability: m.capability }));
-  const preDeniedCommandClasses = [...new Set(matchers.filter((m) => m.command && capabilities[m.capability]?.absolute).map((m) => m.capability))].sort();
-  const readOnlyCommandPatterns = matchers.filter((m) => m.command && m.capability === 'command.read-only').map((m) => m.command!);
+  const preDeniedCommandClasses = [
+    ...new Set(
+      matchers
+        .filter(
+          (m) =>
+            m.command && capabilities[m.capability]?.lock !== 'none' && effective[m.capability] === 'DENY',
+        )
+        .map((m) => m.capability),
+    ),
+  ].sort();
+  const readOnlyCommandPatterns = matchers
+    .filter((m) => m.command && m.capability === 'command.read-only')
+    .map((m) => m.command!);
   const sanitizerLockedMinimums: Record<string, 'block' | 'warn'> = {};
-  for (const s of cp.secrets) for (const d of s.detectors) if (d.locked) sanitizerLockedMinimums[d.id] = d.severity;
+  for (const s of cp.secrets)
+    for (const d of s.detectors) if (d.locked) sanitizerLockedMinimums[d.id] = d.severity;
 
   if (problems.length) throw new ControlPlaneValidationError(problems);
 
@@ -175,6 +248,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     sourceHashes: sortRecord(cp.sourceHashes),
     capabilities: sortRecord(capabilities),
     absoluteDenies: [...absoluteDenies].sort(),
+    organizationLocked: [...organizationLocked].sort(),
     effective: sortRecord(effective),
     provenance: sortRecord(provenance),
     profiles: sortRecord(profiles),
@@ -204,40 +278,165 @@ function rel(root: string, file: string): string {
 /** Diff two compiled tables for `authority_changes` (Q84): effective verdict changes, added and removed IDs. */
 export interface AuthorityChange {
   capability: string;
-  kind: 'added' | 'removed' | 'changed' | 'matcher-repartitioned';
+  kind:
+    | 'added'
+    | 'removed'
+    | 'changed'
+    | 'matcher-repartitioned'
+    | 'matcher-removed'
+    | 'matcher-added'
+    | 'lock-changed'
+    | 'budget-changed'
+    | 'sanitizer-weakened';
+  /** profile/mode cell where a verdict change was observed (first one found); absent for table-wide changes */
+  cell?: string;
   from?: Verdict;
   to?: Verdict;
+  fromLock?: CapabilityLock;
+  toLock?: CapabilityLock;
+  detail?: string;
 }
 
-export function diffAuthorityTables(prev: CompiledAuthorityTable, next: CompiledAuthorityTable, profile = 'STRICT', mode?: string): AuthorityChange[] {
-  const m = mode ?? next.defaultMode;
-  const a = prev.profiles[profile]?.modes[m] ?? prev.effective;
-  const b = next.profiles[profile]?.modes[m] ?? next.effective;
+function matcherKey(x: CompiledMatcher): string {
+  return `${x.tool}|${x.command ?? ''}|${x.path ?? ''}|${x.url ?? ''}`;
+}
+
+/**
+ * Diff two compiled tables for `authority_changes` (Q84) across EVERY profile × mode cell: a verdict change in any
+ * cell counts, matcher removals and re-partitions count, lock-tier moves count, budget changes are reported separately.
+ */
+export function diffAuthorityTables(
+  prev: CompiledAuthorityTable,
+  next: CompiledAuthorityTable,
+): AuthorityChange[] {
   const out: AuthorityChange[] = [];
-  for (const id of Object.keys(b).sort()) {
-    if (!(id in a)) out.push({ capability: id, kind: 'added', to: b[id]! });
-    else if (a[id] !== b[id]) out.push({ capability: id, kind: 'changed', from: a[id]!, to: b[id]! });
+  const seen = new Set<string>();
+  const push = (c: AuthorityChange) => {
+    const k = `${c.kind}|${c.capability}|${c.from ?? ''}|${c.to ?? ''}|${c.detail ?? ''}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(c);
+  };
+  const ids = new Set([...Object.keys(prev.effective), ...Object.keys(next.effective)]);
+  for (const id of [...ids].sort()) {
+    if (!(id in prev.effective)) push({ capability: id, kind: 'added', to: next.effective[id]! });
+    else if (!(id in next.effective)) push({ capability: id, kind: 'removed', from: prev.effective[id]! });
   }
-  for (const id of Object.keys(a).sort()) if (!(id in b)) out.push({ capability: id, kind: 'removed', from: a[id]! });
-  const prevMatchers = new Set(prev.matchers.map((x) => `${x.tool}|${x.command ?? ''}|${x.path ?? ''}|${x.url ?? ''}`));
-  for (const x of next.matchers) {
-    const key = `${x.tool}|${x.command ?? ''}|${x.path ?? ''}|${x.url ?? ''}`;
-    const prevForCap = prev.matchers.find((y) => y.capability === x.capability && `${y.tool}|${y.command ?? ''}|${y.path ?? ''}|${y.url ?? ''}` === key);
-    if (!prevMatchers.has(key) && !prevForCap && a[x.capability] !== undefined) {
-      out.push({ capability: x.capability, kind: 'matcher-repartitioned' });
+  const cells = new Set<string>();
+  for (const t of [prev, next])
+    for (const p of Object.keys(t.profiles))
+      for (const m of Object.keys(t.profiles[p]!.modes)) cells.add(`${p}/${m}`);
+  for (const cell of [...cells].sort()) {
+    const [p, m] = cell.split('/') as [string, string];
+    const a = prev.profiles[p]?.modes[m];
+    const b = next.profiles[p]?.modes[m];
+    if (!a || !b) {
+      push({
+        capability: '*',
+        kind: a ? 'removed' : 'added',
+        cell,
+        detail: `profile/mode cell ${cell} ${a ? 'removed' : 'added'}`,
+      });
+      continue;
     }
+    for (const id of [...ids].sort()) {
+      if (id in a && id in b && a[id] !== b[id])
+        push({ capability: id, kind: 'changed', cell, from: a[id]!, to: b[id]! });
+    }
+  }
+  for (const id of [...ids].sort()) {
+    const fromLock = prev.capabilities[id]?.lock;
+    const toLock = next.capabilities[id]?.lock;
+    if (fromLock && toLock && fromLock !== toLock)
+      push({ capability: id, kind: 'lock-changed', fromLock, toLock });
+  }
+  const prevByKey = new Map(prev.matchers.map((x) => [matcherKey(x), x] as const));
+  const nextByKey = new Map(next.matchers.map((x) => [matcherKey(x), x] as const));
+  next.matchers.forEach((x, i) => {
+    const k = matcherKey(x);
+    const y = prevByKey.get(k);
+    if (!y) {
+      // a new matcher placed before an existing matcher of the same tool with a different verdict re-partitions the
+      // operations that existing matcher used to classify (Q84: MAJOR); appended after every peer it only narrows what
+      // was unknown (MINOR when its capability is not ALLOW)
+      const mine = next.effective[x.capability] ?? 'ASK';
+      const shadowed = next.matchers
+        .slice(i + 1)
+        .some(
+          (z) =>
+            prevByKey.has(matcherKey(z)) &&
+            (z.tool === x.tool || z.tool === 'any' || x.tool === 'any') &&
+            (next.effective[z.capability] ?? 'ASK') !== mine,
+        );
+      push({
+        capability: x.capability,
+        kind: shadowed ? 'matcher-repartitioned' : 'matcher-added',
+        detail: shadowed ? `${k}: inserted before existing matchers of a different verdict` : k,
+      });
+    } else if (y.capability !== x.capability)
+      push({
+        capability: x.capability,
+        kind: 'matcher-repartitioned',
+        detail: `${k}: ${y.capability} -> ${x.capability}`,
+      });
+  });
+  // locked redaction minimums are part of the contract: a removed or lowered minimum is a MAJOR change
+  for (const [id, sev] of Object.entries(prev.sanitizerLockedMinimums)) {
+    const now = next.sanitizerLockedMinimums[id];
+    if (!now) push({ capability: '*', kind: 'sanitizer-weakened', detail: `locked detector ${id} removed` });
+    else if (sev === 'block' && now === 'warn')
+      push({
+        capability: '*',
+        kind: 'sanitizer-weakened',
+        detail: `locked detector ${id} lowered from block to warn`,
+      });
+  }
+  for (const [k, y] of prevByKey)
+    if (!nextByKey.has(k)) push({ capability: y.capability, kind: 'matcher-removed', detail: k });
+  for (const p of Object.keys(next.profiles).sort()) {
+    const a = prev.profiles[p]?.budgets;
+    const b = next.profiles[p]!.budgets;
+    if (!a) continue;
+    for (const k of Object.keys(b) as Array<keyof ExecutionBudgets>)
+      if (a[k] !== b[k])
+        push({
+          capability: '*',
+          kind: 'budget-changed',
+          detail: `${p}.${k}: ${String(a[k])} -> ${String(b[k])}`,
+        });
   }
   return out;
 }
 
-/** SemVer classification of a set of authority changes (Q84). */
-export function classifyAuthorityChanges(changes: AuthorityChange[], next: CompiledAuthorityTable): 'none' | 'minor' | 'major' {
+/**
+ * SemVer classification of a set of authority changes (Q84): any effective verdict change, removal, re-partition,
+ * matcher removal (an operation loses its classification), lock move, or a new ALLOW is MAJOR; a new ASK/DENY id, a
+ * new matcher that narrows, or a budget change is MINOR.
+ */
+export function classifyAuthorityChanges(
+  changes: AuthorityChange[],
+  next: CompiledAuthorityTable,
+): 'none' | 'minor' | 'major' {
   if (changes.length === 0) return 'none';
   let level: 'minor' | 'major' = 'minor';
   for (const c of changes) {
-    if (c.kind === 'changed' || c.kind === 'removed' || c.kind === 'matcher-repartitioned') level = 'major';
+    if (
+      c.kind === 'changed' ||
+      c.kind === 'removed' ||
+      c.kind === 'matcher-repartitioned' ||
+      c.kind === 'matcher-removed' ||
+      c.kind === 'lock-changed' ||
+      c.kind === 'sanitizer-weakened'
+    )
+      level = 'major';
     if (c.kind === 'added' && c.to === 'ALLOW') level = 'major';
-    if (c.kind === 'added' && next.absoluteDenies.includes(c.capability)) level = 'major';
+    if (
+      c.kind === 'added' &&
+      c.capability !== '*' &&
+      (next.absoluteDenies.includes(c.capability) || next.organizationLocked.includes(c.capability))
+    )
+      level = 'major';
+    if (c.kind === 'matcher-added' && next.effective[c.capability] === 'ALLOW') level = 'major';
   }
   return level;
 }

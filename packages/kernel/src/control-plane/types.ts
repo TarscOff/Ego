@@ -6,6 +6,12 @@ export const VERDICT_RANK: Record<Verdict, number> = { ALLOW: 0, ASK: 1, DENY: 2
 
 export type LayerName = 'core' | 'organization' | 'profile' | 'overlay';
 
+/**
+ * Lock tier of a capability (Q98). `absolute`: never widenable by any layer. `organization`: DENY at the core and
+ * widenable only by the organization policy layer, never by an overlay, grant, mode, skill or model. `none`: ordinary.
+ */
+export type CapabilityLock = 'absolute' | 'organization' | 'none';
+
 export interface CapabilityDecl {
   id: string;
   verdict: Verdict;
@@ -14,6 +20,7 @@ export interface CapabilityDecl {
   file: string;
   line: number;
   absolute: boolean;
+  lock: CapabilityLock;
 }
 
 export interface CapabilityDoc {
@@ -21,6 +28,7 @@ export interface CapabilityDoc {
   family: string;
   title: string;
   absolute: boolean;
+  lock: CapabilityLock;
   layer: LayerName;
   file: string;
   capabilities: CapabilityDecl[];
@@ -62,9 +70,26 @@ export type ShellUncertainPolicy = 'DETECT_AFTER' | 'DENY' | 'REQUIRE_ISOLATION'
 export type OwnerWeakeningPolicy = 'AUTO_WITH_INFORM' | 'DECISION';
 export type ModelFlagPolicy = 'INFORM' | 'DECISION_WITH_KEEP';
 
+export type BudgetExceedAction = 'BLOCK' | 'ESCALATE';
+
+/** Execution budgets per profile (alignment item 8). `null` means the dimension is not observable on this host. */
+export interface ExecutionBudgets {
+  maxDurationMinutes: number;
+  maxIterations: number;
+  maxToolCalls: number;
+  maxRetriesPerStep: number;
+  maxDelegationDepth: number;
+  maxConcurrentSubagents: number;
+  maxNetworkOperations: number;
+  maxTokens: number | null;
+  maxCostUsd: number | null;
+  onExceed: BudgetExceedAction;
+}
+
 export interface Profile {
   id: string;
   title: string;
+  budgets: ExecutionBudgets;
   contextBudgetTokens: number;
   organizationCeilingTokens: number;
   requiresSignedReleaseTrust: boolean;
@@ -152,10 +177,25 @@ export interface CoordinationConstants {
   file: string;
 }
 
+export type SupportStatus = 'SUPPORTED' | 'PARTIAL' | 'UNAVAILABLE' | 'UNVERIFIED';
+
+/** A containment control (alignment item 3): technical isolation, distinct from policy and authority. */
+export interface ContainmentControl {
+  id: string;
+  description: string;
+  requiredIn: string[];
+  recommendedIn: string[];
+  hosts: Record<string, SupportStatus>;
+  file: string;
+}
+
 export interface ControlPlane {
   root: string;
   absoluteDenies: CapabilityDoc;
+  /** organization-locked denies: DENY at the core, widenable only by the organization layer (Q98) */
+  organizationLocked: CapabilityDoc | null;
   capabilityDocs: CapabilityDoc[];
+  containment: ContainmentControl[];
   matchers: Matcher[];
   grants: GrantsDoc;
   profiles: Profile[];
@@ -171,7 +211,9 @@ export interface ControlPlane {
 export class ControlPlaneValidationError extends Error {
   readonly problems: string[];
   constructor(problems: string[]) {
-    super(`control plane failed validation (${problems.length} problem${problems.length === 1 ? '' : 's'}):\n- ${problems.join('\n- ')}`);
+    super(
+      `control plane failed validation (${problems.length} problem${problems.length === 1 ? '' : 's'}):\n- ${problems.join('\n- ')}`,
+    );
     this.name = 'ControlPlaneValidationError';
     this.problems = problems;
   }

@@ -8,7 +8,8 @@ title: Forge read, narrow write, issues and work items
 
 The forge abstraction covers GitHub, GitLab, Azure DevOps, Bitbucket and future providers through one contract.
 Reading is broadly allowed; writing is narrow and separate from repository mutation. Pull-request creation,
-modification, closing, merging, self-approval and release publication are absolute denies.
+modification, closing, merging, self-approval and release publication are organization-locked denies (Q98): DENY
+unless the organization policy layer says otherwise.
 
 ## Allowed
 
@@ -27,7 +28,5 @@ modification, closing, merging, self-approval and release publication are absolu
 
 ## Denied
 
-- [x] `forge.issue.create` — create issues or work items.
-- [x] `forge.issue.edit` — edit issue title, body, labels or milestone.
-- [x] `forge.issue.transition` — change issue state or workflow column.
-- [x] `forge.issue.close` — close issues.
+Issue creation, editing, transition and closing are organization-locked denies (see `organization-locked.md`): DENY
+here, widenable only by organization policy.

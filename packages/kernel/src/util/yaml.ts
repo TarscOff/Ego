@@ -56,11 +56,13 @@ export function parseScalar(raw: string, line: number): YamlValue {
   if (/^-?\d+$/.test(s)) return Number.parseInt(s, 10);
   if (/^-?\d+\.\d+$/.test(s)) return Number.parseFloat(s);
   if (s.startsWith('"')) {
-    if (!s.endsWith('"') || s.length < 2) throw new YamlSyntaxError('unterminated double-quoted string', line);
+    if (!s.endsWith('"') || s.length < 2)
+      throw new YamlSyntaxError('unterminated double-quoted string', line);
     return JSON.parse(s) as string;
   }
   if (s.startsWith("'")) {
-    if (!s.endsWith("'") || s.length < 2) throw new YamlSyntaxError('unterminated single-quoted string', line);
+    if (!s.endsWith("'") || s.length < 2)
+      throw new YamlSyntaxError('unterminated single-quoted string', line);
     return s.slice(1, -1).replace(/''/g, "'");
   }
   if (s.startsWith('[')) return parseFlowList(s, line);
@@ -111,7 +113,10 @@ function parseFlowMap(s: string, line: number): { [key: string]: YamlValue } {
   for (const part of splitFlow(inner, line)) {
     const idx = part.indexOf(':');
     if (idx < 0) throw new YamlSyntaxError('flow map entry without colon', line);
-    const key = part.slice(0, idx).trim().replace(/^['"]|['"]$/g, '');
+    const key = part
+      .slice(0, idx)
+      .trim()
+      .replace(/^['"]|['"]$/g, '');
     out[key] = parseScalar(part.slice(idx + 1), line);
   }
   return out;
@@ -148,7 +153,13 @@ function parseList(lines: Line[], start: number, indent: number): { value: YamlV
       continue;
     }
     const m = KEY_RE.exec(rest);
-    if (m && !rest.startsWith('[') && !rest.startsWith('{') && !rest.startsWith('"') && !rest.startsWith("'")) {
+    if (
+      m &&
+      !rest.startsWith('[') &&
+      !rest.startsWith('{') &&
+      !rest.startsWith('"') &&
+      !rest.startsWith("'")
+    ) {
       // inline map item: "- key: value" possibly followed by more keys at indent+2
       const virtualIndent = indent + 2;
       const synthetic: Line = { indent: virtualIndent, text: rest, no: ln.no };
@@ -169,7 +180,11 @@ function parseList(lines: Line[], start: number, indent: number): { value: YamlV
   return { value: out, next: i };
 }
 
-function parseMap(lines: Line[], start: number, indent: number): { value: { [key: string]: YamlValue }; next: number } {
+function parseMap(
+  lines: Line[],
+  start: number,
+  indent: number,
+): { value: { [key: string]: YamlValue }; next: number } {
   const out: { [key: string]: YamlValue } = {};
   let i = start;
   while (i < lines.length) {
@@ -180,7 +195,8 @@ function parseMap(lines: Line[], start: number, indent: number): { value: { [key
     const m = KEY_RE.exec(ln.text);
     if (!m) throw new YamlSyntaxError(`cannot parse map entry: ${ln.text}`, ln.no);
     const key = m[1]!.replace(/^['"]|['"]$/g, '');
-    if (Object.prototype.hasOwnProperty.call(out, key)) throw new YamlSyntaxError(`duplicate key: ${key}`, ln.no);
+    if (Object.prototype.hasOwnProperty.call(out, key))
+      throw new YamlSyntaxError(`duplicate key: ${key}`, ln.no);
     const inline = m[2];
     if (inline !== undefined && /^[|>][+-]?$/.test(inline.trim())) {
       // block scalar: collect following lines indented deeper than the key
@@ -255,7 +271,11 @@ export function stringifyYaml(value: YamlValue, indent = 0): string {
   return keys
     .map((k) => {
       const v = value[k]!;
-      if (v !== null && typeof v === 'object' && (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0)) {
+      if (
+        v !== null &&
+        typeof v === 'object' &&
+        (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0)
+      ) {
         return `${pad}${k}:\n${stringifyYaml(v, indent + 2)}`;
       }
       return `${pad}${k}: ${stringifyYaml(v, indent + 2)}`;

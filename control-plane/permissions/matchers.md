@@ -4,7 +4,10 @@ id: matchers
 title: Operation to capability matchers
 notes: >
   Matchers are evaluated in order; the first match wins. Bash commands are split into segments on `&&`, `||`, `;` and
-  `|`; leading `VAR=value` assignments, `sudo`, `env`, `nice`, `time`, `xargs` prefixes are stripped before matching;
+  `|`; leading `VAR=value` assignments, `sudo`, `env`, `nice`, `time`, `xargs` prefixes and the global option flags of
+  `git`, `gh` and `glab` (`git -C dir`, `git -c k=v`, `--git-dir`, `gh -R owner/repo`, …) are stripped before matching;
+  a `-c core.hooksPath=…` option surfaces as a `git config core.hooksPath` segment; output redirections (`>`, `>>`) are
+  classified as writes to their target path;
   every segment must be allowed for the command to be allowed and the most restrictive verdict wins. `command` patterns
   are regular expressions applied to the normalized segment; `path` patterns are glob-like prefixes applied to the
   resolved path relative to the workspace root or to the home directory (prefix `~/`); `url` patterns match hostnames.
@@ -12,10 +15,31 @@ matchers:
   # --- hook and gate self-protection (absolute) ---
   - capability: harness.gate.bypass
     tool: Bash
-    command: '(^|\s)(harness|ego)\s+hook\b'
+    command: '(^|\s|/)(harness|ego|harness\.js|ego\.js|ego-hook\.sh|git-hook\.sh)(\s+hook\b|\s+(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b)'
   - capability: harness.gate.bypass
     tool: Bash
-    command: '(^|\s)(harness|ego)\s+decision\s+answer\b'
+    command: '(^|\s)(npx|bunx|pnpx)\s+(harness|ego|@tarscoff/ego)\s+hook\b'
+  - capability: harness.gate.bypass
+    tool: Bash
+    command: '(^|\s)hook\s+(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b'
+  - capability: harness.gate.bypass
+    tool: Bash
+    command: '(^|\s)(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
+  - capability: command.env-inject
+    tool: Bash
+    command: '^env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL$)'
+  - capability: command.env-override
+    tool: Bash
+    command: '^env-inject\s+'
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\s+(alias-override|alias-shell|alias-opaque)\b'
+  - capability: harness.runtime.tamper
+    tool: Bash
+    command: '(^|\s)(\b(cp|mv|tee|ln|install|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?|node)\b|>>?)[^|;&]*\.harness/(runtime|generated|hooks)(/|\b)'
+  - capability: harness.runtime.tamper
+    tool: Bash
+    command: '(^|\s)(\b(cp|mv|tee|ln|install|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b|>>?)[^|;&]*\.harness/harness\.md'
   - capability: harness.launcher.invoke-nested
     tool: Bash
     command: '^(claude|codex)(\s|$)'
@@ -28,7 +52,22 @@ matchers:
   - capability: harness.gate.bypass
     tool: Edit
     path: '.harness/runtime/decisions/**'
-  # --- git remote (absolute) ---
+  - capability: harness.runtime.tamper
+    tool: Write
+    path: '.harness/runtime/**'
+  - capability: harness.runtime.tamper
+    tool: Write
+    path: '.harness/generated/**'
+  - capability: harness.runtime.tamper
+    tool: Write
+    path: '.harness/harness.md'
+  - capability: harness.trust.tamper
+    tool: Write
+    path: '~/.ego/trust/**'
+  - capability: harness.trust.tamper
+    tool: Bash
+    command: '(^|\s)(rm|mv|cp|tee|sed\s+-i|truncate|chmod)\b.*\.ego/(trust|index|releases|runtimes)/'
+  # --- git remote (organization-locked) ---
   - capability: git.remote.push.force
     tool: Bash
     command: '^git\s+push\b.*(\s--force(-with-lease)?\b|\s-f\b|\s\+)'
@@ -53,7 +92,7 @@ matchers:
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(commit-tree|update-ref)\b'
-  # --- forge CLIs (absolute PR mutation, narrow writes, issues) ---
+  # --- forge CLIs (organization-locked PR and issue mutation, narrow writes) ---
   - capability: forge.pr.merge
     tool: Bash
     command: '^(gh\s+pr\s+merge|glab\s+mr\s+merge|az\s+repos\s+pr\s+update\b.*--status\s+completed)\b'
@@ -99,10 +138,10 @@ matchers:
   # --- production (absolute; contexts named production/prod) ---
   - capability: production.k8s.mutate
     tool: Bash
-    command: '^kubectl\b.*(--context[= ]\S*(prod|production)\S*|-n\s+\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*).*\b(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|taint)\b'
+    command: '^(kubectl|oc)\b(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))(?=.*\s(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward)\b)'
   - capability: production.helm.mutate
     tool: Bash
-    command: '^helm\s+(install|upgrade|uninstall|rollback|delete)\b.*(--kube-context[= ]\S*(prod|production)\S*|-n\s+\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*)'
+    command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
   - capability: production.cloud.mutate
     tool: Bash
     command: '^(terraform\s+(apply|destroy)|pulumi\s+(up|destroy)|aws\s+\S+\s+(create|delete|update|put|terminate|modify)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
@@ -147,6 +186,21 @@ matchers:
   - capability: fs.credential-store.write
     tool: Write
     path: '~/.pypirc'
+  - capability: fs.credential-store.write
+    tool: Write
+    path: '~/.config/gh/**'
+  - capability: fs.credential-store.write
+    tool: Write
+    path: '~/.azure/**'
+  - capability: fs.credential-store.write
+    tool: Write
+    path: '~/.docker/config.json'
+  - capability: fs.credential-store.write
+    tool: Write
+    path: '~/.gnupg/**'
+  - capability: fs.credential-store.write
+    tool: Write
+    path: '~/.git-credentials'
   - capability: fs.credential-store.read
     tool: Read
     path: '~/.ssh/**'
@@ -169,8 +223,32 @@ matchers:
     tool: Read
     path: '~/.pypirc'
   - capability: fs.credential-store.read
+    tool: Read
+    path: '~/.config/gh/**'
+  - capability: fs.credential-store.read
+    tool: Read
+    path: '~/.azure/**'
+  - capability: fs.credential-store.read
+    tool: Read
+    path: '~/.docker/config.json'
+  - capability: fs.credential-store.read
+    tool: Read
+    path: '~/.gnupg/**'
+  - capability: fs.credential-store.read
+    tool: Read
+    path: '~/.git-credentials'
+  - capability: fs.credential-store.write
     tool: Bash
-    command: '^(cat|less|more|head|tail|grep|sed|awk|cp|scp|base64|xxd|od)\b.*(~|\$HOME|/Users/[^/]+|/home/[^/]+)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud)\b'
+    command: '(^|\s)(\b(tee|cp|mv|install|ln|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|chmod|chown|rm|ssh-keygen|ssh-add|ssh-copy-id|gpg\s+--import|gcloud\s+auth|az\s+login|kubectl\s+config|npm\s+(login|adduser|config\s+set|set))\b|>>?)[^|;&]*(~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud|config/gh|azure|docker/config\.json|gnupg|git-credentials)\b'
+  - capability: fs.credential-store.write
+    tool: Bash
+    command: '^(aws\s+configure\b|gcloud\s+auth\s+(login|activate-service-account)|az\s+login|gh\s+auth\s+login|glab\s+auth\s+login|npm\s+(login|adduser)|docker\s+login|vault\s+login)'
+  - capability: fs.credential-store.read
+    tool: Bash
+    command: '(~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud|config/gh|azure|docker/config\.json|gnupg|git-credentials)\b'
+  - capability: fs.credential-store.read
+    tool: Bash
+    command: '(^|\s|=)\.(ssh|aws|kube|gnupg)/'
   # --- hook and control-plane protection ---
   - capability: fs.hook-config.write
     tool: Write
@@ -188,11 +266,23 @@ matchers:
     tool: Write
     path: '~/.claude/settings.json'
   - capability: fs.hook-config.write
-    tool: Bash
-    command: '^(chmod|rm|mv|cp|truncate|tee|sed\s+-i)\b.*(\.git/hooks|\.harness/hooks|\.claude/settings|\.codex/)'
-  - capability: fs.generated.write
     tool: Write
-    path: '.harness/generated/**'
+    path: '.git/hooks/**'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '.husky/**'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '.claude/settings.local.json'
+  - capability: fs.git-internals.write
+    tool: Write
+    path: '.git/**'
+  - capability: fs.hook-config.write
+    tool: Bash
+    command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(\.git/hooks|\.husky/|\.harness/hooks|\.claude/settings|\.codex/|core\.hooksPath)'
+  - capability: fs.git-internals.write
+    tool: Bash
+    command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(^|\s|/)\.git/'
   - capability: fs.generated.write
     tool: Write
     path: 'policies/generated/**'
@@ -318,7 +408,13 @@ matchers:
     command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|npx\s+(tsc|esbuild|eslint|prettier|vite|next|ng)|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
   - capability: command.read-only
     tool: Bash
-    command: '^(ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|find|fd|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|sort|uniq|cut|awk(?!.*-i)|sed(?!\s+-i)|jq|yq|xargs\s+(ls|cat|grep|rg|wc)|node\s+(-v|--version|-e\s+["'']console)|npm\s+(ls|view|--version|-v|outdated|why|explain)|python3?\s+(--version|-V|-c\s+["'']print)|tsc\s+--version|git\s+--version|history)\b'
+    command: '^(ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|find|fd|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|sort|uniq|cut|awk(?!.*-i)|sed(?!\s+-i)|jq|yq|xargs\s+(ls|cat|grep|rg|wc)|node\s+(-v|--version|-e\s+["'']?console\.log)|npm\s+(ls|view|--version|-v|outdated|why|explain)|python3?\s+(--version|-V|-c\s+["'']?print\()|tsc\s+--version|git\s+--version|history)\b'
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(node\s+(-e|--eval|-p|--print)|python3?\s+-c|ruby\s+-e|perl\s+-e|php\s+-r)\b'
+  - capability: command.interpreter-script
+    tool: Bash
+    command: '^(node|python3?|tsx|ts-node|bun|deno\s+run|ruby|perl|php)\s+(?!-)[^\s]+\.(js|mjs|cjs|ts|mts|py|rb|pl|php)\b'
   - capability: command.local-mutation
     tool: Bash
     command: '^(npm\s+(install|i|ci|uninstall|update|run\s+(format:fix|lint:fix|generate|codegen))|npx\s+(prettier|eslint)\b.*(--write|--fix)|pnpm\s+(install|add|remove)|yarn\s+(add|remove|install)|pip\s+install|poetry\s+(install|add)|go\s+(mod|get)|cargo\s+(add|update)|mkdir|touch|cp|mv|ln|chmod\s+[0-7+]|tar|zip|unzip|node\b|python3?\b|tsx\b|ts-node\b)'
@@ -334,7 +430,7 @@ matchers:
 
 The machine part of this file is the frontmatter. Matchers translate what a host reports (a shell command, a file
 path, a URL, an MCP tool name) into a capability identifier that the compiled authority table can decide. The order is
-the priority: absolute-deny matchers come first so a compound command cannot hide a push behind a harmless prefix.
+the priority: locked-deny matchers (absolute and organization-locked) come first so a compound command cannot hide a push behind a harmless prefix.
 
 Consumers may add matchers in `.harness/overlay/matchers.md`; they may only map to existing capabilities that are
 ASK or DENY in the effective table (narrowing), never introduce an ALLOW mapping for a command the core classifies

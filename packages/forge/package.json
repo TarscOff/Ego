@@ -1,1 +1,7 @@
-{ "name": "@tarscoff/ego-forge", "version": "0.1.0", "private": true, "type": "module", "description": "EGO forge package (internal; built into the single distribution)" }
+{
+  "name": "@tarscoff/ego-forge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "EGO forge package (internal; built into the single distribution)"
+}

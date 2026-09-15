@@ -6,8 +6,10 @@ export interface CurlRedaction {
   findings: Array<{ kind: string; count: number }>;
 }
 
-const AUTH_HEADER_RE = /^(authorization|proxy-authorization|x-api-key|x-auth-token|x-access-token|api-key|apikey|x-token|cookie|set-cookie)\s*:\s*/i;
-const SENSITIVE_KEYS = /^(token|access_token|refresh_token|id_token|api_key|apikey|key|secret|client_secret|password|passwd|pwd|auth|session|sig|signature)$/i;
+const AUTH_HEADER_RE =
+  /^(authorization|proxy-authorization|x-api-key|x-auth-token|x-access-token|api-key|apikey|x-token|cookie|set-cookie)\s*:\s*/i;
+const SENSITIVE_KEYS =
+  /^(token|access_token|refresh_token|id_token|api_key|apikey|key|secret|client_secret|password|passwd|pwd|auth|session|sig|signature)$/i;
 
 function shellTokens(s: string): Array<{ raw: string; value: string; start: number; end: number }> {
   const out: Array<{ raw: string; value: string; start: number; end: number }> = [];
@@ -70,13 +72,16 @@ function redactDataBody(v: string): { text: string; hit: boolean } {
   let hit = false;
   let text = v;
   // key=value pairs
-  text = text.replace(/(^|[&\s])([A-Za-z0-9_.-]+)=([^&\s]+)/g, (all, pre: string, key: string, val: string) => {
-    if (SENSITIVE_KEYS.test(key) || /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(val)) {
-      hit = true;
-      return `${pre}${key}=[REDACTED:${key.toLowerCase()}]`;
-    }
-    return all;
-  });
+  text = text.replace(
+    /(^|[&\s])([A-Za-z0-9_.-]+)=([^&\s]+)/g,
+    (all, pre: string, key: string, val: string) => {
+      if (SENSITIVE_KEYS.test(key) || /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(val)) {
+        hit = true;
+        return `${pre}${key}=[REDACTED:${key.toLowerCase()}]`;
+      }
+      return all;
+    },
+  );
   // JSON string values for sensitive keys
   text = text.replace(/"([A-Za-z0-9_.-]+)"\s*:\s*"([^"]*)"/g, (all, key: string, _val: string) => {
     if (SENSITIVE_KEYS.test(key)) {
@@ -90,10 +95,13 @@ function redactDataBody(v: string): { text: string; hit: boolean } {
 
 function redactUrl(v: string): { text: string; hit: boolean } {
   let hit = false;
-  let text = v.replace(/^([a-z][a-z0-9+.-]*:\/\/[^:\/\s@]+:)([^@\/\s]+)(@)/i, (_all, pre: string, _pass: string, at: string) => {
-    hit = true;
-    return `${pre}[REDACTED:url-password]${at}`;
-  });
+  let text = v.replace(
+    /^([a-z][a-z0-9+.-]*:\/\/[^:/\s@]+:)([^@/\s]+)(@)/i,
+    (_all, pre: string, _pass: string, at: string) => {
+      hit = true;
+      return `${pre}[REDACTED:url-password]${at}`;
+    },
+  );
   text = text.replace(/([?&])([A-Za-z0-9_.-]+)=([^&\s]+)/g, (all, sep: string, key: string, _val: string) => {
     if (SENSITIVE_KEYS.test(key)) {
       hit = true;
@@ -107,7 +115,17 @@ function redactUrl(v: string): { text: string; hit: boolean } {
 const HEADER_FLAGS = new Set(['-H', '--header']);
 const USER_FLAGS = new Set(['-u', '--user', '--proxy-user', '-U']);
 const COOKIE_FLAGS = new Set(['-b', '--cookie']);
-const DATA_FLAGS = new Set(['-d', '--data', '--data-raw', '--data-binary', '--data-urlencode', '-F', '--form', '--form-string', '--json']);
+const DATA_FLAGS = new Set([
+  '-d',
+  '--data',
+  '--data-raw',
+  '--data-binary',
+  '--data-urlencode',
+  '-F',
+  '--form',
+  '--form-string',
+  '--json',
+]);
 const OAUTH_FLAGS = new Set(['--oauth2-bearer']);
 
 /** Redacts every curl invocation found in `text`. Lines that do not invoke curl are returned unchanged. */
@@ -169,7 +187,11 @@ export function redactCurl(text: string): CurlRedaction {
           replacement = r.text;
           bump('curl.url');
         }
-      } else if (t.value.startsWith('--user=') || t.value.startsWith('--header=') || t.value.startsWith('--data=')) {
+      } else if (
+        t.value.startsWith('--user=') ||
+        t.value.startsWith('--header=') ||
+        t.value.startsWith('--data=')
+      ) {
         const [flag, ...rest] = t.value.split('=');
         const v = rest.join('=');
         if (flag === '--user') {
@@ -196,10 +218,14 @@ export function redactCurl(text: string): CurlRedaction {
     out += line.slice(last);
     return out;
   });
-  return { text: outLines.join('\n'), findings: [...counts.entries()].map(([kind, count]) => ({ kind, count })) };
+  return {
+    text: outLines.join('\n'),
+    findings: [...counts.entries()].map(([kind, count]) => ({ kind, count })),
+  };
 }
 
 function quoteIfNeeded(value: string, originalRaw: string): string {
-  if (originalRaw.startsWith("'") || originalRaw.startsWith('"')) return `${originalRaw[0]}${value}${originalRaw[0]}`;
+  if (originalRaw.startsWith("'") || originalRaw.startsWith('"'))
+    return `${originalRaw[0]}${value}${originalRaw[0]}`;
   return /[\s;&|]/.test(value) ? `'${value}'` : value;
 }

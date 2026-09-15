@@ -49,7 +49,12 @@ block: |
 
 test('list at the same indentation as its key', () => {
   const v = parseYaml('keys:\n- id: a\n  status: active\n- id: b\n  status: standby\n');
-  assert.deepEqual(v, { keys: [{ id: 'a', status: 'active' }, { id: 'b', status: 'standby' }] });
+  assert.deepEqual(v, {
+    keys: [
+      { id: 'a', status: 'active' },
+      { id: 'b', status: 'standby' },
+    ],
+  });
 });
 
 test('preserves regex backslashes in single quotes', () => {

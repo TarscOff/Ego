@@ -20,6 +20,7 @@ Human decision gates have no capability that opens them: answering a decision is
 
 ## Requires human approval
 
+- [x] `harness.budget.extend` — extend an execution budget of the current task beyond the profile value; only a human grant moves it to ALLOW, once, for the current task.
 - [x] `harness.pin.change` — `upgrade` and `rollback` change the project pin.
 - [x] `harness.skills.install` — install or update external skills from configured sources.
 - [x] `harness.mcp-trust.edit` — edit `.harness/mcp-trust.md`.
@@ -29,4 +30,3 @@ Human decision gates have no capability that opens them: answering a decision is
 - [x] `harness.control-plane.edit` — edit `control-plane/`, `policies/` baselines or trust files outside HARNESS_MAINTENANCE in the EGO repository.
 - [x] `harness.hooks.edit` — edit generated hook configuration outside HARNESS_MAINTENANCE in the EGO repository.
 - [x] `harness.decision.answer` — record a human decision from any tool, shell, file or subagent.
-- [x] `harness.launcher.invoke-nested` — start a nested agent host (`claude`, `codex`) or pipe payloads into the hook entry point from a tool.
