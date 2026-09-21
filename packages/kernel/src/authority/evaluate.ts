@@ -390,17 +390,13 @@ function findPayloads(rest: string[]): string[] {
 
 function normalizeTail(rest: string[]): string[] {
   const head = rest[0]!;
-  if (
-    (head === 'bash' ||
-      head === 'sh' ||
-      head === 'zsh' ||
-      head === 'dash' ||
-      head === 'ksh' ||
-      head === 'fish') &&
-    rest.includes('-c')
-  ) {
-    const inner = rest[rest.indexOf('-c') + 1];
-    if (inner) return [`${head} -c`, ...splitShellSegments(inner).flatMap(normalizeSegment)];
+  if (head === 'bash' || head === 'sh' || head === 'zsh' || head === 'dash' || head === 'ksh' || head === 'fish') {
+    // -c, or a combined short-flag cluster ending in c (`-euc`, `-ec`, `-lc`, `-xc`) — the command string follows it
+    const cIdx = rest.findIndex((t) => t === '-c' || /^-[a-z]*c$/i.test(t));
+    if (cIdx >= 0) {
+      const inner = rest[cIdx + 1];
+      if (inner) return [`${head} -c`, ...splitShellSegments(inner).flatMap(normalizeSegment)];
+    }
   }
   if (head === 'eval')
     return [
@@ -928,7 +924,8 @@ export function classifyPath(
   tool: 'Read' | 'Write' | 'Edit',
   rawPath: string,
 ): CapabilityHit {
-  const abs = isAbsolute(rawPath) ? rawPath : resolve(ctx.cwd ?? process.cwd(), rawPath);
+  const homed = expandHome(rawPath) ?? rawPath;
+  const abs = isAbsolute(homed) ? homed : resolve(ctx.cwd ?? process.cwd(), homed);
   if (tool !== 'Read' && ctx.egoHome && 'harness.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
@@ -1202,7 +1199,7 @@ function resolveScriptCommand(
   else if (
     (head === 'bash' || head === 'sh' || head === 'zsh' || head === 'source' || head === '.') &&
     tokens[1] &&
-    !tokens.includes('-c')
+    !tokens.some((t) => t === '-c' || /^-[a-z]*c$/i.test(t))
   ) {
     const args = tokens.slice(1).filter((t) => !t.startsWith('-'));
     if (args[0]) scriptPath = args[0];
@@ -1259,7 +1256,7 @@ function resolveScriptCommand(
       } catch {
         return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json unparsable' };
       }
-      const names = ['preinstall', 'install', 'postinstall', 'prepare', 'prepublishOnly'].filter(
+      const names = ['preinstall', 'install', 'postinstall', 'prepare', 'prepublish', 'preprepare', 'postprepare', 'dependencies'].filter(
         (n) => typeof scripts[n] === 'string',
       );
       if (!names.length) return null; // no lifecycle scripts: the install itself is an ordinary local mutation
@@ -1309,9 +1306,25 @@ function resolveScriptCommand(
   }
   // make targets
   if (head === 'make' || head === 'gmake') {
-    const targets = tokens.slice(1).filter((t) => !t.startsWith('-') && !t.includes('='));
+    // options that consume the next token, so their argument is not a target
+    const MAKE_ARG_OPTS = new Set([
+      '-C', '--directory', '-f', '--file', '--makefile', '-j', '--jobs', '-l',
+      '--load-average', '-o', '--old-file', '-W', '--what-if', '-I', '--include-dir',
+    ]);
+    const targets: string[] = [];
+    let makeDir = cwd;
+    for (let i = 1; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t.startsWith('-')) {
+        if ((t === '-C' || t === '--directory') && tokens[i + 1]) makeDir = resolve(cwd, tokens[i + 1]!);
+        if (MAKE_ARG_OPTS.has(t)) i++; // skip the option's argument
+        continue;
+      }
+      if (t.includes('=')) continue; // a variable assignment, not a target
+      targets.push(t);
+    }
     const mkPath = ['Makefile', 'makefile', 'GNUmakefile']
-      .map((n) => join(cwd, n))
+      .map((n) => join(makeDir, n))
       .find((f) => readInsideWorkspace(ctx, f) !== null);
     const text = mkPath ? readInsideWorkspace(ctx, mkPath) : null;
     if (text === null)
@@ -1953,10 +1966,10 @@ function commitBypassFlag(cmdStr: string): boolean {
     // so `-n$IFS-m`, `-n${IFS}`, `-n$""` all reduce to a bare `-n` before git parses it.
     // any $-expansion inside a git-commit flag token can field-split ($IFS and its trims/substrings) or empty-expand,
     // reconstructing a bare `-n`: replace every expansion with a separator and re-check each resulting part
-    const expanded = m[k]!.text.replace(
-      /\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[-@*#?!0-9]|\$/g,
-      ' ',
-    );
+    const expanded = m[k]!.text
+      .replace(/\$\{IFS[^}]*\}|\$IFS/g, ' ') // IFS-based expansions field-split
+      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^}]*)\}/g, '$1') // ${x:-D}/${x:=D}/${x-D}/${x:+A} -> the literal word
+      .replace(/\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[-@*#?!0-9]|\$/g, ' '); // any other expansion -> separator
     for (const part of expanded.split(/\s+/)) {
       if (part === '--no-verify' || clusterNoVerify(part)) return true;
     }

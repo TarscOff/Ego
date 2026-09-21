@@ -783,3 +783,44 @@ test('round-10 residuals: commit ${IFS%?} splice, >>| redirect, symlinked .git, 
   writeFileSync(join(ok, 'package.json'), JSON.stringify({ scripts: { build: 'tsc' } }));
   assert.notEqual(evaluate(table, ctx({ repoRoots: [ok], cwd: ok }), { tool: 'Bash', input: { command: 'npm install' } }).verdict, 'DENY');
 })
+
+test('round-11 residuals: commit default-value expansion, sh -euc cluster, cloud global options, tilde paths, make -C, install prepublish', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  // [0] a hook-bypass flag supplied as a parameter-expansion default value is caught
+  for (const cmd of [
+    'git commit ${x:---no-verify} -m y',
+    'git commit -${x:-n} -m y',
+    'git commit -${x:=n} -m y',
+    'git commit -${x-n} -m y',
+    'git commit -${x:-nm} y',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'git.hooks.bypass', cmd);
+  }
+  // [4] a combined short-flag cluster ending in c (sh -euc / bash -lc) still exposes the -c payload
+  assert.equal(bash('sh -euc "git push origin main"', c).decisive?.capability, 'git.remote.push');
+  assert.equal(bash('bash -lc "gh pr merge 3"', c).decisive?.capability, 'forge.pr.merge');
+  assert.equal(bash('sh -ec "kubectl --context prod delete pod x"', c).decisive?.capability, 'production.k8s.mutate');
+  // [5] a global option before the aws service / terraform flag no longer defeats the production matchers
+  for (const cmd of [
+    'aws --profile prod iam delete-user --user-name x',
+    'aws --region us-east-1 iam create-user --user-name x',
+    'aws --output json secretsmanager delete-secret --secret-id x',
+    'terraform -chdir=infra/prod apply -auto-approve',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'production.cloud.mutate', cmd);
+  }
+  // [6] a literal ~/ file-tool path is home-expanded, so a credential/trust path is not treated as in-repo
+  assert.equal(evaluate(table, c, { tool: 'Write', input: { file_path: '~/.ssh/id_rsa' } }).decisive?.capability, 'fs.credential-store.write');
+  assert.equal(evaluate(table, c, { tool: 'Read', input: { file_path: '~/.aws/credentials' } }).verdict, 'DENY');
+  // [7] make -C DIR does not mis-parse the directory as a target
+  const mk = ctx({ repoRoots: [repo], cwd: repo });
+  writeFileSync(join(repo, 'Makefile'), 'deploy:\n\tgit push origin main\n');
+  assert.equal(bash('make -C . deploy', mk).decisive?.capability, 'git.remote.push');
+  assert.equal(bash('make --directory=. deploy', mk).decisive?.capability, 'git.remote.push');
+  // [1] install runs prepublish/preprepare/postprepare/dependencies too
+  const inst = mkdtempSync(join(tmpdir(), 'ego-inst2-'));
+  mkdirSync(join(inst, '.git'), { recursive: true });
+  writeFileSync(join(inst, 'package.json'), JSON.stringify({ scripts: { prepublish: 'git push --force origin main' } }));
+  assert.equal(evaluate(table, ctx({ repoRoots: [inst], cwd: inst }), { tool: 'Bash', input: { command: 'npm install' } }).verdict, 'DENY');
+})

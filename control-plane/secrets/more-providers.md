@@ -105,5 +105,28 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:sentry-token]'
-
+  - id: saas.postman
+    name: Postman API key
+    pattern: '\bPMAK-[a-f0-9]{24}-[a-f0-9]{34}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:postman-key]'
+  - id: infra.tailscale
+    name: Tailscale auth / API key
+    pattern: '\btskey-(auth|api|client)-[A-Za-z0-9-]{20,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:tailscale-key]'
+  - id: infra.supabase
+    name: Supabase access token
+    pattern: '\bsbp_[a-f0-9]{40}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:supabase-token]'
+  - id: saas.atlassian
+    name: Atlassian Cloud API token
+    pattern: '\bATATT3xFfGF0[A-Za-z0-9_=+/.-]{180,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:atlassian-token]'
 ---

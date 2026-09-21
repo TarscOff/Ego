@@ -196,3 +196,23 @@ test('round-10: additional distinctive-prefix provider tokens are blocked', () =
     assert.ok(!redact(s, detectors).blocked, s);
   }
 });
+
+test('round-11: Postman / Tailscale / Supabase / Atlassian tokens blocked; a secret curl -u username is redacted', () => {
+  const toks: Array<[string, string]> = [
+    ['postman', 'PMAK-' + '0'.repeat(24) + '-' + '0'.repeat(34)],
+    ['tailscale', 'tskey-auth-kAbCdEfG-' + '0'.repeat(40)],
+    ['supabase', 'sbp_' + '0'.repeat(40)],
+    ['atlassian', 'ATATT3xFfGF0' + 'A'.repeat(184)],
+  ];
+  for (const [name, t] of toks) {
+    const r = redact('cred = "' + t + '"', detectors, { isFile: true });
+    assert.ok(r.blocked, `${name} must be blocked`);
+    assert.ok(!r.text.includes(t), `${name} must be redacted`);
+  }
+  // curl -u where the username is itself the secret (Stripe) must not leak the key
+  const K = 'sk_live_4eC39HqLyjWDarjtT1zdp7dc';
+  const s = redact('curl -u' + K + ':x https://api.stripe.com/v1/charges', detectors);
+  assert.ok(!s.text.includes(K), 'the secret -u username must be redacted');
+  // a short human username is still kept
+  assert.ok(redact('curl -u alice:s3cret https://x', detectors).text.includes('-u alice:[REDACTED:password]'));
+});

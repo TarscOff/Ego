@@ -263,7 +263,28 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     preinstall/install/postinstall/prepare, which were never effect-analysed; they are now, so a `postinstall` that
     pushes or mutates production escalates (a benign install stays a local mutation).
   Pinned by `bypass.test.ts` round-10 residuals and `redact.test.ts` round-10. Suite: 148 tests.
-- **Round 11**: an independent re-verification of the round-10 fixes is pending; recorded here when it completes.
+- **Round 11** (workflow `ego-phase1-review-round11`, 25 agents, complete run, adversarial refutation): the round-10
+  fixes held; 9 confirmed findings (7 HIGH, 2 MEDIUM), each reproduced and fixed and pinned:
+  - **Commit default-value expansion** (HIGH, `evaluate.ts`): `git commit -${x:-n}`/`${x:---no-verify}`/`${x:=n}`/`${x-n}`
+    substitute the literal default at the shell; the scan now expands `${var:op word}` to its word before the check.
+  - **`sh -euc` cluster** (MEDIUM, `evaluate.ts`): a combined short-flag cluster ending in `c` (`-euc`, `-ec`, `-lc`)
+    is now recognised as the `-c` command flag, so the carried payload is classified (this also closes a related
+    reach-to-ALLOW where a package script `sh -euc 'git push'` was opaque and swallowed by its declared build class).
+  - **Cloud global option** (MEDIUM, `matchers.md`): a global option before the service/verb (`aws --profile prod iam
+    delete-user`, `terraform -chdir=… apply`) defeated the positional production matchers; they now skip leading
+    options.
+  - **Tilde file paths** (HIGH, `evaluate.ts`): a literal `~/…` on the Read/Write/Edit tool was resolved to
+    `<cwd>/~/…` inside the repo; `classifyPath` now home-expands it, so `~/.ssh/id_rsa` denies.
+  - **make `-C DIR`** (HIGH, `evaluate.ts`): the change-directory argument was mis-parsed as a target (dropping the
+    recipe analysis); make option arguments are now skipped and the Makefile is read from the `-C` directory.
+  - **Install lifecycle list** (HIGH, `evaluate.ts`): the analysed set now matches the hooks npm actually runs on
+    install — `prepublish`, `preprepare`, `postprepare`, `dependencies` — and drops publish-only `prepublishOnly`.
+  - **More secret detectors** (HIGH, `secrets/more-providers.md`): Postman (`PMAK-`), Tailscale (`tskey-`), Supabase
+    (`sbp_`), Atlassian (`ATATT3xFfGF0`).
+  - **curl `-u` secret username** (MEDIUM, `redaction/curl.ts`): a long token-like `-u` username (e.g. a Stripe key in
+    the username position) is now redacted, while a short human username is kept.
+  Pinned by `bypass.test.ts` round-11 residuals and `redact.test.ts` round-11. Suite: 150 tests.
+- **Round 12**: an independent re-verification of the round-11 fixes is pending; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -274,7 +295,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 ### Check lines
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
-  (148 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  (150 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
   phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
   - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
     pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
@@ -294,9 +315,10 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–10 done (round 7 partial, re-covered by complete rounds 8–10); every
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–11 done (round 7 partial, re-covered by complete rounds 8–11); every
   confirmed HIGH/MEDIUM fixed and pinned. This line becomes PASSED only when a COMPLETE round ends with no confirmed
-  HIGH or MEDIUM finding; round 10 still surfaced thirteen, so round 11 is required. This line becomes PASSED only when a round ends
+  HIGH or MEDIUM finding; round 11 still surfaced nine, so round 12 is required. The finding count is trending down
+  (19, 16, 6, 10, 13, 9) as the surfaces are covered. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

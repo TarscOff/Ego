@@ -65,7 +65,12 @@ function redactHeaderValue(v: string): string | null {
 
 function redactUserPass(v: string): string {
   const idx = v.indexOf(':');
-  return idx < 0 ? '[REDACTED:credentials]' : `${v.slice(0, idx)}:[REDACTED:password]`;
+  if (idx < 0) return '[REDACTED:credentials]';
+  const user = v.slice(0, idx);
+  // the -u username is frequently the secret itself (e.g. Stripe `-u sk_live_…:`), so redact a long token-like
+  // username too; a short human username (alice, admin) is kept for debugging
+  const userOut = /^[A-Za-z0-9_.+/=-]{16,}$/.test(user) ? '[REDACTED:credentials]' : user;
+  return `${userOut}:[REDACTED:password]`;
 }
 
 function redactDataBody(v: string): { text: string; hit: boolean } {

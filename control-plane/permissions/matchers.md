@@ -160,19 +160,19 @@ matchers:
     command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
   - capability: production.cloud.mutate
     tool: Bash
-    command: '^(terraform\s+(apply|destroy)|pulumi\s+(up|destroy)|aws\s+\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|cp|sync|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
+    command: '^(terraform\s+(?:-\S+\s+)*(apply|destroy)|pulumi\s+(?:-\S+\s+)*(up|destroy)|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|cp|sync|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
   - capability: production.deploy
     tool: Bash
     command: '^(argocd\s+app\s+(sync|delete|set|rollback)|flux\s+(reconcile|suspend|resume)|kubectl\s+argo\s+rollouts)\b'
   - capability: production.dns.mutate
     tool: Bash
-    command: '^(aws\s+route53\s+change-resource-record-sets|gcloud\s+dns\s+record-sets\s+(create|update|delete)|az\s+network\s+dns\b.*\b(create|delete|update)\b)'
+    command: '^(aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*route53\s+change-resource-record-sets|gcloud\s+dns\s+record-sets\s+(create|update|delete)|az\s+network\s+dns\b.*\b(create|delete|update)\b)'
   - capability: production.iam.mutate
     tool: Bash
-    command: '^(aws\s+iam\s+(create|delete|attach|detach|put|update)|gcloud\s+iam\b.*\b(create|delete|add|remove)\b|az\s+role\s+assignment\s+(create|delete))'
+    command: '^(aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*iam\s+(create|delete|attach|detach|put|update)|gcloud\s+iam\b.*\b(create|delete|add|remove)\b|az\s+role\s+assignment\s+(create|delete))'
   - capability: production.kms.mutate
     tool: Bash
-    command: '^(aws\s+kms\s+(create|schedule-key-deletion|disable|enable|put|update)|gcloud\s+kms\b.*\b(create|destroy|update)\b|az\s+keyvault\b.*\b(create|delete|set|update)\b)'
+    command: '^(aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*kms\s+(create|schedule-key-deletion|disable|enable|put|update)|gcloud\s+kms\b.*\b(create|destroy|update)\b|az\s+keyvault\b.*\b(create|delete|set|update)\b)'
   - capability: production.secrets.mutate
     tool: Bash
     command: '^(vault\s+(kv\s+(put|delete|destroy)|write|delete)|aws\s+secretsmanager\s+(create|put|update|delete)|gcloud\s+secrets\s+(create|versions\s+add|delete))\b'
