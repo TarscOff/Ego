@@ -284,7 +284,22 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   - **curl `-u` secret username** (MEDIUM, `redaction/curl.ts`): a long token-like `-u` username (e.g. a Stripe key in
     the username position) is now redacted, while a short human username is kept.
   Pinned by `bypass.test.ts` round-11 residuals and `redact.test.ts` round-11. Suite: 150 tests.
-- **Round 12**: an independent re-verification of the round-11 fixes is pending; recorded here when it completes.
+- **Round 12** (workflow `ego-phase1-review-round12`, 17 agents, complete run, adversarial refutation): the round-11
+  fixes held; 5 confirmed findings (4 HIGH, 1 MEDIUM), each reproduced and fixed and pinned:
+  - **Commit embedded empty expansion** (HIGH, `evaluate.ts`): an unset `${x}` VANISHES and glues fragments into a
+    flag (`-${x}-no-verify` -> `--no-verify`, `-${x}n` -> `-n`); the scan now tests both a separator AND an empty
+    substitution for residual expansions.
+  - **make `-f` alternate makefile** (HIGH, `evaluate.ts`): `make -f ci.mk release` (and `--file=`/`-C DIR` `=` forms)
+    never read the named makefile, so its recipe went unanalysed; the named makefile is now read.
+  - **Write-capable "read-only" tools** (HIGH, `evaluate.ts`): `sort -o FILE`, `sort --output=`, `uniq IN OUT`,
+    `yq -i FILE` write files but were classified read-only; they are now WRITE_HEADS with a resolved destination.
+  - **`rm -rf $EGO_HOME` root** (MEDIUM, `evaluate.ts`): `rm`/`rmdir`/`shred` of the EGO_HOME root reached ASK; they
+    now count as whole-tree ops in the trust-store reach check, so the root DENYs like its subdirs.
+  - **AWS secret in JSON** (HIGH, `secrets/cloud.md`): a secret in `{"aws_secret_access_key":"…"}` / STS
+    `{"SecretAccessKey":"…"}` slipped the context-keyed detector (closing quote before the colon); the key/value
+    separator now allows the quote and the camelCase STS key.
+  Pinned by `bypass.test.ts` round-12 residuals and `redact.test.ts` round-12. Suite: 152 tests.
+- **Round 13**: an independent re-verification of the round-12 fixes is pending; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -295,7 +310,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 ### Check lines
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
-  (150 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  (152 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
   phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
   - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
     pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
@@ -315,10 +330,10 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–11 done (round 7 partial, re-covered by complete rounds 8–11); every
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–12 done (round 7 partial, re-covered by complete rounds 8–12); every
   confirmed HIGH/MEDIUM fixed and pinned. This line becomes PASSED only when a COMPLETE round ends with no confirmed
-  HIGH or MEDIUM finding; round 11 still surfaced nine, so round 12 is required. The finding count is trending down
-  (19, 16, 6, 10, 13, 9) as the surfaces are covered. This line becomes PASSED only when a round ends
+  HIGH or MEDIUM finding; round 12 still surfaced five, so round 13 is required. The finding count is trending down
+  (19, 16, 6, 10, 13, 9, 5) as the surfaces are covered. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

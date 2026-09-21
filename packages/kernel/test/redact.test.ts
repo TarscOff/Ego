@@ -216,3 +216,17 @@ test('round-11: Postman / Tailscale / Supabase / Atlassian tokens blocked; a sec
   // a short human username is still kept
   assert.ok(redact('curl -u alice:s3cret https://x', detectors).text.includes('-u alice:[REDACTED:password]'));
 });
+
+test('round-12: an AWS secret key inside JSON (and STS SecretAccessKey) is blocked', () => {
+  const AWS = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+  for (const s of [
+    `{"aws_secret_access_key": "${AWS}"}`,
+    `{"SecretAccessKey": "${AWS}"}`,
+    `aws_secret_access_key=${AWS}`,
+    `aws_secret_access_key: ${AWS}`,
+  ]) {
+    const r = redact(s, detectors, { isFile: true });
+    assert.ok(r.blocked, `must block: ${s}`);
+    assert.ok(!r.text.includes(AWS), `must redact: ${s}`);
+  }
+});

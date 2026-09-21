@@ -824,3 +824,33 @@ test('round-11 residuals: commit default-value expansion, sh -euc cluster, cloud
   writeFileSync(join(inst, 'package.json'), JSON.stringify({ scripts: { prepublish: 'git push --force origin main' } }));
   assert.equal(evaluate(table, ctx({ repoRoots: [inst], cwd: inst }), { tool: 'Bash', input: { command: 'npm install' } }).verdict, 'DENY');
 })
+
+test('round-12 residuals: commit embedded empty expansion, make -f altmakefile, sort/uniq/yq writes, rm -rf EGO_HOME root', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  // [0] an empty ${x} that VANISHES and glues the fragments into a bypass flag is caught (both split and empty models)
+  for (const cmd of [
+    'git commit -${x}-no-verify -m x',
+    'git commit --${x}no-verify -m x',
+    'git commit -${x}n -m x',
+    'git commit -v${x}n -m x',
+    'git commit -${x#pat}n -m x',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'git.hooks.bypass', cmd);
+  }
+  // [1] make -f/--file/--makefile reads the alternate makefile, so its recipe is analysed
+  writeFileSync(join(repo, 'ci.mk'), 'release:\n\taws iam delete-user --user-name admin\n');
+  for (const cmd of ['make -f ci.mk release', 'make --file ci.mk release', 'make --file=ci.mk release', 'make -fci.mk release']) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'production.cloud.mutate', cmd);
+  }
+  // [2] "read-only" utilities that write via -o/output-operand/-i are writes
+  assert.equal(bash('sort -o .git/hooks/pre-commit in', c).decisive?.capability, 'fs.hook-config.write');
+  assert.equal(bash('sort --output=.harness/generated/x.json a', c).decisive?.capability, 'harness.runtime.tamper');
+  assert.equal(bash('uniq in .git/config', c).decisive?.capability, 'fs.git-internals.write');
+  assert.equal(bash('yq -i .harness/generated/policy.json', c).decisive?.capability, 'harness.runtime.tamper');
+  // [4] rm -rf of the EGO_HOME root is a whole-tree destroy of the trust store
+  assert.equal(bash(`rm -rf ${c.egoHome}`, c).decisive?.capability, 'harness.trust.tamper');
+  // controls
+  assert.equal(bash('sort a b', c).verdict, 'ALLOW'); // no -o: a read
+  assert.equal(bash('git commit -am "message with -n"', c).verdict, 'ALLOW');
+})

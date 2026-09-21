@@ -11,7 +11,7 @@ detectors:
     replacement: '[REDACTED:aws-access-key]'
   - id: cloud.aws.secret-key
     name: AWS secret access key (context keyed)
-    pattern: '(aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*["'']?)([A-Za-z0-9/+=]{40})'
+    pattern: '((?:aws[_-]?secret[_-]?access[_-]?key|SecretAccessKey)["'']?\s*[:=]\s*["'']?)([A-Za-z0-9/+=]{40})'
     group: 2
     severity: block
     locked: true

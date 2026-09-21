@@ -884,6 +884,9 @@ export function isScratchPath(abs: string): boolean {
 const WRITE_HEADS = new Set([
   'cp',
   'mv',
+  'sort',
+  'uniq',
+  'yq',
   'tee',
   'ln',
   'install',
@@ -1313,19 +1316,31 @@ function resolveScriptCommand(
     ]);
     const targets: string[] = [];
     let makeDir = cwd;
+    let makeFile: string | null = null; // an explicit -f/--file/--makefile alternate makefile
     for (let i = 1; i < tokens.length; i++) {
       const t = tokens[i]!;
       if (t.startsWith('-')) {
+        // both spellings: `-C DIR`/`--directory DIR` and `-CDIR`/`--directory=DIR`
+        const dirEq = /^(?:--directory=|-C)(.+)$/.exec(t);
+        const fileEq = /^(?:--file=|--makefile=|-f)(.+)$/.exec(t);
         if ((t === '-C' || t === '--directory') && tokens[i + 1]) makeDir = resolve(cwd, tokens[i + 1]!);
-        if (MAKE_ARG_OPTS.has(t)) i++; // skip the option's argument
+        else if (dirEq) makeDir = resolve(cwd, dirEq[1]!);
+        if ((t === '-f' || t === '--file' || t === '--makefile') && tokens[i + 1]) makeFile = tokens[i + 1]!;
+        else if (fileEq) makeFile = fileEq[1]!;
+        if (MAKE_ARG_OPTS.has(t)) i++; // skip a separate option argument
         continue;
       }
       if (t.includes('=')) continue; // a variable assignment, not a target
       targets.push(t);
     }
-    const mkPath = ['Makefile', 'makefile', 'GNUmakefile']
-      .map((n) => join(makeDir, n))
-      .find((f) => readInsideWorkspace(ctx, f) !== null);
+    // an explicit makefile wins; otherwise the default names in the (possibly -C) directory
+    const mkPath = makeFile
+      ? readInsideWorkspace(ctx, resolve(makeDir, makeFile)) !== null
+        ? resolve(makeDir, makeFile)
+        : undefined
+      : ['Makefile', 'makefile', 'GNUmakefile']
+          .map((n) => join(makeDir, n))
+          .find((f) => readInsideWorkspace(ctx, f) !== null);
     const text = mkPath ? readInsideWorkspace(ctx, mkPath) : null;
     if (text === null)
       return {
@@ -1695,6 +1710,20 @@ function classifyShellPaths(
       // mv/rename remove the source AND create the destination: every operand is a write (moving `.harness` away,
       // renaming a protected file over another) — the source side is not merely a read
       dest = 'ALL';
+    } else if (head === 'sort') {
+      // `sort -o FILE` / `sort --output=FILE` writes FILE (in place, even when FILE is also an input)
+      const eq = tokens.find((t) => t.startsWith('--output='));
+      const oi = tokens.findIndex((t) => t === '-o' || t === '--output');
+      dest = eq ? eq.slice('--output='.length) : oi >= 0 && tokens[oi + 1] ? tokens[oi + 1]! : null;
+    } else if (head === 'uniq') {
+      // `uniq [input [output]]`: a second bare operand is the output file
+      const operands = bareOperands();
+      dest = operands.length >= 2 ? operands[operands.length - 1]! : null;
+    } else if (head === 'yq') {
+      // `yq -i/--inplace … FILE` edits FILE in place
+      const inplace = tokens.some((t) => t === '-i' || t === '--inplace' || /^-[a-zA-Z]*i$/.test(t));
+      const operands = bareOperands();
+      dest = inplace && operands.length ? operands[operands.length - 1]! : null;
     } else if (['cp', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio'].includes(head)) {
       const operands = bareOperands();
       // cpio -p reads its file list from stdin and copies INTO its sole operand; cp/rsync/... write the last operand
@@ -1816,7 +1845,8 @@ function classifyShellPaths(
           .join('/');
         // mv/rename relocate a whole directory tree without a recursive flag, so moving EGO_HOME (or a trust dir) away
         // is a whole-tree op even though `recursive` is false for them
-        const wholeTree = recursive || head === 'mv' || head === 'rename';
+        const wholeTree =
+          recursive || head === 'mv' || head === 'rename' || head === 'rm' || head === 'rmdir' || head === 'shred';
         if (reachesTrustStore(litPosix, egoPosix, rawGlob, wholeTree))
           hits.push({
             capability: 'harness.trust.tamper',
@@ -1964,14 +1994,17 @@ function commitBypassFlag(cmdStr: string): boolean {
     // the token's own quotes are already stripped (the shell strips `"-n"`/`-"n"`/`-n"m"` to `-n`/`-nm`). Model the
     // remaining reconstruction tricks: `$IFS`/`${IFS}` field-split the word, and `$""`/`$''`/`$VAR` empty-expand away —
     // so `-n$IFS-m`, `-n${IFS}`, `-n$""` all reduce to a bare `-n` before git parses it.
-    // any $-expansion inside a git-commit flag token can field-split ($IFS and its trims/substrings) or empty-expand,
-    // reconstructing a bare `-n`: replace every expansion with a separator and re-check each resulting part
-    const expanded = m[k]!.text
-      .replace(/\$\{IFS[^}]*\}|\$IFS/g, ' ') // IFS-based expansions field-split
-      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^}]*)\}/g, '$1') // ${x:-D}/${x:=D}/${x-D}/${x:+A} -> the literal word
-      .replace(/\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[-@*#?!0-9]|\$/g, ' '); // any other expansion -> separator
-    for (const part of expanded.split(/\s+/)) {
-      if (part === '--no-verify' || clusterNoVerify(part)) return true;
+    // any $-expansion inside a git-commit flag token can field-split ($IFS) or, for an unset/empty variable, VANISH and
+    // glue the literal fragments (`-${x}-no-verify` -> `--no-verify`, `-${x}n` -> `-n`). Default-value forms substitute
+    // their literal word. Test BOTH a separator substitution and an empty substitution for the residual expansions.
+    const base = m[k]!.text
+      .replace(/\$\{IFS[^}]*\}|\$IFS/g, ' ') // IFS-based expansions always field-split
+      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^}]*)\}/g, '$1'); // ${x:-D}/${x:=D}/${x-D}/${x:+A} -> the literal word
+    const residual = /\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[-@*#?!0-9]|\$/g;
+    for (const sub of [' ', '']) {
+      for (const part of base.replace(residual, sub).split(/\s+/)) {
+        if (part === '--no-verify' || clusterNoVerify(part)) return true;
+      }
     }
   }
   return false;
