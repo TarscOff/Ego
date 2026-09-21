@@ -49,7 +49,7 @@ classifying obfuscated opaque code, and lets the loop converge.
 
 ## In progress
 
-- **Round 11** is running as a background Workflow (run id `wf_placeholder`): re-verifies the round-10 fixes and does
+- **Round 11** is running as a background Workflow (run id `wf_03723124-0f9`): re-verifies the round-10 fixes and does
   a fresh pass on evaluator deep edges, containment, launcher/cache. The big secret-detector surface was broadly swept
   in round 10 (a new `secrets/more-providers.md` with 16 detectors), so future rounds should find fewer of those; the
   remaining evaluator findings are narrowing to rare edge cases. When a round completes: reproduce any confirmed
