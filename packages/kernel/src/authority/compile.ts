@@ -150,11 +150,19 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
         );
         continue;
       }
-      effective[c.id] = c.verdict;
+      // Q98 v1 ceiling: an admin-governed (organization-locked) capability may be ENABLED by the organization, but
+      // never to unattended ALLOW — an external write always keeps a human gate. Widening to ALLOW lands on ASK and
+      // the provenance says so, rather than being silently accepted (#2 §4).
+      const clamped = widening && c.verdict === 'ALLOW' ? 'ASK' : c.verdict;
+      effective[c.id] = clamped;
       provenance[c.id]!.push({
-        layer: widening ? 'organization (widened organization-locked deny)' : layerName,
+        layer: widening
+          ? clamped === c.verdict
+            ? 'organization (widened organization-locked deny)'
+            : 'organization (widened organization-locked deny, clamped to the v1 ASK ceiling)'
+          : layerName,
         file: opts.projectRoot ? rel(opts.projectRoot, c.file) : basename(c.file),
-        verdict: c.verdict,
+        verdict: clamped,
       });
     }
   };
