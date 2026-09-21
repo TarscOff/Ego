@@ -166,3 +166,33 @@ test('round-9: npm / PyPI / Azure SAS / DigitalOcean / Docker Hub tokens are blo
   // a plain version string is not a secret
   assert.ok(!redact('const v = "1.2.3";', detectors).blocked);
 });
+
+test('round-10: additional distinctive-prefix provider tokens are blocked', () => {
+  const toks: Array<[string, string]> = [
+    ['databricks', 'dapi' + '0'.repeat(32)],
+    ['shopify', 'shpat_' + 'a'.repeat(32)],
+    ['terraform', 'a1b2c3d4e5f6g7.atlasv1.' + 'z'.repeat(64)],
+    ['newrelic', 'NRAK-' + 'A'.repeat(27)],
+    ['grafana', 'glsa_' + 'a'.repeat(32) + '_0a1b2c3d'],
+    ['square', 'sq0atp-' + 'a'.repeat(22)],
+    ['google-oauth', 'GOCSPX-' + 'a'.repeat(28)],
+    ['stripe-webhook', 'whsec_' + 'a'.repeat(40)],
+    ['github-pat', 'github_pat_' + 'A'.repeat(60)],
+    ['github-app', 'gho_' + 'a'.repeat(36)],
+    ['linear', 'lin_api_' + 'a'.repeat(40)],
+    ['notion', 'ntn_' + 'a'.repeat(40)],
+    ['figma', 'figd_' + 'a'.repeat(40)],
+    ['doppler', 'dp.pt.' + 'a'.repeat(40)],
+    ['planetscale', 'pscale_pw_' + 'a'.repeat(40)],
+    ['sentry', 'sntrys_' + 'a'.repeat(40)],
+  ];
+  for (const [name, t] of toks) {
+    const r = redact('token = "' + t + '"', detectors, { isFile: true });
+    assert.ok(r.blocked, `${name} must be blocked`);
+    assert.ok(!r.text.includes(t), `${name} must be redacted`);
+  }
+  // ordinary code that merely starts with a prefix-like word is not a secret
+  for (const s of ['const dapiClient = 1;', 'npm install lodash', 'const figure = 3;']) {
+    assert.ok(!redact(s, detectors).blocked, s);
+  }
+});

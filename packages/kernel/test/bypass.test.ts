@@ -744,3 +744,42 @@ test('round-9 residuals: >| noclobber redirect, commit $IFS/$"" splice, .git git
   assert.equal(bash('git commit -m "cost $5"', c).verdict, 'ALLOW');
   assert.equal(bash('cat a | grep b', c).verdict, 'ALLOW');
 })
+
+test('round-10 residuals: commit ${IFS%?} splice, >>| redirect, symlinked .git, npm install lifecycle', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  // [0] any $-expansion that field-splits/empties reconstructs a bare -n commit hook bypass
+  for (const cmd of [
+    'git commit -n${IFS%?}-m x',
+    'git commit -n${IFS#?}-m x',
+    'git commit -n${x:- }-m x',
+    'git commit -n${#}-m x',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'git.hooks.bypass', cmd);
+  }
+  // [1] the >>| (append + noclobber-override) redirect is a write
+  assert.equal(bash('echo x >>| .harness/generated/policy.json', c).verdict, 'DENY');
+  assert.equal(bash('echo x>>|.git/hooks/pre-commit', c).verdict, 'DENY');
+  // [2] a symlinked .git node is still protected on the Write/Edit tool (realpath drops the name; lexical path catches it)
+  const sg = mkdtempSync(join(tmpdir(), 'ego-symgit-'));
+  mkdirSync(join(sg, 'realgit', 'hooks'), { recursive: true });
+  writeFileSync(join(sg, 'realgit', 'config'), '');
+  writeFileSync(join(sg, 'realgit', 'hooks', 'pre-commit'), '');
+  symlinkSync(join(sg, 'realgit'), join(sg, '.git'));
+  writeFileSync(join(sg, 'package.json'), '{}');
+  const sgCtx = ctx({ repoRoots: [sg], cwd: sg });
+  assert.equal(evaluate(table, sgCtx, { tool: 'Write', input: { file_path: join(sg, '.git', 'config') } }).decisive?.capability, 'fs.git-internals.write');
+  assert.equal(evaluate(table, sgCtx, { tool: 'Edit', input: { file_path: join(sg, '.git', 'hooks', 'pre-commit') } }).decisive?.capability, 'fs.hook-config.write');
+  // [10] npm/pnpm install runs the install lifecycle scripts, which are effect-analysed
+  const inst = mkdtempSync(join(tmpdir(), 'ego-inst-'));
+  mkdirSync(join(inst, '.git'), { recursive: true });
+  writeFileSync(join(inst, 'package.json'), JSON.stringify({ scripts: { postinstall: 'git push origin main' } }));
+  const iCtx = ctx({ repoRoots: [inst], cwd: inst });
+  for (const cmd of ['npm install', 'npm ci', 'npm install lodash', 'pnpm add x']) {
+    assert.equal(evaluate(table, iCtx, { tool: 'Bash', input: { command: cmd } }).verdict, 'DENY', cmd);
+  }
+  // control: an install with no lifecycle scripts is an ordinary local mutation
+  const ok = mkdtempSync(join(tmpdir(), 'ego-ok-'));
+  writeFileSync(join(ok, 'package.json'), JSON.stringify({ scripts: { build: 'tsc' } }));
+  assert.notEqual(evaluate(table, ctx({ repoRoots: [ok], cwd: ok }), { tool: 'Bash', input: { command: 'npm install' } }).verdict, 'DENY');
+})

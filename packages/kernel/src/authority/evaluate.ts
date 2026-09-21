@@ -597,7 +597,7 @@ export function redirectionTargets(segment: string): string[] {
   // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
   const unglued = segment.replace(/([^\s&|<>])(>{1,2})/g, '$1 $2');
-  const re = /(?:^|\s)(?:\d?>>?|&>>?|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
+  const re = /(?:^|\s)(?:\d?>>?\|?|&>>?\|?)\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(unglued))) {
     const target = m[1]!.replace(/^["']|["']$/g, '');
@@ -752,27 +752,36 @@ function tokenize(s: string): string[] {
 }
 
 export function matchPathPattern(pattern: string, absPath: string, ctx: EvaluationContext): boolean {
-  const home = canonicalPath(homedir());
-  const posix = canonicalPath(absPath).split(sep).join('/');
-  let pat = pattern;
-  let base: string | null = null;
-  if (pat.startsWith('~/')) {
-    pat = pat.slice(2);
-    base = home.split(sep).join('/');
-  }
-  const re = globToRegExp(pat);
-  if (base) return re.test(posix.startsWith(base + '/') ? posix.slice(base.length + 1) : '\0');
-  // repo-relative patterns: test against every registered root, then against the cwd root
-  const roots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
+  const tryMatch = (posix: string, homeBase: string, roots: string[]): boolean => {
+    let pat = pattern;
+    let base: string | null = null;
+    if (pat.startsWith('~/')) {
+      pat = pat.slice(2);
+      base = homeBase;
+    }
+    const re = globToRegExp(pat);
+    if (base) return re.test(posix.startsWith(base + '/') ? posix.slice(base.length + 1) : '\0');
+    // repo-relative patterns: test against every registered root, then against the cwd root
+    for (const root of roots) {
+      if (posix.startsWith(root + '/') && re.test(posix.slice(root.length + 1))) return true;
+    }
+    if (pat.startsWith('**/')) return re.test(posix);
+    return false;
+  };
+  // Match against BOTH the realpath-resolved path (catches a symlink that points INTO a protected tree) AND the lexical
+  // path (catches a protected NAME node that is itself a symlink, e.g. a `.git` symlink whose realpath drops the name).
+  const canonRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
     canonicalPath(r).split(sep).join('/'),
   );
-  for (const root of roots) {
-    if (posix.startsWith(root + '/')) {
-      if (re.test(posix.slice(root.length + 1))) return true;
-    }
-  }
-  if (pat.startsWith('**/')) return re.test(posix);
-  return false;
+  const lexRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
+    resolve(r).split(sep).join('/'),
+  );
+  const canonPosix = canonicalPath(absPath).split(sep).join('/');
+  const lexPosix = (isAbsolute(absPath) ? absPath : resolve(absPath)).split(sep).join('/');
+  return (
+    tryMatch(canonPosix, canonicalPath(homedir()).split(sep).join('/'), canonRoots) ||
+    (lexPosix !== canonPosix && tryMatch(lexPosix, homedir().split(sep).join('/'), lexRoots))
+  );
 }
 
 export function globToRegExp(glob: string): RegExp {
@@ -1236,6 +1245,27 @@ function resolveScriptCommand(
   if (head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') {
     let script: string | null = null;
     const sub = tokens[1] ?? '';
+    // install commands (`npm install`/`ci`/`add`, bare `yarn`) run the install lifecycle scripts — analyse them, since
+    // a preinstall/postinstall/prepare can push, mutate production, or write a protected tree just like `run`
+    const INSTALL_SUBS = new Set(['install', 'i', 'ci', 'add', 'update', 'up', 'upgrade']);
+    if (INSTALL_SUBS.has(sub) || (head === 'yarn' && sub === '')) {
+      const pkgPath = findUp(ctx, cwd, 'package.json');
+      const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
+      if (text === null)
+        return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json not readable' };
+      let scripts: Record<string, unknown> = {};
+      try {
+        scripts = (JSON.parse(text) as { scripts?: Record<string, unknown> }).scripts ?? {};
+      } catch {
+        return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json unparsable' };
+      }
+      const names = ['preinstall', 'install', 'postinstall', 'prepare', 'prepublishOnly'].filter(
+        (n) => typeof scripts[n] === 'string',
+      );
+      if (!names.length) return null; // no lifecycle scripts: the install itself is an ordinary local mutation
+      const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
+      return { kind: 'npm-script', key: 'npm:install', body, reason: 'install lifecycle scripts' };
+    }
     if (sub === 'run' || sub === 'run-script')
       script = tokens.slice(2).find((t) => !t.startsWith('-')) ?? null;
     else if (sub === 'test' || sub === 'start' || sub === 'stop' || sub === 'restart') script = sub;
@@ -1921,9 +1951,12 @@ function commitBypassFlag(cmdStr: string): boolean {
     // the token's own quotes are already stripped (the shell strips `"-n"`/`-"n"`/`-n"m"` to `-n`/`-nm`). Model the
     // remaining reconstruction tricks: `$IFS`/`${IFS}` field-split the word, and `$""`/`$''`/`$VAR` empty-expand away —
     // so `-n$IFS-m`, `-n${IFS}`, `-n$""` all reduce to a bare `-n` before git parses it.
-    const expanded = m[k]!.text
-      .replace(/\$\{IFS\}|\$IFS/g, ' ')
-      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$/g, '');
+    // any $-expansion inside a git-commit flag token can field-split ($IFS and its trims/substrings) or empty-expand,
+    // reconstructing a bare `-n`: replace every expansion with a separator and re-check each resulting part
+    const expanded = m[k]!.text.replace(
+      /\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[-@*#?!0-9]|\$/g,
+      ' ',
+    );
     for (const part of expanded.split(/\s+/)) {
       if (part === '--no-verify' || clusterNoVerify(part)) return true;
     }
