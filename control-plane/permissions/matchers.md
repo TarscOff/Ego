@@ -94,7 +94,9 @@ matchers:
     command: '^git\s+(push|merge)\b.*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+(-c\s+core\.hooksPath|config\b.*core\.hooksPath)'
+    # `-c core.hooksPath=…` is a bypass wherever it sits, including AFTER the verb (`git clone -c core.hooksPath=…`,
+    # round 13). Reading the value back (`--get`) is not a change.
+    command: '^git\b(?![^|;&]*\s--get\b)[^|;&]*core\.hooksPath'
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(commit-tree|update-ref)\b'
@@ -144,7 +146,7 @@ matchers:
   - capability: forge.api.mutate
     tool: Bash
     # graphql body loaded from a file/stdin (field=@path): cannot inspect it, so a mutation cannot be ruled out -> fail closed
-    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*(=@|\s--input\b|\s-i\s+\S|=\s*\$))'
+    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*(=@|\s--input\b|\s-i\s+\S|=\s*[$`]))'
   - capability: forge.api.mutate
     tool: Bash
     command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
@@ -154,13 +156,13 @@ matchers:
   # --- production (absolute; contexts named production/prod) ---
   - capability: production.k8s.mutate
     tool: Bash
-    command: '^(kubectl|oc)\b(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))(?=.*\s(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward|debug|certificate|proxy)\b)'
+    command: '^(kubectl|oc)\b(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))(?=.*\s(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward|debug|certificate|proxy)\b)'
   - capability: production.helm.mutate
     tool: Bash
     command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
   - capability: production.cloud.mutate
     tool: Bash
-    command: '^(terraform\s+(?:-\S+\s+)*(apply|destroy)|pulumi\s+(?:-\S+\s+)*(up|destroy)|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|cp|sync|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+\S+.*\b(create|delete|update)\b|az\s+\S+.*\b(create|delete|update)\b)'
+    command: '^((terraform|tofu)\s+(?:-\S+\s+)*(apply|destroy)|pulumi\s+(?:-\S+\s+)*(up|destroy)|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|cp|sync|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+(?!config\b|auth\b)\S+.*\b(create|delete|update|deploy|remove|rm)\b|az\s+\S+.*\b(create|delete|update|deploy|remove|purge)\b)'
   - capability: production.deploy
     tool: Bash
     command: '^(argocd\s+app\s+(sync|delete|set|rollback)|flux\s+(reconcile|suspend|resume)|kubectl\s+argo\s+rollouts)\b'
@@ -176,6 +178,11 @@ matchers:
   - capability: production.secrets.mutate
     tool: Bash
     command: '^(vault\s+(kv\s+(put|delete|destroy)|write|delete)|aws\s+secretsmanager\s+(create|put|update|delete)|gcloud\s+secrets\s+(create|versions\s+add|delete))\b'
+  # a database client aimed at a production host or connection string is a production mutation, not a local query.
+  # (The general local-vs-remote target resolution lives in the evaluator; this catches the explicitly named case.)
+  - capability: production.database.mutate
+    tool: Bash
+    command: '^(psql|mysql|mariadb|mongosh|mongo|redis-cli|clickhouse-client|cqlsh)\b(?=[^|;&]*(-h\s*\S*(prod|production)\S*|--host[= ]\S*(prod|production)\S*|://[^\s/]*(prod|production)[^\s/]*))'
   # --- destructive roots (absolute) ---
   - capability: fs.destructive-root
     tool: Bash
@@ -336,6 +343,27 @@ matchers:
     tool: Read
     path: '**/.env.*'
   # --- git local classes ---
+  # Mutating branch, recovery and remote-configuration spellings are matched BEFORE the broad `status` matcher below:
+  # it accepts a bare `branch`, `reflog` and `remote`, so every `git branch -f`, `git reflog expire` and
+  # `git remote set-url` used to read as a listing and reach ALLOW (round 13).
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\b[^|;&]*\s(--upload-pack|--receive-pack|--exec)(=|\s)'
+  - capability: git.local.branch.delete
+    tool: Bash
+    command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*[dD]|--delete)\b'
+  - capability: git.local.reset
+    tool: Bash
+    command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*[fMC]|--force)\b'
+  - capability: git.local.recovery.destroy
+    tool: Bash
+    command: '^git\s+(reflog\s+(expire|delete)|gc\b[^|;&]*--prune|stash\s+(clear|drop))\b'
+  - capability: git.remote.configure
+    tool: Bash
+    command: '^git\s+remote\s+(add|remove|rm|rename|set-url|set-branches|set-head|prune)\b'
+  - capability: git.local.restore
+    tool: Bash
+    command: '^git\s+(checkout|switch)\b[^|;&]*\s(-[a-zA-Z]*f|--force|--discard-changes)\b'
   - capability: git.local.status
     tool: Bash
     command: '^git\s+(status|diff|log|blame|show|branch(\s+-[avr]+)?|reflog|remote\s+-v|remote\s+show|ls-files|rev-parse|describe|shortlog|worktree\s+list|stash\s+list)\b'
@@ -368,7 +396,7 @@ matchers:
     command: '^git\s+reset\b'
   - capability: git.local.restore
     tool: Bash
-    command: '^git\s+(restore|checkout\s+(--\s+)?\S+\.\S+)\b'
+    command: '^git\s+(restore|checkout\s+(--\s+)?\S+\.\S+|checkout\b[^|;&]*\s--\s+\S+)\b'
   - capability: git.local.clean
     tool: Bash
     command: '^git\s+clean\b'
@@ -418,12 +446,15 @@ matchers:
   - capability: container.inspect
     tool: Bash
     command: '^(docker|podman)\s+(ps|images|inspect|logs|top|stats|version|info|image\s+ls)\b'
+  - capability: container.registry.push
+    tool: Bash
+    command: '^(docker|podman)\s+(push\b|buildx\s+build\b[^|;&]*--push)'
   - capability: container.run
     tool: Bash
     command: '^(docker|podman)(-compose)?\b'
   - capability: k8s.local.delete
     tool: Bash
-    command: '^(kind\s+delete|k3d\s+cluster\s+delete|minikube\s+delete|kubectl\s+delete\s+(ns|namespace))\b'
+    command: '^(kind\s+delete|k3d\s+cluster\s+delete|minikube\s+delete|kubectl\b[^|;&]*\sdelete\s+(ns|namespace))\b'
   - capability: k8s.local.apply
     tool: Bash
     command: '^(kubectl|helm|kind|k3d|minikube|kustomize)\b'

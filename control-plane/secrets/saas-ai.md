@@ -33,9 +33,27 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:sendgrid-key]'
+  - id: saas.replicate
+    name: Replicate API token
+    pattern: '\br8_[A-Za-z0-9]{37,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:replicate-token]'
+  - id: saas.groq
+    name: Groq API key
+    pattern: '\bgsk_[A-Za-z0-9]{40,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:groq-key]'
+  - id: saas.mailgun
+    name: Mailgun private API key
+    pattern: '\bkey-[0-9a-z]{32}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:mailgun-key]'
   - id: saas.slack
     name: Slack tokens and webhooks
-    pattern: '\b(xox[abeoprs]|xapp)-[A-Za-z0-9-]{10,}\b|https://hooks\.slack\.com/services/[A-Za-z0-9/]+'
+    pattern: '\b(xox[abcdeoprs]|xapp)-[A-Za-z0-9-]{10,}\b|https://hooks\.slack\.com/(services|triggers|workflows)/[A-Za-z0-9/]+'
     severity: block
     locked: true
     replacement: '[REDACTED:slack]'

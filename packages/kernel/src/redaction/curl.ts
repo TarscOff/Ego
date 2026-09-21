@@ -139,7 +139,8 @@ export function redactCurl(text: string): CurlRedaction {
   const bump = (k: string) => counts.set(k, (counts.get(k) ?? 0) + 1);
   const lines = text.split('\n');
   const outLines = lines.map((line) => {
-    if (!/(^|[\s;&|(])curl(\s|$)/.test(line)) return line;
+    // a curl inside a command substitution or assignment (`RESP=`curl -u u:p …``, `x=$(curl …)`) is still a curl
+    if (!/(^|[\s;&|(`=$])curl(\s|$)/.test(line)) return line;
     const tokens = shellTokens(line);
     let out = '';
     let last = 0;
@@ -183,8 +184,13 @@ export function redactCurl(text: string): CurlRedaction {
           replacement = `-H${r}`;
           bump('curl.header');
         }
-      } else if (/^-u.+/.test(t.raw) && !t.raw.startsWith('--')) {
-        replacement = `-u${redactUserPass(t.value.slice(2))}`;
+      } else if (/^-[a-zA-Z]*u$/.test(t.raw) && !t.raw.startsWith('--')) {
+        // a combined short-option cluster ending in `u` (`-sSu`, `-fsSLu`) takes the credentials as the NEXT token
+        expect = 'user';
+      } else if (/^-[a-zA-Z]*u.+/.test(t.raw) && !t.raw.startsWith('--')) {
+        // glued credentials, plain (`-uUSER:PASS`) or after a cluster (`-sSuUSER:PASS`)
+        const at = t.value.indexOf('u', 1);
+        replacement = `${t.value.slice(0, at + 1)}${redactUserPass(t.value.slice(at + 1))}`;
         bump('curl.user');
       } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t.value)) {
         const r = redactUrl(t.value);

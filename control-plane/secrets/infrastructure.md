@@ -5,7 +5,7 @@ title: Infrastructure credentials and private keys
 detectors:
   - id: infra.dockerhub.pat
     name: Docker Hub personal access token
-    pattern: '\bdckr_pat_[A-Za-z0-9_-]{20,}\b'
+    pattern: '\bdckr_(pat|oat)_[A-Za-z0-9_-]{20,}\b'
     severity: block
     locked: true
     replacement: '[REDACTED:dockerhub-pat]'
@@ -15,6 +15,12 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:private-key]'
+  - id: infra.putty-private-key
+    name: PuTTY private key file
+    pattern: 'PuTTY-User-Key-File-\d+:[\s\S]*?Private-MAC:\s*\S+'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:putty-private-key]'
   - id: infra.kube.token
     name: Kubernetes service account or kubeconfig token
     pattern: '(\btoken\s*:\s*)([A-Za-z0-9._-]{20,})'

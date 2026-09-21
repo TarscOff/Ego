@@ -11,7 +11,7 @@ detectors:
     replacement: '[REDACTED:aws-access-key]'
   - id: cloud.aws.secret-key
     name: AWS secret access key (context keyed)
-    pattern: '((?:aws[_-]?secret[_-]?access[_-]?key|SecretAccessKey)["'']?\s*[:=]\s*["'']?)([A-Za-z0-9/+=]{40})'
+    pattern: '((?:aws[_-]?secret[_-]?access[_-]?key|SecretAccessKey)["'']?\s*(?:[:=]\s*|\s+)["'']?)([A-Za-z0-9/+=]{40})'
     group: 2
     severity: block
     locked: true
@@ -30,6 +30,12 @@ detectors:
     locked: true
     replacement: '[REDACTED:gcp-service-account]'
     whole_document: true
+  - id: cloud.gcp.oauth-access-token
+    name: Google OAuth 2.0 access token
+    pattern: '\bya29\.[A-Za-z0-9_-]{20,}'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:google-oauth-token]'
   - id: cloud.gcp.api-key
     name: Google API key
     pattern: '\bAIza[0-9A-Za-z_-]{35}\b'

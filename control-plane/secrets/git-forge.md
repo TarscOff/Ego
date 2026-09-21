@@ -17,7 +17,7 @@ detectors:
     replacement: '[REDACTED:github-token]'
   - id: forge.gitlab.token
     name: GitLab tokens (personal, project, deploy, runner, pipeline)
-    pattern: '\bglpat-[A-Za-z0-9_-]{16,}\b|\bgl(dt|rt|pt|ft|ptt)-[A-Za-z0-9_-]{16,}\b'
+    pattern: '\bglpat-[A-Za-z0-9_-]{16,}\b|\bgl(dt|rt|pt|ft|ptt|cbt|agent|oas|imt|soat)-[A-Za-z0-9_-]{16,}\b'
     severity: block
     locked: true
     replacement: '[REDACTED:gitlab-token]'

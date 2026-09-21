@@ -123,6 +123,36 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:supabase-token]'
+  - id: payments.braintree
+    name: Braintree access token
+    pattern: '\baccess_token\$(production|sandbox)\$[a-z0-9]{16}\$[0-9a-f]{32}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:braintree-token]'
+  - id: saas.netlify
+    name: Netlify personal access token
+    pattern: '\bnfp_[A-Za-z0-9]{36,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:netlify-token]'
+  - id: saas.render
+    name: Render API key
+    pattern: '\brnd_[A-Za-z0-9]{20,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:render-key]'
+  - id: registry.rubygems
+    name: RubyGems API key
+    pattern: '\brubygems_[a-f0-9]{48}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:rubygems-key]'
+  - id: registry.nuget
+    name: NuGet API key
+    pattern: '\boy2[a-z0-9]{40,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:nuget-key]'
   - id: saas.atlassian
     name: Atlassian Cloud API token
     pattern: '\bATATT3xFfGF0[A-Za-z0-9_=+/.-]{180,}\b'

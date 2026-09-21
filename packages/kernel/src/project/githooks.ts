@@ -239,6 +239,34 @@ function pushVerdict(projectRoot: string): string {
   }
 }
 
+/** The temporary index git hands a hook it invoked itself (`git commit -a` stages into one), but only when it really
+ *  belongs to this repository's git directory. An agent-supplied GIT_INDEX_FILE pointing anywhere else is ignored, so
+ *  the scan can never be aimed at an attacker-chosen index. Returns null when the real index should be used. */
+function hookIndexFile(projectRoot: string, env: NodeJS.ProcessEnv): string | null {
+  const raw = env['GIT_INDEX_FILE'];
+  if (!raw) return null;
+  const common = git(['rev-parse', '--git-common-dir'], projectRoot);
+  const gitDir = git(['rev-parse', '--git-dir'], projectRoot);
+  const abs = isAbsolute(raw) ? raw : resolve(projectRoot, raw);
+  const roots = [common.ok ? common.stdout : '', gitDir.ok ? gitDir.stdout : '']
+    .filter(Boolean)
+    .map((d) => (isAbsolute(d) ? d : resolve(projectRoot, d)));
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const target = real(dirname(abs));
+  return roots.some((r) => {
+    const rr = real(r);
+    return target === rr || target.startsWith(rr + sep);
+  })
+    ? abs
+    : null;
+}
+
 /** Git hooks fail closed: a scan that cannot run (git error, buffer overflow, timeout) refuses instead of passing. */
 export function runGitHook(
   name: string,
@@ -250,11 +278,13 @@ export function runGitHook(
   const cp = loadControlPlane(controlPlaneDir());
   const detectors = allDetectors(cp.secrets).filter((d) => d.severity === 'block');
   if (name === 'pre-commit') {
+    const indexFile = hookIndexFile(projectRoot, env);
     const staged = git(
       ['-c', 'core.quotePath=false', 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRT'],
       projectRoot,
       {
         maxBuffer: SCAN_MAX_BUFFER,
+        ...(indexFile ? { indexFile } : {}),
       },
     );
     if (!staged.ok)
@@ -268,7 +298,11 @@ export function runGitHook(
         !/\.example$|\.sample$|\.template$/.test(f)
       )
         messages.push(`refused: ${f} looks like a secret-bearing file`);
-      const content = git(['show', `:${f}`], projectRoot, { maxBuffer: SCAN_MAX_BUFFER, timeoutMs: 60_000 });
+      const content = git(['show', `:${f}`], projectRoot, {
+        maxBuffer: SCAN_MAX_BUFFER,
+        timeoutMs: 60_000,
+        ...(indexFile ? { indexFile } : {}),
+      });
       if (!content.ok) {
         messages.push(
           `refused: cannot read staged ${f} for the secret scan (${content.stderr || 'git error'})`,

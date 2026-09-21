@@ -330,11 +330,16 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–12 done (round 7 partial, re-covered by complete rounds 8–12); every
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–13 done (round 7 partial, re-covered by complete rounds 8–13); every
   confirmed HIGH/MEDIUM fixed and pinned. This line becomes PASSED only when a COMPLETE round ends with no confirmed
-  HIGH or MEDIUM finding; round 12 still surfaced five, so round 13 is required. The finding count is trending down
-  (19, 16, 6, 10, 13, 9, 5) as the surfaces are covered. This line becomes PASSED only when a round ends
-  with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
+  HIGH or MEDIUM finding; round 13 surfaced **61** (76 claimed, 15 refuted), so a further round is required. The count
+  had been trending down (19, 16, 6, 10, 13, 9, 5) but round 13 widened the fleet from 5 dimension skeptics to 14
+  adversarial clusters with shared reproduction probes, and the new clusters found surfaces earlier rounds never
+  reached — chiefly an unbounded `console.log(…)`/`print(…)` carve-out in `command.read-only` that granted silent
+  arbitrary execution, and a `git commit -a` pre-commit scan that read the stale real index and scanned zero files.
+  A falling count across rounds measures the questions asked, not the residual risk. This line becomes PASSED only
+  when a round ends with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an
+  in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked
   SUPPORTED in the host matrix rest on the pre-build verification recorded in the baseline (section C), `codex-cli`

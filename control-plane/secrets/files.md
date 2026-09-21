@@ -19,6 +19,7 @@ sensitive_files:
   - '*.p12'
   - '*.pfx'
   - '*.key'
+  - '*.ppk'
   - 'kubeconfig'
   - 'config' 
   - 'secrets.yaml'

@@ -31,6 +31,7 @@ production denies, not by these capabilities.
 
 - [x] `db.local.drop` — drop a local database.
 - [x] `container.prune` — prune images, containers, volumes.
+- [x] `container.registry.push` — push an image to a registry (`docker push`, `buildx build --push`). Building locally is the agent's working material; publishing the result is an external effect.
 - [x] `k8s.local.delete` — delete local namespaces or clusters.
 
 ## Denied

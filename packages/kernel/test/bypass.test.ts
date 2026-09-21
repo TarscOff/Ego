@@ -854,3 +854,136 @@ test('round-12 residuals: commit embedded empty expansion, make -f altmakefile, 
   assert.equal(bash('sort a b', c).verdict, 'ALLOW'); // no -o: a read
   assert.equal(bash('git commit -am "message with -n"', c).verdict, 'ALLOW');
 })
+
+test('round-13 residuals: interpreter carve-out, wrappers, write destinations, git ref and recovery mutations', () => {
+  const c = ctx();
+  // [1] command.read-only carried an unbounded console.log(…)/print(…) carve-out that won first match over every
+  // inline-interpreter deny: any code rode along inside it and reached ALLOW
+  for (const cmd of [
+    'node -e \'console.log(require("child_process").execSync("git push origin main").toString())\'',
+    'python3 -c \'print(__import__("os").system("git push origin main"))\'',
+    'awk \'BEGIN{system("git push origin main")}\'',
+    'python3 -u -c \'import os; os.system("git push origin main --force")\'',
+  ]) {
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+  }
+  // the same wrapper must not launder a protected-store read or a hook write either
+  assert.equal(
+    bash('node -e \'console.log(require("fs").readFileSync(process.env.HOME+"/.ssh/id_rsa","utf8"))\'', c)
+      .decisive?.capability,
+    'fs.credential-store.write',
+  );
+  for (const cmd of [
+    'node -e \'console.log(require("fs").writeFileSync(".git/hooks/pre-commit","#!/bin/sh"))\'',
+    'tsx -e \'require("fs").writeFileSync(".git/hooks/pre-commit","#!/bin/sh")\'',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'fs.hook-config.write', cmd);
+  }
+  // a genuinely literal body stays allowed: the carve-out is bounded, not removed
+  assert.equal(bash("node -e 'console.log(1)'", c).verdict, 'ALLOW');
+  assert.equal(bash('ls -la', c).verdict, 'ALLOW');
+  assert.equal(bash('awk {print $1}', c).verdict, 'ALLOW');
+
+  // [2] privilege and wrapper tools must not swallow the command they run
+  assert.equal(bash('su --command="rm -rf /" root', c).decisive?.capability, 'fs.destructive-root');
+  assert.equal(bash('su --session-command="rm -rf /" root', c).decisive?.capability, 'fs.destructive-root');
+  assert.equal(
+    bash('runuser -u root -- cp /tmp/evil .git/hooks/pre-commit', c).decisive?.capability,
+    'fs.hook-config.write',
+  );
+  assert.equal(
+    bash('watch -d cp /tmp/evil .git/hooks/pre-commit', c).decisive?.capability,
+    'fs.hook-config.write',
+  );
+  assert.equal(bash('doas cp /etc/shadow /tmp/x', c).decisive?.capability, 'command.privileged');
+  assert.equal(bash('doas -u root rm -rf /', c).decisive?.capability, 'fs.destructive-root');
+  assert.equal(bash('sh -cx "git push origin main"', c).decisive?.capability, 'git.remote.push');
+  assert.equal(bash('bash -c -- "git push origin main"', c).decisive?.capability, 'git.remote.push');
+  assert.equal(bash('fd -x rm -rf {}', c).decisive?.capability, 'fs.destructive-root');
+
+  // [3] write destinations hidden in glued option values, target-directory flags and displaced operands
+  assert.equal(bash('sort -o.git/hooks/pre-commit payload', c).decisive?.capability, 'fs.hook-config.write');
+  assert.equal(bash('patch -o.git/hooks/pre-commit payload.diff', c).decisive?.capability, 'fs.hook-config.write');
+  assert.equal(bash('find . -fprint .git/hooks/pre-commit', c).decisive?.capability, 'fs.hook-config.write');
+  assert.equal(bash('tar -xf a.tar -C.git/hooks', c).decisive?.capability, 'fs.git-internals.write');
+  assert.equal(bash('tar -xf a.tar --one-top-level=.git/hooks', c).decisive?.capability, 'fs.git-internals.write');
+  assert.equal(bash('unzip -d.git/hooks a.zip', c).decisive?.capability, 'fs.git-internals.write');
+  assert.equal(bash('cp -t /etc payload', c).decisive?.capability, 'fs.outside-workspace.write');
+  assert.equal(bash('cp --target-directory=/etc payload', c).decisive?.capability, 'fs.outside-workspace.write');
+  // a trailing value option must not displace the destination
+  assert.equal(bash('cp -r payload /etc --sparse always', c).decisive?.capability, 'fs.outside-workspace.write');
+  // a glued -C value must not be read as tar's `c` (create) function letter
+  assert.equal(bash('tar -xf a.tar -C /tmp/ok', c).verdict, 'ALLOW');
+  assert.equal(bash('tar czf /tmp/a.tgz src', c).verdict, 'ALLOW');
+
+  // [4] redirection targets are unquoted, unescaped and `..`-resolved before classification
+  assert.equal(bash('echo x > "control-plane"/permissions/matchers.md', c).verdict, 'DENY');
+  assert.equal(bash('echo x > control-plan\\e/permissions/matchers.md', c).verdict, 'DENY');
+  assert.equal(bash('echo x > /dev/../etc/cron.d/x', c).decisive?.capability, 'fs.outside-workspace.write');
+  assert.equal(bash('echo x > /dev/null', c).verdict, 'ALLOW'); // a real device sink is still not a write
+  assert.equal(bash('echo x > /dev/stderr', c).verdict, 'ALLOW');
+
+  // [5] git: abbreviated long options, substitutions in flag position, post-verb hooksPath, transport programs
+  assert.equal(bash('git commit --no-verif -m x', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(bash('git commit -$(echo n) -m x', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(bash('git commit -`echo n` -m x', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(bash('git clone -c core.hooksPath=/tmp/h ./src ./dest', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(
+    bash('git clone --upload-pack="sh /tmp/evil.sh" ./src ./dest', c).decisive?.capability,
+    'git.alias.inline',
+  );
+  // a substitution used as a MESSAGE is data, not a flag
+  assert.equal(bash('git commit -m "msg $(date)"', c).verdict, 'ALLOW');
+
+  // [6] ref and recovery mutations were all swallowed by the read-only `git status` matcher
+  assert.equal(bash('git branch -f main HEAD~5', c).decisive?.capability, 'git.local.reset');
+  assert.equal(bash('git branch -D feature', c).decisive?.capability, 'git.local.branch.delete');
+  assert.equal(bash('git reflog expire --expire=now --all', c).decisive?.capability, 'git.local.recovery.destroy');
+  assert.equal(bash('git gc --prune=now', c).decisive?.capability, 'git.local.recovery.destroy');
+  assert.equal(bash('git stash clear', c).decisive?.capability, 'git.local.recovery.destroy');
+  assert.equal(
+    bash('git remote set-url origin https://attacker.example/x.git', c).decisive?.capability,
+    'git.remote.configure',
+  );
+  assert.equal(bash('git checkout -f main', c).decisive?.capability, 'git.local.restore');
+  assert.equal(bash('git checkout HEAD -- src/main', c).decisive?.capability, 'git.local.restore');
+  // listings stay allowed
+  for (const cmd of ['git branch', 'git branch -a', 'git reflog', 'git remote -v', 'git stash list', 'git status'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+
+  // [7] forge and production spellings
+  assert.equal(bash('gh api graphql -f "query=`cat mut.graphql`"', c).decisive?.capability, 'forge.api.mutate');
+  assert.equal(bash('kubectl --namespace=default delete namespace payments', c).decisive?.capability, 'k8s.local.delete');
+  assert.equal(
+    bash('kubectl --server=https://prod-api.k8s.acme.com:6443 delete deployment api', c).decisive?.capability,
+    'production.k8s.mutate',
+  );
+  assert.equal(
+    bash('psql "postgresql://app:pw@prod-db.acme.com:5432/appdb" -c "DROP TABLE orders"', c).decisive?.capability,
+    'production.database.mutate',
+  );
+  assert.equal(bash('redis-cli -h cache.prod.acme.com flushall', c).decisive?.capability, 'production.database.mutate');
+  assert.equal(bash('tofu apply -auto-approve', c).decisive?.capability, 'production.cloud.mutate');
+  assert.equal(bash('gcloud run deploy api --image gcr.io/p/api:bad', c).decisive?.capability, 'production.cloud.mutate');
+  assert.equal(bash('gcloud storage rm -r gs://prod-bucket', c).decisive?.capability, 'production.cloud.mutate');
+  assert.equal(bash('docker push registry.acme.com/prod/api:latest', c).decisive?.capability, 'container.registry.push');
+  // ordinary local development is untouched
+  for (const cmd of ['docker compose up -d', 'kubectl get pods', 'psql -c "select 1"'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+})
+
+test('round-13 residuals: the EGO_HOME trust store is recognised whatever the path casing', () => {
+  // macOS and Windows resolve ~/.ego/RUNTIMES/... to the real `runtimes` directory, so a case variant reached the
+  // trust store under a weaker capability than harness.trust.tamper
+  const c = ctx();
+  for (const cmd of [
+    `echo x > ${c.egoHome}/RUNTIMES/a1b2/dist/ego.js`,
+    `echo x > ${c.egoHome}/Runtimes/a1b2/dist/ego.js`,
+    `cp evil ${c.egoHome}/Trust/keys`,
+    `cp evil ${c.egoHome}/INDEX/x`,
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'harness.trust.tamper', cmd);
+  }
+  // the lowercase spellings keep working exactly as before
+  assert.equal(bash(`echo x > ${c.egoHome}/runtimes/a1b2/dist/ego.js`, c).decisive?.capability, 'harness.trust.tamper');
+})

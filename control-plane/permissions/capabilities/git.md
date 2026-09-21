@@ -35,8 +35,10 @@ organization policy layer says otherwise, Q98).
 - [x] `git.local.clean` — remove untracked files.
 - [x] `git.local.branch.delete` — delete local branches.
 - [x] `git.worktree.remove` — remove worktrees.
+- [x] `git.local.recovery.destroy` — destroy the local recovery net: `reflog expire`/`reflog delete`, `gc --prune`, `stash clear`/`stash drop`. These do not change the working tree, so they read as harmless, but they are what makes an unwanted reset or force-move unrecoverable.
+- [x] `git.remote.configure` — add, rename, remove or re-point a remote (`remote add`, `set-url`, `set-branches`, `set-head`). Reconfiguring where the repository pushes and fetches is not remote inspection.
 
 ## Denied
 
 - [x] `git.hooks.bypass` — `--no-verify`, `-n` on commit, `core.hooksPath` changes, plumbing that skips hooks.
-- [x] `git.alias.inline` — an inline alias (`git -c alias.x=…`, `--config-env=alias.x=…`) redefines what a git verb runs; the aliased verb is judged as what it expands to, and a shell or opaque alias is refused.
+- [x] `git.alias.inline` — an inline alias (`git -c alias.x=…`, `--config-env=alias.x=…`) redefines what a git verb runs; the aliased verb is judged as what it expands to, and a shell or opaque alias is refused. The transport options that name a program to run (`--upload-pack`, `--receive-pack`, `--exec`) are refused the same way: they hand git an arbitrary command line.

@@ -230,3 +230,54 @@ test('round-12: an AWS secret key inside JSON (and STS SecretAccessKey) is block
     assert.ok(!r.text.includes(AWS), `must redact: ${s}`);
   }
 });
+
+test('round-13 residuals: provider detectors, sensitive file names and curl credential spellings', () => {
+  // every one of these is a real provider format that passed through unredacted
+  const NEW_SECRETS: Array<[string, string]> = [
+    ['google oauth access token', 'ya29.a0AfB_byC9f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c8d7e6f5a4b3c'],
+    ['gitlab cluster agent token', 'glcbt-64_7dKxPq3mVn2LwRt9sYbA'],
+    ['gitlab oauth token', 'gloas-9f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c8d7e6f5a4b3c2d1e0f9a'],
+    ['docker hub org token', 'dckr_oat_9f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c'],
+    ['replicate token', 'r8_Nv3QpZ7bKf2sYxLmTgWd8AcJeRh1UoBi5nDq4'],
+    ['groq key', 'gsk_8ZqLm4TnPxWvRb2KcYdA1WGdyb3FYs7HgJkQeUiOpNzXvTrMlCa'],
+    ['mailgun key', 'key-3ax6xnjp29jd6fds4gc373sgvjxteol0'],
+    ['braintree token', 'access_token$production$8p9bxz4cq7fkxr2d$0123456789abcdef0123456789abcdef'],
+    ['netlify token', 'nfp_abcdefghijklmnopqrstuvwxyz0123456789ab'],
+    ['render key', 'rnd_abcdefghijklmnopqrstuvwx'],
+    ['rubygems key', 'rubygems_0123456789abcdef0123456789abcdef0123456789abcdef'],
+    ['nuget key', 'oy2abcdefghijklmnopqrstuvwxyz234567abcdefghi'],
+    ['slack trigger webhook', 'https://hooks.slack.com/triggers/T0ABCDE1234/1234567890123/abcdef1234567890abcdef12'],
+    ['slack session token', 'xoxc-511111111-31111111111-3111111111111-e039d02840a0b9379c'],
+  ];
+  for (const [name, secret] of NEW_SECRETS) {
+    const r = redact(`value: ${secret}`, detectors);
+    assert.ok(r.blocked, `must block: ${name}`);
+    assert.ok(!r.text.includes(secret), `must redact: ${name}`);
+  }
+  // `aws configure set aws_secret_access_key <key>` separates the key with whitespace, not : or =
+  const AWS = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+  const cfg = redact(`aws configure set aws_secret_access_key ${AWS}`, detectors);
+  assert.ok(cfg.blocked && !cfg.text.includes(AWS), 'aws configure set form must be blocked');
+  // a PuTTY key is a private key like any other, and *.ppk is a secret-bearing file name
+  const ppk = redact(
+    'PuTTY-User-Key-File-3: ssh-rsa\nEncryption: none\nPublic-Lines: 1\nAAAA\nPrivate-Lines: 1\nBBBB\nPrivate-MAC: 0123abcd',
+    detectors,
+  );
+  assert.ok(ppk.blocked && !ppk.text.includes('BBBB'), 'PuTTY private key must be blocked');
+  assert.ok(isSensitiveFileName('server.ppk', loadControlPlane(ROOT).secrets));
+
+  // curl: a short-option CLUSTER ending in u, glued credentials, and a curl inside a substitution
+  const PW = 'Hq7Rt2Wx9Lm4Pz6Kd8Vb';
+  for (const line of [
+    `curl -sSu svc-deploy:${PW} https://api.example.com/v1/export`,
+    `RESP=\`curl -u svc-deploy:${PW} https://api.example.com/v1/export\``,
+    `x=$(curl -u alice:${PW} https://api.example.com)`,
+    `curl -ualice:${PW} https://api.example.com`,
+    `curl -fsSLuadmin:${PW} https://api.example.com`,
+  ]) {
+    const r = redactCurl(line);
+    assert.ok(!r.text.includes(PW), `must redact credentials: ${line}`);
+    assert.ok(r.findings.some((f) => f.kind === 'curl.user'), `must report curl.user: ${line}`);
+  }
+  assert.equal(redactCurl('curl https://example.com/plain').findings.length, 0);
+});
