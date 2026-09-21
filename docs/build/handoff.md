@@ -5,9 +5,9 @@ Snapshot for resuming work. Written 2026-09-21. Pair this with `docs/build/build
 
 ## Current state
 
-- **Branch**: `main`. **HEAD**: `cccf31d`. Working tree clean.
+- **Branch**: `main`. **HEAD**: `d6046d5`. Working tree clean.
 - **Deterministic gate is green**: `npm run typecheck`, `npm run lint` (`eslint packages tests`), `node --test`
-  (**148 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
+  (**150 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
   throwaway build).
 - Everything is **committed locally only**. Nothing pushed, no PRs, no production changes — and that constraint holds.
 
@@ -39,7 +39,8 @@ deterministic test in the same round, then committed.
 | 8    | 6                  | `734d696` | complete run; tar write modes, quoted commit flags, multi-digit redirects, redaction span leak, Slack xapp-/xoxe-, control-plane write matcher |
 | 9    | 10                 | `a1341c3` | secret-scan gaps (npm/pypi/azure-SAS/DigitalOcean/Docker), >| redirect, commit $IFS splice, .git gitlink file, nested hook config |
 | 10   | 13                 | `cccf31d` | secret-detector sweep (16 new: Databricks/Shopify/Terraform/NewRelic/Grafana/Square/Google/Stripe-webhook/GitHub/Linear/Notion/Figma/Doppler/PlanetScale/Sentry), commit ${IFS%?} trims, >>| redirect, symlinked .git, npm install lifecycle |
-| 11   | running            | —       | re-verify round-10 fixes + evaluator deep edges / containment / launcher |
+| 11   | 9                  | `d6046d5` | commit default-value, sh -euc cluster, cloud global opts, tilde paths, make -C, install hooks, 4 secrets, curl -u |
+| 12   | running            | —       | re-verify round-11 fixes + fresh evaluator/containment/redaction/launcher pass |
 
 A key framing added in round 7 and kept in round 8: the verdict ladder is ALLOW (silent) < ASK (human approves once) <
 DENY. An opaque command reaching **ASK is the designed human gate, not a bypass**. Reviewers report only reaches to
@@ -49,12 +50,11 @@ classifying obfuscated opaque code, and lets the loop converge.
 
 ## In progress
 
-- **Round 11** is running as a background Workflow (run id `wf_03723124-0f9`): re-verifies the round-10 fixes and does
-  a fresh pass on evaluator deep edges, containment, launcher/cache. The big secret-detector surface was broadly swept
-  in round 10 (a new `secrets/more-providers.md` with 16 detectors), so future rounds should find fewer of those; the
-  remaining evaluator findings are narrowing to rare edge cases. When a round completes: reproduce any confirmed
-  HIGH/MEDIUM by hand, fix + pin each, commit, record it, iterate. When a COMPLETE round ends with zero confirmed
-  HIGH/MEDIUM, set `INDEPENDENT-AGENT REVIEW` to PASSED for phase 1.
+- **Round 12** is running as a background Workflow: re-verifies the round-11 fixes and does a fresh evaluator /
+  containment / redaction / launcher pass. Finding counts are trending down (8, 19, 16, 6, 10, 13, 9) as the surfaces
+  get covered; the remaining findings are narrowing edge cases plus the occasional provider-token gap. When a round
+  completes: reproduce any confirmed HIGH/MEDIUM by hand, fix + pin each, commit, record it, iterate. When a COMPLETE
+  round ends with zero confirmed HIGH/MEDIUM, set `INDEPENDENT-AGENT REVIEW` to PASSED for phase 1.
 
 ## Remaining
 
