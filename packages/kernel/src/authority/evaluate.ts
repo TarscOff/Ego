@@ -87,15 +87,16 @@ const WRAPPERS = new Set([
   'systemd-run',
   'sandbox-exec',
   'busybox',
-  'doas',
   'gtimeout',
 ]);
+// `doas` is deliberately NOT a transparent wrapper: like `sudo`, it must keep its head so the command.privileged
+// matcher that names it can fire (its inner command is analysed separately in normalizeTail).
 /** wrapper options that consume the next token as their value (the command starts after it) */
 const WRAPPER_VALUE_OPTS: Record<string, RegExp> = {
   env: /^(-u|--unset|-C|--chdir|-S|--split-string)$/,
   nice: /^(-n|--adjustment)$/,
   ionice: /^(-c|-n|-p|--class|--classdata)$/,
-  watch: /^(-n|--interval|-d)$/,
+  watch: /^(-n|--interval)$/, // `-d` is a flag (--differences), not a value option: it must not eat the command head
   stdbuf: /^-[ioe]$/,
   strace: /^-[opesEu]$/,
   ltrace: /^-[opesu]$/,
@@ -212,6 +213,18 @@ export function splitShellSegments(command: string): string[] {
 }
 
 /** Strips leading env assignments and transparent wrappers; expands `bash -c '...'` and `xargs` into inner commands. */
+/** The command string carried by `su`/`runuser`/`flock`, in every spelling that runs it: `-c CMD`, `--command CMD`,
+ *  `--command=CMD`, `--session-command=CMD`. Returns null when the wrapper carries no inline command. */
+function operandWrapperBody(tokens: string[], from: number): string | null {
+  for (let i = from + 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t === '-c' || t === '--command' || t === '--session-command') return tokens[i + 1] ?? null;
+    const m = /^(?:--command|--session-command)=([\s\S]*)$/.exec(t);
+    if (m) return m[1]!;
+  }
+  return null;
+}
+
 export function normalizeSegment(segment: string): string[] {
   let s = segment.trim();
   const extra: string[] = [];
@@ -274,27 +287,37 @@ export function normalizeSegment(segment: string): string[] {
       continue;
     }
     if (WRAPPERS_WITH_OPERAND.has(t)) {
-      // flock [opts] <file> cmd | flock [opts] <file> -c 'cmd', su [-] user -c cmd, runuser -u user -- cmd
-      const c = tokens.indexOf('-c', idx);
-      if (c > 0 && tokens[c + 1])
-        return [
-          ...extra,
-          ...splitShellSegments(tokens[c + 1]!).flatMap(normalizeSegment),
-          tokens.slice(idx).join(' '),
-        ];
+      // flock [opts] <file> cmd | flock [opts] <file> -c 'cmd', su [-] user -c cmd, su --command='cmd' user,
+      // runuser -u user -- cmd
+      const body = operandWrapperBody(tokens, idx);
+      if (body !== null)
+        return [...extra, ...splitShellSegments(body).flatMap(normalizeSegment), tokens.slice(idx).join(' ')];
       idx++;
+      let sawSeparator = false;
+      let userGiven = false;
       while (idx < tokens.length && tokens[idx]!.startsWith('-')) {
         const opt = tokens[idx]!;
         idx++;
-        if (/^(-w|--timeout|-E|--conflict-exit-code|-u|--user|-g|--group)$/.test(opt)) idx++;
-        if (opt === '--') break;
+        if (opt === '--') {
+          sawSeparator = true;
+          break;
+        }
+        if (/^(-u|--user)$/.test(opt)) {
+          userGiven = true;
+          idx++;
+        } else if (/^(-w|--timeout|-E|--conflict-exit-code|-g|--group|-s|--shell)$/.test(opt)) idx++;
+        else if (/^--user=/.test(opt)) userGiven = true;
       }
+      // the lock file / user operand is only positional when it was not already given as an option and no `--`
+      // separator has started the command line (round 13: `runuser -u root -- cp …` ate `cp` as the user name)
       if (
-        t === 'flock' ||
-        t === 'su' ||
-        (t === 'runuser' && tokens[idx] !== undefined && !tokens[idx]!.startsWith('-'))
+        !sawSeparator &&
+        !userGiven &&
+        (t === 'flock' ||
+          t === 'su' ||
+          (t === 'runuser' && tokens[idx] !== undefined && !tokens[idx]!.startsWith('-')))
       )
-        idx++; // lock file / user
+        idx++;
       continue;
     }
     break;
@@ -352,13 +375,19 @@ function findPayloads(rest: string[]): string[] {
     }
   }
   if (head === 'fd' || head === 'fdfind') {
+    // `fd [OPTIONS] [pattern] [path]`: the search root is the second bare operand, else the working directory
+    const execAt = rest.findIndex((t) => t === '-x' || t === '--exec' || t === '-X' || t === '--exec-batch');
+    const operands = rest.slice(1, execAt < 0 ? rest.length : execAt).filter((t) => !t.startsWith('-'));
+    const searchRoot = operands[1] ?? '.';
     for (let i = 1; i < rest.length; i++) {
       const t = rest[i]!;
       if (t === '-x' || t === '--exec' || t === '-X' || t === '--exec-batch') {
         const cmd: string[] = [];
         let j = i + 1;
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '\\;') cmd.push(rest[j++]!);
-        if (cmd.length) out.push(requote(cmd.filter((c) => !/^\{.*\}$/.test(c))));
+        // `{}` / `{/}` / `{.}` stand for a match under the search root, exactly as find's `{}` does: substitute the
+        // root rather than dropping the placeholder, or `fd -x rm -rf {}` reads as a bare `rm -rf` (round 13)
+        if (cmd.length) out.push(requote(cmd.map((c) => (/^\{.*\}$/.test(c) ? searchRoot : c))));
         i = j;
       }
     }
@@ -391,10 +420,11 @@ function findPayloads(rest: string[]): string[] {
 function normalizeTail(rest: string[]): string[] {
   const head = rest[0]!;
   if (head === 'bash' || head === 'sh' || head === 'zsh' || head === 'dash' || head === 'ksh' || head === 'fish') {
-    // -c, or a combined short-flag cluster ending in c (`-euc`, `-ec`, `-lc`, `-xc`) — the command string follows it
-    const cIdx = rest.findIndex((t) => t === '-c' || /^-[a-z]*c$/i.test(t));
+    // -c, or a combined short-flag cluster CONTAINING c (`-euc`, `-ec`, `-lc`, `-xc`, `-cx`) — `-c` takes the next
+    // operand as the command string wherever it sits in the cluster. A `--` may separate it from that operand.
+    const cIdx = rest.findIndex((t) => t === '-c' || /^-[a-z]*c[a-z]*$/i.test(t));
     if (cIdx >= 0) {
-      const inner = rest[cIdx + 1];
+      const inner = rest[cIdx + 1] === '--' ? rest[cIdx + 2] : rest[cIdx + 1];
       if (inner) return [`${head} -c`, ...splitShellSegments(inner).flatMap(normalizeSegment)];
     }
   }
@@ -410,7 +440,21 @@ function normalizeTail(rest: string[]): string[] {
   }
 
   if (head === 'sudo' || head === 'doas') {
-    const after = rest.slice(1).filter((t, i) => !(i === 0 && t.startsWith('-')));
+    // skip the privilege tool's own options (and the values of the ones that take one) so the inner command head is
+    // found wherever it sits: `sudo -u root -H cp …`, `doas -u root cp …`
+    let i = 1;
+    while (i < rest.length) {
+      const t = rest[i]!;
+      if (t === '--') {
+        i++;
+        break;
+      }
+      if (!t.startsWith('-')) break;
+      i += /^(-u|-g|-p|-C|-h|-U|-r|-t|-D|--user|--group|--prompt|--host|--role|--type|--chdir|--close-from)$/.test(t)
+        ? 2
+        : 1;
+    }
+    const after = rest.slice(i);
     return [rest.join(' '), ...(after.length ? [after.join(' ')] : [])];
   }
   return [rest.join(' ')];
@@ -593,12 +637,48 @@ export function redirectionTargets(segment: string): string[] {
   // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
   const unglued = segment.replace(/([^\s&|<>])(>{1,2})/g, '$1 $2');
-  const re = /(?:^|\s)(?:\d?>>?\|?|&>>?\|?)\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
+  // a target is a run of quoted and unquoted chunks: `"control-plane"/permissions/x`, `control-plan\e/x`, 'a b'/c
+  const re = /(?:^|\s)(?:\d?>>?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(unglued))) {
-    const target = m[1]!.replace(/^["']|["']$/g, '');
-    if (target.startsWith('&') || target === '/dev/null' || target.startsWith('/dev/')) continue;
+    const target = unquoteShellWord(m[1]!);
+    if (target.startsWith('&')) continue;
+    // real device sinks are not writes to a governed path — but only after `..` is resolved away, so that
+    // `/dev/../etc/x` is judged as `/etc/x` (round 13)
+    const resolved = target.startsWith('/') ? resolve(target) : target;
+    if (resolved === '/dev' || resolved.startsWith('/dev/')) continue;
     out.push(target);
+  }
+  return out;
+}
+
+/** Removes shell quoting and backslash escapes from a single word, the way the shell does before it opens a file. */
+function unquoteShellWord(w: string): string {
+  let out = '';
+  let quote: string | null = null;
+  for (let i = 0; i < w.length; i++) {
+    const ch = w[i]!;
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      if (ch === '\\' && quote === '"' && i + 1 < w.length) {
+        out += w[++i]!;
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < w.length) {
+      out += w[++i]!;
+      continue;
+    }
+    out += ch;
   }
   return out;
 }
@@ -827,18 +907,25 @@ function insideRoots(absPath: string, ctx: EvaluationContext): boolean {
 }
 
 const TRUST_STORE_DIRS = ['trust', 'index', 'releases', 'runtimes'];
+/** The trust store must be recognised however the path is cased: macOS and Windows resolve `~/.ego/RUNTIMES/…` to the
+ *  real `runtimes` directory. Matching case-insensitively everywhere fails closed on a case-sensitive filesystem too. */
+const foldCase = (p: string): string => p.toLowerCase();
 /** true when a posix path IS one of the EGO_HOME trust-store directories or lies within it (the dir node itself counts). */
 function underTrustDir(posix: string, home: string): boolean {
-  return TRUST_STORE_DIRS.some((d) => posix === `${home}/${d}` || posix.startsWith(`${home}/${d}/`));
+  const p = foldCase(posix);
+  const h = foldCase(home);
+  return TRUST_STORE_DIRS.some((d) => p === `${h}/${d}` || p.startsWith(`${h}/${d}/`));
 }
 /** Whether a path (or a glob's literal prefix) reaches the EGO_HOME trust store: at/under a trust dir; a glob that
  *  completes to one; or the EGO_HOME root itself under a glob or a recursive whole-tree op (parent copy/delete). */
 function reachesTrustStore(prefixPosix: string, home: string, isGlob: boolean, recursive: boolean): boolean {
-  if (prefixPosix === home) return isGlob || recursive;
+  const prefix = foldCase(prefixPosix);
+  const h = foldCase(home);
+  if (prefix === h) return isGlob || recursive;
   return TRUST_STORE_DIRS.some((d) => {
-    const dir = `${home}/${d}`;
-    if (prefixPosix === dir || prefixPosix.startsWith(dir + '/')) return true;
-    if (isGlob && (dir.startsWith(prefixPosix + '/') || dir.startsWith(prefixPosix))) return true;
+    const dir = `${h}/${d}`;
+    if (prefix === dir || prefix.startsWith(dir + '/')) return true;
+    if (isGlob && (dir.startsWith(prefix + '/') || dir.startsWith(prefix))) return true;
     return false;
   });
 }
@@ -919,7 +1006,32 @@ const WRITE_HEADS = new Set([
   'unlink',
   'patch',
   'git',
+  'find', // `-fprint`/`-fls`/`-fprintf FILE` write FILE
+  'scp',
 ]);
+
+/** Value of an option in every spelling that a real CLI accepts: `--long VALUE`, `--long=VALUE`, `-o VALUE` and the
+ *  glued short form `-oVALUE`, including when the letter sits inside a cluster (`-xC DIR`, `-xCDIR`, `-qod DIR`). */
+function optionValue(tokens: string[], short: string, longs: string[]): string | null {
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    for (const l of longs) {
+      if (t === l) return tokens[i + 1] ?? null;
+      if (t.startsWith(l + '=')) return t.slice(l.length + 1);
+    }
+    if (!short || !t.startsWith('-') || t.startsWith('--')) continue;
+    const at = t.indexOf(short, 1);
+    if (at < 0) continue;
+    const glued = t.slice(at + 1);
+    if (glued) return glued;
+    return tokens[i + 1] ?? null;
+  }
+  return null;
+}
+
+/** Options of copy-like tools that consume the NEXT token as their value; their value is never the destination. */
+const COPY_VALUE_OPTS =
+  /^(--sparse|--reflink|-S|--suffix|--backup|-t|--target-directory|-m|--mode|-o|--owner|-g|--group|-e|--rsh|--exclude|--include|--exclude-from|--include-from|--files-from|--log-file|--temp-dir|--partial-dir|--compare-dest|--link-dest|--copy-dest|--bwlimit|--timeout|--contimeout|--port|--chmod|--chown|--backup-dir|--max-size|--min-size|--out-format|--rsync-path|--filter|-f|--block-size|-P|-i|-c|-F|-l|-J|-W)$/;
 
 export function classifyPath(
   table: CompiledAuthorityTable,
@@ -1515,6 +1627,30 @@ const CREDENTIAL_DIRS = [
 ];
 /** The archive file an archiver writes/reads: `-f X`, `--file=X`, a combined short cluster ending in `f` (`-cf X`,
  *  `-czf X`, `-wf X`), or a glued value (`-fX`). Returns the archive path, or null (stdin/stdout `-` handled by caller). */
+/** tar function letters that consume an argument: everything after them in the same token is their VALUE, not more
+ *  function letters (`-Ccontrol-plane` is "change directory to control-plane", not "create"). */
+const TAR_ARG_LETTERS = new Set(['f', 'b', 'C', 'V', 'L', 'N', 'X', 'T', 'I', 'H', 'K']);
+
+/** The tar function letters actually requested, across the dashed (`-xf`), clustered and dash-less (`xf`) spellings. */
+function tarFunctionLetters(tokens: string[]): string {
+  let out = '';
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t.startsWith('--')) continue;
+    const body = t.startsWith('-')
+      ? t.slice(1)
+      : i === 1 && /^[A-Za-z]+$/.test(t)
+        ? t // traditional dash-less mode operand: `tar xf a.tar`
+        : '';
+    for (const ch of body) {
+      if (!/[A-Za-z]/.test(ch)) break;
+      out += ch;
+      if (TAR_ARG_LETTERS.has(ch)) break;
+    }
+  }
+  return out;
+}
+
 function archiveFileOperand(tokens: string[]): string | null {
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
@@ -1633,7 +1769,7 @@ function classifyShellPaths(
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
   if (write) {
-    const bareOperands = (): string[] => {
+    const bareOperands = (valueOpts?: RegExp): string[] => {
       // ignore redirections (`< list`, `2> err`) and their targets, then keep the bare operands even when a
       // destination is a bare name (`cd .harness/generated && cp x policy.json`)
       const operands: string[] = [];
@@ -1641,6 +1777,12 @@ function classifyShellPaths(
         const t = tokens[i]!;
         if (/^\d*[<>]{1,2}$/.test(t) || t === '&>' || t === '>|') {
           if (!t.includes('/') && i + 1 < tokens.length) i++;
+          continue;
+        }
+        // an option that consumes the next token must not let its VALUE pass as an operand: a trailing
+        // `--sparse always` would otherwise displace the real destination (round 13)
+        if (valueOpts?.test(t)) {
+          i++;
           continue;
         }
         if (!t.startsWith('-')) operands.push(t);
@@ -1651,6 +1793,7 @@ function classifyShellPaths(
       // traditional tar also takes a DASH-LESS function-letter operand as its first argument: `tar xf a`, `tar cf a`,
       // `tar czf a` — recognise it alongside the dashed `-cf`/`-xf` forms
       const modeTok = tokens[1] && !tokens[1].startsWith('-') && /^[a-z]+$/i.test(tokens[1]) ? tokens[1] : '';
+      const letters = tarFunctionLetters(tokens);
       // every archive-WRITING mode: create (c), append (r), update (u), catenate (A) — not just create
       const writeMode =
         tokens.some(
@@ -1659,12 +1802,10 @@ function classifyShellPaths(
             t === '--append' ||
             t === '--update' ||
             t === '--catenate' ||
-            t === '--concatenate' ||
-            /^-[A-Za-z]*[cruA]/.test(t),
-        ) || /[cruA]/.test(modeTok);
+            t === '--concatenate',
+        ) || /[cruA]/.test(letters);
       const extract =
-        tokens.some((t) => t === '--extract' || t === '--get' || /^-[A-Za-z]*x/.test(t)) ||
-        /x/.test(modeTok);
+        tokens.some((t) => t === '--extract' || t === '--get') || /x/.test(letters);
       if (writeMode) {
         // dash-less `cf`/`czf`/`rf`/`cbf`: the archive is `f`'s positional argument. Function letters before `f` that
         // themselves consume an argument (b blocking-factor, V volume, L length, N newer, X exclude, T files-from)
@@ -1681,21 +1822,20 @@ function classifyShellPaths(
         }
         dest = arc && arc !== '-' ? arc : null; // writing the archive is a write to that path
       } else if (extract) {
-        // the change-directory flag has several spellings: -C DIR, --directory DIR, --directory=DIR, --cd DIR
-        const eq = tokens.find((t) => t.startsWith('--directory='));
-        const fi = tokens.findIndex((t) => t === '-C' || t === '--directory' || t === '--cd');
-        dest = eq
-          ? eq.slice('--directory='.length)
-          : fi >= 0 && tokens[fi + 1]
-            ? tokens[fi + 1]!
-            : '.'; // extracts into the change-directory target, else the working directory
+        // the change-directory flag has several spellings: -C DIR, -CDIR, -xCDIR, --directory DIR, --directory=DIR,
+        // --cd DIR, and --one-top-level[=DIR] creates and extracts into its own directory
+        dest =
+          optionValue(tokens, 'C', ['--directory', '--cd', '--one-top-level']) ?? '.'; // else the working directory
       } else dest = null; // list / compare: read-only
     } else if (head === 'zip') {
       const operands = bareOperands();
       dest = operands.length ? operands[0]! : null; // zip writes its archive: the first non-option operand
     } else if (head === 'unzip') {
-      const i = tokens.indexOf('-d');
-      dest = i > 0 && tokens[i + 1] ? tokens[i + 1]! : '.';
+      dest = optionValue(tokens, 'd', ['--exdir']) ?? '.';
+    } else if (head === 'find') {
+      // find's own write actions: -fprint/-fprint0/-fls FILE and -fprintf FILE FORMAT
+      const i = tokens.findIndex((t) => t === '-fprint' || t === '-fprint0' || t === '-fls' || t === '-fprintf');
+      dest = i >= 0 ? (tokens[i + 1] ?? null) : null;
     } else if (head === 'dd') dest = tokens.find((t) => t.startsWith('of='))?.slice(3) ?? null;
     else if (head === 'pax') {
       const wmode = tokens.some((t) => t === '-w' || /^-[A-Za-z]*w/.test(t)); // -w, -rw, -wf all write
@@ -1711,10 +1851,8 @@ function classifyShellPaths(
       // renaming a protected file over another) — the source side is not merely a read
       dest = 'ALL';
     } else if (head === 'sort') {
-      // `sort -o FILE` / `sort --output=FILE` writes FILE (in place, even when FILE is also an input)
-      const eq = tokens.find((t) => t.startsWith('--output='));
-      const oi = tokens.findIndex((t) => t === '-o' || t === '--output');
-      dest = eq ? eq.slice('--output='.length) : oi >= 0 && tokens[oi + 1] ? tokens[oi + 1]! : null;
+      // `sort -o FILE` / `sort -oFILE` / `sort --output=FILE` writes FILE (in place, even when FILE is an input too)
+      dest = optionValue(tokens, 'o', ['--output']);
     } else if (head === 'uniq') {
       // `uniq [input [output]]`: a second bare operand is the output file
       const operands = bareOperands();
@@ -1725,18 +1863,26 @@ function classifyShellPaths(
       const operands = bareOperands();
       dest = inplace && operands.length ? operands[operands.length - 1]! : null;
     } else if (['cp', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio'].includes(head)) {
-      const operands = bareOperands();
+      const operands = bareOperands(COPY_VALUE_OPTS);
+      // `-t DIR` / `--target-directory=DIR` moves the destination off the operand list entirely: every operand is
+      // then a source and DIR is what gets written (round 13)
+      const targetDir = optionValue(tokens, 't', ['--target-directory']);
       // cpio -p reads its file list from stdin and copies INTO its sole operand; cp/rsync/... write the last operand
-      dest = operands.length
-        ? head === 'cpio'
-          ? operands[0]!
-          : operands[operands.length - 1]!
-        : null;
+      dest = targetDir
+        ? targetDir
+        : operands.length
+          ? head === 'cpio'
+            ? operands[0]!
+            : operands[operands.length - 1]!
+          : null;
     } else if (head === 'git') {
       // `git checkout|restore <ref> -- <paths>` writes the paths
       const sub = tokens[1];
       const dd = tokens.indexOf('--');
       dest = (sub === 'checkout' || sub === 'restore') && dd > 0 ? 'AFTER_DASHDASH' : null;
+    } else if (head === 'patch') {
+      // `patch -o FILE` / `patch -oFILE` / `patch --output=FILE` writes FILE instead of the patched originals
+      dest = optionValue(tokens, 'o', ['--output']) ?? 'ALL';
     } else if (
       [
         'tee',
@@ -1979,6 +2125,10 @@ function commitBypassFlag(cmdStr: string): boolean {
     }
     return false;
   };
+  // git accepts any UNAMBIGUOUS abbreviation of a long option, so `--no-verif` disables the hooks exactly like
+  // `--no-verify`. Accepting every prefix is fail-closed: an ambiguous one makes git error out, never bypass.
+  const abbreviatedNoVerify = (tok: string): boolean =>
+    tok.length >= 6 && '--no-verify'.startsWith(tok);
   for (let k = ci + 1; k < m.length; k++) {
     const prev = m[k - 1]!;
     // a message/file flag consumes the NEXT token as its value, so that token is data, not a flag — skip it. This
@@ -1997,13 +2147,17 @@ function commitBypassFlag(cmdStr: string): boolean {
     // any $-expansion inside a git-commit flag token can field-split ($IFS) or, for an unset/empty variable, VANISH and
     // glue the literal fragments (`-${x}-no-verify` -> `--no-verify`, `-${x}n` -> `-n`). Default-value forms substitute
     // their literal word. Test BOTH a separator substitution and an empty substitution for the residual expansions.
+    // A command substitution reaches here as the `$SUBST` marker the segment splitter leaves behind. In a flag
+    // position it can expand to anything, including `-n`, so it fails closed. (A substitution used as a message or
+    // file VALUE was already skipped above, so `git commit -m "$(date)"` stays allowed.)
+    if (m[k]!.text.includes('$SUBST') || /\$\(|`/.test(m[k]!.text)) return true;
     const base = m[k]!.text
       .replace(/\$\{IFS[^}]*\}|\$IFS/g, ' ') // IFS-based expansions always field-split
       .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^}]*)\}/g, '$1'); // ${x:-D}/${x:=D}/${x-D}/${x:+A} -> the literal word
     const residual = /\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[-@*#?!0-9]|\$/g;
     for (const sub of [' ', '']) {
       for (const part of base.replace(residual, sub).split(/\s+/)) {
-        if (part === '--no-verify' || clusterNoVerify(part)) return true;
+        if (part === '--no-verify' || abbreviatedNoVerify(part) || clusterNoVerify(part)) return true;
       }
     }
   }

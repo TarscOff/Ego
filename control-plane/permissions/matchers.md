@@ -443,28 +443,40 @@ matchers:
   - capability: command.build
     tool: Bash
     command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|npx\s+(tsc|esbuild|eslint|prettier|vite|next|ng)|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
-  - capability: command.read-only
-    tool: Bash
-    command: '^(ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|find|fd|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|sort|uniq|cut|awk(?!.*-i)|sed(?!\s+-i)|jq|yq|xargs\s+(ls|cat|grep|rg|wc)|node\s+(-v|--version|-e\s+["'']?console\.log)|npm\s+(ls|view|--version|-v|outdated|why|explain)|python3?\s+(--version|-V|-c\s+["'']?print\()|tsc\s+--version|git\s+--version|history)\b'
-  # inline interpreters are opaque, so a body that NAMES a protected store fails closed to the same deny the literal verb receives
+  # inline interpreters are opaque, so a body that NAMES a protected store fails closed to the same deny the literal verb receives.
+  # Round 13: this block sits BEFORE command.read-only. Its `console.log(…)` / `print(…)` carve-out used to win
+  # first-match and turn a credential read or a hook write into a silent ALLOW.
   - capability: fs.credential-store.write
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.ssh/|\.aws/credentials|\.aws/config|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.kube/|\.git-credentials|\.docker/config|id_rsa|id_ed25519|id_ecdsa|id_dsa)'
+    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.ssh/|\.aws/credentials|\.aws/config|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.kube/|\.git-credentials|\.docker/config|id_rsa|id_ed25519|id_ecdsa|id_dsa)'
   - capability: harness.trust.tamper
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.ego/(trust|runtimes|releases|index)\b'
+    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.ego/(trust|runtimes|releases|index)\b'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.git/hooks|\.husky/|\.harness/hooks|core\.hooksPath|\.claude/settings|\.codex/)'
+    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|core\.hooksPath|\.claude/settings|\.codex/)'
   - capability: harness.runtime.tamper
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.harness/(generated|runtime)\b'
+    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.harness/(generated|runtime)\b'
   - capability: fs.git-internals.write
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.git/(refs|objects|config|HEAD|packed-refs|info|logs)'
+    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.git/(refs|objects|config|HEAD|packed-refs|info|logs)'
+  # An inline body that spawns a process, escapes to a shell or touches the filesystem is never read-only, whatever
+  # it is wrapped in. Round 13: `node -e 'console.log(execSync("git push origin main"))'` reached ALLOW.
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(node\s+(-e|--eval|-p|--print)|python3?\s+-c|ruby\s+-e|perl\s+-e|php\s+-r)\b'
+    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(child_process|execSync|execFileSync|spawnSync|execFile|spawn\s*\(|os\.system|os\.popen|subprocess|popen|IO\.popen|shell_exec|proc_open|passthru|system\s*\(|require\s*\(|import\s|__import__|fs\.|writeFile|appendFile|unlink|rmSync|rmdir|readFile|open\s*\(|eval\s*\(|Function\s*\(|process\.|Deno\.|Bun\.)'
+  # awk and sed are read-only only while their program neither escapes to a shell nor writes a file
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place)'
+  - capability: command.read-only
+    tool: Bash
+    command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history)\b|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+--version\b)'
+  # interposed interpreter options (`python3 -u -c`, `node --no-warnings -e`) must not escape the ^-anchored match
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(?:(?:node|nodejs|deno|bun|tsx|ts-node)\s+(?:-[-\w=.]+\s+)*(?:-e|--eval|-p|--print)|(?:python3?|ruby|perl|php|Rscript)\s+(?:-[-\w=.]+\s+)*(?:-c|-e|-r|-E))\b'
   - capability: command.interpreter-script
     tool: Bash
     command: '^(node|python3?|tsx|ts-node|bun|deno\s+run|ruby|perl|php)\s+(?!-)[^\s]+\.(js|mjs|cjs|ts|mts|py|rb|pl|php)\b'
