@@ -5,9 +5,9 @@ Snapshot for resuming work. Written 2026-09-21. Pair this with `docs/build/build
 
 ## Current state
 
-- **Branch**: `main`. **HEAD**: `159222b`. Working tree clean.
+- **Branch**: `main`. **HEAD**: `8bf035d`. Working tree clean.
 - **Deterministic gate is green**: `npm run typecheck`, `npm run lint` (`eslint packages tests`), `node --test`
-  (**152 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
+  (**158 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
   throwaway build).
 - Everything is **committed locally only**. Nothing pushed, no PRs, no production changes — and that constraint holds.
 
@@ -41,7 +41,7 @@ deterministic test in the same round, then committed.
 | 10   | 13                 | `cccf31d` | secret-detector sweep (16 new: Databricks/Shopify/Terraform/NewRelic/Grafana/Square/Google/Stripe-webhook/GitHub/Linear/Notion/Figma/Doppler/PlanetScale/Sentry), commit ${IFS%?} trims, >>| redirect, symlinked .git, npm install lifecycle |
 | 11   | 9                  | `d6046d5` | commit default-value, sh -euc cluster, cloud global opts, tilde paths, make -C, install hooks, 4 secrets, curl -u |
 | 12   | 5                  | `159222b` | commit empty-expansion, make -f altmakefile, sort/uniq/yq writes, rm EGO_HOME root, aws-secret-in-json |
-| 13   | pending (held)     | —       | ready to launch; held pending the user's incoming prompt (may answer Q98) |
+| 13   | 61                 | `fbf8643`, `c4c64e6` | 14 adversarial clusters with shared probes; 76 claimed, 15 refuted |
 
 A key framing added in round 7 and kept in round 8: the verdict ladder is ALLOW (silent) < ASK (human approves once) <
 DENY. An opaque command reaching **ASK is the designed human gate, not a bypass**. Reviewers report only reaches to
@@ -51,19 +51,34 @@ classifying obfuscated opaque code, and lets the loop converge.
 
 ## In progress
 
-- **Round 13 is ready but HELD**: rounds 4-12 are done and committed. The user said a big prompt is coming (possibly
-  the Q98 answer), so round 13 is not launched yet to avoid redoing work if the prompt redirects. Counts are trending
-  down (8, 19, 16, 6, 10, 13, 9, 5). When cleared to continue: launch round 13 (verify round-12 fixes + fresh pass),
-  then reproduce/fix/pin/commit any confirmed HIGH/MEDIUM, iterate. When a COMPLETE round ends with zero confirmed
-  HIGH/MEDIUM, set `INDEPENDENT-AGENT REVIEW` to PASSED for phase 1. Q98 still needs the user's explicit answer.
+- **Round 13 is done** (`wf_cc7b53e7-7fb`, 90 agents): 14 adversarial clusters, 76 claims, 61 confirmed after
+  refutation, all fixed and pinned across `fbf8643` and `c4c64e6`. The jump from 5 (round 12) to 61 is a change of
+  instrument, not a regression: the fleet went from 5 dimension skeptics to 14 clusters sharing reproduction probes
+  (`r13probe.mjs`, `r13secret.mjs` in the session scratchpad), and reached surfaces earlier rounds never touched.
+  The two worst: `command.read-only` carried an unbounded `console.log(…)`/`print(…)` carve-out that granted silent
+  arbitrary execution, and the pre-commit scan read the stale real index for `git commit -a` and scanned ZERO files.
+  **A round 14 is required** — this round was not clean.
+- **Q98 is being implemented, not just renamed.** Issues #2 (canonical) and #16 (implementation) require
+  target/effect-aware authorization and sequence it BEFORE phase-1 closure. Landed so far:
+  - `6e2ba36` **Q98-1**: target/effect classification. `control-plane/workspace/local-targets.md` declares the local
+    kube contexts, local DB hosts and production markers; the evaluator resolves the real target and re-judges any
+    capability that merely ASSERTS a local one. LOCAL unchanged, PRODUCTION absolute, EXTERNAL denied via the
+    previously unreachable `k8s.nonlocal.mutate`/`db.nonlocal.mutate`, and UNCLASSIFIED asks a human.
+  - `8bf035d` **Q98-2**: the v1 ASK ceiling. An organization may enable an admin-governed external write, never to
+    unattended ALLOW; a widening to ALLOW compiles to ASK and the provenance records the clamp.
+  Still to do: the HARD_LOCK tier decision (#16 §5), failure reason codes (#16 §10), the 22 deterministic tests
+  (#16 §11), docs/doctor/receipts terminology (#16 §12), and the `harness init` local-target wizard (#16 §7).
+  Then round 14 must validate the NEW boundary before `INDEPENDENT-AGENT REVIEW` can go to PASSED.
 
 ## Remaining
 
 1. **Finish the review loop** to a clean complete round, then flip the `INDEPENDENT-AGENT REVIEW` line to PASSED.
-2. **Q98 needs the user's explicit confirmation** before phase 1 closes: the split of forge capabilities into
-   `lock: organization` (DENY at core, widenable only by `policies/organization/permissions.md`) vs `lock: absolute`
-   (never widenable). It is currently implemented under the recommended default and documented in
-   `docs/architecture/alignment-2026-09.md`; moving an id between tiers is a MAJOR change (Q84).
+2. **Q98 is decided** (issue #2 is FINAL) and is being implemented per #16; see "In progress". The one open product
+   question is #16 §5: whether `forge.pr.create`, `forge.pr.merge`, `git.remote.push.force`,
+   `git.remote.branch.delete`, `git.remote.tag.delete` and `forge.branch.protection.modify` move to
+   `absolute-denies.md` (never widenable, reversing is a MAJOR change per Q84) or stay admin-governed with a v1 DENY
+   ceiling (same behaviour today, cheap to relax later). Nothing else in the control plane references those ids, so
+   either is mechanically clean.
 3. **Phases 2–7** per the frozen baseline: tasks/held-scopes/forge/workspace-registry (2); skills/catalog/ask (3);
    grilling/evidence/benchmark (4); policies/stakeholder-packs/decisions (5); remote source adapters +
    `distribution bundle` + conformance suite (6); phase-7 validation. `CONFORMANCE` stays NOT RUN until the phase-6
