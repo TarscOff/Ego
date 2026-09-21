@@ -9,6 +9,18 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:stripe-key]'
+  - id: saas.npm-token
+    name: npm registry access token
+    pattern: '\bnpm_[A-Za-z0-9]{36}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:npm-token]'
+  - id: saas.pypi-token
+    name: PyPI upload token
+    pattern: '\bpypi-[A-Za-z0-9_-]{16,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:pypi-token]'
   - id: saas.twilio
     name: Twilio auth token or SID key
     pattern: '\bSK[a-f0-9]{32}\b|(twilio[_-]?auth[_-]?token\s*[:=]\s*["'']?)([a-f0-9]{32})'

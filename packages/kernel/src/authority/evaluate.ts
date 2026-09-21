@@ -156,7 +156,8 @@ export function splitShellSegments(command: string): string[] {
         i += 2;
         continue;
       }
-      if (ch === ';' || ch === '|' || ch === '\n') {
+      // a `|` preceded by `>` is the `>|` noclobber-override redirect operator, not a pipe — do not split there
+      if (ch === ';' || ch === '\n' || (ch === '|' && command[i - 1] !== '>')) {
         push();
         i++;
         continue;
@@ -1907,14 +1908,25 @@ function commitBypassFlag(cmdStr: string): boolean {
   };
   for (let k = ci + 1; k < m.length; k++) {
     const prev = m[k - 1]!;
-    // a message/file flag consumes the NEXT token as its value, so that token is data, not a flag — skip it. (The flag
-    // itself must be an unquoted bare `-m`/`-F`/…; a quoted `"-m"` is not a message-introducer.)
-    if (!prev.quoted && /^(-m|-F|--message|--file|--reuse-message|--reedit-message|-C|-c)$/.test(prev.text))
+    // a message/file flag consumes the NEXT token as its value, so that token is data, not a flag — skip it. This
+    // includes a short-flag cluster ENDING in `m`/`F` (`-am`, `-nm`, `-qm`): the trailing m/F takes the next token as
+    // the message. (The introducer must be unquoted; a quoted `"-m"` is not one. A `-nm` bypass is already caught at
+    // the `-nm` token itself before its message is reached.)
+    if (
+      !prev.quoted &&
+      (/^(--message|--file|--reuse-message|--reedit-message|-C|-c)$/.test(prev.text) ||
+        /^-[A-Za-z]*[mF]$/.test(prev.text))
+    )
       continue;
-    // the token's own quotes are already stripped: the shell strips `"-n"`/`-"n"`/`-n"m"` to `-n`/`-nm` before git
-    // parses it, so a quoted hook-bypass flag bypasses just the same and must be caught
-    const t = m[k]!.text;
-    if (t === '--no-verify' || clusterNoVerify(t)) return true;
+    // the token's own quotes are already stripped (the shell strips `"-n"`/`-"n"`/`-n"m"` to `-n`/`-nm`). Model the
+    // remaining reconstruction tricks: `$IFS`/`${IFS}` field-split the word, and `$""`/`$''`/`$VAR` empty-expand away —
+    // so `-n$IFS-m`, `-n${IFS}`, `-n$""` all reduce to a bare `-n` before git parses it.
+    const expanded = m[k]!.text
+      .replace(/\$\{IFS\}|\$IFS/g, ' ')
+      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$/g, '');
+    for (const part of expanded.split(/\s+/)) {
+      if (part === '--no-verify' || clusterNoVerify(part)) return true;
+    }
   }
   return false;
 }

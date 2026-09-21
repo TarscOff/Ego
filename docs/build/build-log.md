@@ -229,7 +229,23 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     baseline (Write/Edit or shell) at ALLOW; they now map to `harness.control-plane.edit` (DENY outside
     HARNESS_MAINTENANCE), which also covers shell writes via the containment check.
   Pinned by `bypass.test.ts` round-8 residuals and `redact.test.ts` round-8 cases. Suite: 144 tests.
-- **Round 9**: an independent re-verification of the round-8 fixes is pending; recorded here when it completes.
+- **Round 9** (workflow `ego-phase1-review-round9`, 31 agents, complete run, adversarial refutation): 10 confirmed
+  findings (7 HIGH, 3 MEDIUM), each reproduced and fixed and pinned. Most were secret-detector coverage gaps:
+  - **Secret-scan coverage** (`secrets/*.md`): npm (`npm_…`), PyPI (`pypi-…`), Azure `SharedAccessKey=` (Service Bus /
+    Event Hub / IoT, alongside the existing `AccountKey=`), DigitalOcean (`dop_v1_`/`doo_v1_`/`dor_v1_`) and Docker Hub
+    (`dckr_pat_`) tokens are now block-severity detectors.
+  - **`>|` noclobber redirect** (`evaluate.ts`): `splitShellSegments` split on the `|` of `>|`, severing the write
+    target; it no longer splits a `|` preceded by `>`, so `echo x>|.harness/generated/…` denies like `>`/`>>`.
+  - **Commit `$IFS` splice** (`evaluate.ts`): `git commit -n$IFS -m x` / `-n${IFS}` / `-n$""` reconstruct a bare `-n`
+    at the shell; the commit scan now models `$IFS` field-splitting and empty `$`-expansions before the cluster test
+    (and correctly skips a message consumed by a cluster ending in `m`/`F`, so `-am`/`-qm` messages stay ALLOW).
+  - **`.git` gitlink file** (`matchers.md`): the DENY matcher guarded only `.git/` contents, so overwriting the `.git`
+    pointer FILE of a worktree/submodule (repointing all internals and hooks) reached ALLOW; `**/.git` is now protected.
+  - **Nested host hook config** (`matchers.md`): `.claude/settings.json`, `…local.json` and `.codex/**` were matched
+    only at a registered repo root; they now carry the `**/` prefix like `**/.git/hooks/**`, so a nested copy in a
+    monorepo package is protected too.
+  Pinned by `bypass.test.ts` round-9 residuals and `redact.test.ts` round-9. Suite: 146 tests.
+- **Round 10**: an independent re-verification of the round-9 fixes is pending; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -240,7 +256,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 ### Check lines
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
-  (144 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  (146 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
   phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
   - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
     pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
@@ -260,9 +276,9 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–8 done (round 7 partial, re-covered by the complete round 8);
-  every confirmed HIGH/MEDIUM fixed and pinned. This line becomes PASSED only when a COMPLETE round ends with no
-  confirmed HIGH or MEDIUM finding; round 8 still surfaced six, so round 9 is required. This line becomes PASSED only when a round ends
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–9 done (round 7 partial, re-covered by complete rounds 8–9); every
+  confirmed HIGH/MEDIUM fixed and pinned. This line becomes PASSED only when a COMPLETE round ends with no confirmed
+  HIGH or MEDIUM finding; round 9 still surfaced ten, so round 10 is required. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

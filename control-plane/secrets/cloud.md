@@ -45,11 +45,17 @@ detectors:
     replacement: '[REDACTED:azure-client-secret]'
   - id: cloud.azure.storage-key
     name: Azure storage account key (connection string)
-    pattern: '(AccountKey=)([A-Za-z0-9+/=]{40,})'
+    pattern: '((?:AccountKey|SharedAccessKey)=)([A-Za-z0-9+/=]{40,})'
     group: 2
     severity: block
     locked: true
     replacement: '[REDACTED:azure-storage-key]'
+  - id: cloud.digitalocean.token
+    name: DigitalOcean API token
+    pattern: '\b(?:dop|doo|dor)_v1_[0-9a-f]{64}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:digitalocean-token]'
   - id: cloud.signed-url
     name: Cloud signed URL parameters
     pattern: '([?&](?:X-Amz-Signature|X-Goog-Signature|sig|Signature)=)([A-Za-z0-9%._~+/=-]{16,})'

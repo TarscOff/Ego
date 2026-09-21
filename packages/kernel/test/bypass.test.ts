@@ -714,3 +714,33 @@ test('round-8 residuals: tar write modes, quoted commit flags, multi-digit redir
   assert.equal(bash('tar cf out.tar a b', c).verdict, 'ALLOW'); // archive to a scratch path
   assert.equal(bash('git commit -am "message with -n inside"', c).verdict, 'ALLOW');
 })
+
+test('round-9 residuals: >| noclobber redirect, commit $IFS/$"" splice, .git gitlink file, nested hook config', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  mkdirSync(join(repo, 'packages', 'api'), { recursive: true });
+  // [0] the `>|` noclobber-override redirect is a write, not a pipe split
+  for (const cmd of [
+    'echo x>|.harness/generated/policy.json',
+    'echo x12>|.git/hooks/evil',
+    'printf y>|.harness/runtime/ledger.json',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [1] a commit hook-bypass flag reconstructed via $IFS field-split / $"" empty-expansion is still caught
+  for (const cmd of ['git commit -n$IFS -m x', 'git commit -n${IFS}-m x', 'git commit -n$"" -m x', 'git commit "-n"$IFS-m x']) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'git.hooks.bypass', cmd);
+  }
+  // [8] the `.git` gitlink pointer FILE (worktree/submodule) is protected, not only `.git/` contents
+  assert.equal(evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, '.git') } }).decisive?.capability, 'fs.git-internals.write');
+  assert.equal(bash('echo "gitdir: /tmp/evil" > .git', c).verdict, 'DENY');
+  // [9] nested host hook/permission config (not only at the repo root) is protected
+  const w = (f: string) => evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, f) } });
+  assert.equal(w('packages/api/.claude/settings.json').decisive?.capability, 'fs.hook-config.write');
+  assert.equal(w('packages/api/.claude/settings.local.json').decisive?.capability, 'fs.hook-config.write');
+  assert.equal(w('packages/api/.codex/config.toml').decisive?.capability, 'fs.hook-config.write');
+  // controls: -am/-qm messages and a message containing $ are not bypasses; a plain pipe still splits
+  assert.equal(bash('git commit -am "message with -n inside"', c).verdict, 'ALLOW');
+  assert.equal(bash('git commit -m "cost $5"', c).verdict, 'ALLOW');
+  assert.equal(bash('cat a | grep b', c).verdict, 'ALLOW');
+})

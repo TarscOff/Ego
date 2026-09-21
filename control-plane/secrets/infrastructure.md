@@ -3,6 +3,12 @@ schema: ego.secrets/1
 family: infrastructure
 title: Infrastructure credentials and private keys
 detectors:
+  - id: infra.dockerhub.pat
+    name: Docker Hub personal access token
+    pattern: '\bdckr_pat_[A-Za-z0-9_-]{20,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:dockerhub-pat]'
   - id: infra.private-key-block
     name: PEM private key block
     pattern: '-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----'

@@ -150,3 +150,19 @@ test('round-8: Slack app-level (xapp-) and refresh (xoxe-) tokens are blocked li
     assert.ok(!r.text.includes(tok), `${tok} must be redacted`);
   }
 });
+
+test('round-9: npm / PyPI / Azure SAS / DigitalOcean / Docker Hub tokens are blocked', () => {
+  const cases: Array<[string, string]> = [
+    ['npm', 'authToken=npm_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'],
+    ['pypi', 'pypi-AgEIcHlwaS5vcmcCJDU2ZWY3YjE4LWFiY2Q'],
+    ['azure-sas', 'Endpoint=sb://x.servicebus.windows.net/;SharedAccessKey=aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uVwXyZ12345a='],
+    ['digitalocean', 'dop_v1_' + '0123456789abcdef'.repeat(4)],
+    ['dockerhub', 'dckr_pat_aBcDeFgHiJkLmNoPqRsTuVwXyZ01'],
+  ];
+  for (const [name, s] of cases) {
+    const r = redact(s, detectors, { isFile: true });
+    assert.ok(r.blocked, `${name} must be blocked`);
+  }
+  // a plain version string is not a secret
+  assert.ok(!redact('const v = "1.2.3";', detectors).blocked);
+});

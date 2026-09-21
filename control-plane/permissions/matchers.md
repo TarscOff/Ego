@@ -289,13 +289,13 @@ matchers:
     path: '.harness/mcp-trust.md'
   - capability: fs.hook-config.write
     tool: Write
-    path: '.claude/settings.json'
+    path: '**/.claude/settings.json'
   - capability: fs.hook-config.write
     tool: Write
-    path: '.claude/settings.local.json'
+    path: '**/.claude/settings.local.json'
   - capability: fs.hook-config.write
     tool: Write
-    path: '.codex/**'
+    path: '**/.codex/**'
   - capability: fs.hook-config.write
     tool: Write
     path: '~/.claude/settings.json'
@@ -307,10 +307,13 @@ matchers:
     path: '**/.husky/**'
   - capability: fs.hook-config.write
     tool: Write
-    path: '.claude/settings.local.json'
+    path: '**/.claude/settings.local.json'
   - capability: fs.git-internals.write
     tool: Write
     path: '**/.git/**'
+  - capability: fs.git-internals.write
+    tool: Write
+    path: '**/.git'
   - capability: fs.hook-config.write
     tool: Bash
     command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(\.git/hooks|\.husky/|\.harness/hooks|\.claude/settings|\.codex/|core\.hooksPath)'
