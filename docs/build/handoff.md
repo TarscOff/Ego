@@ -5,9 +5,9 @@ Snapshot for resuming work. Written 2026-09-21. Pair this with `docs/build/build
 
 ## Current state
 
-- **Branch**: `main`. **HEAD**: `a1341c3`. Working tree clean.
+- **Branch**: `main`. **HEAD**: `cccf31d`. Working tree clean.
 - **Deterministic gate is green**: `npm run typecheck`, `npm run lint` (`eslint packages tests`), `node --test`
-  (**146 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
+  (**148 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
   throwaway build).
 - Everything is **committed locally only**. Nothing pushed, no PRs, no production changes — and that constraint holds.
 
@@ -38,7 +38,8 @@ deterministic test in the same round, then committed.
 | 7    | 3 (partial)        | `c040519` | **usage limit cut 13/16 agents**; the 3 that ran found 3 HIGH, fixed by hand |
 | 8    | 6                  | `734d696` | complete run; tar write modes, quoted commit flags, multi-digit redirects, redaction span leak, Slack xapp-/xoxe-, control-plane write matcher |
 | 9    | 10                 | `a1341c3` | secret-scan gaps (npm/pypi/azure-SAS/DigitalOcean/Docker), >| redirect, commit $IFS splice, .git gitlink file, nested hook config |
-| 10   | running            | —       | re-verify round-9 fixes + broader secret-detector sweep + evaluator/containment |
+| 10   | 13                 | `cccf31d` | secret-detector sweep (16 new: Databricks/Shopify/Terraform/NewRelic/Grafana/Square/Google/Stripe-webhook/GitHub/Linear/Notion/Figma/Doppler/PlanetScale/Sentry), commit ${IFS%?} trims, >>| redirect, symlinked .git, npm install lifecycle |
+| 11   | running            | —       | re-verify round-10 fixes + evaluator deep edges / containment / launcher |
 
 A key framing added in round 7 and kept in round 8: the verdict ladder is ALLOW (silent) < ASK (human approves once) <
 DENY. An opaque command reaching **ASK is the designed human gate, not a bypass**. Reviewers report only reaches to
@@ -48,11 +49,12 @@ classifying obfuscated opaque code, and lets the loop converge.
 
 ## In progress
 
-- **Round 10** is running as a background Workflow (run id `wf_32d30cd5-e07`): re-verifies the round-9 fixes and does
-  a broader secret-detector provider sweep plus evaluator/containment/launcher passes. Rounds have been finding real
-  defects each time; round 9's ten were mostly first-time-probed secret-detector coverage gaps. When a round
-  completes: reproduce any confirmed HIGH/MEDIUM by hand, fix + pin each, commit, record it in the build-log, iterate.
-  When a COMPLETE round ends with zero confirmed HIGH/MEDIUM, set `INDEPENDENT-AGENT REVIEW` to PASSED for phase 1.
+- **Round 11** is running as a background Workflow (run id `wf_placeholder`): re-verifies the round-10 fixes and does
+  a fresh pass on evaluator deep edges, containment, launcher/cache. The big secret-detector surface was broadly swept
+  in round 10 (a new `secrets/more-providers.md` with 16 detectors), so future rounds should find fewer of those; the
+  remaining evaluator findings are narrowing to rare edge cases. When a round completes: reproduce any confirmed
+  HIGH/MEDIUM by hand, fix + pin each, commit, record it, iterate. When a COMPLETE round ends with zero confirmed
+  HIGH/MEDIUM, set `INDEPENDENT-AGENT REVIEW` to PASSED for phase 1.
 
 ## Remaining
 
