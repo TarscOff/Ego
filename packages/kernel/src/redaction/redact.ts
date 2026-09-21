@@ -69,18 +69,28 @@ export function redact(
       continue;
     }
     let count = 0;
-    text = text.replace(re, (...args: unknown[]) => {
-      const match = args[0] as string;
-      if (d.group > 0) {
-        const groups = args.slice(1, -2) as Array<string | undefined>;
-        const target = groups[d.group - 1];
-        if (!target) return match;
+    if (d.group > 0) {
+      // Redact the captured group at its EXACT span, not by string search: a naive match.replace(password, …) would
+      // redact the first textual occurrence, which is the username/scheme when they equal the password
+      // (postgres://admin:admin@… , postgres://postgres:postgres@…), leaving the real secret in the output.
+      const reD = new RegExp(re.source, re.flags.includes('d') ? re.flags : re.flags + 'd');
+      let out = '';
+      let last = 0;
+      for (const mm of text.matchAll(reD)) {
+        const span = mm.indices?.[d.group];
+        if (!span) continue; // the group did not participate in this match
+        out += text.slice(last, span[0]) + d.replacement;
+        last = span[1];
         count++;
-        return match.replace(target, d.replacement);
       }
-      count++;
-      return d.replacement;
-    });
+      out += text.slice(last);
+      text = out;
+    } else {
+      text = text.replace(re, () => {
+        count++;
+        return d.replacement;
+      });
+    }
     if (count > 0) note(d.id, d.family, severity, count);
   }
   const all = [...findings.values()].sort((a, b) => a.detector.localeCompare(b.detector));

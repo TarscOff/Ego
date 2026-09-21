@@ -595,7 +595,7 @@ export function redirectionTargets(segment: string): string[] {
   const out: string[] = [];
   // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
-  const unglued = segment.replace(/([^\s&|<>])(\d*>{1,2})/g, '$1 $2');
+  const unglued = segment.replace(/([^\s&|<>])(>{1,2})/g, '$1 $2');
   const re = /(?:^|\s)(?:\d?>>?|&>>?|>\|)\s*("[^"]*"|'[^']*'|[^\s;&|]+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(unglued))) {
@@ -1592,15 +1592,35 @@ function classifyShellPaths(
       // traditional tar also takes a DASH-LESS function-letter operand as its first argument: `tar xf a`, `tar cf a`,
       // `tar czf a` — recognise it alongside the dashed `-cf`/`-xf` forms
       const modeTok = tokens[1] && !tokens[1].startsWith('-') && /^[a-z]+$/i.test(tokens[1]) ? tokens[1] : '';
-      const create = tokens.some((t) => t === '--create' || /^-[A-Za-z]*c/.test(t)) || /c/.test(modeTok);
+      // every archive-WRITING mode: create (c), append (r), update (u), catenate (A) — not just create
+      const writeMode =
+        tokens.some(
+          (t) =>
+            t === '--create' ||
+            t === '--append' ||
+            t === '--update' ||
+            t === '--catenate' ||
+            t === '--concatenate' ||
+            /^-[A-Za-z]*[cruA]/.test(t),
+        ) || /[cruA]/.test(modeTok);
       const extract =
         tokens.some((t) => t === '--extract' || t === '--get' || /^-[A-Za-z]*x/.test(t)) ||
         /x/.test(modeTok);
-      if (create) {
-        // dash-less `cf`/`czf`: the archive is the operand right after the function-letter token (tokens[2])
-        const arc =
-          archiveFileOperand(tokens) ?? (modeTok && /f/.test(modeTok) ? (tokens[2] ?? null) : null);
-        dest = arc && arc !== '-' ? arc : null; // creating the archive is a write to that path
+      if (writeMode) {
+        // dash-less `cf`/`czf`/`rf`/`cbf`: the archive is `f`'s positional argument. Function letters before `f` that
+        // themselves consume an argument (b blocking-factor, V volume, L length, N newer, X exclude, T files-from)
+        // shift it, so `tar cbf 20 ARCHIVE` has its archive at tokens[3], not tokens[2].
+        let arc = archiveFileOperand(tokens);
+        if (!arc && modeTok && /f/.test(modeTok)) {
+          const argLetters = new Set(['f', 'b', 'V', 'L', 'N', 'X', 'T']);
+          let before = 0;
+          for (const ch of modeTok) {
+            if (ch === 'f') break;
+            if (argLetters.has(ch)) before++;
+          }
+          arc = tokens[2 + before] ?? null;
+        }
+        dest = arc && arc !== '-' ? arc : null; // writing the archive is a write to that path
       } else if (extract) {
         // the change-directory flag has several spellings: -C DIR, --directory DIR, --directory=DIR, --cd DIR
         const eq = tokens.find((t) => t.startsWith('--directory='));
@@ -1875,10 +1895,26 @@ function commitBypassFlag(cmdStr: string): boolean {
   if (gi < 0) return false;
   const ci = m.findIndex((t, i) => i > gi && !t.quoted && t.text === 'commit');
   if (ci < 0) return false;
+  // A short-flag cluster carries --no-verify iff `n` appears before any letter that consumes the rest as a value
+  // (`m`/`F` take the message/file). So `-nm`/`-nam`/`-vnm` bypass; `-mn`/`-mfoo` are just a `-m` message.
+  const clusterNoVerify = (tok: string): boolean => {
+    if (!/^-[A-Za-z]+$/.test(tok)) return false;
+    for (const ch of tok.slice(1)) {
+      if (ch === 'n') return true;
+      if (ch === 'm' || ch === 'F') return false;
+    }
+    return false;
+  };
   for (let k = ci + 1; k < m.length; k++) {
-    const t = m[k]!;
-    if (t.quoted) continue; // the -m/-F message is a quoted token, never a flag
-    if (t.text === '--no-verify' || /^-[A-Za-z]*n[A-Za-z]*$/.test(t.text)) return true;
+    const prev = m[k - 1]!;
+    // a message/file flag consumes the NEXT token as its value, so that token is data, not a flag — skip it. (The flag
+    // itself must be an unquoted bare `-m`/`-F`/…; a quoted `"-m"` is not a message-introducer.)
+    if (!prev.quoted && /^(-m|-F|--message|--file|--reuse-message|--reedit-message|-C|-c)$/.test(prev.text))
+      continue;
+    // the token's own quotes are already stripped: the shell strips `"-n"`/`-"n"`/`-n"m"` to `-n`/`-nm` before git
+    // parses it, so a quoted hook-bypass flag bypasses just the same and must be caught
+    const t = m[k]!.text;
+    if (t === '--no-verify' || clusterNoVerify(t)) return true;
   }
   return false;
 }

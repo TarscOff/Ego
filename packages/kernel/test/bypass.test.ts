@@ -672,3 +672,45 @@ test('round-7 residuals: dash-less tar, mv of the EGO_HOME parent, git commit by
   assert.equal(bash('tar xf a.tar -C build', c).verdict, 'ALLOW');
   assert.equal(bash('tar tf a.tar', c).verdict, 'ALLOW'); // list mode is read-only
 })
+
+test('round-8 residuals: tar write modes, quoted commit flags, multi-digit redirects, control-plane writes', () => {
+  const c = ctx();
+  mkdirSync(join(repo, '.harness', 'generated'), { recursive: true });
+  mkdirSync(join(repo, 'control-plane', 'permissions'), { recursive: true });
+  // [0] every archive-WRITING tar mode (create/append/update/catenate), incl. dash-less and blocking-factor spellings
+  for (const cmd of [
+    'tar rf .harness/generated/x.tar a',
+    'tar uf .harness/generated/x.tar a',
+    'tar --append --file .harness/generated/x.tar a',
+    'tar rf .git/hooks/pre-commit payload',
+    'tar cbf 20 .harness/generated/x.tar a',
+    'tar -rf .harness/generated/x.tar a',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [1] a hook-bypass short flag survives being shell-quoted (the shell strips the quotes before git sees it)
+  for (const cmd of ['git commit "-n" -m x', 'git commit -n"m" x', 'git commit -"n" -m x', 'git commit -vn"m" x']) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'git.hooks.bypass', cmd);
+  }
+  // commit flag-cluster precision: -mn / -mfoon are a `-m` message, not a bypass; -m "-n" message is not a flag
+  assert.equal(bash('git commit -mn', c).verdict, 'ALLOW');
+  assert.equal(bash('git commit -mfoon', c).verdict, 'ALLOW');
+  assert.equal(bash('git commit -m "-n"', c).verdict, 'ALLOW');
+  // [2] a redirection glued to a word ending in TWO OR MORE digits is still a write
+  for (const cmd of [
+    'echo x123>.harness/generated/authority.json',
+    'echo pwned12>.git/config',
+    'echo v2024>.git/hooks/pre-commit',
+    'printf y99>>.harness/runtime/ledger.json',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  // [5] the EGO control-plane / policy baselines are harness.control-plane.edit on the file tool (and shell writes)
+  const w = (f: string) => evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, f) } });
+  assert.equal(w('control-plane/permissions/absolute-denies.md').decisive?.capability, 'harness.control-plane.edit');
+  assert.equal(w('control-plane/permissions/matchers.md').decisive?.capability, 'harness.control-plane.edit');
+  assert.equal(w('policies/baselines/x.md').decisive?.capability, 'harness.control-plane.edit');
+  // controls
+  assert.equal(bash('tar cf out.tar a b', c).verdict, 'ALLOW'); // archive to a scratch path
+  assert.equal(bash('git commit -am "message with -n inside"', c).verdict, 'ALLOW');
+})

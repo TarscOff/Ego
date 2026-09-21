@@ -206,8 +206,30 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   Pinned by `bypass.test.ts` round-7 residuals. This round is NOT a clean pass: the fresh surfaces (redaction,
   budgets/cache, launcher/exec-contract, containment) and the remaining verify clusters were not run. Round 8 re-runs
   them once the usage limit resets. Suite: 141 tests.
-- **Round 8**: pending — re-runs the round-7 surfaces that the usage limit cut short, plus re-verification of the
-  round-7 fixes; recorded here when it completes.
+- **Round 8** (workflow `ego-phase1-review-round8`, 23 agents ran to completion, adversarial refutation with the floor
+  rule): 6 confirmed findings (3 HIGH, 3 MEDIUM), each reproduced and fixed and pinned:
+  - **tar write modes** (HIGH, `evaluate.ts`): append (`r`/`--append`), update (`u`/`--update`) and catenate (`A`)
+    write the archive but were not classified as writes (only create/extract were); and the dash-less blocking-factor
+    spelling `tar cbf 20 ARCHIVE` put the archive at the wrong operand. The resolver now covers every write mode and
+    computes the dash-less archive operand from the function letters that consume an argument.
+  - **Quoted commit hook-bypass flag** (HIGH, `evaluate.ts`): `git commit "-n" -m x` / `-n"m"` / `-"n"` were skipped
+    because the check ignored every quoted token. It now dequotes and parses the short-flag cluster properly (`n`
+    before any `m`/`F` = --no-verify), and skips only the value token a `-m`/`-F` actually consumes — so `-mn` /
+    `-mfoon` / `-m "-n"` stay ALLOW while the quoted bypass denies.
+  - **Multi-digit glued redirect** (HIGH, `evaluate.ts`): the round-7 un-glue split a word ending in two or more
+    digits (`echo x12>PATH`), so the target scanner missed it; it now un-glues only the operator, keeping the digits
+    with the word.
+  - **Password-span redaction leak** (MEDIUM, `redact.ts`): a captured DB/URL password equal to the username or scheme
+    (`postgres://admin:admin@…`) was redacted at the wrong occurrence, leaving the raw secret in the returned text and
+    thus the ledger. Redaction now splices the exact captured span using match indices.
+  - **Slack token coverage** (MEDIUM, `secrets/saas-ai.md`): app-level `xapp-` and refresh `xoxe-` tokens are now
+    blocked like `xoxb-`/`xoxp-`.
+  - **Control-plane write matcher** (MEDIUM, `matchers.md`): `control-plane/**` and the `policies/{baselines,frameworks,
+    schemas,templates}/**` baselines had no file-tool matcher, so an in-repo agent could rewrite the EGO authority
+    baseline (Write/Edit or shell) at ALLOW; they now map to `harness.control-plane.edit` (DENY outside
+    HARNESS_MAINTENANCE), which also covers shell writes via the containment check.
+  Pinned by `bypass.test.ts` round-8 residuals and `redact.test.ts` round-8 cases. Suite: 144 tests.
+- **Round 9**: an independent re-verification of the round-8 fixes is pending; recorded here when it completes.
 - **Incident during round 2** (found 2026-09-15 when the checkpoint commit failed): EGO git hooks had been written
   into this repository's own `.git/hooks` at 02:17, pointing at a shim that does not exist here, so every commit
   failed. No pre-existing hook was displaced. Cause: `installGitHooks` accepted a directory that was not a git
@@ -218,7 +240,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 ### Check lines
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
-  (141 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
+  (144 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
   phase-1 tree; the release build refuses a dirty or untagged tree). Hook latency, stated honestly by path:
   - The **in-process kernel path** (the K26/Q19 budget: `handleHook` with an already-compiled authority table) is
     pinned under 60 ms by `packages/kernel/test/hooks.test.ts` (min-of-N, ~25 ms). This is the budget the design
@@ -238,9 +260,9 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–6 done and round 7 partial (usage limit cut it short); every
-  confirmed HIGH/MEDIUM fixed and pinned so far. Round 8 re-runs the interrupted round-7 surfaces. This line becomes
-  PASSED only when a COMPLETE round ends with no confirmed HIGH or MEDIUM finding. This line becomes PASSED only when a round ends
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–8 done (round 7 partial, re-covered by the complete round 8);
+  every confirmed HIGH/MEDIUM fixed and pinned. This line becomes PASSED only when a COMPLETE round ends with no
+  confirmed HIGH or MEDIUM finding; round 8 still surfaced six, so round 9 is required. This line becomes PASSED only when a round ends
   with no confirmed HIGH or MEDIUM finding, and FAILED otherwise; it is never set from an in-session review.
 - CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked

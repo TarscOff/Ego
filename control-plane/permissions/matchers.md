@@ -269,6 +269,21 @@ matchers:
   - capability: harness.control-plane.edit
     tool: Write
     path: 'policies/organization/**'
+  - capability: harness.control-plane.edit
+    tool: Write
+    path: 'control-plane/**'
+  - capability: harness.control-plane.edit
+    tool: Write
+    path: 'policies/baselines/**'
+  - capability: harness.control-plane.edit
+    tool: Write
+    path: 'policies/frameworks/**'
+  - capability: harness.control-plane.edit
+    tool: Write
+    path: 'policies/schemas/**'
+  - capability: harness.control-plane.edit
+    tool: Write
+    path: 'policies/templates/**'
   - capability: harness.mcp-trust.edit
     tool: Write
     path: '.harness/mcp-trust.md'

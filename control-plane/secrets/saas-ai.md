@@ -23,7 +23,7 @@ detectors:
     replacement: '[REDACTED:sendgrid-key]'
   - id: saas.slack
     name: Slack tokens and webhooks
-    pattern: '\bxox[abpors]-[A-Za-z0-9-]{10,}\b|https://hooks\.slack\.com/services/[A-Za-z0-9/]+'
+    pattern: '\b(xox[abeoprs]|xapp)-[A-Za-z0-9-]{10,}\b|https://hooks\.slack\.com/services/[A-Za-z0-9/]+'
     severity: block
     locked: true
     replacement: '[REDACTED:slack]'

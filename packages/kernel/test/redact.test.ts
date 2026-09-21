@@ -119,3 +119,34 @@ test('sensitive file names', () => {
   assert.ok(isSensitiveFileName('service-account-prod.json', loadControlPlane(ROOT).secrets));
   assert.ok(!isSensitiveFileName('README.md', loadControlPlane(ROOT).secrets));
 });
+
+test('round-8: the exact password span is redacted even when it equals the username or scheme', () => {
+  for (const s of [
+    'psql postgres://admin:admin@db.internal:5432/app',
+    'DATABASE_URL=postgres://postgres:postgres@localhost:5432/app',
+    'mysql://root:root@127.0.0.1:3306/db',
+  ]) {
+    const r = redact(s, detectors);
+    assert.ok(r.blocked, `${s} blocked`);
+    // the credential between ':' and '@' must be gone; nothing after the redaction marker leaks a raw ':<pw>@'
+    assert.ok(r.text.includes('[REDACTED'), s);
+    assert.doesNotMatch(r.text, /:(admin|postgres|root)@/, `raw password still present in: ${r.text}`);
+  }
+  // a distinct username:password still redacts only the password
+  const d = redact('postgres://appuser:S3cr3tPw99@db/app', detectors);
+  assert.ok(!d.text.includes('S3cr3tPw99'));
+  assert.ok(d.text.includes('appuser')); // the username is not a secret
+});
+
+test('round-8: Slack app-level (xapp-) and refresh (xoxe-) tokens are blocked like xoxb-/xoxp-', () => {
+  for (const tok of [
+    'xapp-1-A01234567-1234567890123-abcdefabcdef',
+    'xoxe-1-My0abcdefghijklmnopqrstuvwxyz012345',
+    'xoxb-123456789012-abcdefghijklmnop',
+    'xoxp-123456789012-abcdefghijklmnop',
+  ]) {
+    const r = redact(`const t = "${tok}";`, detectors);
+    assert.ok(r.blocked, `${tok} must be blocked`);
+    assert.ok(!r.text.includes(tok), `${tok} must be redacted`);
+  }
+});
