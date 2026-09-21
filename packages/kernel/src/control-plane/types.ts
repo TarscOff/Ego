@@ -177,6 +177,21 @@ export interface CoordinationConstants {
   file: string;
 }
 
+/** Decision Q98: the authored set of targets that count as repository-owned local development surfaces. Authorization
+ *  is target-aware, so a Kubernetes or database command is judged by WHERE it points, never by the tool's name. */
+export interface LocalTargets {
+  /** glob patterns for kube contexts that are local development clusters (kind-*, minikube, docker-desktop, …) */
+  k8sLocalContexts: string[];
+  /** hostnames that are the local machine (localhost, 127.0.0.1, ::1, *.localhost, …) */
+  dbLocalHosts: string[];
+  /** tokens that mark a target as production wherever they appear in its name */
+  productionMarkers: string[];
+  file: string;
+}
+
+/** The class a concrete target resolves to. UNCLASSIFIED is a first-class answer, never a silent "local". */
+export type TargetClass = 'LOCAL' | 'PRODUCTION' | 'EXTERNAL' | 'UNCLASSIFIED';
+
 export type SupportStatus = 'SUPPORTED' | 'PARTIAL' | 'UNAVAILABLE' | 'UNVERIFIED';
 
 /** A containment control (alignment item 3): technical isolation, distinct from policy and authority. */
@@ -204,6 +219,7 @@ export interface ControlPlane {
   secrets: SecretsDoc[];
   releaseKeys: ReleaseKeysDoc;
   coordination: CoordinationConstants;
+  localTargets: LocalTargets;
   /** sha256 of every authored file, keyed by path relative to root, for provenance and freshness */
   sourceHashes: Record<string, string>;
 }

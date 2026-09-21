@@ -10,6 +10,7 @@ import {
   type CapabilityLock,
   type ControlPlane,
   type ExecutionBudgets,
+  type LocalTargets,
   type Verdict,
 } from '../control-plane/types.ts';
 
@@ -76,6 +77,8 @@ export interface CompiledAuthorityTable {
   readOnlyCommandPatterns: string[];
   /** detector id → minimum severity that overlays may not lower */
   sanitizerLockedMinimums: Record<string, 'block' | 'warn'>;
+  /** Q98: the authored local-development targets, so authorization can be target-aware */
+  localTargets: LocalTargets;
 }
 
 export interface CompileOptions {
@@ -261,6 +264,12 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     preDeniedCommandClasses,
     readOnlyCommandPatterns,
     sanitizerLockedMinimums: sortRecord(sanitizerLockedMinimums),
+    localTargets: {
+      k8sLocalContexts: [...cp.localTargets.k8sLocalContexts].sort(),
+      dbLocalHosts: [...cp.localTargets.dbLocalHosts].sort(),
+      productionMarkers: [...cp.localTargets.productionMarkers].sort(),
+      file: rel(opts.projectRoot ?? '', cp.localTargets.file),
+    },
   };
   return { ...body, tableHash: sha256Canonical(body) };
 }

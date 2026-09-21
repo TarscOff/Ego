@@ -3,7 +3,7 @@ import { homedir, tmpdir } from 'node:os';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
-import type { Verdict } from '../control-plane/types.ts';
+import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 
 export interface EvaluationContext {
@@ -1520,6 +1520,165 @@ function opaqueHit(
   };
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Q98 target/effect classification. Authorization is target-aware: a Kubernetes or database command is judged by
+// WHERE it points, never by the tool's name. `kubectl apply` at a kind cluster is local work; the same command at a
+// shared cluster is an external effect; with no resolvable target it is TARGET_UNCLASSIFIED, never a silent "local".
+// ---------------------------------------------------------------------------------------------------------------
+
+const K8S_MUTATING_VERBS = new Set([
+  'apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon',
+  'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward',
+  'debug', 'certificate', 'proxy',
+]);
+const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push']);
+const DB_STATEMENT_FLAGS = new Set(['-c', '--command', '-e', '--execute', '--eval', '-f', '--file']);
+/** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
+const TARGET_SENSITIVE: Record<string, 'k8s' | 'db'> = {
+  'k8s.local.apply': 'k8s',
+  'k8s.local.delete': 'k8s',
+  'k8s.local.test': 'k8s',
+  'db.local.query': 'db',
+  'db.local.migrate': 'db',
+  'db.local.drop': 'db',
+  'db.local.start': 'db',
+};
+
+/** A token is unresolvable when it is a variable, a substitution marker or a glob: it could name anything. */
+const isOpaqueTarget = (v: string): boolean => /^\$|\$\{|\$SUBST|`|[*?]/.test(v);
+
+const K8S_VALUE_OPTS =
+  /^(--context|--kube-context|--kubeconfig|--server|--token|--user|--cluster|--as|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|--namespace|-n|-o|--output|-f|--filename|-l|--selector|--field-selector)$/;
+
+/** First operand that is neither an option nor an option's value. */
+function firstOperand(tokens: string[], valueOpts: RegExp): string {
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t.startsWith('-')) {
+      if (valueOpts.test(t)) i++;
+      continue;
+    }
+    return t;
+  }
+  return '';
+}
+
+function matchesAnyGlob(name: string, patterns: string[]): boolean {
+  const n = name.toLowerCase();
+  return patterns.some((p) => globToRegExp(p.toLowerCase()).test(n));
+}
+
+function hasProductionMarker(name: string, markers: string[]): boolean {
+  const n = name.toLowerCase();
+  return markers.some((m) => new RegExp(`(^|[^a-z0-9])${m.toLowerCase()}([^a-z0-9]|$)`).test(n));
+}
+
+function classifyTargetName(
+  name: string,
+  localPatterns: string[],
+  targets: LocalTargets,
+): TargetClass {
+  if (!name || isOpaqueTarget(name)) return 'UNCLASSIFIED';
+  if (hasProductionMarker(name, targets.productionMarkers)) return 'PRODUCTION';
+  if (matchesAnyGlob(name, localPatterns)) return 'LOCAL';
+  return 'EXTERNAL';
+}
+
+/** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
+function resolveK8sTarget(
+  tokens: string[],
+  targets: LocalTargets,
+): { cls: TargetClass; target: string; mutating: boolean } {
+  const head = tokens[0] ?? '';
+  if (/^(kind|k3d|minikube)$/.test(head)) return { cls: 'LOCAL', target: head, mutating: true };
+  // the verb is the first operand that is not an option NOR an option's value: `kubectl --context X delete ns` must
+  // read `delete`, not `X`
+  const verb = firstOperand(tokens, K8S_VALUE_OPTS);
+  const mutating = head === 'helm' ? HELM_MUTATING_VERBS.has(verb) : K8S_MUTATING_VERBS.has(verb);
+  const context = optionValue(tokens, '', ['--context', '--kube-context']);
+  const kubeconfig = optionValue(tokens, '', ['--kubeconfig']);
+  const server = optionValue(tokens, '', ['--server']);
+  const ns = optionValue(tokens, 'n', ['--namespace']);
+  // a production namespace escalates even on an otherwise local-looking context
+  if (ns && !isOpaqueTarget(ns) && hasProductionMarker(ns, targets.productionMarkers))
+    return { cls: 'PRODUCTION', target: ns, mutating };
+  for (const [value, patterns] of [
+    [context, targets.k8sLocalContexts],
+    [server, []],
+    [kubeconfig, []],
+  ] as Array<[string | null, string[]]>) {
+    if (value === null) continue;
+    return { cls: classifyTargetName(value, patterns, targets), target: value, mutating };
+  }
+  return { cls: 'UNCLASSIFIED', target: 'the ambient kubeconfig context', mutating };
+}
+
+/** Resolves the database target of a normalized segment and whether a statement is executed against it. */
+function resolveDbTarget(
+  tokens: string[],
+  targets: LocalTargets,
+): { cls: TargetClass; target: string; executes: boolean } {
+  const head = tokens[0] ?? '';
+  const executes = tokens.some(
+    (t) => DB_STATEMENT_FLAGS.has(t) || [...DB_STATEMENT_FLAGS].some((f) => f.startsWith('--') && t.startsWith(f + '=')),
+  );
+  // sqlite3 operates on a file: the path rules already govern it
+  if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
+  const uri = tokens.find((t) => /^[a-z][a-z0-9+.-]*:\/\//i.test(t));
+  if (uri) {
+    if (isOpaqueTarget(uri)) return { cls: 'UNCLASSIFIED', target: uri, executes };
+    const host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]*@)?\[?([^\]:/?\s]+)\]?/i.exec(uri)?.[1] ?? '';
+    return { cls: classifyTargetName(host, targets.dbLocalHosts, targets), target: host, executes };
+  }
+  const host = optionValue(tokens, 'h', ['--host']);
+  if (host !== null) return { cls: classifyTargetName(host, targets.dbLocalHosts, targets), target: host, executes };
+  const bare = tokens.slice(1).find((t) => !t.startsWith('-'));
+  if (bare && isOpaqueTarget(bare)) return { cls: 'UNCLASSIFIED', target: bare, executes };
+  // no host anywhere: these clients default to the local socket or localhost
+  return { cls: 'LOCAL', target: 'the local socket', executes };
+}
+
+/** Re-judges a capability that ASSERTS a local target against the target the command actually names (Q98). */
+function retargetLocalCapability(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  hit: CapabilityHit,
+  norm: string,
+): CapabilityHit {
+  const kind = TARGET_SENSITIVE[hit.capability];
+  if (!kind) return hit;
+  const targets = table.localTargets;
+  if (!targets || targets.k8sLocalContexts.length === 0) return hit;
+  const tokens = tokenize(norm);
+  const resolved =
+    kind === 'k8s' ? resolveK8sTarget(tokens, targets) : resolveDbTarget(tokens, targets);
+  const acts = kind === 'k8s' ? (resolved as { mutating: boolean }).mutating : (resolved as { executes: boolean }).executes;
+  if (!acts || resolved.cls === 'LOCAL') return hit; // reads and genuinely local work keep their verdict
+  const capability =
+    resolved.cls === 'PRODUCTION'
+      ? kind === 'k8s'
+        ? 'production.k8s.mutate'
+        : 'production.database.mutate'
+      : resolved.cls === 'EXTERNAL'
+        ? kind === 'k8s'
+          ? 'k8s.nonlocal.mutate'
+          : 'db.nonlocal.mutate'
+        : kind === 'k8s'
+          ? 'k8s.target.unclassified'
+          : 'db.target.unclassified';
+  if (!(capability in table.capabilities)) return hit;
+  return {
+    capability,
+    verdict: verdictFor(table, ctx, capability),
+    via:
+      resolved.cls === 'UNCLASSIFIED'
+        ? `TARGET_UNCLASSIFIED: ${resolved.target} could not be resolved to a declared local development target (${targets.file})`
+        : `target ${resolved.target} is ${resolved.cls}, not a declared local development target (${targets.file})`,
+    segment: norm,
+    absolute: isAbsoluteCap(table, capability),
+  };
+}
+
 function classifyNormalized(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -1530,13 +1689,18 @@ function classifyNormalized(
   let outer: CapabilityHit | null = null;
   for (const { m, re } of compiled) {
     if (re.test(norm)) {
-      outer = {
-        capability: m.capability,
-        verdict: verdictFor(table, ctx, m.capability),
-        via: `matcher /${m.command}/`,
-        segment: norm,
-        absolute: isAbsoluteCap(table, m.capability),
-      };
+      outer = retargetLocalCapability(
+        table,
+        ctx,
+        {
+          capability: m.capability,
+          verdict: verdictFor(table, ctx, m.capability),
+          via: `matcher /${m.command}/`,
+          segment: norm,
+          absolute: isAbsoluteCap(table, m.capability),
+        },
+        norm,
+      );
       break;
     }
   }

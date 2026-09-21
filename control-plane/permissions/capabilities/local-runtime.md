@@ -34,6 +34,11 @@ production denies, not by these capabilities.
 - [x] `container.registry.push` — push an image to a registry (`docker push`, `buildx build --push`). Building locally is the agent's working material; publishing the result is an external effect.
 - [x] `k8s.local.delete` — delete local namespaces or clusters.
 
+- [x] `k8s.target.unclassified` — a mutating Kubernetes or Helm operation whose target could not be resolved: no
+  `--context` was given (the ambient kubeconfig context is not knowable to the kernel) or it is hidden behind a
+  variable. Q98 forbids guessing that an unknown high-impact target is local, so it asks a human and says why.
+- [x] `db.target.unclassified` — a database statement whose target could not be resolved, for the same reason.
+
 ## Denied
 
 - [x] `db.nonlocal.mutate` — any mutation of a database whose connection is not classified local or development.

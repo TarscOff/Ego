@@ -953,7 +953,12 @@ test('round-13 residuals: interpreter carve-out, wrappers, write destinations, g
 
   // [7] forge and production spellings
   assert.equal(bash('gh api graphql -f "query=`cat mut.graphql`"', c).decisive?.capability, 'forge.api.mutate');
-  assert.equal(bash('kubectl --namespace=default delete namespace payments', c).decisive?.capability, 'k8s.local.delete');
+  // no --context given: Q98 target resolution refuses to guess "local" for a namespace deletion
+  assert.equal(
+    bash('kubectl --namespace=default delete namespace payments', c).decisive?.capability,
+    'k8s.target.unclassified',
+  );
+  assert.equal(bash('kubectl --context kind-dev delete ns test', c).decisive?.capability, 'k8s.local.delete');
   assert.equal(
     bash('kubectl --server=https://prod-api.k8s.acme.com:6443 delete deployment api', c).decisive?.capability,
     'production.k8s.mutate',
@@ -986,4 +991,72 @@ test('round-13 residuals: the EGO_HOME trust store is recognised whatever the pa
   }
   // the lowercase spellings keep working exactly as before
   assert.equal(bash(`echo x > ${c.egoHome}/runtimes/a1b2/dist/ego.js`, c).decisive?.capability, 'harness.trust.tamper');
+})
+
+test('Q98 target/effect classification: a Kubernetes or database command is judged by WHERE it points', () => {
+  const c = ctx();
+  // LOCAL — declared local development targets are the agent's working material: no human approval
+  for (const cmd of [
+    'kubectl --context kind-dev apply -f k8s/dev.yaml',
+    'kubectl --context=k3d-test delete pod x',
+    'kubectl --context docker-desktop apply -f a.yaml',
+    'helm upgrade --install app ./chart --kube-context kind-dev',
+    'psql postgres://localhost:5432/app_dev -c "drop table x"',
+    'psql -h 127.0.0.1 -c "select 1"',
+    'psql -c "select 1"', // no host at all: the local socket
+    'mongosh --eval "db.x.find()"',
+    'sqlite3 ./dev.db "delete from t"',
+    'docker compose up -d',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+  }
+
+  // deleting a LOCAL cluster is still a declared human gate: local does not mean unguarded
+  assert.equal(bash('minikube delete', c).decisive?.capability, 'k8s.local.delete');
+
+  // EXTERNAL — a resolved target that is not declared local is a shared system, whatever the tool is called
+  assert.equal(
+    bash('kubectl --context acme-eks-blue delete ns payments', c).decisive?.capability,
+    'k8s.nonlocal.mutate',
+  );
+  assert.equal(
+    bash('psql postgres://admin:pw@db.acme.internal:5432/app -c "delete from users"', c).decisive?.capability,
+    'db.nonlocal.mutate',
+  );
+  assert.equal(
+    bash('mongosh mongodb+srv://cluster0.acme.mongodb.net/app --eval "db.users.drop()"', c).decisive?.capability,
+    'db.nonlocal.mutate',
+  );
+  assert.equal(
+    bash('mysql --host=analytics.acme.com -e "drop database x"', c).decisive?.capability,
+    'db.nonlocal.mutate',
+  );
+
+  // PRODUCTION — a production marker in the context, namespace or host reaches the absolute denies
+  assert.equal(
+    bash('kubectl --context acme-prod-eks apply -f a.yaml', c).decisive?.capability,
+    'production.k8s.mutate',
+  );
+  assert.equal(
+    bash('kubectl --context kind-dev -n production delete deploy api', c).decisive?.capability,
+    'production.k8s.mutate',
+  );
+
+  // TARGET_UNCLASSIFIED — never guessed local; it asks a human and the reason says why
+  for (const cmd of [
+    'kubectl delete deployment api',
+    'kubectl apply -f k8s/dev.yaml',
+    'helm uninstall billing',
+    'kubectl --context "$CTX" delete ns x',
+    'psql $DATABASE_URL -c "delete from users"',
+  ]) {
+    const r = bash(cmd, c);
+    assert.equal(r.verdict, 'ASK', cmd);
+    assert.match(r.decisive?.capability ?? '', /target\.unclassified$/, cmd);
+    assert.match(r.reason, /TARGET_UNCLASSIFIED/, cmd);
+  }
+
+  // reads are not re-targeted: only operations that actually mutate the target are judged against it
+  assert.equal(bash('kubectl get pods', c).verdict, 'ALLOW');
+  assert.equal(bash('kubectl --context acme-eks-blue get pods', c).verdict, 'ALLOW');
 })

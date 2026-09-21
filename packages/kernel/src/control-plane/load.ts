@@ -29,6 +29,7 @@ import {
   type GrantsDoc,
   type Intent,
   type LayerName,
+  type LocalTargets,
   type Matcher,
   type MatcherTool,
   type ModelFlagPolicy,
@@ -653,6 +654,25 @@ function parseCoordination(file: string, problems: string[]): CoordinationConsta
   };
 }
 
+/** Decision Q98: the authored local-development targets. Fails closed — a malformed or empty list is a problem, not a
+ *  silently empty set, because an empty `k8s_local_contexts` would make every cluster unclassified. */
+function parseLocalTargets(file: string, problems: string[]): LocalTargets {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.local-targets/1')
+    problems.push(`${file}: schema must be ego.local-targets/1`);
+  const list = (key: string): string[] => {
+    const v = optionalStringList(doc, key);
+    if (v.length === 0) problems.push(`${file}: ${key} must list at least one entry`);
+    return v;
+  };
+  return {
+    k8sLocalContexts: list('k8s_local_contexts'),
+    dbLocalHosts: list('db_local_hosts'),
+    productionMarkers: list('production_markers'),
+    file,
+  };
+}
+
 export function loadControlPlane(root: string): ControlPlane {
   const problems: string[] = [];
   const sourceHashes: Record<string, string> = {};
@@ -720,6 +740,10 @@ export function loadControlPlane(root: string): ControlPlane {
     .filter((s): s is SecretsDoc => s !== null);
   const coordFile = req('workspace/coordination.md');
   const coordination = coordFile ? parseCoordination(coordFile, problems) : parseCoordinationDefaults();
+  const targetsFile = req('workspace/local-targets.md');
+  const localTargets = targetsFile
+    ? parseLocalTargets(targetsFile, problems)
+    : { k8sLocalContexts: [], dbLocalHosts: [], productionMarkers: [], file: '' };
 
   // cross-document validation
   const allIds = new Map<string, string>();
@@ -803,6 +827,7 @@ export function loadControlPlane(root: string): ControlPlane {
     secrets,
     releaseKeys,
     coordination,
+    localTargets,
     sourceHashes,
   };
 }
