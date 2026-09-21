@@ -5,9 +5,9 @@ Snapshot for resuming work. Written 2026-09-21. Pair this with `docs/build/build
 
 ## Current state
 
-- **Branch**: `main`. **HEAD**: `c040519`. Working tree clean.
+- **Branch**: `main`. **HEAD**: `734d696`. Working tree clean.
 - **Deterministic gate is green**: `npm run typecheck`, `npm run lint` (`eslint packages tests`), `node --test`
-  (**141 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
+  (**144 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
   throwaway build).
 - Everything is **committed locally only**. Nothing pushed, no PRs, no production changes — and that constraint holds.
 
@@ -36,7 +36,8 @@ deterministic test in the same round, then committed.
 | 5    | 19                 | `b8fddc3` | interpreter-body writes, archive dests, mv source, trust dir-node, glued syntax |
 | 6    | 16                 | `ed757a4` | zip/bsdtar/tar --directory, trust globs, ANSI-C, HARNESS_MAINTENANCE spoof, worktree fail-open |
 | 7    | 3 (partial)        | `c040519` | **usage limit cut 13/16 agents**; the 3 that ran found 3 HIGH, fixed by hand |
-| 8    | running            | —       | re-runs the round-7 surfaces the limit cut short + re-verifies round-7 fixes |
+| 8    | 6                  | `734d696` | complete run; tar write modes, quoted commit flags, multi-digit redirects, redaction span leak, Slack xapp-/xoxe-, control-plane write matcher |
+| 9    | running            | —       | re-verify round-8 fixes + fresh pass (redaction breadth, launcher/diff, containment, context/session) |
 
 A key framing added in round 7 and kept in round 8: the verdict ladder is ALLOW (silent) < ASK (human approves once) <
 DENY. An opaque command reaching **ASK is the designed human gate, not a bypass**. Reviewers report only reaches to
@@ -46,11 +47,11 @@ classifying obfuscated opaque code, and lets the loop converge.
 
 ## In progress
 
-- **Round 8** is running as a background Workflow (run id `wf_cd054da6-27f`). It covers the four fresh surfaces the
-  usage limit interrupted in round 7 — redaction/secret-scan, budgets/policy-cache, launcher/exec-contract/diff,
-  containment/protected-paths — plus re-verification of the round-6/7 fixes. When it completes: reproduce any confirmed
-  HIGH/MEDIUM by hand, fix + pin each, commit, record the round in the build-log, and iterate. If it ends clean
-  (zero confirmed HIGH/MEDIUM across a complete run), set `INDEPENDENT-AGENT REVIEW` to PASSED for phase 1.
+- **Round 9** is running as a background Workflow (run id `wf_56afb1f5-e85`): re-verifies the round-8 fixes and
+  sweeps less-covered surfaces (redaction breadth, launcher/diff, containment, context-trust/session/doctor). The
+  finding count is trending down (round 5: 19, round 6: 16, round 8: 6), so the loop is converging. When a round
+  completes: reproduce any confirmed HIGH/MEDIUM by hand, fix + pin each, commit, record it in the build-log, iterate.
+  When a COMPLETE round ends with zero confirmed HIGH/MEDIUM, set `INDEPENDENT-AGENT REVIEW` to PASSED for phase 1.
 
 ## Remaining
 
