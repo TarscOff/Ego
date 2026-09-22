@@ -1060,3 +1060,61 @@ test('Q98 target/effect classification: a Kubernetes or database command is judg
   assert.equal(bash('kubectl get pods', c).verdict, 'ALLOW');
   assert.equal(bash('kubectl --context acme-eks-blue get pods', c).verdict, 'ALLOW');
 })
+
+test('round-14 residuals: Q98 target resolution takes the MOST RESTRICTIVE signal, and finds the verb by name', () => {
+  const c = ctx();
+  // [1] a local-looking --context must not end the search: --server overrides the context's endpoint and
+  // --kubeconfig chooses the file the context is looked up in, so both are classified too
+  for (const cmd of [
+    'kubectl --context kind-dev --server https://k8s.acme.com --token T apply -f evil.yaml',
+    'kubectl --kubeconfig /tmp/remote.yaml --context kind-dev apply -f evil.yaml',
+    'kubectl --context kind-dev --kube-apiserver https://k8s.acme.com delete deployment api',
+    'helm --kube-context kind-dev --kubeconfig /tmp/remote.yaml upgrade --install api ./chart',
+  ]) {
+    assert.equal(bash(cmd, c).decisive?.capability, 'k8s.nonlocal.mutate', cmd);
+  }
+  // [2] a repeated option is applied LAST by the client, so every occurrence is classified and the worst decides
+  assert.equal(
+    bash('kubectl --context acme-eks --context kind-dev delete ns payments', c).decisive?.capability,
+    'k8s.nonlocal.mutate',
+  );
+  assert.equal(
+    bash('psql -h localhost -h db.acme.internal -c "delete from users"', c).decisive?.capability,
+    'db.nonlocal.mutate',
+  );
+  // [3] the verb is found BY NAME: an unknown global option can no longer displace it into a "read"
+  assert.equal(
+    bash('kubectl --cache-dir /tmp/x delete deployment api', c).decisive?.capability,
+    'k8s.target.unclassified',
+  );
+  // [4] verbs that were missing from the mutating sets
+  assert.equal(
+    bash('kubectl --context acme-prod-eks auth reconcile -f rbac.yaml', c).decisive?.capability,
+    'production.k8s.mutate',
+  );
+  assert.equal(bash('helm --kube-context acme-eks test api', c).decisive?.capability, 'k8s.nonlocal.mutate');
+
+  // [5] a database target hidden in a libpq keyword/value conninfo string, not a URI
+  assert.equal(
+    bash('psql "host=prod-db.acme.com dbname=app" -c "DROP TABLE orders"', c).decisive?.capability,
+    'production.database.mutate',
+  );
+  assert.equal(bash('psql "host=db.acme.internal dbname=app"', c).decisive?.capability, 'db.nonlocal.mutate');
+  // a connection service name resolves through a file the kernel cannot read: never local
+  assert.equal(bash('psql service=prod -c "select 1"', c).decisive?.capability, 'db.target.unclassified');
+  // [6] the statement no longer has to arrive by flag: a client aimed at a remote database is an external effect
+  // whatever it then types (bare operands, a script file, stdin, or an interactive session)
+  assert.equal(bash('redis-cli -h cache.acme.com flushall', c).decisive?.capability, 'db.nonlocal.mutate');
+  assert.equal(bash('psql -h db.acme.internal -f migrate.sql', c).decisive?.capability, 'db.nonlocal.mutate');
+
+  // ordinary local development is still untouched
+  for (const cmd of [
+    'kubectl --context kind-dev apply -f dev.yaml',
+    'kubectl get pods',
+    'helm list',
+    'psql -c "select 1"',
+    'docker compose up -d',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+  }
+})

@@ -1529,10 +1529,9 @@ function opaqueHit(
 const K8S_MUTATING_VERBS = new Set([
   'apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon',
   'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward',
-  'debug', 'certificate', 'proxy',
+  'debug', 'certificate', 'proxy', 'auth', 'apply-set', 'wait',
 ]);
-const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push']);
-const DB_STATEMENT_FLAGS = new Set(['-c', '--command', '-e', '--execute', '--eval', '-f', '--file']);
+const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test']);
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
 const TARGET_SENSITIVE: Record<string, 'k8s' | 'db'> = {
   'k8s.local.apply': 'k8s',
@@ -1547,20 +1546,49 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db'> = {
 /** A token is unresolvable when it is a variable, a substitution marker or a glob: it could name anything. */
 const isOpaqueTarget = (v: string): boolean => /^\$|\$\{|\$SUBST|`|[*?]/.test(v);
 
-const K8S_VALUE_OPTS =
-  /^(--context|--kube-context|--kubeconfig|--server|--token|--user|--cluster|--as|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|--namespace|-n|-o|--output|-f|--filename|-l|--selector|--field-selector)$/;
+/** LOCAL is the weakest answer and PRODUCTION the strongest: when several signals resolve, the strongest decides. */
+const TARGET_SEVERITY: Record<TargetClass, number> = {
+  LOCAL: 0,
+  UNCLASSIFIED: 1,
+  EXTERNAL: 2,
+  PRODUCTION: 3,
+};
 
-/** First operand that is neither an option nor an option's value. */
-function firstOperand(tokens: string[], valueOpts: RegExp): string {
+/** Every kubectl verb, so the verb can be found BY NAME rather than by skipping option values. */
+const KUBECTL_VERBS = new Set([
+  ...['get', 'describe', 'logs', 'top', 'explain', 'api-resources', 'api-versions', 'version', 'config', 'cluster-info', 'wait', 'diff', 'events', 'kustomize'],
+  ...['apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon', 'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward', 'debug', 'certificate', 'proxy', 'auth', 'apply-set'],
+]);
+const HELM_VERBS = new Set([
+  ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency'],
+  ...['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test', 'repo', 'plugin', 'create', 'package'],
+]);
+
+/** Every value of an option, in every spelling — a client applies the LAST one, so all of them are classified and
+ *  the most restrictive decides rather than trusting whichever appears first (round 14). */
+function optionValues(tokens: string[], short: string, longs: string[]): string[] {
+  const out: string[] = [];
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
-    if (t.startsWith('-')) {
-      if (valueOpts.test(t)) i++;
-      continue;
+    let matched = false;
+    for (const l of longs) {
+      if (t === l) {
+        if (tokens[i + 1] !== undefined) out.push(tokens[i + 1]!);
+        matched = true;
+      } else if (t.startsWith(l + '=')) {
+        out.push(t.slice(l.length + 1));
+        matched = true;
+      }
+      if (matched) break;
     }
-    return t;
+    if (matched || !short || !t.startsWith('-') || t.startsWith('--')) continue;
+    const at = t.indexOf(short, 1);
+    if (at < 0) continue;
+    const glued = t.slice(at + 1);
+    if (glued) out.push(glued);
+    else if (tokens[i + 1] !== undefined) out.push(tokens[i + 1]!);
   }
-  return '';
+  return out;
 }
 
 function matchesAnyGlob(name: string, patterns: string[]): boolean {
@@ -1591,26 +1619,30 @@ function resolveK8sTarget(
 ): { cls: TargetClass; target: string; mutating: boolean } {
   const head = tokens[0] ?? '';
   if (/^(kind|k3d|minikube)$/.test(head)) return { cls: 'LOCAL', target: head, mutating: true };
-  // the verb is the first operand that is not an option NOR an option's value: `kubectl --context X delete ns` must
-  // read `delete`, not `X`
-  const verb = firstOperand(tokens, K8S_VALUE_OPTS);
-  const mutating = head === 'helm' ? HELM_MUTATING_VERBS.has(verb) : K8S_MUTATING_VERBS.has(verb);
-  const context = optionValue(tokens, '', ['--context', '--kube-context']);
-  const kubeconfig = optionValue(tokens, '', ['--kubeconfig']);
-  const server = optionValue(tokens, '', ['--server']);
-  const ns = optionValue(tokens, 'n', ['--namespace']);
-  // a production namespace escalates even on an otherwise local-looking context
-  if (ns && !isOpaqueTarget(ns) && hasProductionMarker(ns, targets.productionMarkers))
-    return { cls: 'PRODUCTION', target: ns, mutating };
-  for (const [value, patterns] of [
-    [context, targets.k8sLocalContexts],
-    [server, []],
-    [kubeconfig, []],
-  ] as Array<[string | null, string[]]>) {
-    if (value === null) continue;
-    return { cls: classifyTargetName(value, patterns, targets), target: value, mutating };
-  }
-  return { cls: 'UNCLASSIFIED', target: 'the ambient kubeconfig context', mutating };
+  // The verb is found BY NAME, not by skipping option values: any global option missing from a skip-list would
+  // otherwise displace it and silently turn a mutation into a read (round 14).
+  const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
+  const mutate = head === 'helm' ? HELM_MUTATING_VERBS : K8S_MUTATING_VERBS;
+  const verb = tokens.slice(1).find((t) => !t.startsWith('-') && known.has(t));
+  // an unrecognised verb fails closed: the kernel cannot show it is a read
+  const mutating = verb === undefined ? true : mutate.has(verb);
+  // EVERY signal that can select the cluster is classified, and the MOST RESTRICTIVE one decides. kubectl resolves
+  // them together — `--server` overrides the context's endpoint and `--kubeconfig` chooses the file the context is
+  // looked up in — so a local-looking `--context` must never end the search (round 14).
+  const signals: Array<{ cls: TargetClass; target: string }> = [];
+  const add = (values: string[], patterns: string[], kind: string) => {
+    for (const v of values) signals.push({ cls: classifyTargetName(v, patterns, targets), target: `${kind} ${v}` });
+  };
+  add(optionValues(tokens, '', ['--context', '--kube-context']), targets.k8sLocalContexts, 'context');
+  add(optionValues(tokens, '', ['--kubeconfig']), [], 'kubeconfig');
+  add(optionValues(tokens, '', ['--server', '--kube-apiserver', '-s']), [], 'server');
+  for (const ns of optionValues(tokens, 'n', ['--namespace']))
+    if (!isOpaqueTarget(ns) && hasProductionMarker(ns, targets.productionMarkers))
+      signals.push({ cls: 'PRODUCTION', target: `namespace ${ns}` });
+  if (signals.length === 0)
+    return { cls: 'UNCLASSIFIED', target: 'the ambient kubeconfig context', mutating };
+  const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
+  return { cls: worst.cls, target: worst.target, mutating };
 }
 
 /** Resolves the database target of a normalized segment and whether a statement is executed against it. */
@@ -1619,23 +1651,34 @@ function resolveDbTarget(
   targets: LocalTargets,
 ): { cls: TargetClass; target: string; executes: boolean } {
   const head = tokens[0] ?? '';
-  const executes = tokens.some(
-    (t) => DB_STATEMENT_FLAGS.has(t) || [...DB_STATEMENT_FLAGS].some((f) => f.startsWith('--') && t.startsWith(f + '=')),
-  );
+  // Whether a statement is "executed" is not guessed any more. A client pointed at a non-local database is an
+  // external effect whatever it then types: the statement can arrive by flag, by positional argument, by file, by
+  // stdin redirect, or interactively (round 14 found all five spellings escaping the flag test).
+  const executes = true;
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
-  const uri = tokens.find((t) => /^[a-z][a-z0-9+.-]*:\/\//i.test(t));
-  if (uri) {
-    if (isOpaqueTarget(uri)) return { cls: 'UNCLASSIFIED', target: uri, executes };
-    const host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]*@)?\[?([^\]:/?\s]+)\]?/i.exec(uri)?.[1] ?? '';
-    return { cls: classifyTargetName(host, targets.dbLocalHosts, targets), target: host, executes };
+  const signals: Array<{ cls: TargetClass; target: string }> = [];
+  const push = (v: string, kind: string) =>
+    signals.push({ cls: classifyTargetName(v, targets.dbLocalHosts, targets), target: `${kind} ${v}` });
+
+  for (const t of tokens) {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) {
+      if (isOpaqueTarget(t)) signals.push({ cls: 'UNCLASSIFIED', target: t });
+      else push(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]*@)?\[?([^\]:/?\s]+)\]?/i.exec(t)?.[1] ?? '', 'uri host');
+    }
+    // libpq / MySQL keyword-value conninfo: `psql "host=db.acme.com dbname=app"` names the host without a URI
+    for (const m of t.matchAll(/(?:^|[\s"'])host(?:addr)?\s*=\s*([^\s"';]+)/gi)) push(m[1]!, 'conninfo host');
+    // a service name resolves through a file the kernel cannot read: unknowable, so never local
+    if (/(?:^|[\s"'])service\s*=/i.test(t) || t === '--service' || t.startsWith('--service='))
+      signals.push({ cls: 'UNCLASSIFIED', target: 'a connection service name' });
   }
-  const host = optionValue(tokens, 'h', ['--host']);
-  if (host !== null) return { cls: classifyTargetName(host, targets.dbLocalHosts, targets), target: host, executes };
+  for (const h of optionValues(tokens, 'h', ['--host'])) push(h, 'host');
   const bare = tokens.slice(1).find((t) => !t.startsWith('-'));
-  if (bare && isOpaqueTarget(bare)) return { cls: 'UNCLASSIFIED', target: bare, executes };
-  // no host anywhere: these clients default to the local socket or localhost
-  return { cls: 'LOCAL', target: 'the local socket', executes };
+  if (signals.length === 0 && bare && isOpaqueTarget(bare))
+    return { cls: 'UNCLASSIFIED', target: bare, executes };
+  if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
+  const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
+  return { cls: worst.cls, target: worst.target, executes };
 }
 
 /** Re-judges a capability that ASSERTS a local target against the target the command actually names (Q98). */
