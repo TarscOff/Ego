@@ -11,7 +11,7 @@ controls:
       claude-code: SUPPORTED
       codex-cli: UNVERIFIED
   - id: secret-redaction-boundary
-    description: Tool output, evidence and receipts pass the structured and regex redactors before leaving the kernel; originals are never logged. The redactor is host-independent; the hook path that feeds it is verified per host.
+    description: 'PARTIAL. EGO redacts what IT writes — the runtime ledger, receipts and its own evidence — and originals are never logged. It does NOT route a host tool''s output through a redactor: nothing in the kernel rewrites tool output before the model sees it, so a secret a tool prints reaches the transcript. Routing tool output through the redactor needs the host to hand EGO that output, which is phase-6 conformance work.'
     required_in: [STANDARD, STRICT, HIGH_ASSURANCE]
     recommended_in: []
     hosts:
@@ -25,14 +25,14 @@ controls:
       claude-code: PARTIAL
       codex-cli: UNVERIFIED
   - id: worktree-isolation
-    description: Concurrent sessions work in separate git worktrees bound to the same logical workspace; a second live session in a bound checkout is refused.
+    description: 'NOT CONTAINMENT, and never to be reported as such: a worktree separates Git working state between concurrent sessions and nothing else. It shares the filesystem, the network, the credentials and the process table. Listed here as a coordination control so doctor can report it honestly; the physical boundary is issue #26. Not implemented today — held scopes are phase 2.'
     required_in: [HIGH_ASSURANCE]
     recommended_in: [STRICT]
     hosts:
       claude-code: PARTIAL
       codex-cli: UNVERIFIED
   - id: managed-settings-lock
-    description: Host settings and hooks come from the managed tier only, so a session cannot edit its own guards.
+    description: 'HOST FEATURE, NOT VERIFIED BY EGO. When the host enforces a managed settings tier, a session cannot edit its own guards. EGO neither installs nor checks that tier: it records what the host claims in the capability matrix and must not report the control SATISFIED on that basis alone. Verification is phase-6 conformance work.'
     required_in: [HIGH_ASSURANCE]
     recommended_in: [STRICT]
     hosts:

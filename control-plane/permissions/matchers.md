@@ -523,10 +523,10 @@ matchers:
     command: '^rm\s+-[a-zA-Z]*r'
   - capability: command.test
     tool: Bash
-    command: '^(npm\s+(test|run\s+test\S*)|npx\s+(vitest|jest|mocha|playwright)|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|node\s+--test)\b'
+    command: '^(npm\s+(test|run\s+test\S*)|(npx\s+)?(vitest|jest|mocha|playwright|ava|tap|karma)|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|node\s+--test)\b'
   - capability: command.build
     tool: Bash
-    command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|npx\s+(tsc|esbuild|eslint|prettier|vite|next|ng)|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
+    command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|(npx\s+)?(tsc|esbuild|eslint|prettier|biome|vite|rollup|webpack|swc|turbo|nx|next|ng|tsup|parcel)\b|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
   # inline interpreters are opaque, so a body that NAMES a protected store fails closed to the same deny the literal verb receives.
   # Round 13: this block sits BEFORE command.read-only. Its `console.log(…)` / `print(…)` carve-out used to win
   # first-match and turn a credential read or a hook write into a silent ALLOW.

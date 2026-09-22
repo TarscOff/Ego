@@ -2084,26 +2084,21 @@ function classifyNormalized(
   }
   // the body resolves against ITS OWN execution context, not the caller's
   const bodyRes = effect.bodyRes ?? state.res;
-  const inner: CapabilityHit[] = [];
-  for (const seg of effect.body) {
-    for (const n of normalizeSegment(seg)) {
-      for (const h of classifyNormalized(table, ctx, compiled, n, {
-        depth: state.depth + 1,
-        seen,
-        res: bodyRes,
-      }))
-        inner.push({ ...h, effectOf: effect.reason });
-    }
-  }
+  // the producer's body re-enters THE SAME pipeline, with its own execution context — never a weaker sub-layer
+  const inner = analyzeSegments(table, ctx, compiled, effect.body, {
+    depth: state.depth + 1,
+    seen,
+    res: bodyRes,
+  }).map((h) => ({ ...h, effectOf: h.effectOf ?? effect.reason }));
   if (declared) {
-    // Positive effects (push, production, destructive, network…) escalate a declared class. Opacity inside it does
-    // not — EXCEPT opacity that means "something will run that we could not read", which is the very case the rule
-    // above exists for. Dropping it here let one level of indirection cancel the gate: an npm script whose body is
-    // `make -C ./sub lint` silently regained ALLOW (challenge findings 2, 16, 20).
-    return [
-      ...hits,
-      ...inner.filter((h) => !OPACITY_CLASSES.has(h.capability) || h.opaqueUnread === true),
-    ];
+    // INVARIANT 1: the same action gets the same classification at any depth. An inner opacity hit is therefore
+    // KEPT, whichever producer built it — `opaqueHit()`, a matcher (`command.interpreter-script`), the `$`-head
+    // branch or the no-matcher fallback (`command.unknown`). Filtering on `opaqueUnread` kept only the first of
+    // those four, so `node scripts/deploy.js` was ASK on its own and ALLOW inside a target called `build`
+    // (challenge findings 1, 18, 36). September alignment item 5 is superseded here: a declared class no longer
+    // absorbs opacity at all. What it still absorbs is a target that DOES NOT EXIST, decided above by
+    // `unresolved === 'missing'`, so `npm test` with no test script stays out of the operator's way.
+    return [...hits, ...inner];
   }
   // undeclared script fully analysed: its effect replaces the unknown verdict
   return inner.length ? inner : [opaqueHit(table, ctx, norm, `${effect.reason}: empty`)];
@@ -2773,19 +2768,29 @@ function carrierCommandValues(seg: string): string[] {
   return out;
 }
 
-export function classifyCommand(
+/** THE canonical semantic-analysis pipeline.
+ *
+ *  Invariant (product decision, 2026-09-22): the same semantic action receives the same security analysis whether it
+ *  appears at top level, inside a Makefile recipe, inside a package script, inside a shell script or behind any other
+ *  supported producer. Nested analysis may ADD context; it may never lose a protection that applies at top level.
+ *
+ *  Both entry points delegate here: `classifyCommand` for a host tool call, and the effect recursion in
+ *  `classifyNormalized` for a resolved producer body. Before this existed the recursion re-entered a SUB-layer
+ *  (matchers only), so a nested effect was analysed strictly more weakly than the identical text at top level —
+ *  `echo x > $EGO_HOME/trust/keys` was an absolute deny at top level and an ALLOW inside a make recipe.
+ *
+ *  Recursion is bounded by `state.depth` (truncation is opaque, never the parent's class) and by `state.seen`, which
+ *  keys on execution identity (directory + target), not on a bare name. */
+function analyzeSegments(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
-  command: string,
+  compiled: Array<{ m: CompiledMatcher; re: RegExp }>,
+  segments: string[],
+  state: EffectState,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
-  const bashMatchers = table.matchers.filter((m) => m.command && (m.tool === 'Bash' || m.tool === 'any'));
-  const compiled: Array<{ m: CompiledMatcher; re: RegExp }> = bashMatchers.map((m) => ({
-    m,
-    re: new RegExp(m.command!, 'i'),
-  }));
-  let cwd = ctx.cwd ?? process.cwd();
-  for (const seg of splitShellSegments(command)) {
+  let cwd = state.res.cwdVerified ? state.res.cwd : '\0dynamic';
+  for (const seg of segments) {
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
     const cdTrimmed = seg.trim();
@@ -2802,7 +2807,7 @@ export function classifyCommand(
           : canonicalPath(
               isAbsolute(target)
                 ? target
-                : resolve(cwd === '\0dynamic' ? (ctx.cwd ?? process.cwd()) : cwd, target),
+                : resolve(cwd === '\0dynamic' ? state.res.cwd : cwd, target),
             );
       if (cwd === '\0dynamic')
         hits.push({
@@ -2826,12 +2831,12 @@ export function classifyCommand(
         segment: seg,
         absolute: isAbsoluteCap(table, 'git.hooks.bypass'),
       });
-    const effectiveCwd = cwd === '\0dynamic' ? (ctx.cwd ?? process.cwd()) : cwd;
+    const effectiveCwd = cwd === '\0dynamic' ? state.res.cwd : cwd;
     // the tracked working directory IS the resolution context; when `cd` went somewhere dynamic it is not proven,
     // and every conclusion drawn from a relative path below is downgraded rather than guessed
     const res: ResolutionContext = { cwd: effectiveCwd, cwdVerified: cwd !== '\0dynamic' };
     for (const norm of normalizeSegment(seg)) {
-      const normHits = classifyNormalized(table, ctx, compiled, norm, { depth: 0, seen: new Set(), res });
+      const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, res });
       for (const h of normHits) hits.push(h);
       // a locked operation carried by any wrapper, launcher or placeholder the normalizer does not know is still found:
       // every suffix of the token list that starts with a governed tool is matched against the locked matchers
@@ -2910,6 +2915,23 @@ export function classifyCommand(
     }
   }
   return hits;
+}
+
+export function classifyCommand(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  command: string,
+): CapabilityHit[] {
+  const bashMatchers = table.matchers.filter((m) => m.command && (m.tool === 'Bash' || m.tool === 'any'));
+  const compiled: Array<{ m: CompiledMatcher; re: RegExp }> = bashMatchers.map((m) => ({
+    m,
+    re: new RegExp(m.command!, 'i'),
+  }));
+  return analyzeSegments(table, ctx, compiled, splitShellSegments(command), {
+    depth: 0,
+    seen: new Set(),
+    res: { cwd: ctx.cwd ?? process.cwd(), cwdVerified: true },
+  });
 }
 
 export function classifyUrl(

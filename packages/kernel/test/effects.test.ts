@@ -50,8 +50,12 @@ test('npm run scripts are classified by their effect (alignment item 5)', () => 
   assert.equal(bash('npm run ship', c).decisive?.capability, 'git.remote.push');
   assert.equal(bash('npm run release', c).decisive?.capability, 'forge.pr.create');
   assert.equal(bash('npm run prodkill', c).decisive?.capability, 'production.k8s.mutate');
-  // a declared class (command.build) is not escalated by an opaque interpreter script inside it
-  assert.equal(bash('npm run build', c).verdict, 'ALLOW');
+  // SUPERSEDED 2026-09-22 by the one-pipeline invariant: the same action gets the same analysis at any depth.
+  // `node scripts/build.mjs` is ASK on its own (command.interpreter-script), so it is ASK inside a script called
+  // `build` too. A declared class no longer absorbs opacity; what it still absorbs is a target that does not exist.
+  assert.equal(bash('npm run build', c).verdict, 'ASK');
+  assert.equal(bash('npm run build', c).decisive?.capability, 'command.interpreter-script');
+  assert.equal(bash('node scripts/build.mjs', c).verdict, 'ASK', 'identical at top level');
   // an undeclared script whose body is unknown stays ASK
   assert.equal(bash('npm run lint', c).verdict, 'ALLOW'); // lint is a declared build class
   assert.equal(bash('npm run clean', c).verdict, 'ASK');
@@ -296,4 +300,50 @@ test('verified execution context: a conclusion is KNOWN only when the context it
     assert.equal(bash(cmd, ctx(plain)).verdict, 'ALLOW', cmd);
   const pushes = workspace({ Makefile: 'deploy:\n\tgit push origin main\n' });
   assert.equal(bash('make deploy', ctx(pushes)).decisive?.capability, 'git.remote.push');
+});
+
+test('one pipeline: the same action gets the same security analysis at every depth', () => {
+  // Product decision, 2026-09-22. Before the pipelines were unified, the effect recursion re-entered a SUB-layer
+  // (matchers only), so a nested body was analysed strictly more weakly than the identical text at top level:
+  // `echo x > $EGO_HOME/trust/keys` was an absolute deny on its own and an ALLOW inside a Makefile recipe.
+  const bodies = [
+    'node scripts/build.mjs',
+    'tsc -p .',
+    'echo hello',
+    'eslint .',
+    'git push origin main',
+    'rm -rf dist',
+    'unknown-tool --x',
+    'kubectl --context prod-eu delete deploy api -n production',
+    '$CMD --evil',
+  ];
+  const dir = workspace({
+    Makefile: bodies.map((b, i) => `t${i}:\n\t${b}\n`).join('\n'),
+    'package.json': JSON.stringify({ scripts: Object.fromEntries(bodies.map((b, i) => [`build${i}`, b])) }),
+    'scripts/build.mjs': 'console.log(1)',
+  });
+  const c = ctx(dir);
+  for (const [i, body] of bodies.entries()) {
+    const top = bash(body, c);
+    const viaMake = bash(`make t${i}`, c);
+    const viaNpm = bash(`npm run build${i}`, c);
+    assert.equal(viaMake.verdict, top.verdict, `make t${i} must match top level for: ${body}`);
+    assert.equal(viaNpm.verdict, top.verdict, `npm run build${i} must match top level for: ${body}`);
+  }
+
+  // the protections that only ran at top level now run at every depth: paths, redirections, the trust store and cd
+  const home = mkdtempSync(join(tmpdir(), 'ego-onepipe-home-'));
+  const deep = workspace({
+    Makefile: `trust:\n\techo x > ${home}/trust/keys.json\nnested:\n\tcd sub && ./x.sh\n`,
+    'sub/x.sh': '#!/bin/sh\ngit push origin main\n',
+  });
+  const dc = ctx(deep, { egoHome: home });
+  assert.equal(bash(`echo x > ${home}/trust/keys.json`, dc).decisive?.capability, 'ego.trust.tamper');
+  assert.equal(bash('make trust', dc).decisive?.capability, 'ego.trust.tamper', 'same write, one level down');
+  assert.equal(bash('make nested', dc).decisive?.capability, 'git.remote.push', 'cd inside a recipe is tracked');
+
+  // and ordinary development is still fluid
+  const plain = workspace({ Makefile: 'build:\n\ttsc -p .\n', 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .', test: 'vitest run' } }) });
+  for (const cmd of ['make build', 'npm run build', 'npm test', 'tsc -p .', 'eslint .', 'vitest run'])
+    assert.equal(bash(cmd, ctx(plain)).verdict, 'ALLOW', cmd);
 });
