@@ -331,6 +331,18 @@ test('one pipeline: the same action gets the same security analysis at every dep
     assert.equal(viaNpm.verdict, top.verdict, `npm run build${i} must match top level for: ${body}`);
   }
 
+  // the SHELL-SCRIPT producer is included: it used to pre-filter its own body and was the one that diverged
+  const shBodies = ['git push origin main', 'echo pwn > ~/.ssh/authorized_keys', ': > ~/.ssh/known_hosts', 'echo hello'];
+  const shDir = workspace(
+    Object.fromEntries([
+      ...shBodies.map((b, i) => [`y${i}.sh`, `#!/bin/sh\nnpm run lint\n${b}\n`] as const),
+      ['package.json', JSON.stringify({ scripts: { lint: 'eslint .' } })],
+    ]),
+  );
+  const sc = ctx(shDir);
+  for (const [i, body] of shBodies.entries())
+    assert.equal(bash(`./y${i}.sh`, sc).verdict, bash(body, sc).verdict, `./y${i}.sh must match top level: ${body}`);
+
   // the protections that only ran at top level now run at every depth: paths, redirections, the trust store and cd
   const home = mkdtempSync(join(tmpdir(), 'ego-onepipe-home-'));
   const deep = workspace({

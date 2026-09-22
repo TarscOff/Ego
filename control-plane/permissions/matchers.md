@@ -569,6 +569,13 @@ matchers:
   - capability: command.interpreter-script
     tool: Bash
     command: '^(rg|ripgrep|grep|ag)\b[^|;&]*\s(--pre|--hostname-bin|--pre-glob)(=|\s)'
+  # Pure shell structure and no-op builtins. They were never classified, so they were command.unknown (ASK) at top
+  # level; once a script body stopped being pre-filtered, every `set -e` and `done` line asked. A redirection or a
+  # command substitution disqualifies the line — `: > ~/.ssh/known_hosts` and `trap "curl …"` must NOT land here,
+  # and their redirection/payload is classified separately anyway.
+  - capability: command.read-only
+    tool: Bash
+    command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|for|while|until|case|esac|done|fi|else|elif|then|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`$]*$'
   - capability: command.read-only
     tool: Bash
     command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history)\b|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+--version\b)'

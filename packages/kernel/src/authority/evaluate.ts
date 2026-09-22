@@ -1174,45 +1174,6 @@ const OPACITY_CLASSES = new Set(['command.unknown', 'command.interpreter-script'
 /** keywords that prefix a command on the same line: strip and classify the remainder (`if git push`, `do npm test`) */
 const PREFIX_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', '!', '{', '}', 'time']);
 /** statements that are shell structure, never an external effect: the whole segment is skipped */
-const STATEMENT_KEYWORDS = new Set([
-  'fi',
-  'done',
-  'esac',
-  'function',
-  'local',
-  'export',
-  'return',
-  'exit',
-  'shift',
-  'set',
-  'unset',
-  'declare',
-  'readonly',
-  'typeset',
-  'trap',
-  'true',
-  'false',
-  ':',
-  'break',
-  'continue',
-  'wait',
-  'cd',
-  'pushd',
-  'popd',
-  'umask',
-  'read',
-  'echo',
-  'printf',
-  'test',
-  '[',
-  '[[',
-  'for',
-  'while',
-  'until',
-  'case',
-  'select',
-  'in',
-]);
 const PACKAGE_MANAGER_BUILTINS = new Set([
   'install',
   'i',
@@ -1366,16 +1327,17 @@ function scriptSegments(text: string): string[] | null {
         if (!m || !PREFIX_KEYWORDS.has(m[1]!)) break;
         t = t.slice(m[0].length).trim();
       }
-      // leading VAR=value assignments before a command; a bare assignment line is structure
-      for (;;) {
-        const m = /^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s*/.exec(t);
-        if (!m) break;
-        t = t.slice(m[0].length).trim();
-      }
+      // A bare assignment LINE is structure; an assignment that PREFIXES a command selects that command's target
+      // and must reach the pipeline with it (`PGHOST=prod psql -c …`), so it is kept.
+      if (/^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s*$/.test(t)) continue;
       if (!t) continue;
       const head = /^(\S+)/.exec(t)?.[1] ?? '';
+      // Only pure SHELL STRUCTURE is dropped — a function header, a case label, a closing paren. A command is
+      // never dropped for having a builtin head: `echo`, `printf`, `read`, `trap`, `:` and `test` all carry
+      // redirections and operands, and deciding they were harmless BEFORE the canonical pipeline saw them made a
+      // shell script the one producer where nested analysis was weaker than top level (challenge 4, finding 1).
+      // The filter belongs after classification, never before it.
       if (
-        STATEMENT_KEYWORDS.has(head) ||
         /^[A-Za-z_][A-Za-z0-9_-]*\s*\(\)/.test(t) ||
         /^[)]/.test(head) ||
         /^[A-Za-z0-9_*|-]+\)$/.test(head)
@@ -1535,7 +1497,7 @@ function resolveScriptCommand(
         (n) => typeof scripts[n] === 'string',
       );
       if (!names.length) return null; // no lifecycle scripts: the install itself is an ordinary local mutation
-      const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
+      const body = names.map((n) => scripts[n] as string); // pre/main/post are separate processes
       return {
         kind: 'npm-script',
         key: `npm:${dirname(pkgPath)}:install`,
@@ -1688,7 +1650,7 @@ function resolveScriptCommand(
             reason: 'recipe uses variable commands',
             unresolved: 'unread',
           };
-        for (const seg of splitShellSegments(cmd)) body.push(seg);
+        body.push(cmd); // one recipe LINE = one shell
       }
     }
     return {
@@ -2085,11 +2047,14 @@ function classifyNormalized(
   // the body resolves against ITS OWN execution context, not the caller's
   const bodyRes = effect.bodyRes ?? state.res;
   // the producer's body re-enters THE SAME pipeline, with its own execution context — never a weaker sub-layer
-  const inner = analyzeSegments(table, ctx, compiled, effect.body, {
-    depth: state.depth + 1,
-    seen,
-    res: bodyRes,
-  }).map((h) => ({ ...h, effectOf: h.effectOf ?? effect.reason }));
+  const inner = analyzeSegments(
+    table,
+    ctx,
+    compiled,
+    effect.body,
+    { depth: state.depth + 1, seen, res: bodyRes },
+    effect.kind !== 'shell-script', // a script is one shell; make recipe lines and npm pre/post are not
+  ).map((h) => ({ ...h, effectOf: h.effectOf ?? effect.reason }));
   if (declared) {
     // INVARIANT 1: the same action gets the same classification at any depth. An inner opacity hit is therefore
     // KEPT, whichever producer built it — `opaqueHit()`, a matcher (`command.interpreter-script`), the `$`-head
@@ -2787,10 +2752,18 @@ function analyzeSegments(
   compiled: Array<{ m: CompiledMatcher; re: RegExp }>,
   segments: string[],
   state: EffectState,
+  /** true when each segment runs in its OWN shell, so a `cd` must not leak to the next one. GNU make starts a shell
+   *  per recipe line, and npm runs pre/main/post as separate processes (challenge 4, findings 4, 19, 26, 33). */
+  isolatedShells = false,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
-  let cwd = state.res.cwdVerified ? state.res.cwd : '\0dynamic';
-  for (const seg of segments) {
+  const startCwd = state.res.cwdVerified ? state.res.cwd : '\0dynamic';
+  let cwd = startCwd;
+  // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
+  const units = segments.flatMap((u) => (isolatedShells ? [splitShellSegments(u)] : [[u]]));
+  for (const unit of isolatedShells ? units : [segments]) {
+    if (isolatedShells) cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
+    for (const seg of unit) {
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
     const cdTrimmed = seg.trim();
@@ -2914,6 +2887,7 @@ function analyzeSegments(
       hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
     }
   }
+    }
   return hits;
 }
 
