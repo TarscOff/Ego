@@ -39,7 +39,7 @@ controls:
       claude-code: SUPPORTED
       codex-cli: UNVERIFIED
   - id: sandboxed-command-execution
-    description: Shell commands run in a host sandbox with a write scope limited to the checkout and the runtime root.
+    description: 'DESIGNED, NOT IMPLEMENTED (issue #26): shell commands would run in a host sandbox with a write scope limited to the checkout and the runtime root. EGO neither establishes nor verifies this boundary today, and no profile requires it.'
     required_in: []
     recommended_in: [STRICT, HIGH_ASSURANCE]
     hosts:

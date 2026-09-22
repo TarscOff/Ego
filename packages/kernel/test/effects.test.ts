@@ -235,3 +235,65 @@ test('layered contract, round 2: missing vs unread is decided by EXISTENCE, at e
   // a resolved effect is still judged by what it actually does, in both directions
   assert.equal(bash('make build', ctx(workspace({ Makefile: 'build:\n\techo hi\n' }))).verdict, 'ALLOW');
 });
+
+test('verified execution context: a conclusion is KNOWN only when the context it used was proven', () => {
+  // Product decision, 2026-09-22. `make -C tools gen` used to classify the recipe against the PARENT's working
+  // directory, so EGO read a decoy ./gen.sh at the repository root while make ran tools/gen.sh — a confident wrong
+  // answer with no opacity signal. Holding the executed file fixed and changing only the decoy moved the verdict.
+  const HOSTILE = '#!/bin/sh\ngit push origin main\nrm -rf ~/.ssh\n';
+
+  // [1] the decoy must not decide the verdict any more
+  const decoyed = workspace({
+    Makefile: 'lint:\n\tmake -C tools gen\n',
+    'tools/Makefile': 'gen:\n\t./gen.sh\n',
+    'tools/gen.sh': HOSTILE,
+    'gen.sh': '#!/bin/sh\nnpx tsc -p .\n', // same name at the root, never executed
+  });
+  for (const cmd of ['make lint', 'make -C tools gen'])
+    assert.equal(bash(cmd, ctx(decoyed)).verdict, 'DENY', cmd);
+
+  // [2] a tracked `cd` is part of the context
+  const nested = workspace({ 'tools/Makefile': 'gen:\n\t./gen.sh\n', 'tools/gen.sh': HOSTILE });
+  assert.equal(bash('cd tools && make gen', ctx(nested)).verdict, 'DENY');
+
+  // [3] the cycle guard keys on the directory: a same-named target elsewhere is a different effect
+  const twins = workspace({
+    Makefile: 'all:\n\tmake -C a all\n\tmake -C b all\n',
+    'a/Makefile': 'all:\n\techo safe\n',
+    'b/Makefile': 'all:\n\t./x.sh\n',
+    'b/x.sh': HOSTILE,
+  });
+  assert.equal(bash('make all', ctx(twins)).verdict, 'DENY');
+
+  // [4] through a package script as well
+  const viaNpm = workspace({
+    'package.json': JSON.stringify({ scripts: { lint: 'make -C tools gen' } }),
+    'tools/Makefile': 'gen:\n\t./gen.sh\n',
+    'tools/gen.sh': HOSTILE,
+    'gen.sh': '#!/bin/sh\necho ok\n',
+  });
+  assert.equal(bash('npm run lint', ctx(viaNpm)).verdict, 'DENY');
+
+  // [5] a context that cannot be PROVEN is opaque, not guessed: an include, a selector, a dynamic cd
+  const included = workspace({ Makefile: 'include extra.mk\n', 'extra.mk': 'deploy:\n\t./d.sh\n', 'd.sh': HOSTILE });
+  assert.equal(bash('make deploy', ctx(included)).decisive?.capability, 'command.script-opaque');
+  const ws = workspace({ 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }) });
+  for (const cmd of ['npm run build -w pkg-a', 'npm --prefix ./sub run build', 'pnpm --filter api build'])
+    assert.equal(bash(cmd, ctx(ws)).decisive?.capability, 'command.script-opaque', cmd);
+  assert.notEqual(bash('cd $DYN && make build', ctx(ws)).verdict, 'ALLOW');
+
+  // [6] analysis truncation is opaque and never inherits the enclosing declared class
+  const deep = workspace({
+    'package.json': JSON.stringify({
+      scripts: { a: 'npm run b', b: 'npm run c', c: 'npm run d', d: 'npm run e', e: 'git push --force origin main' },
+    }),
+  });
+  assert.notEqual(bash('npm run a', ctx(deep)).verdict, 'ALLOW');
+
+  // [7] ordinary development is untouched: a proven context still resolves normally, in both directions
+  const plain = workspace({ Makefile: 'build:\n\techo hi\n', 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }) });
+  for (const cmd of ['make build', 'npm run build', 'make', 'npm test'])
+    assert.equal(bash(cmd, ctx(plain)).verdict, 'ALLOW', cmd);
+  const pushes = workspace({ Makefile: 'deploy:\n\tgit push origin main\n' });
+  assert.equal(bash('make deploy', ctx(pushes)).decisive?.capability, 'git.remote.push');
+});

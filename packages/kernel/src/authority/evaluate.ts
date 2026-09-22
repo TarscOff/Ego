@@ -1309,9 +1309,23 @@ function findUp(ctx: EvaluationContext, start: string, name: string): string | n
   return null;
 }
 
+/** The execution context a semantic conclusion was computed against (product decision, 2026-09-22).
+ *
+ *  EGO may report an effect as KNOWN only when the context required to resolve it has itself been VERIFIED. A
+ *  resolver that cannot prove its context inputs match the real execution context must downgrade its conclusion to
+ *  UNKNOWN/OPAQUE. Absence of proof is not proof of a safe context. */
+export interface ResolutionContext {
+  /** the directory this segment's relative operands resolve against */
+  cwd: string;
+  /** false when that directory could not be proven: a dynamic `cd`, an unresolvable `-C`, an unmodelled workspace
+   *  selector. Any conclusion drawn from a relative path is then opaque rather than confident-and-wrong. */
+  cwdVerified: boolean;
+}
+
 interface EffectState {
   depth: number;
   seen: Set<string>;
+  res: ResolutionContext;
 }
 
 function stripComment(line: string): string {
@@ -1405,11 +1419,16 @@ function manifestUnresolved(
 function resolveScriptCommand(
   ctx: EvaluationContext,
   norm: string,
+  res: ResolutionContext,
 ): {
   kind: 'shell-script' | 'npm-script' | 'make-target';
   key: string;
   body: string[] | null;
   reason: string;
+  /** The execution context the BODY's relative operands resolve against. `make -C sub` runs its recipe in `sub`;
+   *  an npm script runs in the manifest's directory; a shell script runs in the caller's directory. Resolving a
+   *  body against the parent's directory made EGO read a different file than the one that executes. */
+  bodyRes?: ResolutionContext;
   /** Why the body is null. `missing`: the target does not exist, so nothing can execute and the command fails on
    *  its own. `unread`: something WILL execute that could not be read — unreadable, too large, malformed, wrongly
    *  encoded, reached through another working directory, dynamically constructed or unsupported. Only `missing`
@@ -1418,7 +1437,17 @@ function resolveScriptCommand(
 } | null {
   const tokens = tokenize(norm);
   const head = tokens[0] ?? '';
-  const cwd = ctx.cwd ?? process.cwd();
+  const cwd = res.cwd;
+  // The product decision, applied at the root of every resolver: a semantic conclusion drawn from a RELATIVE path
+  // is only trustworthy when the directory it is relative to has been proven. Absence of proof is not proof.
+  if (!res.cwdVerified)
+    return {
+      kind: 'shell-script',
+      key: `unverified:${norm}`,
+      body: null,
+      reason: 'the working directory this resolution depends on could not be verified',
+      unresolved: 'unread',
+    };
   // shell scripts: ./x.sh, bash x.sh, sh x.sh, source x.sh, . x.sh, /abs/x.sh
   let scriptPath: string | null = null;
   if (/^\.{0,2}\//.test(head) || isAbsolute(head)) scriptPath = head;
@@ -1463,12 +1492,29 @@ function resolveScriptCommand(
       kind: 'shell-script',
       key: `script:${abs}`,
       body,
+      bodyRes: res,
       reason: body ? 'shell script analysed' : 'shell script uses dynamic commands',
       ...(body ? {} : { unresolved: 'unread' as const }),
     };
   }
   // package manager scripts
   if (head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') {
+    // A workspace/prefix/filter selector changes WHICH manifest the script comes from. EGO does not model the
+    // workspace graph, so reading the root manifest would be a confident wrong answer: the conclusion is
+    // downgraded instead (challenge findings 3, 22, 34).
+    const selector = tokens.find(
+      (t) =>
+        /^(-w|--workspace|--workspaces|--filter|-F|--prefix|-C|--dir|--cwd|--scope|--recursive|-r)$/.test(t) ||
+        /^(--workspace|--filter|--prefix|--dir|--cwd|--scope)=/.test(t),
+    );
+    if (selector)
+      return {
+        kind: 'npm-script',
+        key: `npm:selector:${selector}`,
+        body: null,
+        reason: `the ${selector} selector chooses a manifest outside the resolved working directory`,
+        unresolved: 'unread',
+      };
     let script: string | null = null;
     const sub = tokens[1] ?? '';
     // install commands (`npm install`/`ci`/`add`, bare `yarn`) run the install lifecycle scripts — analyse them, since
@@ -1477,7 +1523,7 @@ function resolveScriptCommand(
     if (INSTALL_SUBS.has(sub) || (head === 'yarn' && sub === '')) {
       const pkgPath = findUp(ctx, cwd, 'package.json');
       const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
-      if (text === null)
+      if (pkgPath === null || text === null)
         return manifestUnresolved(ctx, pkgPath, 'npm:install', 'package.json');
       let scripts: Record<string, unknown> = {};
       try {
@@ -1490,7 +1536,13 @@ function resolveScriptCommand(
       );
       if (!names.length) return null; // no lifecycle scripts: the install itself is an ordinary local mutation
       const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
-      return { kind: 'npm-script', key: 'npm:install', body, reason: 'install lifecycle scripts' };
+      return {
+        kind: 'npm-script',
+        key: `npm:${dirname(pkgPath)}:install`,
+        body,
+        bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
+        reason: 'install lifecycle scripts',
+      };
     }
     if (sub === 'run' || sub === 'run-script')
       script = tokens.slice(2).find((t) => !t.startsWith('-')) ?? null;
@@ -1505,7 +1557,7 @@ function resolveScriptCommand(
     if (script === null) return null;
     const pkgPath = findUp(ctx, cwd, 'package.json');
     const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
-    if (text === null)
+    if (pkgPath === null || text === null)
       return manifestUnresolved(ctx, pkgPath, `npm:${script}`, 'package.json');
     let scripts: Record<string, unknown> = {};
     try {
@@ -1532,7 +1584,13 @@ function resolveScriptCommand(
       };
     }
     const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
-    return { kind: 'npm-script', key: `npm:${script}`, body, reason: `package.json script "${script}"` };
+    return {
+      kind: 'npm-script',
+      key: `npm:${dirname(pkgPath)}:${script}`,
+      body,
+      bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
+      reason: `package.json script "${script}"`,
+    };
   }
   // make targets
   if (head === 'make' || head === 'gmake') {
@@ -1578,7 +1636,7 @@ function resolveScriptCommand(
       const exists = candidates.some((f) => fileExists(f));
       return {
         kind: 'make-target',
-        key: `make:${targets.join(',')}`,
+        key: `make:${makeDir}:${targets.join(',')}`,
         body: null,
         reason: exists ? 'Makefile present but not readable' : 'no Makefile',
         unresolved: exists ? 'unread' : 'missing',
@@ -1604,14 +1662,28 @@ function resolveScriptCommand(
     const body: string[] = [];
     for (const t of wanted) {
       const r = recipes.get(t);
-      if (!r) return { kind: 'make-target', key: `make:${t}`, body: null, reason: `target "${t}" not found`, unresolved: 'missing' };
+      if (!r) {
+        // "my parser did not find the target" is not "the target does not exist". An `include`, a pattern rule, a
+        // `$(eval)`-generated rule or a VPATH target all execute while being invisible here (challenge findings
+        // 5, 12, 21, 35). Only a makefile with none of those may claim the target is genuinely absent.
+        const opaqueRules = /^\s*(-?include|sinclude)\b/m.test(text) || /^[^\s:]*%[^\s:]*\s*::?/m.test(text) || /\$\(eval\b/.test(text);
+        return {
+          kind: 'make-target',
+          key: `make:${makeDir}:${t}`,
+          body: null,
+          reason: opaqueRules
+            ? `target "${t}" is not visible to the parser, and this makefile uses includes or pattern rules`
+            : `target "${t}" not found`,
+          unresolved: opaqueRules ? 'unread' : 'missing',
+        };
+      }
       for (const rl of r) {
         const cmd = rl.replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
         if (/^\$[({]/.test(cmd) || /\$\((shell|eval)\b/.test(cmd))
           return {
             kind: 'make-target',
-            key: `make:${t}`,
+            key: `make:${makeDir}:${t}`,
             body: null,
             reason: 'recipe uses variable commands',
             unresolved: 'unread',
@@ -1621,8 +1693,12 @@ function resolveScriptCommand(
     }
     return {
       kind: 'make-target',
-      key: `make:${wanted.join(',')}`,
+      // the cycle guard must key on the DIRECTORY too: a same-named target in another directory is a different
+      // effect, and keying by name alone let the second one be skipped entirely (challenge findings 4, 30)
+      key: `make:${makeDir}:${wanted.join(',')}`,
       body,
+      // the recipe runs in the -C directory, not in the caller's (challenge finding 1)
+      bodyRes: { cwd: makeDir, cwdVerified: res.cwdVerified },
       reason: `Makefile target ${wanted.join(', ')}`,
     };
   }
@@ -1986,8 +2062,11 @@ function classifyNormalized(
       absolute: false,
     },
   ];
-  if (state.depth >= MAX_EFFECT_DEPTH) return hits;
-  const effect = resolveScriptCommand(ctx, norm);
+  if (state.depth >= MAX_EFFECT_DEPTH)
+    // Analysis truncation is UNKNOWN, never "whatever the parent was". Returning the enclosing declared class let a
+    // chain of indirection launder anything past the gate (challenge findings 2, 11, 20, 29, 36).
+    return [...hits, opaqueHit(table, ctx, norm, `analysis truncated at depth ${MAX_EFFECT_DEPTH}`)];
+  const effect = resolveScriptCommand(ctx, norm, state.res);
   if (!effect) return hits;
   if (state.seen.has(effect.key)) return hits;
   const seen = new Set(state.seen).add(effect.key);
@@ -2003,10 +2082,16 @@ function classifyNormalized(
     if (!declared) return [opaqueHit(table, ctx, norm, effect.reason)];
     return effect.unresolved === 'missing' ? hits : [...hits, opaqueHit(table, ctx, norm, effect.reason)];
   }
+  // the body resolves against ITS OWN execution context, not the caller's
+  const bodyRes = effect.bodyRes ?? state.res;
   const inner: CapabilityHit[] = [];
   for (const seg of effect.body) {
     for (const n of normalizeSegment(seg)) {
-      for (const h of classifyNormalized(table, ctx, compiled, n, { depth: state.depth + 1, seen }))
+      for (const h of classifyNormalized(table, ctx, compiled, n, {
+        depth: state.depth + 1,
+        seen,
+        res: bodyRes,
+      }))
         inner.push({ ...h, effectOf: effect.reason });
     }
   }
@@ -2742,8 +2827,11 @@ export function classifyCommand(
         absolute: isAbsoluteCap(table, 'git.hooks.bypass'),
       });
     const effectiveCwd = cwd === '\0dynamic' ? (ctx.cwd ?? process.cwd()) : cwd;
+    // the tracked working directory IS the resolution context; when `cd` went somewhere dynamic it is not proven,
+    // and every conclusion drawn from a relative path below is downgraded rather than guessed
+    const res: ResolutionContext = { cwd: effectiveCwd, cwdVerified: cwd !== '\0dynamic' };
     for (const norm of normalizeSegment(seg)) {
-      const normHits = classifyNormalized(table, ctx, compiled, norm, { depth: 0, seen: new Set() });
+      const normHits = classifyNormalized(table, ctx, compiled, norm, { depth: 0, seen: new Set(), res });
       for (const h of normHits) hits.push(h);
       // a locked operation carried by any wrapper, launcher or placeholder the normalizer does not know is still found:
       // every suffix of the token list that starts with a governed tool is matched against the locked matchers

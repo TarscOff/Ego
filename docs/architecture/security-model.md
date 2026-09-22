@@ -79,9 +79,9 @@ conflated, and the second column is the one any claim about EGO's security has t
 
 | Profile | Designed isolation (#26, not built) | Actually in force today | What EGO may claim today |
 |---|---|---|---|
-| **STANDARD** | Current checkout; policies, hooks, claims, validation | Policies, hooks, claims, validation. No process, filesystem or network restriction. | Normal local work stays fluid, and known-safe `LOCAL_WORKSPACE` operations are `ALLOW`. EGO must **not** pretend arbitrary opaque execution is physically contained. Ambiguous actions able to escape the governed workspace `ASK` or `DENY`. |
+| **STANDARD** | Current checkout; policies, hooks, claims, validation | **Policies and hooks only.** Held scopes/claims are phase 2 and the validation matrix is phase 3-4, so neither is in force. No process, filesystem or network restriction. | Normal local work stays fluid, and known-safe `LOCAL_WORKSPACE` operations are `ALLOW`. EGO must **not** pretend arbitrary opaque execution is physically contained. Ambiguous actions able to escape the governed workspace `ASK` or `DENY`. |
 | **STRICT** | A dedicated branch and worktree per task | **Nothing beyond STANDARD.** The branch/worktree execution strategy is not implemented. | Exactly what STANDARD claims, and nothing more. Even once built, **worktree isolation is not filesystem, network or process containment.** |
-| **HIGH_ASSURANCE** | Worktree plus a sandbox or managed boundary: restricted filesystem, credentials, network, external targets and tool surface | Managed-settings tamper protection and the narrowed capability set only. **No sandbox, no filesystem, credential, network or tool-surface restriction.** | Exactly what STANDARD claims. It may **not** yet rely on containment for anything. |
+| **HIGH_ASSURANCE** | Worktree plus a sandbox or managed boundary: restricted filesystem, credentials, network, external targets and tool surface | **The narrowed capability set only.** Managed-settings tamper protection is a HOST feature EGO records in its capability matrix; EGO neither installs nor verifies it, so it is not something EGO provides. **No sandbox, no filesystem, credential, network or tool-surface restriction.** | Exactly what STANDARD claims. It may **not** yet rely on containment for anything. |
 
 The third column is why the fail-safe rule currently resolves to `ASK` in *every* profile: there is no boundary to
 defer to anywhere. When issue #26 lands, only the profile whose containment is both required and verified may move
@@ -104,6 +104,32 @@ classes stay closed. A finding from a future review becomes one of three things:
 3. a **containment requirement**, when interpreting it exhaustively would amount to reimplementing the shell or the
    tool. These are recorded against issue #26 rather than answered with another regex.
 
+## The fifth state: KNOWN-BUT-WRONG
+
+A second independent challenge found that the first three states were not exhaustive. A resolver can be
+**confidently wrong**: `make -C tools gen` had its recipe classified against the PARENT's working directory, so EGO
+read a decoy `./gen.sh` at the repository root while make ran `tools/gen.sh`. Holding the executed file fixed and
+changing only the never-executed decoy moved the verdict — proof that the verdict was computed from the wrong file.
+There was no opacity signal at all.
+
+The contract therefore carries a state before all the others:
+
+```text
+KNOWN + VERIFIED EXECUTION CONTEXT   -> evaluate normally through authority/policy
+KNOWN + UNVERIFIED OR INCOMPLETE CONTEXT -> treat as UNKNOWN / OPAQUE
+```
+
+A `ResolutionContext` (`packages/kernel/src/authority/evaluate.ts`) carries the directory a conclusion is relative
+to and whether that directory was **proven**. It is threaded through effect resolution: a `make -C` recipe resolves
+in the `-C` directory, an npm script in its manifest's directory, a shell script in the caller's. The recursion's
+cycle guard keys on the directory too, so a same-named target elsewhere is a different effect rather than a skipped
+one. Where the context cannot be proven — a dynamic `cd`, an unmodelled workspace selector (`-w`, `--prefix`,
+`--filter`), a makefile whose target is only visible through an `include` or a pattern rule — the conclusion is
+downgraded to opaque instead of being asserted.
+
+**Analysis truncation is also opaque.** Reaching the recursion depth limit returns an opacity hit; it never falls
+back to the enclosing declared class, which previously let a chain of indirection launder anything.
+
 ## Known limitations, stated plainly
 
 - The classifier does not understand arbitrary shell, and no amount of hardening will make it do so.
@@ -113,3 +139,7 @@ classes stay closed. A finding from a future review becomes one of three things:
 - Host conformance is unverified until the phase-6 suite exists; the `codex-cli` dialect fails closed on everything
   but `ALLOW` until then.
 - A human who approves an `ASK` is trusted. EGO bounds what is asked, not who answers.
+- The execution context EGO models is the working directory and the manifest/recipe it resolves against. PATH
+  resolution, shell aliases and functions, `direnv`, `.npmrc` and most environment-dependent resolution are **not**
+  modelled. Where they would change which artifact executes, EGO has no signal at all — that is the residual shape
+  of the KNOWN-BUT-WRONG class, and it is why containment (#26) remains a separate and necessary boundary.

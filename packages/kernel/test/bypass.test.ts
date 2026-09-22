@@ -1331,3 +1331,29 @@ test('layered contract, round 2: unresolved execution fails safe at every depth 
   assert.deepEqual(redirectionTargets('echo x > \\\n/etc/cron.d/evil'), ['/etc/cron.d/evil']);
   assert.deepEqual(redirectionTargets('printf x 1<> .git/hooks/pre-commit'), ['.git/hooks/pre-commit']);
 })
+
+test('challenge round 2: generalized guards and the protected hooks directory', () => {
+  const c = ctx();
+  // `.githooks/` is the layout EGO's own doctor tells the operator to configure, and it was unprotected: the
+  // governance shims live there, so a write replaces EGO's pre-commit secret scan (challenge finding 23)
+  for (const cmd of ['echo x > .githooks/pre-commit', 'cp evil .githooks/pre-push', 'chmod +x .githooks/pre-commit'])
+    assert.equal(bash(cmd, c).decisive?.capability, 'fs.hook-config.write', cmd);
+  assert.equal(bash('echo x > src/a.ts', c).verdict, 'ALLOW');
+
+  // the container guard attaches to the EFFECT (entering an existing container), not to one spelling of the verb
+  for (const cmd of [
+    'docker exec c sh -c "git push"',
+    'docker container exec c sh',
+    'docker-compose exec api sh',
+    'podman container attach c',
+  ]) {
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+  }
+
+  // the short `-I` names a compression PROGRAM for the archive tools and an include DIRECTORY for make: scoping it
+  // wrongly turned ordinary development into a prompt
+  assert.equal(bash('make -I include all', c).verdict, 'ALLOW');
+  for (const cmd of ['grep -e pattern f', 'rg -e pattern .', 'sed -e s/a/b/ f'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+  assert.notEqual(bash('tar -I /tmp/pwn -cf a.tgz src', c).verdict, 'ALLOW');
+})

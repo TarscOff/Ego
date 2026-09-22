@@ -318,6 +318,12 @@ matchers:
     path: '**/.husky/**'
   - capability: fs.hook-config.write
     tool: Write
+    path: '**/.githooks/**'
+  - capability: fs.hook-config.write
+    tool: Edit
+    path: '**/.githooks/**'
+  - capability: fs.hook-config.write
+    tool: Write
     path: '**/.claude/settings.local.json'
   - capability: fs.git-internals.write
     tool: Write
@@ -327,7 +333,7 @@ matchers:
     path: '**/.git'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(\.git/hooks|\.husky/|\.harness/hooks|\.claude/settings|\.codex/|core\.hooksPath)'
+    command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/settings|\.codex/|core\.hooksPath)'
   - capability: fs.git-internals.write
     tool: Bash
     command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(^|\s|/)\.git/'
@@ -478,7 +484,7 @@ matchers:
   # of the container runtime itself is a containment requirement (#26), not a per-invocation prompt.
   - capability: command.script-opaque
     tool: Bash
-    command: '^(docker|podman)(\s+compose)?\s+exec\b'
+    command: '^(docker|docker-compose|podman|podman-compose|nerdctl|lima|colima)(\s+(compose|container|service|stack))?\s+(exec|attach)\b'
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'
