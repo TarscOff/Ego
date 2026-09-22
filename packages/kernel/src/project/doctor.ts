@@ -360,17 +360,30 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       const hosts: HostId[] = active ? [active] : [...HOST_IDS];
       for (const h of hosts) {
         const status = c.hosts[h] ?? 'UNVERIFIED';
-        // only SUPPORTED satisfies a required control; PARTIAL and UNVERIFIED never do
+        // SATISFIED means EGO VERIFIED the property, not that a host claims it. A control EGO records but never
+        // checks is UNVERIFIED; one EGO only partly provides is reported as not satisfied with the gap named.
+        // Reporting SATISFIED on a host's word was how `managed-settings-lock` and `secret-redaction-boundary`
+        // came to assert protection that does not exist (challenge 4).
         const state: DoctorState = !active
           ? 'UNVERIFIED'
           : status === 'SUPPORTED'
             ? 'SATISFIED'
-            : 'NOT SATISFIED';
+            : status === 'UNVERIFIED'
+              ? 'UNVERIFIED'
+              : 'NOT SATISFIED';
+        const why =
+          status === 'UNVERIFIED'
+            ? 'EGO records this capability but does not verify it; conformance is phase 6'
+            : status === 'PARTIAL'
+              ? 'only partly provided — see the control description for what is and is not covered'
+              : status === 'UNAVAILABLE'
+                ? 'the host does not provide it'
+                : 'verified';
         add(
           'containment',
           `${c.id} on ${h}`,
           state,
-          `required in ${pin.profile}; host status ${status}`,
+          `required in ${pin.profile}; host status ${status} (${why})`,
           active !== null,
         );
       }

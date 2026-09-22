@@ -246,6 +246,13 @@ export function normalizeSegment(segment: string): string[] {
     if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
     s = s.slice(m[0].length);
   }
+  // shell prefix keywords (`if git push`, `do npm test`, `then rm -rf x`) are normalization, not a safety
+  // judgement: stripping them in the analyzer gives every producer AND the top level the same treatment.
+  for (;;) {
+    const m = /^(\S+)\s+/.exec(s);
+    if (!m || !PREFIX_KEYWORDS.has(m[1]!)) break;
+    s = s.slice(m[0].length).trim();
+  }
   const tokens = tokenize(s);
   if (tokens.length === 0) return extra;
   let idx = 0;
@@ -1308,6 +1315,10 @@ function stripComment(line: string): string {
 
 /** Splits shell script text into classifiable segments, returning null when the script is opaque (dynamic commands). */
 function scriptSegments(text: string): string[] | null {
+  // PRODUCER CONTRACT: resolve WHICH lines execute, and hand every one of them over verbatim. Nothing is dropped
+  // for looking harmless — that judgement belongs to the canonical analyzer, which classifies shell structure as
+  // read-only itself. A heredoc BODY is data the script feeds to a command, not commands, so it is not emitted as
+  // executable text; `eval` and a `$`-headed command cannot be resolved at all and are reported as UNKNOWN.
   const out: string[] = [];
   let heredoc: string | null = null;
   for (const raw of text.split(/\r?\n/)) {
@@ -1319,33 +1330,14 @@ function scriptSegments(text: string): string[] | null {
     if (!line || line.startsWith('#!')) continue;
     const hd = /<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/.exec(line);
     if (hd) heredoc = hd[1]!;
+    // an `eval` or a command built from a variable cannot be resolved: report UNKNOWN rather than guess
     for (const seg of splitShellSegments(line)) {
-      let t = seg.trim();
-      // strip leading prefix keywords: `if git push`, `do npm test`, `then rm -rf x`
-      for (;;) {
-        const m = /^(\S+)\s*/.exec(t);
-        if (!m || !PREFIX_KEYWORDS.has(m[1]!)) break;
-        t = t.slice(m[0].length).trim();
+      for (const n of normalizeSegment(seg)) {
+        const head = /^(\S+)/.exec(n)?.[1] ?? '';
+        if (head === 'eval' || /^["']?\$/.test(head)) return null;
       }
-      // A bare assignment LINE is structure; an assignment that PREFIXES a command selects that command's target
-      // and must reach the pipeline with it (`PGHOST=prod psql -c …`), so it is kept.
-      if (/^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s*$/.test(t)) continue;
-      if (!t) continue;
-      const head = /^(\S+)/.exec(t)?.[1] ?? '';
-      // Only pure SHELL STRUCTURE is dropped — a function header, a case label, a closing paren. A command is
-      // never dropped for having a builtin head: `echo`, `printf`, `read`, `trap`, `:` and `test` all carry
-      // redirections and operands, and deciding they were harmless BEFORE the canonical pipeline saw them made a
-      // shell script the one producer where nested analysis was weaker than top level (challenge 4, finding 1).
-      // The filter belongs after classification, never before it.
-      if (
-        /^[A-Za-z_][A-Za-z0-9_-]*\s*\(\)/.test(t) ||
-        /^[)]/.test(head) ||
-        /^[A-Za-z0-9_*|-]+\)$/.test(head)
-      )
-        continue;
-      if (head === 'eval' || /^["']?\$/.test(head)) return null;
-      out.push(t);
     }
+    out.push(line);
   }
   return out;
 }
@@ -1378,13 +1370,36 @@ function manifestUnresolved(
   };
 }
 
+/** THE PRODUCER CONTRACT (product decision, 2026-09-22 — "security true by construction").
+ *
+ *  A producer — make, a package script, a shell script, and any producer added later — MAY:
+ *    - resolve WHICH body will execute;
+ *    - resolve the execution context that body runs in;
+ *    - provide structured provenance for what it inspected;
+ *    - report UNKNOWN when it cannot resolve something.
+ *
+ *  A producer MAY NOT:
+ *    - decide a segment is safe, or remove a builtin, redirection or substitution before analysis;
+ *    - absorb UNKNOWN into a friendly parent class;
+ *    - emit a verdict of its own, or weaken nested analysis.
+ *
+ *  The contract is enforced structurally rather than by convention: this return type has NO field that can carry a
+ *  verdict, a capability or a hit, so a producer has nowhere to put one. `body` is the VERBATIM executable text,
+ *  and the single caller always hands it to `analyzeSegments` — there is no alternate path around the analyzer.
+ *  `packages/kernel/test/producer-contract.test.ts` proves no producer drops executable content. */
 function resolveScriptCommand(
   ctx: EvaluationContext,
   norm: string,
   res: ResolutionContext,
 ): {
   kind: 'shell-script' | 'npm-script' | 'make-target';
+  /** execution IDENTITY for the cycle guard: everything that makes this a distinct execution — the directory, the
+   *  makefile or manifest actually read, and the target. A bare name collided across directories and across
+   *  `-f other.mk` (challenge 4, findings 20, 34). */
   key: string;
+  /** what was inspected to reach this conclusion, and its fingerprint, so a stale resolution can be detected */
+  provenance?: { source: string; fingerprint: string };
+  /** the VERBATIM executable units. A producer may not filter, simplify or drop any of it. */
   body: string[] | null;
   reason: string;
   /** The execution context the BODY's relative operands resolve against. `make -C sub` runs its recipe in `sub`;
@@ -1580,6 +1595,15 @@ function resolveScriptCommand(
       if (t.includes('=')) continue; // a variable assignment, not a target
       targets.push(t);
     }
+    // a directory, makefile or target built from a variable or a substitution cannot be resolved
+    if (tokens.slice(1).some((t) => /[$`]/.test(t)))
+      return {
+        kind: 'make-target',
+        key: `make:dynamic:${norm}`,
+        body: null,
+        reason: 'the makefile, directory or target is built at runtime and cannot be resolved',
+        unresolved: 'unread',
+      };
     // an explicit makefile wins; otherwise the default names in the (possibly -C) directory
     const mkPath = makeFile
       ? readInsideWorkspace(ctx, resolve(makeDir, makeFile)) !== null
@@ -1631,7 +1655,7 @@ function resolveScriptCommand(
         const opaqueRules = /^\s*(-?include|sinclude)\b/m.test(text) || /^[^\s:]*%[^\s:]*\s*::?/m.test(text) || /\$\(eval\b/.test(text);
         return {
           kind: 'make-target',
-          key: `make:${makeDir}:${t}`,
+          key: `make:${mkPath ?? makeDir}:${t}`,
           body: null,
           reason: opaqueRules
             ? `target "${t}" is not visible to the parser, and this makefile uses includes or pattern rules`
@@ -1645,7 +1669,7 @@ function resolveScriptCommand(
         if (/^\$[({]/.test(cmd) || /\$\((shell|eval)\b/.test(cmd))
           return {
             kind: 'make-target',
-            key: `make:${makeDir}:${t}`,
+            key: `make:${mkPath ?? makeDir}:${t}`,
             body: null,
             reason: 'recipe uses variable commands',
             unresolved: 'unread',
@@ -1657,7 +1681,7 @@ function resolveScriptCommand(
       kind: 'make-target',
       // the cycle guard must key on the DIRECTORY too: a same-named target in another directory is a different
       // effect, and keying by name alone let the second one be skipped entirely (challenge findings 4, 30)
-      key: `make:${makeDir}:${wanted.join(',')}`,
+      key: `make:${mkPath ?? makeDir}:${wanted.join(',')}`,
       body,
       // the recipe runs in the -C directory, not in the caller's (challenge finding 1)
       bodyRes: { cwd: makeDir, cwdVerified: res.cwdVerified },
@@ -2774,19 +2798,26 @@ function analyzeSegments(
       : null;
     if (cdArgs && cdArgs.length) {
       const target = expandHome(cdArgs[cdArgs.length - 1]!);
-      cwd =
+      const resolvedCd =
         target === null || /[$`*?]/.test(target)
-          ? '\0dynamic'
+          ? null
           : canonicalPath(
               isAbsolute(target)
                 ? target
                 : resolve(cwd === '\0dynamic' ? state.res.cwd : cwd, target),
             );
+      // NOTE on a `cd` into a directory that does not exist (challenge 4, finding 3): with `&&` the cd failing
+      // means nothing after it runs, so assuming it succeeded is safe; with `;` the rest runs in the ORIGINAL
+      // directory, which EGO would then misattribute. Distinguishing them needs the separator, which segment
+      // splitting discards. Requiring the directory to exist was tried and rejected: it broke `mkdir -p x && cd x`
+      // and every `cd src && …` in a checkout EGO has not materialised. Recorded as a residual limitation rather
+      // than fixed by making ordinary development ask.
+      cwd = resolvedCd ?? '\0dynamic';
       if (cwd === '\0dynamic')
         hits.push({
           capability: 'command.unknown',
           verdict: verdictFor(table, ctx, 'command.unknown'),
-          via: 'cd to a dynamic directory',
+          via: resolvedCd === null ? 'cd to a dynamic directory' : `cd to ${resolvedCd}, which does not exist`,
           segment: seg,
           absolute: false,
         });

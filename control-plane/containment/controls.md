@@ -15,8 +15,8 @@ controls:
     required_in: [STANDARD, STRICT, HIGH_ASSURANCE]
     recommended_in: []
     hosts:
-      claude-code: SUPPORTED
-      codex-cli: UNVERIFIED
+      claude-code: PARTIAL
+      codex-cli: PARTIAL
   - id: held-scope-isolation
     description: Two live sessions never mutate the same held scope; a foreign live session in the checkout downgrades or refuses uncertain shell mutation per profile.
     required_in: [STRICT, HIGH_ASSURANCE]
@@ -36,7 +36,7 @@ controls:
     required_in: [HIGH_ASSURANCE]
     recommended_in: [STRICT]
     hosts:
-      claude-code: SUPPORTED
+      claude-code: UNVERIFIED
       codex-cli: UNVERIFIED
   - id: sandboxed-command-execution
     description: 'DESIGNED, NOT IMPLEMENTED (issue #26): shell commands would run in a host sandbox with a write scope limited to the checkout and the runtime root. EGO neither establishes nor verifies this boundary today, and no profile requires it.'
