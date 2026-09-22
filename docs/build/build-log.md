@@ -354,7 +354,15 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   observation. `resolution` is now a required 9-value outcome of which exactly two carry a positive claim, the
   execution closure covers make prerequisites/includes/-f/default goals/conditionals/.ONESHELL plus the ambient
   producers (git hooks, install lifecycle scripts), a write ledger makes a rewritten source STALE, and `cwdVerified`
-  is earned rather than defaulted. Pinned by `packages/kernel/test/resolution.test.ts`. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  is earned rather than defaulted. Pinned by `packages/kernel/test/resolution.test.ts`. Challenge 6 then ran against
+  that architecture and returned **32 confirmed findings and 11 claimed new architectural classes**. Reproduced and
+  closed in session: the git ambient closure guessed `.git/hooks` instead of asking git (husky's `core.hooksPath`
+  and linked worktrees made a hostile hook invisible while it fired); `.RECIPEPREFIX` made a whole recipe invisible;
+  GNU make's candidate order was inverted, and fixing it exposed that `realpathSync` preserves the requested
+  spelling on a case-insensitive filesystem, which had unhooked the freshness ledger; four real `npm install`
+  aliases skipped the ambient closure and `--no-scripts` was accepted although npm ignores it; and a
+  PROPORTIONALITY regression of ours — one pattern rule made every unrelated target ASK. The remaining findings are
+  reported to the product owner as architectural classes, not patched. This line stays IN PROGRESS. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
