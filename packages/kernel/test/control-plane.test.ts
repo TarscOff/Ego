@@ -480,11 +480,12 @@ test('fail closed: a bullet with a malformed checkbox never silently drops the c
   assert.ok(compileAuthority(loadControlPlane(dir)).absoluteDenies.includes('production.storage.mutate'));
 });
 
-test('Q98 v1 ceiling: an organization may enable an admin-governed capability, but never to unattended ALLOW', () => {
+test('Q98 ceiling: an organization may enable an admin-governed capability, but never to unattended ALLOW', () => {
   const cp = loadControlPlane(ROOT);
   const dir = mkdtempSync(join(tmpdir(), 'ego-ceiling-'));
-  // the organization layer is the ONLY layer allowed to widen an organization-locked deny — but #2 §4 forbids an
-  // unattended external write, so a widening to ALLOW must land on ASK instead of being accepted verbatim
+  // the organization layer is the ONLY layer allowed to widen an organization-locked deny, and every capability in
+  // that tier is administrable. Enabling an EXTERNAL effect still keeps its bounded human approval, so a widening to
+  // ALLOW lands on ASK instead of being accepted verbatim.
   const orgAllow = loadOverlayCapabilities(
     writeOverlay(
       dir,
@@ -496,7 +497,7 @@ test('Q98 v1 ceiling: an organization may enable an admin-governed capability, b
   assert.equal(t.effective['forge.issue.create'], 'ASK');
   assert.equal(t.effective['git.remote.push'], 'ASK');
   for (const id of ['forge.issue.create', 'git.remote.push'])
-    assert.match(t.provenance[id]!.at(-1)!.layer, /clamped to the v1 ASK ceiling/);
+    assert.match(t.provenance[id]!.at(-1)!.layer, /clamped to the ASK ceiling/);
   // enabling it to ASK is honoured exactly as written: the ceiling clamps, it does not block governance
   const orgAsk = loadOverlayCapabilities(
     writeOverlay(

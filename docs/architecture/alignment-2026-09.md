@@ -52,3 +52,24 @@ Item 4 conflicts with the baseline's absolute-deny list. The mechanism now disti
 The recommended answer keeps the day-one behaviour identical (everything above is DENY until an organization writes
 a policy) while making the widening path explicit, versioned and testable. Moving an identifier between the two files
 is a MAJOR release under Q84.
+
+### Q98 resolution — human decision, 2026-09-22
+
+The product owner settled the open tier question: **every lock in this tier is administrable, and there is no release
+phasing.** There is no "v1 hard lock" that is later relaxed; `forge.pr.create`, `forge.pr.merge`,
+`git.remote.push.force`, `git.remote.branch.delete`, `git.remote.tag.delete` and `forge.branch.protection.modify`
+therefore stay `lock: organization` and are **not** moved to `absolute-denies.md`. This supersedes the HARD_LOCK list
+in issue #16 §5.
+
+What administrable means, precisely:
+
+- an organization decides, in a versioned and reviewable file, whether each capability is disabled or available;
+- enabling an **external effect** makes it available behind a bounded human approval (`ASK`), not unattended. A layer
+  asking for `ALLOW` compiles to `ASK` and the provenance records the clamp. That gate is what makes the capability
+  administrable rather than silent — it is not a temporary restriction;
+- no host mode (`open`, `free`, full-PC, skip-permissions) suppresses it.
+
+The `absolute` tier keeps only EGO's self-protection and the never-mutate-production promise: gate bypass, trust-store
+and runtime tampering, credential-store writes, destructive filesystem roots, nested-host invocation, and the
+production mutation categories. Issue #16 §3 asks for exactly that list to remain non-widenable. If that boundary is
+also meant to become administrable, it is a separate human decision and must be recorded here before it is built.

@@ -13,12 +13,20 @@ a stakeholder document or a model can never widen them. Day one behaviour is ide
 difference is that an accountable organization can decide otherwise, in a versioned, explainable, testable file.
 Moving an identifier between this file and `../absolute-denies.md` is a MAJOR release (Q84, Q98).
 
-**The v1 ceiling is `ASK`.** These are external effects: they leave the project-owned local workspace and change
-shared state. An organization may enable one, and then a human approves each occurrence; an organization may not turn
-one into an unattended `ALLOW`. A layer that asks for `ALLOW` is compiled to `ASK`, and the capability's provenance
-records that it was clamped, so the decision stays visible instead of silently ignored. No host mode — `open`, `free`,
-full-PC, skip-permissions — suppresses that gate. This is decision Q98; the canonical wording for this tier is
-`ADMIN_GOVERNED`, and `organization-locked` is the compatibility name still used by the schema.
+**Every capability in this tier is administrable, and there is no release phasing.** An organization decides, in a
+versioned file, whether each one is disabled or available. Nothing here is ever moved to a non-widenable lock: a human
+decision by the product owner (2026-09-22) settled that external-effect capabilities stay administrable rather than
+being hard-locked for a "v1", which supersedes the HARD_LOCK list in issue #16 §5.
+
+**The ceiling is `ASK`.** These are external effects: they leave the project-owned local workspace and change shared
+state. An organization may enable one, and then a human approves each occurrence; enabling it does not convert it into
+an unattended `ALLOW`. A layer that asks for `ALLOW` is compiled to `ASK`, and the capability's provenance records that
+it was clamped, so the decision stays visible instead of silently ignored. No host mode — `open`, `free`, full-PC,
+skip-permissions — suppresses that gate. This is the bounded human approval of decision Q98 (`TASK_APPROVAL`): it is
+what makes the capability administrable rather than unattended, not a temporary restriction.
+
+The canonical wording for this tier is `ADMIN_GOVERNED`; `organization-locked` is the compatibility name still used by
+the schema.
 
 ## Denied
 
