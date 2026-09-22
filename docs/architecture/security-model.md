@@ -54,13 +54,12 @@ program runs. A class only counts as known when it bounds what its operands can 
 recognise this" into "this is fine". It converts it into a question for a human, unless a real boundary is present to
 make the question unnecessary.
 
-This is enforced in the evaluator, and the distinction is **structural, not textual**. `resolveScriptCommand`
-returns `unresolved: 'missing' | 'unread'`, decided by whether the file EXISTS — not by whether we happened to read
-it, and never by matching a prose reason string. `missing` means nothing can execute (`npm test` with no test
-script fails on its own) and a declared class keeps its verdict. `unread` means something WILL execute that could
-not be read — unreadable, too large, malformed, wrongly encoded, reached through another working directory,
-dynamically constructed or unsupported — and the human gate applies **at every depth**, including through an
-enclosing declared class. That narrows September alignment item 5.
+This is enforced in the evaluator, and the distinction is **structural, not textual**: `resolveScriptCommand`
+returns a required `resolution` outcome, never a prose reason a consumer has to interpret. The next section states
+that ladder. The short version is that only a **proven** absence — the manifest was fully read and genuinely has no
+such script, so `npm test` without a test script fails on its own — lets a declared class keep its verdict. Anything
+that WILL execute and could not be read reaches the human gate **at every depth**, including through an enclosing
+declared class. That narrows September alignment item 5.
 
 Nothing falls through to `ALLOW` any more. A tool the evaluator does not model, a modelled tool with a missing or
 unexpected operand, an interpreter invocation that matched nothing else, an `exec` into an unknown container, a
