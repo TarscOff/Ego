@@ -504,7 +504,7 @@ function budget(
   }
   if (isAgentShell(io.env)) {
     io.err(
-      'refused: harness.budget.extend is a human act from your own terminal (ASK), never from an agent shell',
+      'refused: ego.budget.extend is a human act from your own terminal (ASK), never from an agent shell',
     );
     return 2;
   }

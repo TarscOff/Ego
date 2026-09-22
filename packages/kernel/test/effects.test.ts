@@ -137,7 +137,7 @@ test('make targets are classified by their recipe', () => {
   assert.equal(bash('make', c).verdict, 'ALLOW');
 });
 
-test('EGO_HOME trust store writes are harness.trust.tamper in every profile', () => {
+test('EGO_HOME trust store writes are ego.trust.tamper in every profile', () => {
   const dir = workspace({});
   const home = join(dir, 'home');
   for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE']) {
@@ -145,7 +145,7 @@ test('EGO_HOME trust store writes are harness.trust.tamper in every profile', ()
       const c = ctx(dir, { profile, mode, egoHome: home, inEgoRepository: true });
       const r = evaluate(table, c, { tool: 'Write', input: { file_path: join(home, 'trust', 'keys.json') } });
       assert.equal(r.verdict, 'DENY', `${profile}/${mode}`);
-      assert.equal(r.decisive?.capability, 'harness.trust.tamper');
+      assert.equal(r.decisive?.capability, 'ego.trust.tamper');
     }
   }
   const c = ctx(dir, { egoHome: home });
@@ -153,5 +153,5 @@ test('EGO_HOME trust store writes are harness.trust.tamper in every profile', ()
     evaluate(table, c, { tool: 'Read', input: { file_path: join(home, 'trust', 'keys.json') } }).verdict,
     'ALLOW',
   );
-  assert.equal(bash(`rm -rf ~/.ego/trust/keys.json`, c).decisive?.capability, 'harness.trust.tamper');
+  assert.equal(bash(`rm -rf ~/.ego/trust/keys.json`, c).decisive?.capability, 'ego.trust.tamper');
 });

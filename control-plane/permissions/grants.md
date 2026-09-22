@@ -49,9 +49,9 @@ grants:
     phrases: ["prune docker", "you can prune", "nettoie docker"]
   - capability: k8s.local.delete
     phrases: ["delete the local cluster", "delete the namespace", "you can delete the cluster", "supprime le cluster local"]
-  - capability: harness.skills.install
+  - capability: ego.skills.install
     phrases: ["install the skill", "install the skills", "you can install the skill", "installe le skill", "installe les skills"]
-  - capability: harness.pin.change
+  - capability: ego.pin.change
     phrases: ["upgrade the harness", "upgrade ego", "rollback the harness", "you can upgrade the harness", "mets a jour le harness", "upgrade le harness"]
   - capability: command.privileged
     phrases: ["you can use sudo", "run it with sudo", "tu peux utiliser sudo"]

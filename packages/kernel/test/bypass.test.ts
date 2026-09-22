@@ -128,13 +128,13 @@ test('shell redirections are path-known writes', () => {
   assert.equal(bash('echo x > .claude/settings.json').decisive?.capability, 'fs.hook-config.write');
   assert.equal(
     bash('echo "{}" > .harness/generated/policy.json').decisive?.capability,
-    'harness.runtime.tamper',
+    'ego.runtime.tamper',
   );
   assert.equal(
     bash('printf "" > .harness/runtime/sessions/s1.json').decisive?.capability,
-    'harness.runtime.tamper',
+    'ego.runtime.tamper',
   );
-  assert.equal(bash('echo pin > .harness/harness.md').decisive?.capability, 'harness.runtime.tamper');
+  assert.equal(bash('echo pin > .harness/harness.md').decisive?.capability, 'ego.runtime.tamper');
   assert.equal(bash('echo x > .env').decisive?.capability, 'fs.env-file.write');
   assert.equal(bash('echo x > src/out.txt').verdict, 'ALLOW');
   assert.equal(bash('echo x > /etc/hosts').decisive?.capability, 'fs.outside-workspace.write');
@@ -145,9 +145,9 @@ test('shell redirections are path-known writes', () => {
 test('runtime state, generated artifacts, hooks and git internals cannot be written in band', () => {
   const c = ctx();
   const write = (p: string) => evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, p) } });
-  assert.equal(write('.harness/runtime/sessions/s1.json').decisive?.capability, 'harness.runtime.tamper');
-  assert.equal(write('.harness/generated/policy.json').decisive?.capability, 'harness.runtime.tamper');
-  assert.equal(write('.harness/harness.md').decisive?.capability, 'harness.runtime.tamper');
+  assert.equal(write('.harness/runtime/sessions/s1.json').decisive?.capability, 'ego.runtime.tamper');
+  assert.equal(write('.harness/generated/policy.json').decisive?.capability, 'ego.runtime.tamper');
+  assert.equal(write('.harness/harness.md').decisive?.capability, 'ego.runtime.tamper');
   assert.equal(write('.git/hooks/pre-push').decisive?.capability, 'fs.hook-config.write');
   assert.equal(write('.husky/pre-commit').decisive?.capability, 'fs.hook-config.write');
   assert.equal(write('.git/config').decisive?.capability, 'fs.git-internals.write');
@@ -159,7 +159,7 @@ test('runtime state, generated artifacts, hooks and git internals cannot be writ
     'rm -rf .harness/runtime',
     'touch .harness/hooks/x',
   ]) {
-    assert.equal(bash(cmd).decisive?.capability, 'harness.runtime.tamper', cmd);
+    assert.equal(bash(cmd).decisive?.capability, 'ego.runtime.tamper', cmd);
   }
   for (const cmd of [
     'cp hook .git/hooks/pre-commit',
@@ -191,7 +191,7 @@ test('every spelling of the hook entry points is gate bypass', () => {
   ]) {
     const r = bash(cmd);
     assert.equal(r.verdict, 'DENY', cmd);
-    assert.equal(r.decisive?.capability, 'harness.gate.bypass', cmd);
+    assert.equal(r.decisive?.capability, 'ego.gate.bypass', cmd);
   }
   assert.equal(bash('ego status').verdict, 'ASK');
 });
@@ -201,7 +201,7 @@ test('an EGO_HOME under the home directory is still protected against symlinked 
   assert.equal(
     evaluate(table, c, { tool: 'Edit', input: { file_path: join(homedir(), '.ego', 'index', 'x.json') } })
       .decisive?.capability,
-    'harness.trust.tamper',
+    'ego.trust.tamper',
   );
 });
 
@@ -320,8 +320,8 @@ test('round-2 residuals: copies, archives and globs into protected paths resolve
     assert.equal(r.verdict, 'DENY', cmd);
     assert.ok(
       [
-        'harness.runtime.tamper',
-        'harness.gate.bypass',
+        'ego.runtime.tamper',
+        'ego.gate.bypass',
         'fs.hook-config.write',
         'fs.git-internals.write',
         'command.destructive',
@@ -340,7 +340,7 @@ test('round-2 residuals: copies, archives and globs into protected paths resolve
   symlinkSync(join(repo, '.harness'), link);
   assert.equal(
     bash(`cp p.json ${link}/generated/policy.json`, c).decisive?.capability,
-    'harness.runtime.tamper',
+    'ego.runtime.tamper',
   );
   assert.equal(bash('cp a.ts src/b.ts', c).verdict, 'ALLOW');
   assert.equal(bash('tar -xf vendor.tar -C vendor', c).verdict, 'ALLOW');
@@ -510,7 +510,7 @@ test('round-5 residuals: env -S options, archive-create writes, mv source, glued
     assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
   }
   // [14] mv relocates a protected directory (its SOURCE is removed): a write to that tree
-  assert.equal(bash('mv .harness /tmp/h', c).decisive?.capability, 'harness.gate.bypass');
+  assert.equal(bash('mv .harness /tmp/h', c).decisive?.capability, 'ego.gate.bypass');
   assert.equal(bash('mv .harness/generated/policy.json /tmp/x', c).verdict, 'DENY');
   // [7] a redirection glued to the preceding word is still a write
   for (const cmd of [
@@ -532,7 +532,7 @@ test('round-5 residuals: env -S options, archive-create writes, mv source, glued
     `mv ${ego}/releases /tmp/r`,
     `tee ${ego}/trust/keys.json`,
   ]) {
-    assert.equal(bash(cmd, c).decisive?.capability, 'harness.trust.tamper', cmd);
+    assert.equal(bash(cmd, c).decisive?.capability, 'ego.trust.tamper', cmd);
   }
   // [3] forge graphql with a file/stdin body (--input / -i) is a mutation; [4] combined commit -nm bypasses hooks
   assert.equal(bash('gh api graphql --input payload.json', c).decisive?.capability, 'forge.api.mutate');
@@ -551,7 +551,7 @@ test('round-5 residuals: env -S options, archive-create writes, mv source, glued
   );
   assert.equal(
     bash(`python3 -c "open(__import__('os').path.expanduser('~/.ego/trust/k'),'w')"`, c).decisive?.capability,
-    'harness.trust.tamper',
+    'ego.trust.tamper',
   );
   assert.equal(
     bash(`node -e "require('fs').writeFileSync('.git/hooks/pre-commit','x')"`, c).decisive?.capability,
@@ -591,7 +591,7 @@ test('round-6 residuals: archivers, trust globs/parent, glued redirects, ANSI-C,
     `mv ${ego}/trus[t] /tmp/x`,
     `cp -r ${ego} /tmp/x`,
   ]) {
-    assert.equal(bash(cmd, c).decisive?.capability, 'harness.trust.tamper', cmd);
+    assert.equal(bash(cmd, c).decisive?.capability, 'ego.trust.tamper', cmd);
   }
   // [5] a redirection glued to a word ending in a digit is still a write
   for (const cmd of [
@@ -632,7 +632,7 @@ test('round-6 residuals: archivers, trust globs/parent, glued redirects, ANSI-C,
   assert.equal(bash('git commit -m "add support for -n flag"', c).verdict, 'ALLOW');
   // [14] the enforcement shims under .harness/hooks are an absolute write, on the file tool too
   const w = (f: string) => evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, f) } });
-  assert.equal(w('.harness/hooks/git-hook.sh').decisive?.capability, 'harness.runtime.tamper');
+  assert.equal(w('.harness/hooks/git-hook.sh').decisive?.capability, 'ego.runtime.tamper');
   assert.ok(w('.harness/hooks/ego-hook.sh').decisive?.absolute);
   // controls that must NOT be denied
   assert.equal(bash('zip -r out.zip src', c).verdict, 'ALLOW');
@@ -655,9 +655,9 @@ test('round-7 residuals: dash-less tar, mv of the EGO_HOME parent, git commit by
     assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
   }
   // [R7-1] mv/rename relocate a whole tree without a recursive flag: moving EGO_HOME away is trust tamper
-  assert.equal(bash(`mv ${ego} /tmp/stolen`, c).decisive?.capability, 'harness.trust.tamper');
-  assert.equal(bash(`rename ${ego} /tmp/x`, c).decisive?.capability, 'harness.trust.tamper');
-  assert.equal(bash(`mv ${ego}/trust /tmp/x`, c).decisive?.capability, 'harness.trust.tamper');
+  assert.equal(bash(`mv ${ego} /tmp/stolen`, c).decisive?.capability, 'ego.trust.tamper');
+  assert.equal(bash(`rename ${ego} /tmp/x`, c).decisive?.capability, 'ego.trust.tamper');
+  assert.equal(bash(`mv ${ego}/trust /tmp/x`, c).decisive?.capability, 'ego.trust.tamper');
   // [R7-3] a git commit hook bypass carried in a quoted env -S / --split-string / bash -c value is still caught
   for (const cmd of [
     `env -S 'git commit -nm x'`,
@@ -705,11 +705,11 @@ test('round-8 residuals: tar write modes, quoted commit flags, multi-digit redir
   ]) {
     assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
   }
-  // [5] the EGO control-plane / policy baselines are harness.control-plane.edit on the file tool (and shell writes)
+  // [5] the EGO control-plane / policy baselines are ego.control-plane.edit on the file tool (and shell writes)
   const w = (f: string) => evaluate(table, c, { tool: 'Write', input: { file_path: join(repo, f) } });
-  assert.equal(w('control-plane/permissions/absolute-denies.md').decisive?.capability, 'harness.control-plane.edit');
-  assert.equal(w('control-plane/permissions/matchers.md').decisive?.capability, 'harness.control-plane.edit');
-  assert.equal(w('policies/baselines/x.md').decisive?.capability, 'harness.control-plane.edit');
+  assert.equal(w('control-plane/permissions/absolute-denies.md').decisive?.capability, 'ego.control-plane.edit');
+  assert.equal(w('control-plane/permissions/matchers.md').decisive?.capability, 'ego.control-plane.edit');
+  assert.equal(w('policies/baselines/x.md').decisive?.capability, 'ego.control-plane.edit');
   // controls
   assert.equal(bash('tar cf out.tar a b', c).verdict, 'ALLOW'); // archive to a scratch path
   assert.equal(bash('git commit -am "message with -n inside"', c).verdict, 'ALLOW');
@@ -845,11 +845,11 @@ test('round-12 residuals: commit embedded empty expansion, make -f altmakefile, 
   }
   // [2] "read-only" utilities that write via -o/output-operand/-i are writes
   assert.equal(bash('sort -o .git/hooks/pre-commit in', c).decisive?.capability, 'fs.hook-config.write');
-  assert.equal(bash('sort --output=.harness/generated/x.json a', c).decisive?.capability, 'harness.runtime.tamper');
+  assert.equal(bash('sort --output=.harness/generated/x.json a', c).decisive?.capability, 'ego.runtime.tamper');
   assert.equal(bash('uniq in .git/config', c).decisive?.capability, 'fs.git-internals.write');
-  assert.equal(bash('yq -i .harness/generated/policy.json', c).decisive?.capability, 'harness.runtime.tamper');
+  assert.equal(bash('yq -i .harness/generated/policy.json', c).decisive?.capability, 'ego.runtime.tamper');
   // [4] rm -rf of the EGO_HOME root is a whole-tree destroy of the trust store
-  assert.equal(bash(`rm -rf ${c.egoHome}`, c).decisive?.capability, 'harness.trust.tamper');
+  assert.equal(bash(`rm -rf ${c.egoHome}`, c).decisive?.capability, 'ego.trust.tamper');
   // controls
   assert.equal(bash('sort a b', c).verdict, 'ALLOW'); // no -o: a read
   assert.equal(bash('git commit -am "message with -n"', c).verdict, 'ALLOW');
@@ -979,7 +979,7 @@ test('round-13 residuals: interpreter carve-out, wrappers, write destinations, g
 
 test('round-13 residuals: the EGO_HOME trust store is recognised whatever the path casing', () => {
   // macOS and Windows resolve ~/.ego/RUNTIMES/... to the real `runtimes` directory, so a case variant reached the
-  // trust store under a weaker capability than harness.trust.tamper
+  // trust store under a weaker capability than ego.trust.tamper
   const c = ctx();
   for (const cmd of [
     `echo x > ${c.egoHome}/RUNTIMES/a1b2/dist/ego.js`,
@@ -987,10 +987,10 @@ test('round-13 residuals: the EGO_HOME trust store is recognised whatever the pa
     `cp evil ${c.egoHome}/Trust/keys`,
     `cp evil ${c.egoHome}/INDEX/x`,
   ]) {
-    assert.equal(bash(cmd, c).decisive?.capability, 'harness.trust.tamper', cmd);
+    assert.equal(bash(cmd, c).decisive?.capability, 'ego.trust.tamper', cmd);
   }
   // the lowercase spellings keep working exactly as before
-  assert.equal(bash(`echo x > ${c.egoHome}/runtimes/a1b2/dist/ego.js`, c).decisive?.capability, 'harness.trust.tamper');
+  assert.equal(bash(`echo x > ${c.egoHome}/runtimes/a1b2/dist/ego.js`, c).decisive?.capability, 'ego.trust.tamper');
 })
 
 test('Q98 target/effect classification: a Kubernetes or database command is judged by WHERE it points', () => {

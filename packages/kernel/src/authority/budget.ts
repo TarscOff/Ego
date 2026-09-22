@@ -49,7 +49,7 @@ export function evaluateBudget(
   return { breaches, action: breaches.length === 0 ? 'CONTINUE' : b.onExceed };
 }
 
-/** A human grant of `harness.budget.extend` may raise numeric limits for the current task only; it can never lower on_exceed to silence. */
+/** A human grant of `ego.budget.extend` may raise numeric limits for the current task only; it can never lower on_exceed to silence. */
 export function applyBudgetExtension(
   budgets: ExecutionBudgets,
   requested: Partial<ExecutionBudgets>,

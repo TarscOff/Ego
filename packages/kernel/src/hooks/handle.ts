@@ -56,7 +56,7 @@ const READ_ONLY_CAPABILITIES = new Set([
   'network.localhost',
   'mcp.local.discover',
   'mcp.local.read',
-  'harness.runtime.write',
+  'ego.runtime.write',
 ]);
 
 const NETWORK_CAPABILITY_PREFIXES = [

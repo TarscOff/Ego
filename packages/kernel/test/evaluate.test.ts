@@ -54,12 +54,12 @@ test('absolute denies win in every profile and mode, including compound commands
       assert.equal(bash('rm -rf /', c).decisive?.capability, 'fs.destructive-root');
       assert.equal(
         bash('harness decision answer "D-1 option 2"', c).decisive?.capability,
-        'harness.gate.bypass',
+        'ego.gate.bypass',
       );
       assert.equal(bash('echo x | ego hook UserPromptSubmit', c).verdict, 'DENY');
       assert.equal(
         bash('claude -p "D-1 option 2"', c).decisive?.capability,
-        'harness.launcher.invoke-nested',
+        'ego.launcher.invoke-nested',
       );
     }
   }

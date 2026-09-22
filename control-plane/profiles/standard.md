@@ -38,5 +38,5 @@ nothing.
 Execution budgets (`budgets`) bound one task: wall-clock duration, agent iterations, tool calls, retries of one step,
 delegation depth, concurrent subagents and network operations. Token and cost limits apply only where the host reports
 them (`null` = not observable). Exceeding a budget stops the task with `on_exceed`: BLOCK refuses further governed tool
-calls until a human extends the budget (`harness.budget.extend`, ASK); ESCALATE raises a decision and continues only
+calls until a human extends the budget (`ego.budget.extend`, ASK); ESCALATE raises a decision and continues only
 with an answer. Repeated failure of one step never loops: once a step has used its retries, BLOCK profiles refuse the next identical attempt and ESCALATE profiles require a human decision for it.

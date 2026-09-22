@@ -1041,13 +1041,13 @@ export function classifyPath(
 ): CapabilityHit {
   const homed = expandHome(rawPath) ?? rawPath;
   const abs = isAbsolute(homed) ? homed : resolve(ctx.cwd ?? process.cwd(), homed);
-  if (tool !== 'Read' && ctx.egoHome && 'harness.trust.tamper' in table.capabilities) {
+  if (tool !== 'Read' && ctx.egoHome && 'ego.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
     if (underTrustDir(posix, home)) {
       return {
-        capability: 'harness.trust.tamper',
-        verdict: verdictFor(table, ctx, 'harness.trust.tamper'),
+        capability: 'ego.trust.tamper',
+        verdict: verdictFor(table, ctx, 'ego.trust.tamper'),
         via: 'EGO_HOME trust store',
         absolute: true,
       };
@@ -2202,8 +2202,8 @@ function classifyShellPaths(
           recursive || head === 'mv' || head === 'rename' || head === 'rm' || head === 'rmdir' || head === 'shred';
         if (reachesTrustStore(litPosix, egoPosix, rawGlob, wholeTree))
           hits.push({
-            capability: 'harness.trust.tamper',
-            verdict: verdictFor(table, ctx, 'harness.trust.tamper'),
+            capability: 'ego.trust.tamper',
+            verdict: verdictFor(table, ctx, 'ego.trust.tamper'),
             via: `EGO_HOME trust store (${rawGlob ? 'glob' : recursive ? 'recursive' : 'path'} ${p.raw})`,
             segment: seg,
             absolute: true,
@@ -2459,7 +2459,7 @@ export function classifyCommand(
                 lock === 'absolute' ||
                 lock === 'organization' ||
                 m.capability === 'command.env-inject' ||
-                m.capability === 'harness.gate.bypass'
+                m.capability === 'ego.gate.bypass'
               )
                 hits.push({
                   capability: m.capability,
@@ -2486,8 +2486,8 @@ export function classifyCommand(
           const home = canonicalPath(ctx.egoHome).split(sep).join('/');
           if (underTrustDir(abs.split(sep).join('/'), home)) {
             hits.push({
-              capability: 'harness.trust.tamper',
-              verdict: verdictFor(table, ctx, 'harness.trust.tamper'),
+              capability: 'ego.trust.tamper',
+              verdict: verdictFor(table, ctx, 'ego.trust.tamper'),
               via: 'EGO_HOME trust store (shell write)',
               segment: seg,
               absolute: true,

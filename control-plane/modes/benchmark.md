@@ -14,9 +14,9 @@ overrides:
     verdict: DENY
   - capability: forge.issue.assign
     verdict: DENY
-  - capability: harness.skills.install
+  - capability: ego.skills.install
     verdict: DENY
-  - capability: harness.pin.change
+  - capability: ego.pin.change
     verdict: DENY
 ---
 # BENCHMARK

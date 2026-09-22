@@ -106,7 +106,7 @@ export function writePolicyCache(projectRoot: string, cache: PolicyCache): strin
 /**
  * Reads the cache and verifies its internal integrity: the table hash must equal the canonical hash of the table body.
  * A corrupted, truncated or hand-edited cache is treated as absent (the caller recompiles); the in-band write paths to
- * the cache are pre-denied (`harness.runtime.tamper`), out-of-band forgery is detected by `check` (K1).
+ * the cache are pre-denied (`ego.runtime.tamper`), out-of-band forgery is detected by `check` (K1).
  */
 export function readPolicyCache(projectRoot: string): PolicyCache | null {
   const c = readJsonIfExists<PolicyCache>(join(projectRoot, POLICY_CACHE_RELATIVE));

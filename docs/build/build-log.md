@@ -179,7 +179,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     matcher is replaced by a quote-aware evaluator check, so a combined `-nm`/`-nam` denies but a `-n` inside the `-m`
     message does not (removes a false-positive DENY while keeping the bypass caught).
   - **`.harness/hooks/**` on the file tool** (1 MEDIUM, `matchers.md`): the enforcement shims are the absolute
-    `harness.runtime.tamper` on Write/Edit too, not the weaker `fs.hook-config.write`.
+    `ego.runtime.tamper` on Write/Edit too, not the weaker `fs.hook-config.write`.
   - **Retry-stop leading no-op** (1 LOW, `handle.ts`): the key now normalises to the first REAL command, so a prepended
     `: ;`/`true &&`/`x=1 ` no-op cannot mint a fresh key either.
   - **Malformed checkbox** (1 LOW, `load.ts`): a bullet with a malformed checkbox (`- [-]`, `- [~]`, `- [ x]`) fails
@@ -226,7 +226,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     blocked like `xoxb-`/`xoxp-`.
   - **Control-plane write matcher** (MEDIUM, `matchers.md`): `control-plane/**` and the `policies/{baselines,frameworks,
     schemas,templates}/**` baselines had no file-tool matcher, so an in-repo agent could rewrite the EGO authority
-    baseline (Write/Edit or shell) at ALLOW; they now map to `harness.control-plane.edit` (DENY outside
+    baseline (Write/Edit or shell) at ALLOW; they now map to `ego.control-plane.edit` (DENY outside
     HARNESS_MAINTENANCE), which also covers shell writes via the containment check.
   Pinned by `bypass.test.ts` round-8 residuals and `redact.test.ts` round-8 cases. Suite: 144 tests.
 - **Round 9** (workflow `ego-phase1-review-round9`, 31 agents, complete run, adversarial refutation): 10 confirmed

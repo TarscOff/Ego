@@ -31,7 +31,7 @@ Operations an organization may legitimately decide to allow live in `capabilitie
 - [x] `mcp.remote.production.mutate` — production mutation through a remote MCP server.
 - [x] `fs.destructive-root` — recursive deletion of a filesystem root, home directory or the checkout root.
 - [x] `fs.credential-store.write` — writing SSH keys, cloud credential files, password stores, netrc, npmrc, pypirc.
-- [x] `harness.gate.bypass` — any attempt to convert HUMAN_DECISION_REQUIRED into approval, answer a decision from a tool, run the human prompt hook from a shell, or write decision records directly.
-- [x] `harness.trust.tamper` — editing the trust store, release keys or the cached runtimes under EGO_HOME from any tool.
-- [x] `harness.runtime.tamper` — writing runtime state (`.harness/runtime/`), generated artifacts (`.harness/generated/`), hook shims or the pin from any tool; the kernel alone writes them through its own commands.
-- [x] `harness.launcher.invoke-nested` — starting a nested agent host (`claude`, `codex`) or a pseudo-terminal wrapper from a tool to manufacture a human channel.
+- [x] `ego.gate.bypass` — any attempt to convert HUMAN_DECISION_REQUIRED into approval, answer a decision from a tool, run the human prompt hook from a shell, or write decision records directly.
+- [x] `ego.trust.tamper` — editing the trust store, release keys or the cached runtimes under EGO_HOME from any tool.
+- [x] `ego.runtime.tamper` — writing runtime state (`.harness/runtime/`), generated artifacts (`.harness/generated/`), hook shims or the pin from any tool; the kernel alone writes them through its own commands.
+- [x] `ego.launcher.invoke-nested` — starting a nested agent host (`claude`, `codex`) or a pseudo-terminal wrapper from a tool to manufacture a human channel.

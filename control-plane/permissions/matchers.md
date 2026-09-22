@@ -13,16 +13,16 @@ notes: >
   resolved path relative to the workspace root or to the home directory (prefix `~/`); `url` patterns match hostnames.
 matchers:
   # --- hook and gate self-protection (absolute) ---
-  - capability: harness.gate.bypass
+  - capability: ego.gate.bypass
     tool: Bash
     command: '(^|\s|/)(harness|ego|harness\.js|ego\.js|ego-hook\.sh|git-hook\.sh)(\s+hook\b|\s+(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b)'
-  - capability: harness.gate.bypass
+  - capability: ego.gate.bypass
     tool: Bash
     command: '(^|\s)(npx|bunx|pnpx)\s+(harness|ego|@tarscoff/ego)\s+hook\b'
-  - capability: harness.gate.bypass
+  - capability: ego.gate.bypass
     tool: Bash
     command: '(^|\s)hook\s+(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b'
-  - capability: harness.gate.bypass
+  - capability: ego.gate.bypass
     tool: Bash
     command: '(^|\s)(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
   - capability: command.env-inject
@@ -34,40 +34,40 @@ matchers:
   - capability: git.alias.inline
     tool: Bash
     command: '^git\s+(alias-override|alias-shell|alias-opaque)\b'
-  - capability: harness.runtime.tamper
+  - capability: ego.runtime.tamper
     tool: Bash
     command: '(^|\s)(\b(cp|mv|tee|ln|install|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?|node)\b|>>?)[^|;&]*\.harness/(runtime|generated|hooks)(/|\b)'
-  - capability: harness.runtime.tamper
+  - capability: ego.runtime.tamper
     tool: Bash
     command: '(^|\s)(\b(cp|mv|tee|ln|install|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b|>>?)[^|;&]*\.harness/harness\.md'
-  - capability: harness.launcher.invoke-nested
+  - capability: ego.launcher.invoke-nested
     tool: Bash
     command: '^(claude|codex)(\s|$)'
-  - capability: harness.launcher.invoke-nested
+  - capability: ego.launcher.invoke-nested
     tool: Bash
     command: '^(script|expect|unbuffer)\b'
-  - capability: harness.gate.bypass
+  - capability: ego.gate.bypass
     tool: Write
     path: '.harness/runtime/decisions/**'
-  - capability: harness.gate.bypass
+  - capability: ego.gate.bypass
     tool: Edit
     path: '.harness/runtime/decisions/**'
-  - capability: harness.runtime.tamper
+  - capability: ego.runtime.tamper
     tool: Write
     path: '.harness/runtime/**'
-  - capability: harness.runtime.tamper
+  - capability: ego.runtime.tamper
     tool: Write
     path: '.harness/generated/**'
-  - capability: harness.runtime.tamper
+  - capability: ego.runtime.tamper
     tool: Write
     path: '.harness/hooks/**'
-  - capability: harness.runtime.tamper
+  - capability: ego.runtime.tamper
     tool: Write
     path: '.harness/harness.md'
-  - capability: harness.trust.tamper
+  - capability: ego.trust.tamper
     tool: Write
     path: '~/.ego/trust/**'
-  - capability: harness.trust.tamper
+  - capability: ego.trust.tamper
     tool: Bash
     command: '(^|\s)(rm|mv|cp|tee|sed\s+-i|truncate|chmod)\b.*\.ego/(trust|index|releases|runtimes)/'
   # --- git remote (organization-locked) ---
@@ -273,25 +273,25 @@ matchers:
     tool: Bash
     command: '(^|\s|=)\.(ssh|aws|kube|gnupg)/'
   # --- hook and control-plane protection ---
-  - capability: harness.control-plane.edit
+  - capability: ego.control-plane.edit
     tool: Write
     path: 'policies/organization/**'
-  - capability: harness.control-plane.edit
+  - capability: ego.control-plane.edit
     tool: Write
     path: 'control-plane/**'
-  - capability: harness.control-plane.edit
+  - capability: ego.control-plane.edit
     tool: Write
     path: 'policies/baselines/**'
-  - capability: harness.control-plane.edit
+  - capability: ego.control-plane.edit
     tool: Write
     path: 'policies/frameworks/**'
-  - capability: harness.control-plane.edit
+  - capability: ego.control-plane.edit
     tool: Write
     path: 'policies/schemas/**'
-  - capability: harness.control-plane.edit
+  - capability: ego.control-plane.edit
     tool: Write
     path: 'policies/templates/**'
-  - capability: harness.mcp-trust.edit
+  - capability: ego.mcp-trust.edit
     tool: Write
     path: '.harness/mcp-trust.md'
   - capability: fs.hook-config.write
@@ -480,13 +480,13 @@ matchers:
   - capability: fs.credential-store.write
     tool: Bash
     command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.ssh/|\.aws/credentials|\.aws/config|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.kube/|\.git-credentials|\.docker/config|id_rsa|id_ed25519|id_ecdsa|id_dsa)'
-  - capability: harness.trust.tamper
+  - capability: ego.trust.tamper
     tool: Bash
     command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.ego/(trust|runtimes|releases|index)\b'
   - capability: fs.hook-config.write
     tool: Bash
     command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|core\.hooksPath|\.claude/settings|\.codex/)'
-  - capability: harness.runtime.tamper
+  - capability: ego.runtime.tamper
     tool: Bash
     command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.harness/(generated|runtime)\b'
   - capability: fs.git-internals.write
