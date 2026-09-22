@@ -348,7 +348,13 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 done. **The exit criterion changed on 2026-09-22.** The old
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus four challenges of the new contract (22, 41, 37, 37
+  confirmed). **Security was made true by construction on 2026-09-22**, after those challenges kept finding the same
+  meta-defect in the repairs rather than in the rules: a fix landed at the place under inspection and missed its
+  siblings (the opacity filter covered 1 producer of 4; the canonical pipeline was true for 3 of 4). The producer
+  contract is now carried by the type — `resolveScriptCommand` has no field a verdict could travel in — and
+  `analyzeSegments` is the single pipeline every body reaches at every depth. Pinned by
+  `packages/kernel/test/producer-contract.test.ts`. **The exit criterion changed on 2026-09-22.** The old
   criterion ("one complete round ends with zero confirmed HIGH or MEDIUM") was a test of whether hardening the command
   classifier could converge. It was measured with an identical 14-cluster instrument across three rounds: 61, 76, 67.
   Between rounds 14 and 15 all 76 findings were fixed and pinned; an identical pass then found 67 more, many of them

@@ -69,6 +69,36 @@ a governed capability rather than to silence. On claude-code an `allow` is rende
 which *suppresses the host's own prompt* — so returning `ALLOW` for something unmodelled was strictly worse than
 saying nothing.
 
+## The producer contract: true by construction, not by vigilance
+
+Four independent challenges exposed the same meta-defect in the repairs themselves, not in the rules: a rule would be
+implemented at the place being inspected and quietly miss its siblings. The opacity filter covered one producer of
+four. The canonical pipeline was true for three of four. Each fix was correct where it was written and absent
+everywhere else, so the next round found the same class through a different door.
+
+The answer is not more vigilance. It is to make the property structural.
+
+A **producer** is anything that turns one invocation into other executable content: `make`, an npm/yarn/pnpm/bun
+script, a lifecycle hook, a shell script, and anything added later. The contract is stated once, in the type:
+
+| A producer MAY | A producer MAY NOT |
+|---|---|
+| Resolve which body will execute | Decide a segment is safe |
+| Resolve the body's execution context | Remove builtins, redirections, substitutions or any executable line |
+| Provide provenance (which file, which directory) | Absorb UNKNOWN into a friendlier enclosing class |
+| Report that it could not resolve (UNKNOWN) | Emit a verdict, or weaken the analysis of a nested body |
+
+Two halves of that are enforced by the shape of the code rather than by a test: `resolveScriptCommand` returns
+`{kind, key, provenance?, body, bodyRes?, reason, unresolved?}` — **there is no field a verdict could travel in** — and
+its single caller hands the body straight to `analyzeSegments`. The prefix-keyword stripping that producers used to do
+(`then`, `do`, `if`, `@`, `-`) now lives in the analyzer's own normalization, so a producer has nothing left to filter
+with. `packages/kernel/test/producer-contract.test.ts` pins the rest: fifteen bodies are analysed at top level and
+again behind six producers, including two nested combinations, and every verdict must match.
+
+The consequence to keep in mind when adding a producer: you get to say *what runs* and *where*, never *whether it is
+allowed*. If a new producer needs to classify something itself, that is the signal that the canonical analyzer is
+missing a case — fix it there, where every producer benefits at once.
+
 ## What each profile may honestly claim
 
 Containment is a property of the host and the profile, never of the classifier. Issue #26 owns the implementation.
@@ -139,6 +169,11 @@ back to the enclosing declared class, which previously let a chain of indirectio
 - Host conformance is unverified until the phase-6 suite exists; the `codex-cli` dialect fails closed on everything
   but `ALLOW` until then.
 - A human who approves an `ASK` is trusted. EGO bounds what is asked, not who answers.
+- A `cd` into a directory that does not exist is assumed to have succeeded. With `&&` that assumption is safe —
+  the cd fails, so nothing after it runs. With `;` the rest of the line runs in the ORIGINAL directory and EGO
+  attributes it to the wrong one. Telling the two apart needs the separator, which segment splitting discards.
+  Requiring the target to exist was implemented and then reverted: it made `mkdir -p x && cd x` and every
+  `cd src && …` in a checkout EGO has not materialised ask a human, which is a usability break, not a boundary.
 - The execution context EGO models is the working directory and the manifest/recipe it resolves against. PATH
   resolution, shell aliases and functions, `direnv`, `.npmrc` and most environment-dependent resolution are **not**
   modelled. Where they would change which artifact executes, EGO has no signal at all — that is the residual shape
