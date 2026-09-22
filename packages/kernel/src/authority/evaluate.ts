@@ -3,7 +3,7 @@ import { homedir, tmpdir } from 'node:os';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir } from '../project/githooks.ts';
-import { gitConfigGet } from '../util/git.ts';
+import { git, gitConfigGet } from '../util/git.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
@@ -1706,7 +1706,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         if (sub.hasPatternRules) model.hasPatternRules = true;
         model.rebinds.push(...sub.rebinds);
         model.sources.push(...sub.sources);
-        if (!model.defaultGoal && sub.defaultGoal) model.defaultGoal = sub.defaultGoal;
+        if (sub.defaultGoal) model.defaultGoal = sub.defaultGoal; // make takes the LAST assignment
         if (sub.oneShell) model.oneShell = true;
         if (!model.firstTarget) model.firstTarget = sub.firstTarget;
       }
@@ -1875,11 +1875,11 @@ function hooksFor(verb: string): string[] {
  */
 function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: ExecutionEnvironment): ProducerResult {
   const verb = tokens.slice(1).find((t) => !t.startsWith('-'));
-  const names = verb ? hooksFor(verb) : undefined;
-  // a verb that raises no hook event, and `--no-verify`, which is already its own governed capability: no ambient
-  // body exists, and that is a fact about git's own semantics rather than a resolver giving up
-  if (!names || !names.length || tokens.some((t) => t === '--no-verify' || t === '-n'))
-    return { kind: 'none', key: `git:${verb ?? ''}`, body: null, reason: 'no hook event', resolution: 'ABSENT_VERIFIED' };
+  if (!verb)
+    return { kind: 'none', key: 'git:', body: null, reason: 'no verb', resolution: 'ABSENT_VERIFIED' };
+  // `--no-verify` skips the hooks, but NOT the configured helper programs: the two halves of the ambient closure
+  // are independent, and tying the config scan to the hook table left `git add` running a clean filter unseen.
+  const names = tokens.some((t) => t === '--no-verify' || t === '-n') ? [] : hooksFor(verb);
   const root = repoRootFor(ctx, env.cwd);
   if (root === null)
     return {
@@ -1889,6 +1889,25 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
       reason: `the hooks that \`git ${verb}\` fires live outside any registered repository`,
       resolution: 'AMBIENT_UNRESOLVED',
     };
+  // CONFIGURATION CLOSURE for git, independent of the hook table: several config keys name a PROGRAM git runs for
+  // ordinary verbs — a clean/smudge filter on add and checkout, a textconv on diff, an fsmonitor on almost
+  // everything. They are attached to the REPOSITORY, not to the command, so nothing else in the closure would ever
+  // name them (challenge 6, finding 26). A repository that configures none of them is untouched.
+  // LOCAL scope only. The operator's own global pager, editor or ssh command is their choice and is not part of
+  // the repository's attack surface; gating on it would gate every `git status` on every developer machine. What
+  // matters is config an agent or a dependency can write INTO THE CHECKOUT.
+  const configPrograms = gitLocalProgramValues(root);
+  if (!names.length && configPrograms.length)
+    return {
+      kind: 'git-ambient',
+      key: `git-config-programs:${root}:${verb}`,
+      body: configPrograms,
+      bodyEnv: childEnvironment(env, { cwd: root, cwdVerified: env.cwdVerified }),
+      reason: `programs this repository's git configuration runs for \`git ${verb}\``,
+      resolution: 'RESOLVED_COMPLETE',
+    };
+  if (!names.length)
+    return { kind: 'none', key: `git:${verb}`, body: null, reason: 'no hook event', resolution: 'ABSENT_VERIFIED' };
   // Ask git where hooks live instead of guessing `.git/hooks`. `core.hooksPath` (husky v9 sets it to `.husky`) and
   // a LINKED WORKTREE — whose `.git` is a file pointing at the main worktree's common dir — both move them, and
   // guessing made the relocated hook invisible while it still fired (challenge 6, finding 1). The kernel already
@@ -1917,6 +1936,7 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
   const body: string[] = [];
   const sources: string[] = [];
   let unresolved: string | null = null;
+  body.push(...configPrograms);
   for (const name of names) {
     for (const file of chainedHookFiles(dir, name)) {
       const text = readInsideWorkspace(ctx, file);
@@ -1962,6 +1982,28 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
     resolution: 'RESOLVED_COMPLETE',
     provenance: { source: sources.join(','), fingerprint: fingerprint(body.join('\n')) },
   };
+}
+
+/** REPOSITORY-LOCAL git config whose VALUE is a command git will run: clean/smudge filters, textconv, fsmonitor
+ *  and the like. Local scope only \u2014 these are the keys an agent or a dependency can write into the checkout. */
+function gitLocalProgramValues(root: string): string[] {
+  const out: string[] = [];
+  const dump = git(['config', '--local', '--list'], root);
+  if (!dump.ok || !dump.stdout) return out;
+  for (const line of dump.stdout.split(/\r?\n/)) {
+    const eq = line.indexOf('=');
+    if (eq < 0) continue;
+    const key = line.slice(0, eq);
+    const value = line.slice(eq + 1).trim();
+    if (!value || value === 'false' || value === '0') continue;
+    if (
+      /^(filter\.[^.]+\.(clean|smudge|process)|diff\.[^.]+\.(textconv|command)|core\.(fsmonitor|pager|sshCommand|gitProxy|editor))$/i.test(
+        key,
+      )
+    )
+      out.push(value);
+  }
+  return out;
 }
 
 /** Every file `git <verb>` will execute for one hook name: the hook itself plus the `<name>.pre-ego*` chain EGO's
@@ -2304,7 +2346,7 @@ function resolveScriptCommand(
       merged.sources.push(...m.sources);
       merged.text += m.text + '\n';
       if (m.oneShell) merged.oneShell = true;
-      if (!merged.defaultGoal && m.defaultGoal) merged.defaultGoal = m.defaultGoal;
+      if (m.defaultGoal) merged.defaultGoal = m.defaultGoal; // make takes the LAST assignment
       if (!merged.firstTarget) merged.firstTarget = m.firstTarget;
     }
     // A bare `make` builds .DEFAULT_GOAL when set, not the first rule (challenge 5, finding 16).
