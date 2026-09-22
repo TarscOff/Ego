@@ -348,8 +348,14 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus four challenges of the new contract (22, 41, 37, 37
-  confirmed). **Security was made true by construction on 2026-09-22**, after those challenges kept finding the same
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus FIVE challenges of the new contract (22, 41, 37, 37, 24
+  confirmed). Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
+  UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
+  ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
+  script body are analysed, contrary to the report. The remainder — chiefly the make producer routing its own parser
+  gaps into `unresolved: 'missing'`, the one state that preserves a declared ALLOW — are NOT fixed and are reported
+  to the product owner as architectural decisions, not as defects to patch. This line stays IN PROGRESS. **Security was made true by construction on 2026-09-22**, after those challenges kept finding the same
   meta-defect in the repairs rather than in the rules: a fix landed at the place under inspection and missed its
   siblings (the opacity filter covered 1 producer of 4; the canonical pipeline was true for 3 of 4). The producer
   contract is now carried by the type — `resolveScriptCommand` has no field a verdict could travel in — and
