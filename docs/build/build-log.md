@@ -348,8 +348,13 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus FIVE challenges of the new contract (22, 41, 37, 37, 24
-  confirmed). Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
+  confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
+  own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
+  observation. `resolution` is now a required 9-value outcome of which exactly two carry a positive claim, the
+  execution closure covers make prerequisites/includes/-f/default goals/conditionals/.ONESHELL plus the ambient
+  producers (git hooks, install lifecycle scripts), a write ledger makes a rewritten source STALE, and `cwdVerified`
+  is earned rather than defaulted. Pinned by `packages/kernel/test/resolution.test.ts`. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
