@@ -1657,8 +1657,12 @@ function opaqueHit(
 /** Environment variables that choose which database or cluster a client talks to. */
 /** Options that hand an arbitrary program to an otherwise well-behaved command. The list is a real family, not a
  *  spelling chase: every entry is "this option's value is executed". */
-const PROGRAM_OPERAND_RE =
-  /\s(--use-compress-program|--checkpoint-action|--to-command|--rsh-command|-I|--rsh|-e(?=\s+\S*(ssh|sh|bash|python|perl|ruby|node))|--exec|--ok-dir|-TT|--unzip-command|--filter=.*command|--pre|--hostname-bin|--upload-pack|--receive-pack|--editor|--pager|--ssh-command|--proxy-command)(=|\s)/;
+const PROGRAM_OPERAND_LONG =
+  '--use-compress-program|--checkpoint-action|--to-command|--rsh-command|--rsh|--exec|--ok-dir|-TT|--unzip-command|--filter=.*command|--pre|--hostname-bin|--upload-pack|--receive-pack|--editor|--pager|--ssh-command|--proxy-command|-e(?=\\s+\\S*(ssh|sh|bash|python|perl|ruby|node))';
+const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
+/** the archive tools where a short `-I` names a compression PROGRAM (for make it is an include directory) */
+const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
+const PROGRAM_OPERAND_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG}|-I)(=|\\s)`);
 
 const DB_CLIENT_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'sqlite3', 'redis-cli', 'clickhouse-client', 'cqlsh',
@@ -2188,7 +2192,9 @@ function classifyShellPaths(
   // `tar -I /tmp/pwn`, `tar --checkpoint-action=exec=…`, `zip -TT prog`, `rsync -e prog`, `git -c *.command=…`
   // all run an arbitrary program under a friendly class. This is the fourth line of the contract — KNOWN CLASS +
   // UNBOUNDED PROGRAM OPERAND -> treat as UNKNOWN/OPAQUE (challenge finding 14).
-  const program = PROGRAM_OPERAND_RE.exec(seg);
+  // `-I` names a compression PROGRAM for tar/pax but an include DIRECTORY for make and a pattern file for grep,
+  // so the short form is scoped to the archive tools; the long spellings are unambiguous everywhere.
+  const program = (PROGRAM_OPERAND_TOOL_RE.test(seg) ? PROGRAM_OPERAND_RE : PROGRAM_OPERAND_LONG_RE).exec(seg);
   if (program)
     hits.push({
       capability: 'command.script-opaque',
