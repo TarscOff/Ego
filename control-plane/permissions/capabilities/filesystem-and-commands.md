@@ -35,6 +35,11 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
 - [x] `command.privileged` — commands requiring elevated privileges.
 - [x] `command.network-tool` — commands that themselves perform network transfers (curl, wget, scp, rsync to remote).
 - [x] `command.script-opaque` — a shell script or Makefile target whose effect cannot be classified statically (missing, outside the workspace, too large, or using `eval`, variable commands or dynamic sourcing).
+- [x] `command.ambient-unresolved` — an operation whose EXECUTION CLOSURE includes executable content attached to
+  repository state rather than named in the command, which EGO could not read: the dependency tree's install
+  lifecycle scripts (`npm install` without `--ignore-scripts`), or a git hook that fires for the verb and could
+  not be resolved. EGO's own governance shim is recognised by provenance and contributes nothing. Widen this
+  only with a containment boundary in force, or by running installs with `--ignore-scripts`.
 - [x] `command.interpreter-script` — running a program file through an interpreter (`python x.py`, `node x.js`, `tsx`, `ruby`, …) whose effect the kernel cannot see; overlays may declare known non-mutating scripts.
 - [x] `command.interpreter-inline` — inline code passed to an interpreter (`node -e`, `python -c`) beyond simple printing.
 - [x] `command.archive-extract` — extracting an archive whose contents the kernel cannot see into a directory that contains protected paths (the repository root, `.harness/`, `.git/`); extraction into an ordinary subdirectory is a local mutation.

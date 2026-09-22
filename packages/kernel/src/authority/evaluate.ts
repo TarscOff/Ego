@@ -2,6 +2,7 @@
 import { homedir, tmpdir } from 'node:os';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { shimScript } from '../project/githooks.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
@@ -1294,6 +1295,9 @@ interface EffectState {
   depth: number;
   seen: Set<string>;
   res: ResolutionContext;
+  /** A4 — FRESHNESS. Canonical paths that an EARLIER unit of this same command writes. A resolution whose source
+   *  is in this ledger is STALE: the bytes EGO read are not the bytes that will run. */
+  written: ReadonlySet<string>;
 }
 
 function stripComment(line: string): string {
@@ -1342,6 +1346,34 @@ function scriptSegments(text: string): string[] | null {
   return out;
 }
 
+/** True when the path exists on disk AND is a directory. A3: an invocation directory that is not there cannot be
+ *  the proven base of a relative resolution. */
+function directoryExists(abs: string): boolean {
+  try {
+    return statSync(abs).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Destination operands of the write-ish commands, resolved against `cwd`. Feeds the A4 freshness ledger so that
+ *  `cp evil.mk Makefile && make build` can no longer be judged from the Makefile that was replaced. */
+function writtenPathOperands(segment: string, cwd: string): string[] {
+  const tokens = tokenize(segment);
+  const head = tokens[0] ?? '';
+  const operands = tokens.slice(1).filter((t) => !t.startsWith('-') && !t.includes('='));
+  const out: string[] = [];
+  const abs = (t: string): string => (isAbsolute(t) ? t : resolve(cwd, t));
+  if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2) out.push(abs(operands[operands.length - 1]!));
+  else if (/^(tee|truncate|touch)$/.test(head)) out.push(...operands.map(abs));
+  else if (head === 'dd') {
+    const of = tokens.find((t) => t.startsWith('of='));
+    if (of) out.push(abs(of.slice(3)));
+  } else if (/^(sed|perl)$/.test(head) && tokens.some((t) => /^-[a-z]*i/.test(t)) && operands.length)
+    out.push(...operands.slice(1).map(abs));
+  return out;
+}
+
 /** True when the path exists on disk, whatever our ability to read it. */
 function fileExists(abs: string): boolean {
   try {
@@ -1352,47 +1384,113 @@ function fileExists(abs: string): boolean {
   }
 }
 
-/** A manifest we could not read: `unread` when it is there (too large, wrong encoding, no permission, outside the
- *  workspace), `missing` when it is not — the command then fails on its own and nothing executes. */
+/* ------------------------------------------------------------------------------------------------------------- *
+ * RESOLUTION OUTCOME — "positive security claims must be earned" (product decision, 2026-09-22).
+ *
+ * A parser failing to find something is NOT proof that it does not exist. "NOT ANALYZED" and "PROVEN ABSENT" are
+ * different states, and only one of them may keep a declared class's ALLOW. Before this type there was a single
+ * boolean-ish `missing | unread`, and every gap between a producer's grammar and the real tool landed in the
+ * friendly half: an unparsed make construct read exactly like a target that does not exist, so the analyzer's own
+ * blind spot was routed into the one state that fails OPEN.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+export type ResolutionOutcome =
+  /** everything that will execute was located, read and handed over */
+  | 'RESOLVED_COMPLETE'
+  /** PROVEN that nothing will execute — the source was fully read and genuinely does not define this target */
+  | 'ABSENT_VERIFIED'
+  /** part of what will execute was resolved; the rest was not */
+  | 'PARTIAL'
+  /** the source uses constructs this resolver does not model */
+  | 'UNSUPPORTED'
+  /** the source exists but could not be read */
+  | 'UNREADABLE'
+  /** the target, path or command is built at runtime */
+  | 'DYNAMIC'
+  /** resolved correctly, but the source may have been rewritten before the effect executes */
+  | 'STALE'
+  /** the execution context the conclusion depends on was not proven */
+  | 'CONTEXT_UNVERIFIED'
+  /** an implicit producer attached to repository state (git hooks, dependency install scripts) was not resolved */
+  | 'AMBIENT_UNRESOLVED';
+
+/**
+ * INFORMATION MONOTONICITY. Less verified information must never produce a more permissive verdict, so the two
+ * states that carry a positive claim are named here ONCE and every other state — including any added later —
+ * falls to the opaque side by construction. `analyzeBody` is independent: a PARTIAL resolution still hands over
+ * what it did resolve, and the unresolved remainder is reported separately rather than swallowing the rest.
+ */
+export function resolutionEffect(outcome: ResolutionOutcome): { proven: boolean; opaque: boolean } {
+  switch (outcome) {
+    case 'RESOLVED_COMPLETE':
+    case 'ABSENT_VERIFIED':
+      return { proven: true, opaque: false };
+    default:
+      return { proven: false, opaque: true };
+  }
+}
+
+/** How much verified information an outcome carries. Used by the monotonicity property test; never by policy. */
+export const INFORMATION_RANK: Record<ResolutionOutcome, number> = {
+  RESOLVED_COMPLETE: 2,
+  ABSENT_VERIFIED: 2,
+  PARTIAL: 1,
+  STALE: 1,
+  UNSUPPORTED: 0,
+  UNREADABLE: 0,
+  DYNAMIC: 0,
+  CONTEXT_UNVERIFIED: 0,
+  AMBIENT_UNRESOLVED: 0,
+};
+
+/** A cheap content fingerprint, so a resolution can be invalidated when its source changes (freshness, A4). */
+function fingerprint(text: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < text.length; i++) {
+    h1 = Math.imul(h1 ^ text.charCodeAt(i), 0x01000193);
+    h2 = Math.imul(h2 + text.charCodeAt(i), 0x85ebca6b) ^ (h2 >>> 13);
+  }
+  return ((h1 >>> 0).toString(16) + (h2 >>> 0).toString(16)).padStart(16, '0');
+}
+
+/** A manifest we could not read: UNREADABLE when it is there, ABSENT_VERIFIED when it provably is not. */
 function manifestUnresolved(
   ctx: EvaluationContext,
   abs: string | null,
   key: string,
   what: string,
-): { kind: 'npm-script'; key: string; body: null; reason: string; unresolved: 'missing' | 'unread' } {
+): ProducerResult {
   const exists = abs !== null && fileExists(abs);
   return {
     kind: 'npm-script',
     key,
     body: null,
     reason: exists ? `${what} present but not readable` : `no ${what}`,
-    unresolved: exists ? 'unread' : 'missing',
+    resolution: exists ? 'UNREADABLE' : 'ABSENT_VERIFIED',
   };
 }
 
 /** THE PRODUCER CONTRACT (product decision, 2026-09-22 — "security true by construction").
  *
- *  A producer — make, a package script, a shell script, and any producer added later — MAY:
- *    - resolve WHICH body will execute;
- *    - resolve the execution context that body runs in;
- *    - provide structured provenance for what it inspected;
- *    - report UNKNOWN when it cannot resolve something.
+ *  A producer — make, a package script, a shell script, an ambient producer, and any producer added later — MAY:
+ *    - resolve WHICH bodies will execute, explicit and ambient;
+ *    - resolve the execution context those bodies run in;
+ *    - report how COMPLETE, FRESH and PROVEN that resolution is (`resolution`);
+ *    - provide structured provenance and a fingerprint for what it inspected;
+ *    - report inability to resolve.
  *
  *  A producer MAY NOT:
- *    - decide a segment is safe, or remove a builtin, redirection or substitution before analysis;
- *    - absorb UNKNOWN into a friendly parent class;
- *    - emit a verdict of its own, or weaken nested analysis.
+ *    - emit ALLOW/ASK/DENY, or decide a body is safe;
+ *    - discard executable content before canonical analysis;
+ *    - map its own parser failure to a friendly absence without proof;
+ *    - weaken a nested effect, or hide analysis truncation.
  *
- *  The contract is enforced structurally rather than by convention: this return type has NO field that can carry a
- *  verdict, a capability or a hit, so a producer has nowhere to put one. `body` is the VERBATIM executable text,
- *  and the single caller always hands it to `analyzeSegments` — there is no alternate path around the analyzer.
- *  `packages/kernel/test/producer-contract.test.ts` proves no producer drops executable content. */
-function resolveScriptCommand(
-  ctx: EvaluationContext,
-  norm: string,
-  res: ResolutionContext,
-): {
-  kind: 'shell-script' | 'npm-script' | 'make-target';
+ *  Enforced structurally rather than by convention: this type has NO field that can carry a verdict, a capability
+ *  or a hit, and `resolution` is REQUIRED — a producer cannot omit its completeness state, and every value except
+ *  the two proven ones is opacity. `packages/kernel/test/producer-contract.test.ts` pins the rest. */
+export interface ProducerResult {
+  kind: 'shell-script' | 'npm-script' | 'make-target' | 'git-ambient';
   /** execution IDENTITY for the cycle guard: everything that makes this a distinct execution — the directory, the
    *  makefile or manifest actually read, and the target. A bare name collided across directories and across
    *  `-f other.mk` (challenge 4, findings 20, 34). */
@@ -1403,27 +1501,280 @@ function resolveScriptCommand(
   body: string[] | null;
   reason: string;
   /** The execution context the BODY's relative operands resolve against. `make -C sub` runs its recipe in `sub`;
-   *  an npm script runs in the manifest's directory; a shell script runs in the caller's directory. Resolving a
-   *  body against the parent's directory made EGO read a different file than the one that executes. */
+   *  an npm script runs in the manifest's directory; a shell script runs in the caller's directory. */
   bodyRes?: ResolutionContext;
-  /** Why the body is null. `missing`: the target does not exist, so nothing can execute and the command fails on
-   *  its own. `unread`: something WILL execute that could not be read — unreadable, too large, malformed, wrongly
-   *  encoded, reached through another working directory, dynamically constructed or unsupported. Only `missing`
-   *  may keep a declared class's verdict; `unread` is opacity at every depth (decision "option B"). */
-  unresolved?: 'missing' | 'unread';
-} | null {
+  /** How complete/fresh/proven this resolution is. REQUIRED: only RESOLVED_COMPLETE and ABSENT_VERIFIED carry a
+   *  positive claim; everything else is opacity at every depth. */
+  resolution: ResolutionOutcome;
+  /** true when the body is ONE shell (a script) rather than independent shells (make recipe lines, npm pre/post) */
+  oneShell?: boolean;
+}
+
+/* ---------------------------------------------- GNU make subset ---------------------------------------------- */
+
+interface MakeRule {
+  recipes: string[];
+  prereqs: string[];
+}
+interface MakeFileModel {
+  rules: Map<string, MakeRule>;
+  firstTarget: string | null;
+  defaultGoal: string | null;
+  oneShell: boolean;
+  /** constructs this resolver does not model, so "not found" can never be reported as proven absence */
+  unsupported: string[];
+  sources: string[];
+  text: string;
+}
+
+/** Joins backslash continuations OUTSIDE recipe lines; a recipe's continuation stays one logical shell line. */
+function makeLogicalLines(text: string): string[] {
+  const raw = text.split(/\r?\n/);
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    let line = raw[i]!;
+    while (/\\$/.test(line) && i + 1 < raw.length) {
+      // GNU make joins the continuation; inside a recipe the backslash-newline is handed to ONE shell, so the
+      // joined text must stay a single line (challenge 5, finding 18: splitting it relocated relative paths).
+      const next = raw[++i]!;
+      line = line.replace(/\\$/, '') + (line.startsWith('\t') ? next.replace(/^\t/, ' ') : ' ' + next.trim());
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/**
+ * Parses the subset of GNU make EGO models, following `include` directives and recording every construct it does
+ * NOT model. Both branches of a conditional are kept: EGO cannot evaluate the condition, and analysing the union
+ * is the safe direction — classifying only the last textually-visible recipe made `make ENV=prod build` ALLOW
+ * while make executed the other branch (challenge 5, finding 15).
+ */
+function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth = 0): MakeFileModel {
+  const model: MakeFileModel = {
+    rules: new Map(),
+    firstTarget: null,
+    defaultGoal: null,
+    oneShell: false,
+    unsupported: [],
+    sources: [],
+    text: '',
+  };
+  const text = readInsideWorkspace(ctx, path);
+  if (text === null) {
+    model.unsupported.push(`${path} could not be read`);
+    return model;
+  }
+  model.sources.push(path);
+  model.text = text;
+  const lines = makeLogicalLines(text);
+  let current: MakeRule | null = null;
+  for (const line of lines) {
+    if (line.startsWith('\t')) {
+      if (current) current.recipes.push(line.slice(1));
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    // `include a.mk b.mk` — the included rules really execute, so an unreadable one is not "no such target"
+    const inc = /^[-s]?include\s+(.+)$/.exec(trimmed);
+    if (inc) {
+      current = null;
+      if (/[$`]/.test(inc[1]!)) {
+        model.unsupported.push(`include with a computed path: ${trimmed}`);
+        continue;
+      }
+      if (depth >= 3) {
+        model.unsupported.push('include nested deeper than this resolver follows');
+        continue;
+      }
+      for (const name of inc[1]!.split(/\s+/).filter(Boolean)) {
+        const sub = parseMakefile(ctx, resolve(dir, name), dir, depth + 1);
+        for (const [t, r] of sub.rules) {
+          const existing = model.rules.get(t);
+          if (existing) {
+            existing.recipes.push(...r.recipes);
+            existing.prereqs.push(...r.prereqs);
+          } else model.rules.set(t, { recipes: [...r.recipes], prereqs: [...r.prereqs] });
+        }
+        model.unsupported.push(...sub.unsupported);
+        model.sources.push(...sub.sources);
+        if (!model.defaultGoal && sub.defaultGoal) model.defaultGoal = sub.defaultGoal;
+        if (sub.oneShell) model.oneShell = true;
+        if (!model.firstTarget) model.firstTarget = sub.firstTarget;
+      }
+      continue;
+    }
+    // constructs whose effect this resolver cannot compute — recorded, never silently ignored
+    if (/^(ifeq|ifneq|ifdef|ifndef|else|endif)\b/.test(trimmed)) {
+      if (!/^(else|endif)\b/.test(trimmed)) model.unsupported.push(`conditional: ${trimmed}`);
+      current = null;
+      continue;
+    }
+    if (/^(vpath|VPATH\s*[:+?]?=)/.test(trimmed)) model.unsupported.push(`VPATH: ${trimmed}`);
+    if (/\$\(eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
+    if (/^\.ONESHELL\s*:/.test(trimmed)) {
+      // the WHOLE recipe goes to one shell, so a `cd` on one line leaks into the next
+      model.oneShell = true;
+      current = null;
+      continue;
+    }
+    const goal = /^\.DEFAULT_GOAL\s*[:+?]?=\s*(\S+)/.exec(trimmed);
+    if (goal) {
+      model.defaultGoal = goal[1]!;
+      current = null;
+      continue;
+    }
+    if (trimmed.startsWith('.')) {
+      current = null;
+      continue; // other special targets (.PHONY, .SUFFIXES, …) define no recipe EGO must run
+    }
+    // a rule: `targets [: | ::] prereqs [; recipe]`. A target or prerequisite list built from a variable is
+    // recorded as unsupported rather than parsed as a literal name.
+    const rule = /^([^:=#]+?)\s*::?(?!=)\s*([^;]*)(?:;(.*))?$/.exec(line);
+    if (rule && !/^\s/.test(line)) {
+      const targets = rule[1]!.trim().split(/\s+/).filter(Boolean);
+      const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
+      if (targets.some((t) => /[%$]/.test(t)))
+        model.unsupported.push(`pattern or computed rule: ${targets.join(' ')}`);
+      if (prereqs.some((p) => /[$]/.test(p))) model.unsupported.push(`computed prerequisites: ${trimmed}`);
+      const shared: MakeRule = { recipes: [], prereqs };
+      if (rule[3] && rule[3].trim()) shared.recipes.push(rule[3].trim()); // `target: ; cmd` one-line form
+      for (const t of targets) {
+        const existing = model.rules.get(t);
+        if (existing) {
+          // both branches of a conditional, or a `::` rule declared twice: keep EVERY recipe, never the last one
+          existing.prereqs.push(...prereqs);
+          existing.recipes.push(...shared.recipes);
+          current = existing;
+        } else {
+          model.rules.set(t, shared);
+          current = shared;
+        }
+        if (!model.firstTarget && !t.startsWith('.')) model.firstTarget = t;
+      }
+      continue;
+    }
+    current = null;
+  }
+  return model;
+}
+
+/** Hooks each git verb actually fires. The ambient execution closure of that verb is those hook files. */
+const GIT_HOOK_TRIGGERS: Record<string, string[]> = {
+  commit: ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit'],
+  merge: ['pre-merge-commit', 'prepare-commit-msg', 'commit-msg', 'post-merge'],
+  pull: ['pre-merge-commit', 'post-merge', 'post-checkout'],
+  checkout: ['post-checkout'],
+  switch: ['post-checkout'],
+  clone: ['post-checkout'],
+  rebase: ['pre-rebase', 'post-rewrite'],
+  push: ['pre-push'],
+  am: ['applypatch-msg', 'pre-applypatch', 'post-applypatch'],
+  cherry: ['post-rewrite'],
+  revert: ['prepare-commit-msg', 'commit-msg', 'post-commit'],
+};
+
+/**
+ * AMBIENT EXECUTION CLOSURE for git (A5). Executable content attached to repository STATE rather than named in the
+ * command has no producer to invoke: `npm install` lets a dependency install a hook, and the next `git commit`
+ * runs it — two individually-ALLOW decisions composing into unanalysed execution (challenge 5, finding 24).
+ *
+ * EGO's own governance shim is re-rendered and compared byte for byte, so it is recognised by PROVENANCE, not by a
+ * producer deciding something is safe: a file identical to what EGO installed delegates to EGO itself and adds no
+ * third-party body. Anything else — including the `.pre-ego` hooks the shim chains — is an ordinary body and goes
+ * through the canonical analyzer.
+ */
+function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], res: ResolutionContext): ProducerResult | null {
+  const verb = tokens.slice(1).find((t) => !t.startsWith('-'));
+  const names = verb ? GIT_HOOK_TRIGGERS[verb] : undefined;
+  if (!names) return null;
+  if (tokens.some((t) => t === '--no-verify' || t === '-n')) return null; // already its own governed capability
+  const root = repoRootFor(ctx, res.cwd);
+  if (root === null)
+    return {
+      kind: 'git-ambient',
+      key: `git-hooks:unknown:${verb}`,
+      body: null,
+      reason: `the hooks that \`git ${verb}\` fires live outside any registered repository`,
+      resolution: 'AMBIENT_UNRESOLVED',
+    };
+  const dir = join(root, '.git', 'hooks');
+  const body: string[] = [];
+  const sources: string[] = [];
+  let unresolved: string | null = null;
+  for (const name of names) {
+    for (const file of [join(dir, name), join(dir, `${name}.pre-ego`)]) {
+      if (!fileExists(file)) continue;
+      const text = readInsideWorkspace(ctx, file);
+      if (text === null) {
+        unresolved = `${file} fires on \`git ${verb}\` but could not be read`;
+        continue;
+      }
+      sources.push(file);
+      if (text === shimScript(name)) continue; // EGO's own shim, verified byte for byte: it delegates to EGO
+      const segs = scriptSegments(text);
+      if (segs === null) {
+        unresolved = `${file} fires on \`git ${verb}\` and builds its commands dynamically`;
+        continue;
+      }
+      body.push(...segs);
+    }
+  }
+  if (unresolved !== null)
+    return {
+      kind: 'git-ambient',
+      key: `git-hooks:${dir}:${verb}`,
+      body: body.length ? body : null,
+      bodyRes: { cwd: root, cwdVerified: res.cwdVerified },
+      reason: unresolved,
+      resolution: 'AMBIENT_UNRESOLVED',
+    };
+  if (!body.length) return null; // no hook, or EGO's own shim only: `git commit` stays an ordinary local operation
+  return {
+    kind: 'git-ambient',
+    key: `git-hooks:${dir}:${verb}`,
+    body,
+    bodyRes: { cwd: root, cwdVerified: res.cwdVerified },
+    reason: `git hooks fired by \`git ${verb}\``,
+    resolution: 'RESOLVED_COMPLETE',
+    provenance: { source: sources.join(','), fingerprint: fingerprint(body.join('\n')) },
+  };
+}
+
+/** The registered repository root containing `dir`, or null. */
+function repoRootFor(ctx: EvaluationContext, dir: string): string | null {
+  const d = canonicalPath(dir);
+  let best: string | null = null;
+  for (const r of ctx.repoRoots ?? []) {
+    const root = canonicalPath(r);
+    if ((d === root || d.startsWith(root + sep)) && (best === null || root.length > best.length)) best = root;
+  }
+  return best;
+}
+
+function resolveScriptCommand(
+  ctx: EvaluationContext,
+  norm: string,
+  res: ResolutionContext,
+  written: ReadonlySet<string> = new Set(),
+): ProducerResult | null {
   const tokens = tokenize(norm);
   const head = tokens[0] ?? '';
   const cwd = res.cwd;
-  // The product decision, applied at the root of every resolver: a semantic conclusion drawn from a RELATIVE path
-  // is only trustworthy when the directory it is relative to has been proven. Absence of proof is not proof.
+  /** A4 — FRESHNESS. A source rewritten by an earlier unit of the SAME command can no longer justify a later
+   *  ALLOW: `printf 'build:\n\tgit push' > Makefile && make build` was classified from the old contents. */
+  const stale = (...paths: string[]): boolean => paths.some((p) => written.has(canonicalPath(p)));
+  // A3 — a semantic conclusion drawn from a RELATIVE path is only trustworthy when the directory it is relative to
+  // has been proven. Absence of proof is not proof.
   if (!res.cwdVerified)
     return {
       kind: 'shell-script',
       key: `unverified:${norm}`,
       body: null,
       reason: 'the working directory this resolution depends on could not be verified',
-      unresolved: 'unread',
+      resolution: 'CONTEXT_UNVERIFIED',
     };
   // shell scripts: ./x.sh, bash x.sh, sh x.sh, source x.sh, . x.sh, /abs/x.sh
   let scriptPath: string | null = null;
@@ -1438,6 +1789,14 @@ function resolveScriptCommand(
   }
   if (scriptPath !== null) {
     const abs = isAbsolute(scriptPath) ? scriptPath : resolve(cwd, scriptPath);
+    if (stale(abs))
+      return {
+        kind: 'shell-script',
+        key: `script:${abs}`,
+        body: null,
+        reason: 'this script is rewritten earlier in the same command, so its analysed contents are not what runs',
+        resolution: 'STALE',
+      };
     const text = readInsideWorkspace(ctx, abs);
     if (text === null)
       return {
@@ -1445,7 +1804,7 @@ function resolveScriptCommand(
         key: `script:${abs}`,
         body: null,
         reason: 'script not readable inside the workspace',
-        unresolved: 'unread',
+        resolution: fileExists(abs) ? 'UNREADABLE' : 'ABSENT_VERIFIED',
       };
     if (
       !/^#!.*\b(sh|bash|zsh|dash|ksh)\b/.test(text) &&
@@ -1461,7 +1820,7 @@ function resolveScriptCommand(
         key: `script:${abs}`,
         body: null,
         reason: 'executable is not a shell script',
-        unresolved: 'unread',
+        resolution: 'UNSUPPORTED',
       };
     }
     const body = scriptSegments(text);
@@ -1470,15 +1829,16 @@ function resolveScriptCommand(
       key: `script:${abs}`,
       body,
       bodyRes: res,
+      oneShell: true,
       reason: body ? 'shell script analysed' : 'shell script uses dynamic commands',
-      ...(body ? {} : { unresolved: 'unread' as const }),
+      resolution: body ? 'RESOLVED_COMPLETE' : 'DYNAMIC',
+      provenance: { source: abs, fingerprint: fingerprint(text) },
     };
   }
   // package manager scripts
   if (head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') {
     // A workspace/prefix/filter selector changes WHICH manifest the script comes from. EGO does not model the
-    // workspace graph, so reading the root manifest would be a confident wrong answer: the conclusion is
-    // downgraded instead (challenge findings 3, 22, 34).
+    // workspace graph, so reading the root manifest would be a confident wrong answer.
     const selector = tokens.find(
       (t) =>
         /^(-w|--workspace|--workspaces|--filter|-F|--prefix|-C|--dir|--cwd|--scope|--recursive|-r)$/.test(t) ||
@@ -1490,39 +1850,49 @@ function resolveScriptCommand(
         key: `npm:selector:${selector}`,
         body: null,
         reason: `the ${selector} selector chooses a manifest outside the resolved working directory`,
-        unresolved: 'unread',
+        resolution: 'UNSUPPORTED',
       };
     let script: string | null = null;
     const sub = tokens[1] ?? '';
-    // install commands (`npm install`/`ci`/`add`, bare `yarn`) run the install lifecycle scripts — analyse them, since
-    // a preinstall/postinstall/prepare can push, mutate production, or write a protected tree just like `run`
     const INSTALL_SUBS = new Set(['install', 'i', 'ci', 'add', 'update', 'up', 'upgrade']);
     if (INSTALL_SUBS.has(sub) || (head === 'yarn' && sub === '')) {
       const pkgPath = findUp(ctx, cwd, 'package.json');
       const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
-      if (pkgPath === null || text === null)
-        return manifestUnresolved(ctx, pkgPath, 'npm:install', 'package.json');
+      if (pkgPath === null || text === null) return manifestUnresolved(ctx, pkgPath, 'npm:install', 'package.json');
       let scripts: Record<string, unknown> = {};
       try {
         scripts = (JSON.parse(text) as { scripts?: Record<string, unknown> }).scripts ?? {};
       } catch {
-        return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json unparsable', unresolved: 'unread' };
+        return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json unparsable', resolution: 'UNREADABLE' };
       }
-      const names = ['preinstall', 'install', 'postinstall', 'prepare', 'prepublish', 'preprepare', 'postprepare', 'dependencies'].filter(
+      const names = ['preinstall', 'install', 'postinstall', 'prepare', 'prepublish', 'preprepare', 'postprepare'].filter(
         (n) => typeof scripts[n] === 'string',
       );
-      if (!names.length) return null; // no lifecycle scripts: the install itself is an ordinary local mutation
       const body = names.map((n) => scripts[n] as string); // pre/main/post are separate processes
+      // A5 — the install's execution closure includes the DEPENDENCY TREE's lifecycle scripts, which EGO cannot
+      // read. `--ignore-scripts` is the one spelling that provably runs none of them.
+      const ignore = tokens.some((t) => t === '--ignore-scripts' || t === '--no-scripts');
+      if (!ignore)
+        return {
+          kind: 'npm-script',
+          key: `npm:${pkgPath ? dirname(pkgPath) : cwd}:install`,
+          body: body.length ? body : null,
+          bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
+          reason: 'install runs the dependency tree’s lifecycle scripts, which EGO cannot read (--ignore-scripts runs none)',
+          resolution: 'AMBIENT_UNRESOLVED',
+        };
+      if (!body.length) return null; // --ignore-scripts and no local lifecycle scripts: an ordinary local mutation
       return {
         kind: 'npm-script',
         key: `npm:${dirname(pkgPath)}:install`,
         body,
         bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
         reason: 'install lifecycle scripts',
+        resolution: 'RESOLVED_COMPLETE',
+        provenance: { source: pkgPath, fingerprint: fingerprint(text) },
       };
     }
-    if (sub === 'run' || sub === 'run-script')
-      script = tokens.slice(2).find((t) => !t.startsWith('-')) ?? null;
+    if (sub === 'run' || sub === 'run-script') script = tokens.slice(2).find((t) => !t.startsWith('-')) ?? null;
     else if (sub === 'test' || sub === 'start' || sub === 'stop' || sub === 'restart') script = sub;
     else if (
       (head === 'yarn' || head === 'pnpm' || head === 'bun') &&
@@ -1533,15 +1903,21 @@ function resolveScriptCommand(
       script = sub;
     if (script === null) return null;
     const pkgPath = findUp(ctx, cwd, 'package.json');
+    if (pkgPath !== null && stale(pkgPath))
+      return {
+        kind: 'npm-script',
+        key: `npm:${pkgPath}:${script}`,
+        body: null,
+        reason: 'package.json is rewritten earlier in the same command, so its analysed contents are not what runs',
+        resolution: 'STALE',
+      };
     const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
-    if (pkgPath === null || text === null)
-      return manifestUnresolved(ctx, pkgPath, `npm:${script}`, 'package.json');
+    if (pkgPath === null || text === null) return manifestUnresolved(ctx, pkgPath, `npm:${script}`, 'package.json');
     let scripts: Record<string, unknown> = {};
     try {
-      const pkg = JSON.parse(text) as { scripts?: Record<string, unknown> };
-      scripts = pkg.scripts ?? {};
+      scripts = (JSON.parse(text) as { scripts?: Record<string, unknown> }).scripts ?? {};
     } catch {
-      return { kind: 'npm-script', key: `npm:${script}`, body: null, reason: 'package.json unparsable', unresolved: 'unread' };
+      return { kind: 'npm-script', key: `npm:${script}`, body: null, reason: 'package.json unparsable', resolution: 'UNREADABLE' };
     }
     const names = [`pre${script}`, script, `post${script}`].filter((n) => typeof scripts[n] === 'string');
     if (!names.includes(script)) {
@@ -1551,13 +1927,16 @@ function resolveScriptCommand(
           key: `npm:${script}`,
           body: ['node server.js'],
           reason: 'npm start default',
+          resolution: 'RESOLVED_COMPLETE',
         };
+      // the manifest was fully read and genuinely has no such script: nothing executes. This is the narrow case
+      // where absence is PROVEN, and the only one that keeps a declared ALLOW.
       return {
         kind: 'npm-script',
         key: `npm:${script}`,
         body: null,
         reason: `script "${script}" not found in package.json`,
-        unresolved: 'missing',
+        resolution: 'ABSENT_VERIFIED',
       };
     }
     const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
@@ -1567,127 +1946,155 @@ function resolveScriptCommand(
       body,
       bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
       reason: `package.json script "${script}"`,
+      resolution: 'RESOLVED_COMPLETE',
+      provenance: { source: pkgPath, fingerprint: fingerprint(text) },
     };
   }
   // make targets
   if (head === 'make' || head === 'gmake') {
-    // options that consume the next token, so their argument is not a target
     const MAKE_ARG_OPTS = new Set([
       '-C', '--directory', '-f', '--file', '--makefile', '-j', '--jobs', '-l',
       '--load-average', '-o', '--old-file', '-W', '--what-if', '-I', '--include-dir',
     ]);
     const targets: string[] = [];
     let makeDir = cwd;
-    let makeFile: string | null = null; // an explicit -f/--file/--makefile alternate makefile
+    const makeFiles: string[] = []; // every -f/--file/--makefile: make reads them ALL, not just the last
     for (let i = 1; i < tokens.length; i++) {
       const t = tokens[i]!;
       if (t.startsWith('-')) {
-        // both spellings: `-C DIR`/`--directory DIR` and `-CDIR`/`--directory=DIR`
         const dirEq = /^(?:--directory=|-C)(.+)$/.exec(t);
         const fileEq = /^(?:--file=|--makefile=|-f)(.+)$/.exec(t);
-        if ((t === '-C' || t === '--directory') && tokens[i + 1]) makeDir = resolve(cwd, tokens[i + 1]!);
-        else if (dirEq) makeDir = resolve(cwd, dirEq[1]!);
-        if ((t === '-f' || t === '--file' || t === '--makefile') && tokens[i + 1]) makeFile = tokens[i + 1]!;
-        else if (fileEq) makeFile = fileEq[1]!;
-        if (MAKE_ARG_OPTS.has(t)) i++; // skip a separate option argument
+        // successive -C are CUMULATIVE in make: `make -C a -C b` enters a, then a/b (challenge 5, finding 17)
+        if ((t === '-C' || t === '--directory') && tokens[i + 1]) makeDir = resolve(makeDir, tokens[i + 1]!);
+        else if (dirEq) makeDir = resolve(makeDir, dirEq[1]!);
+        if ((t === '-f' || t === '--file' || t === '--makefile') && tokens[i + 1]) makeFiles.push(tokens[i + 1]!);
+        else if (fileEq) makeFiles.push(fileEq[1]!);
+        if (MAKE_ARG_OPTS.has(t)) i++;
         continue;
       }
       if (t.includes('=')) continue; // a variable assignment, not a target
       targets.push(t);
     }
-    // a directory, makefile or target built from a variable or a substitution cannot be resolved
     if (tokens.slice(1).some((t) => /[$`]/.test(t)))
       return {
         kind: 'make-target',
         key: `make:dynamic:${norm}`,
         body: null,
         reason: 'the makefile, directory or target is built at runtime and cannot be resolved',
-        unresolved: 'unread',
+        resolution: 'DYNAMIC',
       };
-    // an explicit makefile wins; otherwise the default names in the (possibly -C) directory
-    const mkPath = makeFile
-      ? readInsideWorkspace(ctx, resolve(makeDir, makeFile)) !== null
-        ? resolve(makeDir, makeFile)
-        : undefined
-      : ['Makefile', 'makefile', 'GNUmakefile']
-          .map((n) => join(makeDir, n))
-          .find((f) => readInsideWorkspace(ctx, f) !== null);
-    const text = mkPath ? readInsideWorkspace(ctx, mkPath) : null;
-    if (text === null) {
-      // "no Makefile anywhere" is missing: `make` fails and nothing runs. "a Makefile is there but we did not read
-      // it" is unread: its recipe WILL run. Decided by existence, never by a reason string (challenge finding 1).
-      const candidates = makeFile
-        ? [resolve(makeDir, makeFile)]
-        : ['Makefile', 'makefile', 'GNUmakefile'].map((n) => join(makeDir, n));
-      const exists = candidates.some((f) => fileExists(f));
+    const paths = makeFiles.length
+      ? makeFiles.map((f) => resolve(makeDir, f))
+      : ['Makefile', 'makefile', 'GNUmakefile'].map((n) => join(makeDir, n)).filter((f) => fileExists(f)).slice(0, 1);
+    if (paths.some((p) => stale(p)))
+      return {
+        kind: 'make-target',
+        key: `make:${makeDir}:${targets.join(',')}`,
+        body: null,
+        reason: 'the makefile is rewritten earlier in the same command, so its analysed contents are not what runs',
+        resolution: 'STALE',
+      };
+    if (!paths.length || !paths.some((p) => readInsideWorkspace(ctx, p) !== null)) {
+      const exists = paths.some((p) => fileExists(p));
       return {
         kind: 'make-target',
         key: `make:${makeDir}:${targets.join(',')}`,
         body: null,
         reason: exists ? 'Makefile present but not readable' : 'no Makefile',
-        unresolved: exists ? 'unread' : 'missing',
+        resolution: exists ? 'UNREADABLE' : 'ABSENT_VERIFIED',
       };
     }
-    const lines = text.split(/\r?\n/);
-    const recipes = new Map<string, string[]>();
-    let current: string[] | null = null;
-    let firstTarget: string | null = null;
-    for (const line of lines) {
-      if (line.startsWith('\t')) {
-        if (current) current.push(line.slice(1));
-        continue;
+    // merge every -f file, following includes
+    const merged: MakeFileModel = { rules: new Map(), firstTarget: null, defaultGoal: null, oneShell: false, unsupported: [], sources: [], text: '' };
+    for (const p of paths) {
+      const m = parseMakefile(ctx, p, makeDir);
+      for (const [t, r] of m.rules) {
+        const e = merged.rules.get(t);
+        if (e) {
+          e.recipes.push(...r.recipes);
+          e.prereqs.push(...r.prereqs);
+        } else merged.rules.set(t, { recipes: [...r.recipes], prereqs: [...r.prereqs] });
       }
-      const m = /^([A-Za-z0-9_./-]+)\s*::?(?!=)/.exec(line);
-      if (m && !line.startsWith('.') && !/^\s/.test(line)) {
-        current = [];
-        for (const t of m[1]!.split(/\s+/)) recipes.set(t, current);
-        if (!firstTarget) firstTarget = m[1]!;
-      } else current = null;
+      merged.unsupported.push(...m.unsupported);
+      merged.sources.push(...m.sources);
+      merged.text += m.text + '\n';
+      if (m.oneShell) merged.oneShell = true;
+      if (!merged.defaultGoal && m.defaultGoal) merged.defaultGoal = m.defaultGoal;
+      if (!merged.firstTarget) merged.firstTarget = m.firstTarget;
     }
-    const wanted = targets.length ? targets : firstTarget ? [firstTarget] : [];
+    // A bare `make` builds .DEFAULT_GOAL when set, not the first rule (challenge 5, finding 16).
+    const wanted = targets.length ? targets : [merged.defaultGoal ?? merged.firstTarget].filter((t): t is string => !!t);
     const body: string[] = [];
-    for (const t of wanted) {
-      const r = recipes.get(t);
-      if (!r) {
-        // "my parser did not find the target" is not "the target does not exist". An `include`, a pattern rule, a
-        // `$(eval)`-generated rule or a VPATH target all execute while being invisible here (challenge findings
-        // 5, 12, 21, 35). Only a makefile with none of those may claim the target is genuinely absent.
-        const opaqueRules = /^\s*(-?include|sinclude)\b/m.test(text) || /^[^\s:]*%[^\s:]*\s*::?/m.test(text) || /\$\(eval\b/.test(text);
-        return {
-          kind: 'make-target',
-          key: `make:${mkPath ?? makeDir}:${t}`,
-          body: null,
-          reason: opaqueRules
-            ? `target "${t}" is not visible to the parser, and this makefile uses includes or pattern rules`
-            : `target "${t}" not found`,
-          unresolved: opaqueRules ? 'unread' : 'missing',
-        };
+    const missing: string[] = [];
+    let partial: string | null = null;
+    // A5 — EXECUTION CLOSURE: a target's prerequisites run BEFORE it, so their recipes are part of what this
+    // command executes (challenge 5, finding 8). Walked transitively with a cycle guard and a depth bound.
+    const visited = new Set<string>();
+    const walk = (t: string, depth: number): void => {
+      if (visited.has(t)) return;
+      visited.add(t);
+      const rule = merged.rules.get(t);
+      if (!rule) {
+        // a prerequisite with no rule is usually a FILE, which executes nothing; a requested TARGET with no rule is
+        // only PROVEN absent when this makefile uses nothing the parser cannot see
+        if (depth === 0) missing.push(t);
+        return;
       }
-      for (const rl of r) {
+      if (depth >= 8) {
+        partial = `prerequisite chain of "${t}" is deeper than this resolver follows`;
+        return;
+      }
+      for (const p of rule.prereqs) walk(p, depth + 1);
+      for (const rl of rule.recipes) {
         const cmd = rl.replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
-        if (/^\$[({]/.test(cmd) || /\$\((shell|eval)\b/.test(cmd))
-          return {
-            kind: 'make-target',
-            key: `make:${mkPath ?? makeDir}:${t}`,
-            body: null,
-            reason: 'recipe uses variable commands',
-            unresolved: 'unread',
-          };
-        body.push(cmd); // one recipe LINE = one shell
+        if (/^\$[({]/.test(cmd) || /\$\((shell|eval)\b/.test(cmd)) {
+          // ONE unresolvable line no longer discards the rest: the resolved lines are still analysed and the
+          // remainder is reported (challenge 5, finding 8 — "known but incomplete body")
+          partial = `a recipe line of "${t}" is a variable command`;
+          continue;
+        }
+        body.push(cmd);
       }
+    };
+    for (const t of wanted) walk(t, 0);
+    const provenance = { source: merged.sources.join(','), fingerprint: fingerprint(merged.text) };
+    const bodyRes = { cwd: makeDir, cwdVerified: res.cwdVerified };
+    const key = `make:${merged.sources.join(',') || makeDir}:${wanted.join(',')}`;
+    if (missing.length) {
+      // "my parser did not find the target" is NOT "the target does not exist". Only a makefile using nothing this
+      // resolver cannot model may claim proven absence (challenge 5, findings 5 and 12).
+      const blind = merged.unsupported.length > 0;
+      return {
+        kind: 'make-target',
+        key,
+        body: body.length ? body : null,
+        bodyRes,
+        provenance,
+        reason: blind
+          ? `target "${missing.join(', ')}" is not visible to this resolver, which does not model: ${merged.unsupported.slice(0, 3).join('; ')}`
+          : `target "${missing.join(', ')}" not found`,
+        resolution: blind ? 'PARTIAL' : 'ABSENT_VERIFIED',
+      };
     }
+    if (!wanted.length)
+      return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
+    const unsupported = partial ?? (merged.unsupported.length ? merged.unsupported[0]! : null);
     return {
       kind: 'make-target',
-      // the cycle guard must key on the DIRECTORY too: a same-named target in another directory is a different
-      // effect, and keying by name alone let the second one be skipped entirely (challenge findings 4, 30)
-      key: `make:${mkPath ?? makeDir}:${wanted.join(',')}`,
+      key,
       body,
-      // the recipe runs in the -C directory, not in the caller's (challenge finding 1)
-      bodyRes: { cwd: makeDir, cwdVerified: res.cwdVerified },
-      reason: `Makefile target ${wanted.join(', ')}`,
+      bodyRes,
+      provenance,
+      // .ONESHELL hands the WHOLE recipe to one shell, so a `cd` leaks into the next line (challenge 5, finding 10)
+      oneShell: merged.oneShell,
+      reason: unsupported
+        ? `Makefile target ${wanted.join(', ')}; NOT fully resolved: ${unsupported}`
+        : `Makefile target ${wanted.join(', ')}`,
+      resolution: unsupported ? 'PARTIAL' : 'RESOLVED_COMPLETE',
     };
   }
+  if (head === 'git') return resolveGitAmbient(ctx, tokens, res);
   return null;
 }
 
@@ -1697,10 +2104,11 @@ function opaqueHit(
   norm: string,
   reason: string,
   unread = true,
+  capability: 'command.script-opaque' | 'command.ambient-unresolved' = 'command.script-opaque',
 ): CapabilityHit {
   return {
-    capability: 'command.script-opaque',
-    verdict: verdictFor(table, ctx, 'command.script-opaque'),
+    capability,
+    verdict: verdictFor(table, ctx, capability),
     via: reason,
     segment: norm,
     absolute: false,
@@ -2052,21 +2460,37 @@ function classifyNormalized(
     // Analysis truncation is UNKNOWN, never "whatever the parent was". Returning the enclosing declared class let a
     // chain of indirection launder anything past the gate (challenge findings 2, 11, 20, 29, 36).
     return [...hits, opaqueHit(table, ctx, norm, `analysis truncated at depth ${MAX_EFFECT_DEPTH}`)];
-  const effect = resolveScriptCommand(ctx, norm, state.res);
+  const effect = resolveScriptCommand(ctx, norm, state.res, state.written);
   if (!effect) return hits;
   if (state.seen.has(effect.key)) return hits;
   const seen = new Set(state.seen).add(effect.key);
+  // THE WHOLE RULE, total over ResolutionOutcome (product decision, 2026-09-22 — "positive security claims must be
+  // earned"). Exactly two outcomes carry a positive claim; every other value — including any added later — is
+  // opacity, because `resolutionEffect` names the proven ones rather than enumerating the unproven ones.
+  //     KNOWN + AUTHORIZED          -> execute according to policy
+  //     UNKNOWN/OPAQUE + CONTAINED  -> execute inside the containment boundary   (issue #26, not built)
+  //     UNKNOWN/OPAQUE + NO SANDBOX -> ASK or DENY, never silently ALLOW
+  // A declared class keeps its verdict ONLY for ABSENT_VERIFIED — proof that nothing executes, so `npm test` with
+  // no test script stays out of the operator's way. "My parser did not find it" is not that proof.
+  const { opaque } = resolutionEffect(effect.resolution);
+  const remainder = opaque
+    ? [
+        opaqueHit(
+          table,
+          ctx,
+          norm,
+          `${effect.reason} [${effect.resolution}]`,
+          true,
+          // an unresolved AMBIENT producer is its own governed capability, so an organization can decide about
+          // "installs run third-party code" separately from "this script is unreadable" (Q98: every lock is
+          // administrable, and a lock nobody can distinguish is a lock nobody can tune)
+          effect.resolution === 'AMBIENT_UNRESOLVED' ? 'command.ambient-unresolved' : 'command.script-opaque',
+        ),
+      ]
+    : [];
   if (effect.body === null) {
-    // The effect could not be resolved. The layered security contract (decision "option B", 2026-09-22) forbids
-    // unresolved EXECUTION from becoming a silent ALLOW while EGO claims no containment:
-    //     KNOWN + AUTHORIZED          -> execute according to policy
-    //     UNKNOWN/OPAQUE + CONTAINED  -> execute inside the containment boundary   (issue #26, not built)
-    //     UNKNOWN/OPAQUE + NO SANDBOX -> ASK or DENY, never silently ALLOW
-    // The only exception is a target that DOES NOT EXIST: `npm test` with no test script fails on its own, nothing
-    // runs, and ordinary work must not be interrupted. That difference is decided structurally by
-    // `effect.unresolved`, never by reading a prose reason (challenge finding 1).
-    if (!declared) return [opaqueHit(table, ctx, norm, effect.reason)];
-    return effect.unresolved === 'missing' ? hits : [...hits, opaqueHit(table, ctx, norm, effect.reason)];
+    if (!declared) return remainder.length ? remainder : hits;
+    return [...hits, ...remainder];
   }
   // the body resolves against ITS OWN execution context, not the caller's
   const bodyRes = effect.bodyRes ?? state.res;
@@ -2076,21 +2500,22 @@ function classifyNormalized(
     ctx,
     compiled,
     effect.body,
-    { depth: state.depth + 1, seen, res: bodyRes },
-    effect.kind !== 'shell-script', // a script is one shell; make recipe lines and npm pre/post are not
+    { depth: state.depth + 1, seen, res: bodyRes, written: state.written },
+    // a script is ONE shell; make recipe lines and npm pre/post are independent shells — unless .ONESHELL hands
+    // the whole recipe to one shell, which the producer reports through `oneShell`
+    !(effect.oneShell ?? effect.kind === 'shell-script'),
   ).map((h) => ({ ...h, effectOf: h.effectOf ?? effect.reason }));
   if (declared) {
     // INVARIANT 1: the same action gets the same classification at any depth. An inner opacity hit is therefore
     // KEPT, whichever producer built it — `opaqueHit()`, a matcher (`command.interpreter-script`), the `$`-head
-    // branch or the no-matcher fallback (`command.unknown`). Filtering on `opaqueUnread` kept only the first of
-    // those four, so `node scripts/deploy.js` was ASK on its own and ALLOW inside a target called `build`
-    // (challenge findings 1, 18, 36). September alignment item 5 is superseded here: a declared class no longer
-    // absorbs opacity at all. What it still absorbs is a target that DOES NOT EXIST, decided above by
-    // `unresolved === 'missing'`, so `npm test` with no test script stays out of the operator's way.
-    return [...hits, ...inner];
+    // branch or the no-matcher fallback (`command.unknown`). A declared class no longer absorbs opacity at all,
+    // and `remainder` carries the part of the execution closure that was NOT resolved, so a PARTIAL body can no
+    // longer be read as the complete set of what will run.
+    return [...hits, ...inner, ...remainder];
   }
   // undeclared script fully analysed: its effect replaces the unknown verdict
-  return inner.length ? inner : [opaqueHit(table, ctx, norm, `${effect.reason}: empty`)];
+  const resolved = [...inner, ...remainder];
+  return resolved.length ? resolved : [opaqueHit(table, ctx, norm, `${effect.reason}: empty`)];
 }
 
 /** Heads whose operands are read (or listed recursively); their path arguments are classified like Read tool calls. */
@@ -2781,6 +3206,9 @@ function analyzeSegments(
   isolatedShells = false,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
+  // A4 — the write ledger grows as we walk: a source rewritten by an earlier unit of this same command can no
+  // longer justify a later positive claim (`> Makefile && make build`).
+  const written = new Set(state.written);
   const startCwd = state.res.cwdVerified ? state.res.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
@@ -2791,21 +3219,24 @@ function analyzeSegments(
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
     const cdTrimmed = seg.trim();
-    const cdArgs = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed)
-      ? tokenize(cdTrimmed)
-          .slice(1)
-          .filter((a) => a !== '--' && !a.startsWith('-'))
-      : null;
+    const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
+    const cdArgs = cdTokens ? cdTokens.filter((a) => a !== '--' && !a.startsWith('-')) : null;
     if (cdArgs && cdArgs.length) {
       const target = expandHome(cdArgs[cdArgs.length - 1]!);
-      const resolvedCd =
-        target === null || /[$`*?]/.test(target)
-          ? null
-          : canonicalPath(
-              isAbsolute(target)
-                ? target
-                : resolve(cwd === '\0dynamic' ? state.res.cwd : cwd, target),
-            );
+      const base = cwd === '\0dynamic' ? state.res.cwd : cwd;
+      const logical = target === null ? null : isAbsolute(target) ? target : resolve(base, target);
+      let resolvedCd = target === null || /[$`*?]/.test(target) ? null : canonicalPath(logical!);
+      // `cd` is LOGICAL by default and PHYSICAL under -P: after a symlinked component, a `..` segment goes to two
+      // different directories. EGO resolves physically, so where the two disagree the context is not proven and
+      // every relative conclusion below it is downgraded rather than asserted (challenge 5, finding 19).
+      if (
+        resolvedCd !== null &&
+        logical !== null &&
+        /(^|\/)\.\.(\/|$)/.test(target!) &&
+        !cdTokens!.some((t) => /^-[a-zA-Z]*P/.test(t)) &&
+        resolve(logical) !== resolvedCd
+      )
+        resolvedCd = null;
       // NOTE on a `cd` into a directory that does not exist (challenge 4, finding 3): with `&&` the cd failing
       // means nothing after it runs, so assuming it succeeded is safe; with `;` the rest runs in the ORIGINAL
       // directory, which EGO would then misattribute. Distinguishing them needs the separator, which segment
@@ -2844,7 +3275,7 @@ function analyzeSegments(
     // and every conclusion drawn from a relative path below is downgraded rather than guessed
     const res: ResolutionContext = { cwd: effectiveCwd, cwdVerified: cwd !== '\0dynamic' };
     for (const norm of normalizeSegment(seg)) {
-      const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, res });
+      const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, res, written });
       for (const h of normHits) hits.push(h);
       // a locked operation carried by any wrapper, launcher or placeholder the normalizer does not know is still found:
       // every suffix of the token list that starts with a governed tool is matched against the locked matchers
@@ -2913,14 +3344,13 @@ function analyzeSegments(
         });
         continue;
       }
-      const h = classifyPath(
-        table,
-        ctx,
-        'Write',
-        isAbsolute(expanded) ? expanded : resolve(effectiveCwd, expanded),
-      );
+      const abs = isAbsolute(expanded) ? expanded : resolve(effectiveCwd, expanded);
+      written.add(canonicalPath(abs)); // A4: a later unit resolving THIS file is now stale
+      const h = classifyPath(table, ctx, 'Write', abs);
       hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
     }
+    // and the write-ish commands, whose destination is an operand rather than a redirection
+    for (const abs of writtenPathOperands(seg, effectiveCwd)) written.add(canonicalPath(abs));
   }
     }
   return hits;
@@ -2936,10 +3366,17 @@ export function classifyCommand(
     m,
     re: new RegExp(m.command!, 'i'),
   }));
+  // A3 — CONTEXT VERIFICATION MUST BE EARNED. `cwdVerified` used to default to true merely because a cwd string
+  // existed, so every conclusion drawn from a relative path inherited a claim nobody had checked. The invocation
+  // directory counts as proven only when it EXISTS and lies inside a registered repository root — the two facts
+  // every relative resolution below actually depends on.
+  const cwd = ctx.cwd ?? process.cwd();
+  const cwdVerified = directoryExists(cwd) && repoRootFor(ctx, cwd) !== null;
   return analyzeSegments(table, ctx, compiled, splitShellSegments(command), {
     depth: 0,
     seen: new Set(),
-    res: { cwd: ctx.cwd ?? process.cwd(), cwdVerified: true },
+    res: { cwd, cwdVerified },
+    written: new Set(),
   });
 }
 

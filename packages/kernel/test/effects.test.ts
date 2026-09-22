@@ -62,8 +62,10 @@ test('npm run scripts are classified by their effect (alignment item 5)', () => 
   assert.equal(bash('npm run clean', c).decisive?.capability, 'command.destructive');
   // self-recursion terminates
   assert.notEqual(bash('npm run loop', c).verdict, 'DENY');
-  // a missing script is opaque
-  assert.equal(bash('npm run nothing', c).decisive?.capability, 'command.script-opaque');
+  // a script the manifest PROVABLY does not define executes nothing, so it is not "opaque script" — the command
+  // itself is simply unrecognised. Same verdict (ASK), more accurate capability (resolution ABSENT_VERIFIED).
+  assert.equal(bash('npm run nothing', c).verdict, 'ASK');
+  assert.equal(bash('npm run nothing', c).decisive?.capability, 'command.unknown');
   // yarn / pnpm shorthand
   assert.equal(bash('yarn deploy', c).decisive?.capability, 'git.remote.push');
   assert.equal(bash('pnpm release', c).decisive?.capability, 'forge.pr.create');
@@ -104,8 +106,9 @@ test('shell scripts are read and classified when static and inside the workspace
   assert.equal(bash('./bin/tool', c).decisive?.capability, 'command.script-opaque');
   // outside the workspace: never read
   assert.equal(bash('/etc/profile', c).decisive?.capability, 'command.script-opaque');
-  // missing script
-  assert.equal(bash('./scripts/missing.sh', c).decisive?.capability, 'command.script-opaque');
+  // a script that is not there executes nothing: ABSENT_VERIFIED, still ASK because the command is unrecognised
+  assert.equal(bash('./scripts/missing.sh', c).verdict, 'ASK');
+  assert.equal(bash('./scripts/missing.sh', c).decisive?.capability, 'command.unknown');
   // oversized script is opaque
   const big = workspace({ 'big.sh': '#!/bin/bash\n' + 'ls\n'.repeat(40000) });
   assert.equal(bash('./big.sh', ctx(big)).decisive?.capability, 'command.script-opaque');
@@ -193,8 +196,9 @@ test('layered contract: unknown execution never becomes a silent ALLOW without c
   assert.equal(bash('make real', c).verdict, 'ALLOW');
   assert.equal(bash('npm run build', c).verdict, 'ALLOW');
 
-  // and an undeclared opaque command still asks, as it always did
-  assert.equal(bash('./unknown-binary --do-it', c).decisive?.capability, 'command.script-opaque');
+  // and an undeclared command that is not on disk still asks, as it always did
+  assert.equal(bash('./unknown-binary --do-it', c).verdict, 'ASK');
+  assert.equal(bash('./unknown-binary --do-it', c).decisive?.capability, 'command.unknown');
 });
 
 test('layered contract, round 2: missing vs unread is decided by EXISTENCE, at every depth', () => {
@@ -279,8 +283,11 @@ test('verified execution context: a conclusion is KNOWN only when the context it
   assert.equal(bash('npm run lint', ctx(viaNpm)).verdict, 'DENY');
 
   // [5] a context that cannot be PROVEN is opaque, not guessed: an include, a selector, a dynamic cd
+  // an `include` is now FOLLOWED rather than treated as a reason to give up, so the real effect is found instead
+  // of a generic opacity: ASK became DENY. Execution closure narrows the verdict, it never widens it.
   const included = workspace({ Makefile: 'include extra.mk\n', 'extra.mk': 'deploy:\n\t./d.sh\n', 'd.sh': HOSTILE });
-  assert.equal(bash('make deploy', ctx(included)).decisive?.capability, 'command.script-opaque');
+  assert.equal(bash('make deploy', ctx(included)).verdict, 'DENY');
+  assert.equal(bash('make deploy', ctx(included)).decisive?.capability, 'fs.credential-store.write');
   const ws = workspace({ 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }) });
   for (const cmd of ['npm run build -w pkg-a', 'npm --prefix ./sub run build', 'pnpm --filter api build'])
     assert.equal(bash(cmd, ctx(ws)).decisive?.capability, 'command.script-opaque', cmd);

@@ -39,7 +39,13 @@ const ctx = (dir: string, over: Partial<EvaluationContext> = {}): EvaluationCont
 const run = (cmd: string, c: EvaluationContext) => evaluate(table, c, { tool: 'Bash', input: { command: cmd } });
 
 /** Every producer EGO supports, with a way to invoke it and a way to put an arbitrary body behind it. */
-const PRODUCERS: Array<{ name: string; files: (body: string) => Record<string, string>; invoke: string }> = [
+const PRODUCERS: Array<{
+  name: string;
+  files: (body: string) => Record<string, string>;
+  invoke: string;
+  /** true when invoking this producer ALSO runs content EGO cannot read, so it may be stricter than the bare body */
+  ambient?: boolean;
+}> = [
   {
     name: 'make target',
     files: (body) => ({ Makefile: `run:\n\t${body}\n` }),
@@ -54,6 +60,7 @@ const PRODUCERS: Array<{ name: string; files: (body: string) => Record<string, s
     name: 'npm install lifecycle',
     files: (body) => ({ 'package.json': JSON.stringify({ scripts: { postinstall: body } }) }),
     invoke: 'npm install',
+    ambient: true,
   },
   {
     name: 'shell script',
@@ -98,6 +105,8 @@ const BODIES = [
   'ls -la',
 ];
 
+const RANK: Record<string, number> = { ALLOW: 0, ASK: 1, DENY: 2 };
+
 test('producer contract: no producer can weaken the analysis of the body it resolves', () => {
   for (const body of BODIES) {
     // the reference verdict is the body analysed directly, at top level
@@ -106,6 +115,16 @@ test('producer contract: no producer can weaken the analysis of the body it reso
     for (const p of PRODUCERS) {
       const dir = workspace(p.files(body));
       const got = run(p.invoke, ctx(dir));
+      if (p.ambient) {
+        // A producer that carries an AMBIENT obligation of its own — `npm install` also runs the dependency
+        // tree's lifecycle scripts, which EGO cannot read — is allowed to be STRICTER than the bare body, and
+        // must never be looser. Equality would forbid the execution closure from ever narrowing a verdict.
+        assert.ok(
+          RANK[got.verdict]! >= RANK[expected]!,
+          `${p.name}: "${body}" was ${expected} at top level and must not be weaker behind the producer, got ${got.verdict}`,
+        );
+        continue;
+      }
       assert.equal(
         got.verdict,
         expected,

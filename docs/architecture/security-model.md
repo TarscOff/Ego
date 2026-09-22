@@ -69,6 +69,76 @@ a governed capability rather than to silence. On claude-code an `allow` is rende
 which *suppresses the host's own prompt* — so returning `ALLOW` for something unmodelled was strictly worse than
 saying nothing.
 
+## Positive security claims must be earned
+
+The fifth challenge found the failure that four rounds of enumeration had been circling: **a parser failing to find
+something is not proof that it does not exist.** The producer had one bit — `missing` or `unread` — and `missing`
+was the only state that kept a declared ALLOW. "Not parsed" and "not present" are the same observation to a regex,
+so every gap between EGO's grammar and the real tool was routed into the one state that fails **open**. An ordinary
+`build test:` rule, a prerequisite, a `.DEFAULT_GOAL`, an `include` — all common make — hid a `git push` behind
+`command.build` ALLOW.
+
+Resolution is now a structured outcome, and **exactly two of its values carry a positive claim**:
+
+| Outcome | Meaning | Keeps a declared ALLOW |
+|---|---|:--:|
+| `RESOLVED_COMPLETE` | everything that will execute was located and read | yes |
+| `ABSENT_VERIFIED` | **proven** that nothing will execute | yes |
+| `PARTIAL` | some of what will execute was resolved; the rest was not | no |
+| `UNSUPPORTED` | the source uses constructs this resolver does not model | no |
+| `UNREADABLE` | the source exists but could not be read | no |
+| `DYNAMIC` | the target, path or command is built at runtime | no |
+| `STALE` | resolved, but the source is rewritten before the effect runs | no |
+| `CONTEXT_UNVERIFIED` | the context the conclusion depends on was not proven | no |
+| `AMBIENT_UNRESOLVED` | an implicit producer attached to repository state was not resolved | no |
+
+The consumer is a single total rule over that enum, and `resolutionEffect()` names the **proven** values rather than
+enumerating the unproven ones — so an outcome added later falls to the opaque side by construction rather than by
+someone remembering. `PARTIAL` is what makes this more than a rename: a body may now be *incomplete*. The resolved
+lines are still analysed **and** the unresolved remainder is reported, instead of one unparsable recipe line
+discarding the whole target, or a partly-parsed makefile passing for a complete one.
+
+EGO does **not** reimplement GNU make, the shell, npm or git. It models a subset and records every construct it does
+not model; the unmodelled part fails safe.
+
+## Execution closure
+
+Security analysis cannot consider only the executable text present in the command. The **execution closure** of an
+operation is the set of bodies EGO must account for before it may make a positive claim about it:
+
+- a make target's **prerequisites**, transitively, plus `include`d fragments, every `-f` file, `.DEFAULT_GOAL`,
+  both branches of a conditional (EGO cannot evaluate the condition, so it analyses the union), `.ONESHELL`
+  recipes as one shell, and cumulative `-C`;
+- an **install**'s dependency-tree lifecycle scripts, which EGO cannot read — `npm install` is therefore
+  `command.ambient-unresolved` (ASK) and `npm install --ignore-scripts` is ALLOW. This is a deliberate behaviour
+  change: an install genuinely executes third-party code, and it is the one gate that composes with the next one;
+- a **git verb's hooks**. Installed hooks have no producer to name them: `npm install` lets a dependency install a
+  hook and the next `git commit` runs it, two individually-ALLOW decisions composing into unanalysed execution.
+  Each verb now carries the hooks it fires. EGO's own governance shim is re-rendered and compared **byte for byte**,
+  so it is recognised by provenance rather than by a producer deciding something is safe — a repository governed by
+  EGO keeps `git commit` at ALLOW, and any other hook body goes through the canonical analyzer.
+
+The closure is proportional: `make build`, `npm run build`, `npm test` and `git commit` in an ordinary repository
+are all still ALLOW.
+
+## Freshness
+
+A body that was resolved correctly can be rewritten before it runs. `analyzeSegments` therefore carries a **write
+ledger** that grows as it walks: redirection targets and the destination operands of the write commands. A producer
+resolving a source that is already in the ledger returns `STALE` rather than the contents it read, so
+`cp evil.mk Makefile && make build` can no longer be judged from the Makefile that was replaced.
+
+This covers mutation by an earlier unit of the same decision. It does **not** cover another process racing EGO
+between the verdict and the execution; that is a containment concern (#26), stated again under limitations.
+
+## Context verification is earned
+
+`cwdVerified` used to default to `true` merely because a cwd string existed, so every relative conclusion inherited
+a claim nobody had checked. The invocation directory now counts as proven only when it **exists** and lies inside a
+registered repository root. And because `cd` is *logical* by default but *physical* under `-P`, a `..` segment after
+a symlinked component resolves to two different directories: where the two disagree, the base is not proven and
+everything below it is downgraded.
+
 ## The producer contract: true by construction, not by vigilance
 
 Four independent challenges exposed the same meta-defect in the repairs themselves, not in the rules: a rule would be
