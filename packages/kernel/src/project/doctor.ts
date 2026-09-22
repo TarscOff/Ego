@@ -381,7 +381,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
             : status === 'PARTIAL'
               ? 'only partly provided — see the control description for what is and is not covered'
               : status === 'UNAVAILABLE'
-                ? 'the host does not provide it'
+                ? 'not in force: neither the host nor EGO provides it today — see the control description'
                 : 'declared SUPPORTED in EGO\u2019s own control plane; not verified against the running host (phase 6)';
         add(
           'containment',

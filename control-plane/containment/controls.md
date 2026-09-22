@@ -18,18 +18,18 @@ controls:
       claude-code: PARTIAL
       codex-cli: PARTIAL
   - id: held-scope-isolation
-    description: Two live sessions never mutate the same held scope; a foreign live session in the checkout downgrades or refuses uncertain shell mutation per profile.
+    description: 'NOT IMPLEMENTED (held scopes are phase 2). Designed: two live sessions never mutate the same held scope, and a foreign live session in the checkout downgrades or refuses uncertain shell mutation per profile. Nothing enforces this today.'
     required_in: [STRICT, HIGH_ASSURANCE]
     recommended_in: [STANDARD]
     hosts:
-      claude-code: PARTIAL
+      claude-code: UNAVAILABLE
       codex-cli: UNVERIFIED
   - id: worktree-isolation
     description: 'NOT CONTAINMENT, and never to be reported as such: a worktree separates Git working state between concurrent sessions and nothing else. It shares the filesystem, the network, the credentials and the process table. Listed here as a coordination control so doctor can report it honestly; the physical boundary is issue #26. Not implemented today — held scopes are phase 2.'
     required_in: [HIGH_ASSURANCE]
     recommended_in: [STRICT]
     hosts:
-      claude-code: PARTIAL
+      claude-code: UNAVAILABLE
       codex-cli: UNVERIFIED
   - id: managed-settings-lock
     description: 'HOST FEATURE, NOT VERIFIED BY EGO. When the host enforces a managed settings tier, a session cannot edit its own guards. EGO neither installs nor checks that tier: it records what the host claims in the capability matrix and must not report the control SATISFIED on that basis alone. Verification is phase-6 conformance work.'
@@ -43,7 +43,7 @@ controls:
     required_in: []
     recommended_in: [STRICT, HIGH_ASSURANCE]
     hosts:
-      claude-code: PARTIAL
+      claude-code: UNAVAILABLE
       codex-cli: UNVERIFIED
   - id: network-egress-control
     description: Tool network egress is restricted to classified endpoints; HIGH_ASSURANCE denies public network use by tools.
