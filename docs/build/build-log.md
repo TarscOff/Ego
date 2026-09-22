@@ -330,7 +330,15 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
-- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–13 done (round 7 partial, re-covered by complete rounds 8–13); every
+- INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 done. **The exit criterion changed on 2026-09-22.** The old
+  criterion ("one complete round ends with zero confirmed HIGH or MEDIUM") was a test of whether hardening the command
+  classifier could converge. It was measured with an identical 14-cluster instrument across three rounds: 61, 76, 67.
+  Between rounds 14 and 15 all 76 findings were fixed and pinned; an identical pass then found 67 more, many of them
+  neighbouring spellings of those fixes. Exhaustive shell-syntax enumeration is therefore not a credible security
+  boundary, and the product owner replaced the criterion with the layered, evidence-based contract recorded in
+  `docs/architecture/security-model.md` and in issue #1. This line still becomes PASSED only when an independent
+  review challenges THAT contract and leaves no HIGH or MEDIUM finding against it; it is never set from an in-session
+  review. Rounds 1–13 detail follows. (round 7 partial, re-covered by complete rounds 8–13); every
   confirmed HIGH/MEDIUM fixed and pinned. This line becomes PASSED only when a COMPLETE round ends with no confirmed
   HIGH or MEDIUM finding; round 13 surfaced **61** (76 claimed, 15 refuted), so a further round is required. The count
   had been trending down (19, 16, 6, 10, 13, 9, 5) but round 13 widened the fleet from 5 dimension skeptics to 14

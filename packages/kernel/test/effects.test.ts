@@ -132,8 +132,15 @@ test('make targets are classified by their recipe', () => {
   const c = ctx(dir);
   assert.equal(bash('make build', c).verdict, 'ALLOW');
   assert.equal(bash('make deploy', c).decisive?.capability, 'git.remote.push');
-  // make is a declared build class: an opaque recipe does not escalate it, a positive effect does
-  assert.equal(bash('make dyn', c).verdict, 'ALLOW');
+  // make is a declared build class, and opacity INSIDE a resolved recipe still does not escalate it.
+  // But a recipe built from a variable (`dyn: $(DEPLOY_CMD)`) is not resolved at all: something WILL run that
+  // could not be read. The layered security contract (decision "option B", 2026-09-22) narrows September
+  // alignment item 5 here — unknown execution asks a human while EGO claims no containment. This assertion
+  // deliberately replaces the previous `ALLOW`.
+  assert.equal(bash('make dyn', c).verdict, 'ASK');
+  assert.equal(bash('make dyn', c).decisive?.capability, 'command.script-opaque');
+  // a target that simply does not exist fails harmlessly and is not escalated
+  assert.equal(bash('make nosuchtarget', c).verdict, 'ALLOW');
   assert.equal(bash('make', c).verdict, 'ALLOW');
 });
 
@@ -154,4 +161,34 @@ test('EGO_HOME trust store writes are ego.trust.tamper in every profile', () => 
     'ALLOW',
   );
   assert.equal(bash(`rm -rf ~/.ego/trust/keys.json`, c).decisive?.capability, 'ego.trust.tamper');
+});
+
+test('layered contract: unknown execution never becomes a silent ALLOW without containment', () => {
+  // Decision "option B", 2026-09-22. EGO claims NO containment today (real sandboxing is issue #26 and will be
+  // required only in HIGH_ASSURANCE), so every path where something WILL run that could not be read must reach a
+  // human. A target that simply does not exist is NOT such a path: the command fails harmlessly.
+  const dir = workspace({
+    Makefile: 'dyn:\n\t$(DEPLOY_CMD)\n\nreal:\n\techo hello\n',
+    'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }),
+    'scripts/opaque.sh': '#!/bin/sh\n"$UNKNOWN_CMD"\n',
+  });
+  const c = ctx(dir);
+
+  // something WILL run that could not be read -> the human gate
+  for (const cmd of ['make dyn']) {
+    const r = bash(cmd, c);
+    assert.equal(r.verdict, 'ASK', cmd);
+    assert.equal(r.decisive?.capability, 'command.script-opaque', cmd);
+  }
+
+  // the target does not exist: the command fails on its own, so it is not escalated
+  for (const cmd of ['make nosuchtarget', 'npm test', 'npm run nosuchscript-build'])
+    assert.notEqual(bash(cmd, c).verdict, 'DENY', cmd);
+
+  // a resolved effect keeps being judged by what it actually does, in both directions
+  assert.equal(bash('make real', c).verdict, 'ALLOW');
+  assert.equal(bash('npm run build', c).verdict, 'ALLOW');
+
+  // and an undeclared opaque command still asks, as it always did
+  assert.equal(bash('./unknown-binary --do-it', c).decisive?.capability, 'command.script-opaque');
 });

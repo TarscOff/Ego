@@ -1168,6 +1168,9 @@ export function classifyPath(
 const MAX_EFFECT_DEPTH = 4;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 /** classes that only say "the kernel cannot see inside"; they never escalate a command whose class the matchers declared */
+/** Reasons that mean "something WILL run that we could not read", as opposed to "the target does not exist". */
+const EXECUTES_UNREAD = /not readable inside the workspace|is not a shell script|uses variable commands/;
+
 const OPACITY_CLASSES = new Set(['command.unknown', 'command.interpreter-script', 'command.script-opaque']);
 /** keywords that prefix a command on the same line: strip and classify the remainder (`if git push`, `do npm test`) */
 const PREFIX_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', '!', '{', '}', 'time']);
@@ -1905,8 +1908,26 @@ function classifyNormalized(
   if (state.seen.has(effect.key)) return hits;
   const seen = new Set(state.seen).add(effect.key);
   if (effect.body === null) {
-    // opaque: a declared class keeps its verdict (the matchers accepted that it runs project code); an undeclared one is opaque
-    return declared ? hits : [opaqueHit(table, ctx, norm, effect.reason)];
+    // The effect could not be resolved AT ALL — the script, recipe or target was not readable. That is unknown
+    // execution, and the layered security contract (decision "option B", 2026-09-22) forbids it from becoming a
+    // silent ALLOW merely because the outer command matched a friendly class:
+    //     KNOWN + AUTHORIZED          -> execute according to policy
+    //     UNKNOWN/OPAQUE + CONTAINED  -> execute inside the containment boundary
+    //     UNKNOWN/OPAQUE + NO SANDBOX -> ASK or DENY, never silently ALLOW
+    // EGO claims no containment today (real sandboxing is issue #26, and only HIGH_ASSURANCE will require it), so
+    // the honest answer is the human gate. A declared class whose body IS resolved keeps its verdict below —
+    // opacity INSIDE a resolved effect does not escalate it (September alignment item 5).
+    if (!declared) return [opaqueHit(table, ctx, norm, effect.reason)];
+    // A declared class keeps its verdict when the target simply DOES NOT EXIST — `npm test` with no test script
+    // fails harmlessly and must not interrupt ordinary work. It does NOT keep it when something WILL run that
+    // could not be read: an unreadable script, a non-script executable, a recipe built from a variable. That is
+    // unknown execution, and the layered contract (decision "option B", 2026-09-22) forbids it from becoming a
+    // silent ALLOW while EGO claims no containment:
+    //     KNOWN + AUTHORIZED          -> execute according to policy
+    //     UNKNOWN/OPAQUE + CONTAINED  -> execute inside the containment boundary   (issue #26, not built)
+    //     UNKNOWN/OPAQUE + NO SANDBOX -> ASK or DENY, never silently ALLOW
+    // This narrows September alignment item 5, which let a declared class absorb an unresolvable effect.
+    return EXECUTES_UNREAD.test(effect.reason) ? [...hits, opaqueHit(table, ctx, norm, effect.reason)] : hits;
   }
   const inner: CapabilityHit[] = [];
   for (const seg of effect.body) {
