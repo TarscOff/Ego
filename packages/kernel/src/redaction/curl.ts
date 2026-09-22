@@ -191,7 +191,16 @@ export function redactCurl(text: string): CurlRedaction {
         expect = 'user';
       } else if (/^-[a-zA-Z]*[uU].+/.test(t.raw) && !t.raw.startsWith('--')) {
         // glued credentials, plain (`-uUSER:PASS`) or after a cluster (`-sSuUSER:PASS`); `-U` is --proxy-user
-        const at = Math.max(t.value.indexOf('u', 1), t.value.indexOf('U', 1));
+        // the option letter is the FIRST u/U whose cluster prefix is itself option letters; Math.max() could pick a
+        // `U` inside the credential and split the secret, leaving half of it visible (round 15)
+        let at = -1;
+        for (let k = 1; k < t.value.length; k++) {
+          if ((t.value[k] === 'u' || t.value[k] === 'U') && /^-[a-zA-Z]*$/.test(t.value.slice(0, k))) {
+            at = k;
+            break;
+          }
+        }
+        if (at < 0) at = 1;
         replacement = `${t.value.slice(0, at + 1)}${redactUserPass(t.value.slice(at + 1))}`;
         bump('curl.user');
       } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t.value)) {

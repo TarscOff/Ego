@@ -356,11 +356,15 @@ matchers:
   # `-u` is the short form of --upload-pack for the transport verbs (it means something else for push/stash)
   - capability: git.alias.inline
     tool: Bash
-    command: '^git\s+(clone|fetch|ls-remote|pull)\b[^|;&]*\s-u\s+\S'
+    command: '^git\s+(clone|fetch|ls-remote|pull)\b[^|;&]*\s-u(\s+|)\S'
   # merge-index runs the program named as its first operand
   - capability: git.alias.inline
     tool: Bash
     command: '^git\s+merge-index\b'
+  # `git <read verb> --output=PATH` writes PATH with no other governance on it
+  - capability: fs.repo.write
+    tool: Bash
+    command: '^git\b[^|;&]*\s(--output|-o)(=|\s)\S'
   # a clone template directory is copied into .git, hooks included: it installs hooks that then run
   - capability: git.hooks.bypass
     tool: Bash
@@ -368,13 +372,16 @@ matchers:
   # a forcing refspec (leading +) overwrites a local branch, destroying unpushed commits
   - capability: git.local.reset
     tool: Bash
-    command: '^git\s+(fetch|pull)\b[^|;&]*\s\+\S+:\S'
+    command: '^git\s+(fetch|pull)\b[^|;&]*(\s\+\S+:\S|\s(-f|--force)\b[^|;&]*\s\S+:\S)'
   - capability: git.local.branch.delete
     tool: Bash
-    command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*[dD]|--delete)\b'
+    command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*[dD][a-zA-Z]*|--delete)(\s|$)'
   - capability: git.local.reset
     tool: Bash
-    command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*[fMC]|--force)\b'
+    command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*f[a-zA-Z]*|--force)(\s|$)'
+  - capability: git.local.reset
+    tool: Bash
+    command: '^git\s+(checkout|switch|branch)\b[^|;&]*\sforce-ref-reset(\s|$)'
   - capability: git.local.recovery.destroy
     tool: Bash
     command: '^git\s+(reflog\s+(expire|delete)|gc\b[^|;&]*--prune|stash\s+(clear|drop))\b'
@@ -383,7 +390,7 @@ matchers:
     command: '^git\s+remote\s+(add|remove|rm|rename|set-url|set-branches|set-head|prune)\b'
   - capability: git.local.restore
     tool: Bash
-    command: '^git\s+(checkout|switch)\b[^|;&]*\s(-[a-zA-Z]*f|--force|--discard-changes)\b'
+    command: '^git\s+(checkout|switch)\b[^|;&]*\s(-[a-zA-Z]*f[a-zA-Z]*|--force|--discard-changes)(\s|$)'
   - capability: git.local.status
     tool: Bash
     command: '^git\s+(status|diff|log|blame|show|branch(\s+-[avr]+)?|reflog|remote\s+-v|remote\s+show|ls-files|rev-parse|describe|shortlog|worktree\s+list|stash\s+list)\b'

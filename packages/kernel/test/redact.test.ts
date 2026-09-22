@@ -329,3 +329,14 @@ test('round-14 residuals: aliased and spaced secret key names, more providers, c
     assert.ok(out.findings.some((f) => f.kind === 'curl.user'));
   }
 });
+
+test('round-15 residuals: the -u/-U option letter is the first one, not the last', () => {
+  // Math.max(indexOf('u'), indexOf('U')) could pick a letter INSIDE the credential and split the secret in two,
+  // leaving part of it visible. The option letter is the first u/U whose cluster prefix is itself option letters.
+  for (const PW of ['UPPERCASEinside123', 'lowerUthenUmore456', 'Qp7nRt3Wz9Lk2Vb4']) {
+    for (const line of [`curl -u alice:${PW} https://x`, `curl -sSualice:${PW} https://x`, `curl -Ualice:${PW} https://x`]) {
+      const r = redactCurl(line);
+      assert.ok(!r.text.includes(PW), `must not leak any part of the credential: ${line}`);
+    }
+  }
+});

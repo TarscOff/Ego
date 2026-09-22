@@ -1185,3 +1185,42 @@ test('round-14 residuals: git long-option abbreviations, transport programs, awk
   );
   assert.equal(bash('docker run --rm -v ./src:/app alpine make', c).verdict, 'ALLOW');
 })
+
+test('round-15 residuals: defects introduced by the round-14 fixes themselves', () => {
+  const c = ctx();
+  // [1] the `env` wrapper dropped the target-selecting assignment that the leading-assignment form keeps
+  assert.equal(
+    bash('env PGHOST=prod-db.acme.com psql -c "DROP TABLE users"', c).decisive?.capability,
+    'production.database.mutate',
+  );
+  assert.equal(
+    bash('env MYSQL_HOST=db.acme.com mysql -e "DROP TABLE users"', c).decisive?.capability,
+    'db.nonlocal.mutate',
+  );
+  assert.equal(bash('env PGHOST=localhost psql -c "select 1"', c).verdict, 'ALLOW');
+
+  // [2] a destination option is applied LAST by the tool; reading it first-wins wrote the protected path silently
+  assert.equal(
+    bash('sort -o safe.txt -o .git/hooks/pre-commit in', c).decisive?.capability,
+    'fs.hook-config.write',
+  );
+  assert.equal(bash('tar -x -C /tmp/ok -C .git/hooks -f a.tar', c).decisive?.capability, 'fs.git-internals.write');
+
+  // [3] cp's BOOLEAN flags were listed as value-taking and swallowed the real destination
+  assert.equal(bash('cp src -i .git/hooks/pre-commit', c).decisive?.capability, 'fs.hook-config.write');
+  assert.equal(bash('cp a b', c).verdict, 'ALLOW');
+
+  // [4] a short-option cluster with letters AFTER the governed one broke the word boundary
+  assert.equal(bash('git branch -Dq feature', c).decisive?.capability, 'git.local.branch.delete');
+  assert.equal(bash('git checkout -fq other', c).decisive?.capability, 'git.local.restore');
+  assert.equal(bash('git clone -u./evil.sh ./src d', c).decisive?.capability, 'git.alias.inline');
+  // `--force` with a refspec destroys a local branch exactly as `+refspec` does
+  assert.equal(bash('git fetch --force origin a:refs/heads/b', c).decisive?.capability, 'git.local.reset');
+  for (const cmd of ['git branch -a', 'git checkout -b feat', 'git switch -c feat', 'git branch -m a b', 'git fetch origin'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+
+  // [5] matchers compile case-insensitively, so the uppercase FORCE twins of the harmless create/rename options
+  // cannot be told apart there; the evaluator decides case-sensitively and surfaces a marker
+  for (const cmd of ['git checkout -B main', 'git switch -C main', 'git branch -M main', 'git branch -C a b'])
+    assert.equal(bash(cmd, c).decisive?.capability, 'git.local.reset', cmd);
+})

@@ -259,14 +259,17 @@ export function normalizeSegment(segment: string): string[] {
             while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) {
               const name = tokens[idx]!.slice(0, tokens[idx]!.indexOf('='));
               if (ENV_INJECT_RE.test(name)) extra.push(`env-inject ${name}`);
+              if (TARGET_ENV_RE.test(name)) targetEnv.push(tokens[idx]!);
               idx++;
             }
           break;
         }
         if (t === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) {
-          // assignments passed through `env` are judged exactly like leading assignments
+          // assignments passed through `env` are judged exactly like leading assignments — INCLUDING the ones that
+          // select the target, which this branch used to drop (round 15)
           const name = tok.slice(0, tok.indexOf('='));
           if (ENV_INJECT_RE.test(name)) extra.push(`env-inject ${name}`);
+          if (TARGET_ENV_RE.test(name)) targetEnv.push(tok);
           idx++;
           continue;
         }
@@ -342,7 +345,21 @@ export function normalizeSegment(segment: string): string[] {
     rest = [head, ...rest.slice(1)];
   }
   // git long options may be abbreviated: expand them before any matcher or flag test looks at them
-  if (head === 'git') rest = expandGitAbbreviations(rest);
+  if (head === 'git') {
+    rest = expandGitAbbreviations(rest);
+    // `-B` (checkout/switch) and `-M`/`-C` (branch) FORCE a ref to move, destroying commits, while `-b`/`-c`/`-m`
+    // merely create or rename. Matchers are compiled case-insensitively, so the distinction cannot be expressed
+    // there: it is decided here, case-sensitively, and surfaced as a marker the matcher can name (round 15).
+    const verb = rest[1] ?? '';
+    // checkout forces with -B, switch with -C, branch with -M (move) or -C (copy) — each the uppercase twin of a
+    // harmless lowercase create/rename
+    const forceLetters: Record<string, string> = { checkout: 'B', switch: 'C', branch: 'MC' };
+    const letters = forceLetters[verb];
+    const forced =
+      letters !== undefined &&
+      rest.some((t) => new RegExp(`^-[a-zA-Z]*[${letters}][a-zA-Z]*$`).test(t));
+    if (forced) rest = [...rest, 'force-ref-reset'];
+  }
   if (targetEnv.length && TARGET_ENV_HEADS.has(head)) rest = [...rest, ...targetEnv];
   const stripped = stripToolGlobalOptions(head, rest);
   rest = stripped.rest;
@@ -667,7 +684,7 @@ export function redirectionTargets(segment: string): string[] {
   // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
   // a backslash-newline continuation is erased by the shell before it opens the file, so erase it first too
-  const joined = segment.replace(/\\\r?\n[ \t]*/g, ' ');
+  const joined = segment.replace(/\\\r?\n/g, '');
   const unglued = joined.replace(/([^\s&|<>])(>{1,2})/g, '$1 $2');
   // a target is a run of quoted and unquoted chunks: `"control-plane"/permissions/x`, `control-plan\e/x`, 'a b'/c
   const re = /(?:^|\s)(?:\d?>>?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
@@ -1045,6 +1062,12 @@ const WRITE_HEADS = new Set([
 /** Value of an option in every spelling that a real CLI accepts: `--long VALUE`, `--long=VALUE`, `-o VALUE` and the
  *  glued short form `-oVALUE`, including when the letter sits inside a cluster (`-xC DIR`, `-xCDIR`, `-qod DIR`). */
 function optionValue(tokens: string[], short: string, longs: string[]): string | null {
+  // the tool applies the LAST occurrence, so the last one is the destination that actually gets written
+  const all = optionValues(tokens, short, longs);
+  return all.length ? all[all.length - 1]! : legacyOptionValue(tokens, short, longs);
+}
+
+function legacyOptionValue(tokens: string[], short: string, longs: string[]): string | null {
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
     for (const l of longs) {
@@ -1065,8 +1088,19 @@ function optionValue(tokens: string[], short: string, longs: string[]): string |
 }
 
 /** Options of copy-like tools that consume the NEXT token as their value; their value is never the destination. */
-const COPY_VALUE_OPTS =
-  /^(--sparse|--reflink|-S|--suffix|--backup|-t|--target-directory|-m|--mode|-o|--owner|-g|--group|-e|--rsh|--exclude|--include|--exclude-from|--include-from|--files-from|--log-file|--temp-dir|--partial-dir|--compare-dest|--link-dest|--copy-dest|--bwlimit|--timeout|--contimeout|--port|--chmod|--chown|--backup-dir|--max-size|--min-size|--out-format|--rsync-path|--filter|-f|--block-size|-P|-i|-c|-F|-l|-J|-W)$/;
+/** Value-taking options PER TOOL. A boolean flag listed here would swallow the real destination, which is exactly
+ *  what `cp SRC -i DEST` did while `-i` (interactive) sat in a shared list (round 15). */
+const VALUE_OPTS_BY_HEAD: Record<string, RegExp> = {
+  cp: /^(--sparse|--reflink|-S|--suffix|--backup|-t|--target-directory|-Z|--context)$/,
+  install: /^(-m|--mode|-o|--owner|-g|--group|-S|--suffix|-t|--target-directory|-Z|--context|--backup)$/,
+  mv: /^(-S|--suffix|-t|--target-directory|--backup)$/,
+  rsync:
+    /^(-e|--rsh|--exclude|--include|--exclude-from|--include-from|--files-from|--log-file|--temp-dir|--partial-dir|--compare-dest|--link-dest|--copy-dest|--bwlimit|--timeout|--contimeout|--port|--chmod|--chown|--backup-dir|--suffix|--max-size|--min-size|--out-format|--rsync-path|--filter|-f|--block-size|--modify-window|--iconv)$/,
+  scp: /^(-P|-i|-c|-F|-l|-J|-o|-S|-D)$/,
+  cpio: /^(-H|--format|-F|--file|-R|--owner|-D|--directory)$/,
+  ditto: /^(--arch|--bom|--extattr)$/,
+};
+const copyValueOpts = (head: string): RegExp | undefined => VALUE_OPTS_BY_HEAD[head];
 
 export function classifyPath(
   table: CompiledAuthorityTable,
@@ -2126,7 +2160,7 @@ function classifyShellPaths(
       const operands = bareOperands();
       dest = inplace && operands.length ? operands[operands.length - 1]! : null;
     } else if (['cp', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio'].includes(head)) {
-      const operands = bareOperands(COPY_VALUE_OPTS);
+      const operands = bareOperands(copyValueOpts(head));
       // `-t DIR` / `--target-directory=DIR` moves the destination off the operand list entirely: every operand is
       // then a source and DIR is what gets written (round 13)
       const targetDir = optionValue(
