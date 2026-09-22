@@ -168,6 +168,9 @@ test('A5 execution closure: prerequisites, default goals, includes and alternate
     // .RECIPEPREFIX replaces the tab that introduces a recipe: a tab-only parser saw an EMPTY recipe and called
     // the target fully resolved — its own gap becoming a positive claim
     ['.RECIPEPREFIX', { Makefile: `.RECIPEPREFIX = >\nbuild:\n>${push}\n` }, 'make build'],
+    // GNU make's precedence is GNUmakefile, makefile, Makefile: reading them in the wrong order named a file make
+    // never opens, while still claiming RESOLVED_COMPLETE
+    ['makefile precedence', { GNUmakefile: `build:\n\t${push}\n`, Makefile: 'build:\n\ttsc -p .\n' }, 'make build'],
     ['double-colon rules', { Makefile: `build::\n\techo one\nbuild::\n\t${push}\n` }, 'make build'],
     ['order-only prerequisite', { Makefile: `build: | prep\n\techo ok\nprep:\n\t${push}\n` }, 'make build'],
   ];

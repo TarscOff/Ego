@@ -1,6 +1,6 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir } from '../project/githooks.ts';
 import { gitConfigGet } from '../util/git.ts';
@@ -1692,6 +1692,24 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   return model;
 }
 
+/** The default makefile `make` would open in `dir`, in GNU make's precedence order, named by its REAL directory
+ *  entry so path comparisons hold on case-insensitive filesystems. */
+function defaultMakefile(dir: string): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const byLower = new Map<string, string>();
+  for (const e of entries) if (!byLower.has(e.toLowerCase())) byLower.set(e.toLowerCase(), e);
+  for (const name of ['GNUmakefile', 'makefile', 'Makefile']) {
+    const real = entries.includes(name) ? name : byLower.get(name.toLowerCase());
+    if (real && fileExists(join(dir, real))) return [join(dir, real)];
+  }
+  return [];
+}
+
 /** Hooks each git verb actually fires. The ambient execution closure of that verb is those hook files. */
 const GIT_HOOK_TRIGGERS: Record<string, string[]> = {
   commit: ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit'],
@@ -2054,7 +2072,12 @@ function resolveScriptCommand(
       };
     const paths = makeFiles.length
       ? makeFiles.map((f) => resolve(makeDir, f))
-      : ['Makefile', 'makefile', 'GNUmakefile'].map((n) => join(makeDir, n)).filter((f) => fileExists(f)).slice(0, 1);
+      : // GNU make's own precedence is GNUmakefile, then makefile, then Makefile. Reading them in the wrong order
+        // named a file make never opens while claiming RESOLVED_COMPLETE (challenge 6, findings 2, 8, 20). The
+        // candidate is resolved to the REAL directory entry: on a case-insensitive filesystem `makefile` and
+        // `Makefile` are the same file but canonicalise to different strings, which silently unhooked the
+        // freshness ledger.
+        defaultMakefile(makeDir);
     if (paths.some((p) => stale(p)))
       return {
         kind: 'make-target',
