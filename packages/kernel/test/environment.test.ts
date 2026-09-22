@@ -85,6 +85,23 @@ test('binding resolution: when the environment redefines what a NAME runs, the t
   assert.notEqual(run('make build', repath).verdict, 'ALLOW');
   // and the same target with the default binding is ordinary work
   assert.equal(run('make build', honest).verdict, 'ALLOW');
+
+  // THE DIMENSION IS LIVE AND TRANSITIVE. Declaring a dimension and never consulting it is the "accepted but
+  // unconsumed" defect this phase removed from doctor; it must not survive in the environment itself (challenge 7,
+  // finding 1). A rebinding makefile hands its recipes an environment that SAYS so, and a body resolved inside it
+  // — one level deeper, through a different producer — is not a positive claim either.
+  const nested = workspace({
+    Makefile: 'SHELL := ./bin/x\nbuild: prep\n\ttsc -p .\nprep:\n\t./gen.sh\n',
+    'gen.sh': '#!/bin/sh\necho hi\n',
+  });
+  assert.notEqual(run('make build', nested).verdict, 'ALLOW');
+  assert.match(scopes('make build', nested), /binding/);
+  // the same makefile WITHOUT the rebinding is ordinary work at every depth
+  const clean = workspace({
+    Makefile: 'build: prep\n\ttsc -p .\nprep:\n\t./gen.sh\n',
+    'gen.sh': '#!/bin/sh\necho hi\n',
+  });
+  assert.equal(run('make build', clean).verdict, 'ALLOW');
 });
 
 test('scoped opacity: an unknown names the part of the closure it is about', () => {

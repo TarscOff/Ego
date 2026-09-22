@@ -2256,7 +2256,12 @@ function resolveScriptCommand(
       kind: 'npm-script',
       key: `npm:${dirname(pkgPath)}:${script}`,
       body,
-      bodyEnv: childEnvironment(env, { cwd: dirname(pkgPath), cwdVerified: env.cwdVerified }),
+      bodyEnv: childEnvironment(env, {
+        cwd: dirname(pkgPath),
+        cwdVerified: env.cwdVerified,
+        config: { read: [pkgPath], unresolved: [] },
+        sources: { [pkgPath]: fingerprint(text) },
+      }),
       reason: `package.json script "${script}"`,
       resolution: 'RESOLVED_COMPLETE',
       provenance: { source: pkgPath, fingerprint: fingerprint(text) },
@@ -2399,7 +2404,16 @@ function resolveScriptCommand(
     for (const t of wanted) walk(t, 0);
     const provenance = { source: merged.sources.join(','), fingerprint: fingerprint(merged.text) };
     const mkName = merged.sources[0] ?? makeDir;
-    const bodyEnv = childEnvironment(env, { cwd: makeDir, cwdVerified: env.cwdVerified });
+    const rebinds = [...cliRebinds, ...merged.rebinds];
+    const bodyEnv = childEnvironment(env, {
+      cwd: makeDir,
+      cwdVerified: env.cwdVerified,
+      // the binding dimension is INHERITED by everything this recipe invokes: a makefile that assigns SHELL or
+      // PATH re-points every program named anywhere below it, not only on its own recipe lines
+      ...(rebinds.length ? { binding: { kind: 'redefined' as const, why: rebinds[0]! } } : {}),
+      config: { read: merged.sources, unresolved: [] },
+      sources: Object.fromEntries(merged.sources.map((f) => [f, fingerprint(merged.text)])),
+    });
     const key = `make:${merged.sources.join(',') || makeDir}:${wanted.join(',')}`;
     if (missing.length) {
       // "my parser did not find the target" is NOT "the target does not exist". Only a makefile using nothing this
@@ -2428,7 +2442,7 @@ function resolveScriptCommand(
     // BINDING RESOLUTION — a recipe whose interpreter or lookup path the makefile itself redefines does not mean
     // what it says. The text is honest and the programs are not, so the body is analysed AND the binding gap is
     // reported rather than the whole target being declared unknown.
-    for (const r of [...cliRebinds, ...merged.rebinds])
+    for (const r of rebinds)
       gaps.push({ what: 'binding', where: mkName, why: `the environment redefines program lookup: ${r}` });
     // SELF-MODIFYING PRODUCER — make REMAKES a makefile that is itself a target, then restarts and runs the new
     // one. The source EGO read is then the pre-image of what executes (challenge 6, finding 9).
@@ -2914,10 +2928,19 @@ function classifyNormalized(
   //     UNKNOWN/OPAQUE + NO SANDBOX -> ASK or DENY, never silently ALLOW
   // A declared class keeps its verdict ONLY for ABSENT_VERIFIED — proof that nothing executes, so `npm test` with
   // no test script stays out of the operator's way. "My parser did not find it" is not that proof.
-  const { opaque } = resolutionEffect(effect.resolution);
+  // THE BINDING DIMENSION IS LIVE AND TRANSITIVE. A body resolved inside an environment whose program lookup was
+  // redefined does not mean what its text says, however completely the text was read — so a positive claim there
+  // is not earned, at any depth. Declaring a dimension and never consulting it is the "accepted but unconsumed"
+  // defect this phase removed from doctor; it must not survive in the environment itself (challenge 7, finding 1).
+  const inheritedBinding: Unresolved[] =
+    state.env.binding.kind === 'redefined'
+      ? [{ what: 'binding', where: norm, why: state.env.binding.why ?? 'program lookup redefined by an enclosing environment' }]
+      : [];
+  const { opaque: outcomeOpaque } = resolutionEffect(effect.resolution);
+  const opaque = outcomeOpaque || inheritedBinding.length > 0;
   // SCOPED OPACITY: the hit names WHICH part of the execution closure is unresolved, so a reader can see what EGO
   // could not see and an organization can govern the parts separately.
-  const gaps = effect.unresolved ?? [];
+  const gaps = [...(effect.unresolved ?? []), ...inheritedBinding];
   const scope = gaps.length ? gaps.map((u) => `${u.what}:${u.where}`).join(', ') : effect.resolution;
   const remainder = opaque
     ? [
