@@ -371,6 +371,10 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
             : status === 'UNVERIFIED'
               ? 'UNVERIFIED'
               : 'NOT SATISFIED';
+        // The word EGO prints must say where the claim COMES FROM. `SUPPORTED` is a status EGO authored in
+        // control-plane/containment/controls.md; nothing here consults a runtime fact, so calling it "verified"
+        // told an auditor EGO had checked something it had not (challenge 5, finding 20). "Declared" is the
+        // honest word until the phase-6 conformance suite can turn a declaration into a verification.
         const why =
           status === 'UNVERIFIED'
             ? 'EGO records this capability but does not verify it; conformance is phase 6'
@@ -378,7 +382,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
               ? 'only partly provided — see the control description for what is and is not covered'
               : status === 'UNAVAILABLE'
                 ? 'the host does not provide it'
-                : 'verified';
+                : 'declared SUPPORTED in EGO\u2019s own control plane; not verified against the running host (phase 6)';
         add(
           'containment',
           `${c.id} on ${h}`,
@@ -388,6 +392,18 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
         );
       }
     }
+    // A setting the control plane accepts, validates and compiles, but that NO consumer reads, is decoration: an
+    // operator can tighten it, see it compile, and get nothing. Say so rather than letting the profile document's
+    // promise stand (challenge 5, finding 22).
+    const profile = cp.profiles.find((p) => p.id === pin.profile);
+    if (profile?.requiresManagedTier)
+      add(
+        'containment',
+        'requires_managed_tier',
+        'NOT SATISFIED',
+        `${pin.profile} declares requires_managed_tier: true, but no consumer reads it — EGO neither installs nor verifies a managed tier (issue #26)`,
+        true,
+      );
     const budgets = cp.profiles.find((p) => p.id === pin.profile)?.budgets;
     if (budgets)
       add(

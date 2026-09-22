@@ -5,7 +5,7 @@
 // positive claim requires the whole execution closure — explicit AND ambient.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { loadControlPlane } from '../src/control-plane/load.ts';
@@ -176,4 +176,19 @@ test('A3 context verification is earned: an unproven base cannot support a posit
   );
   // -P says physically, which is what EGO resolves, so it stays proven
   assert.equal(run('cd -P link && make build', linked).verdict, 'ALLOW');
+});
+
+test('A7.5 doctor truth: a status EGO authored is never reported as something EGO verified', () => {
+  // Challenge 5, finding 20: doctor printed "(verified)" next to every containment control whose status was
+  // SUPPORTED — a word taken from control-plane/containment/controls.md, which EGO wrote. No runtime fact was
+  // consulted. An auditor reading `ego doctor` was told EGO had checked something it had not.
+  const src = readFileSync(new URL('../src/project/doctor.ts', import.meta.url), 'utf8');
+  const block = src.slice(src.indexOf('const why ='), src.indexOf('host status'));
+  assert.ok(!/:\s*'verified'/.test(block), 'a declared status must not be reported with the bare word "verified"');
+  assert.ok(/declared/.test(block), 'the line must say where the claim comes from');
+  // and a profile setting that no consumer reads must be reported as inert rather than left to look enforced
+  assert.ok(
+    /requires_managed_tier/.test(src) && /no consumer reads it/.test(src),
+    'an accepted-but-unconsumed profile requirement must be surfaced as not satisfied',
+  );
 });
