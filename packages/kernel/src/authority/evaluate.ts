@@ -2,7 +2,8 @@
 import { homedir, tmpdir } from 'node:os';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { shimScript } from '../project/githooks.ts';
+import { shimScript, gitHooksDir } from '../project/githooks.ts';
+import { gitConfigGet } from '../util/git.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
@@ -1364,7 +1365,11 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   const operands = tokens.slice(1).filter((t) => !t.startsWith('-') && !t.includes('='));
   const out: string[] = [];
   const abs = (t: string): string => (isAbsolute(t) ? t : resolve(cwd, t));
-  if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2) out.push(abs(operands[operands.length - 1]!));
+  if (head === 'git' && /^(checkout|restore)$/.test(operands[0] ?? '')) {
+    const dd = tokens.indexOf('--');
+    if (dd >= 0) out.push(...tokens.slice(dd + 1).map(abs));
+  } else if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2)
+    out.push(abs(operands[operands.length - 1]!));
   else if (/^(tee|truncate|touch)$/.test(head)) out.push(...operands.map(abs));
   else if (head === 'dd') {
     const of = tokens.find((t) => t.startsWith('of='));
@@ -1569,9 +1574,18 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   model.text = text;
   const lines = makeLogicalLines(text);
   let current: MakeRule | null = null;
+  // GNU make lets `.RECIPEPREFIX` replace the tab that introduces a recipe line. A parser that only knows the tab
+  // sees an EMPTY recipe and reports the target fully resolved — its own gap becoming a positive claim.
+  let prefix = '\t';
   for (const line of lines) {
-    if (line.startsWith('\t')) {
-      if (current) current.recipes.push(line.slice(1));
+    const rp = /^\s*\.RECIPEPREFIX\s*[:+?]?=\s*(\S?)/.exec(line);
+    if (rp) {
+      prefix = rp[1] || '\t'; // an empty assignment restores the tab
+      current = null;
+      continue;
+    }
+    if (line.startsWith(prefix)) {
+      if (current) current.recipes.push(line.slice(prefix.length));
       continue;
     }
     const trimmed = line.trim();
@@ -1700,7 +1714,31 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], res: Resolu
       reason: `the hooks that \`git ${verb}\` fires live outside any registered repository`,
       resolution: 'AMBIENT_UNRESOLVED',
     };
-  const dir = join(root, '.git', 'hooks');
+  // Ask git where hooks live instead of guessing `.git/hooks`. `core.hooksPath` (husky v9 sets it to `.husky`) and
+  // a LINKED WORKTREE — whose `.git` is a file pointing at the main worktree's common dir — both move them, and
+  // guessing made the relocated hook invisible while it still fired (challenge 6, finding 1). The kernel already
+  // had the correct resolver; the evaluator was the one layer not using it.
+  let dir: string;
+  try {
+    dir = gitHooksDir(root, gitConfigGet(root, 'core.hooksPath'));
+  } catch {
+    return {
+      kind: 'git-ambient',
+      key: `git-hooks:unresolved:${verb}`,
+      body: null,
+      reason: `the hooks directory \`git ${verb}\` runs from could not be determined`,
+      resolution: 'AMBIENT_UNRESOLVED',
+    };
+  }
+  // A hooks directory EGO cannot read is not an absence: something WILL run that was never analysed.
+  if (!directoryExists(dir))
+    return {
+      kind: 'git-ambient',
+      key: `git-hooks:${dir}:${verb}`,
+      body: null,
+      reason: `the hooks directory \`git ${verb}\` runs from (${dir}) does not exist or is not readable`,
+      resolution: dir.startsWith(root) ? 'ABSENT_VERIFIED' : 'AMBIENT_UNRESOLVED',
+    };
   const body: string[] = [];
   const sources: string[] = [];
   let unresolved: string | null = null;
@@ -1765,7 +1803,12 @@ function resolveScriptCommand(
   const cwd = res.cwd;
   /** A4 — FRESHNESS. A source rewritten by an earlier unit of the SAME command can no longer justify a later
    *  ALLOW: `printf 'build:\n\tgit push' > Makefile && make build` was classified from the old contents. */
-  const stale = (...paths: string[]): boolean => paths.some((p) => written.has(canonicalPath(p)));
+  //  `\0any` is the wildcard: an EARLIER unit of this command could not be classified, so it may have written
+  //  anything, and no later resolution in the same unit can be proven fresh. Enumerating writer commands would be
+  //  the same losing game as enumerating shell spellings — `node -e`, `python -c`, `git checkout -- f`, a build
+  //  step that regenerates its own makefile, all write files without being "write commands".
+  const stale = (...paths: string[]): boolean =>
+    written.has('\0any') || paths.some((p) => written.has(canonicalPath(p)));
   // A3 — a semantic conclusion drawn from a RELATIVE path is only trustworthy when the directory it is relative to
   // has been proven. Absence of proof is not proof.
   if (!res.cwdVerified)
@@ -3216,6 +3259,7 @@ function analyzeSegments(
   for (const unit of isolatedShells ? units : [segments]) {
     if (isolatedShells) cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
     for (const seg of unit) {
+    const hitsBefore = hits.length;
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
     const cdTrimmed = seg.trim();
@@ -3351,6 +3395,19 @@ function analyzeSegments(
     }
     // and the write-ish commands, whose destination is an operand rather than a redirection
     for (const abs of writtenPathOperands(seg, effectiveCwd)) written.add(canonicalPath(abs));
+    // A4 — a segment whose own effect could not be determined may have written ANY file, so nothing resolved after
+    // it in this unit is provably fresh. This is what makes freshness a property rather than a list of writers.
+    if (
+      hits
+        .slice(hitsBefore)
+        .some(
+          (h) =>
+            OPACITY_CLASSES.has(h.capability) ||
+            h.capability === 'command.ambient-unresolved' ||
+            h.capability === 'command.interpreter-inline',
+        )
+    )
+      written.add('\0any');
   }
     }
   return hits;
