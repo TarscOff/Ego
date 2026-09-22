@@ -134,6 +134,15 @@ test('ambient-event closure: hooks are found by the EVENT a command raises, not 
   // a verb that raises no event is untouched
   assert.equal(run('git status', refs).verdict, 'ALLOW');
   assert.equal(run('git log --oneline', refs).verdict, 'ALLOW');
+  // SUPPRESSION IS PER-EVENT. `--no-verify` bypasses the VERIFICATION hooks of one event and nothing else, and a
+  // bare `-n` means --no-verify only for commit and push (it is --no-tags for fetch, --no-stat for pull/merge).
+  // Treating either as "no hooks at all" turned the whole ambient closure off for every verb (challenge 7, #1).
+  const many = workspace({
+    '.git/hooks/post-merge': `#!/bin/sh\n${PUSH}\n`,
+    '.git/hooks/reference-transaction': `#!/bin/sh\n${PUSH}\n`,
+  });
+  for (const cmd of ['git pull -n', 'git fetch -n', 'git merge -n feature', 'git commit -n -m x'])
+    assert.equal(run(cmd, many).verdict, 'DENY', `${cmd}: -n must not discard the whole closure`);
   // cherry-pick fires commit hooks, and EGO's shim chains `<name>.pre-ego.*`, not only `<name>.pre-ego`
   const chained = workspace({ '.git/hooks/pre-commit.pre-ego.1': `#!/bin/sh\n${PUSH}\n` });
   assert.equal(run('git cherry-pick abc', chained).verdict, 'DENY');
@@ -166,6 +175,31 @@ test('.DEFAULT_GOAL takes the LAST assignment, as make does', () => {
     'more.mk': `.DEFAULT_GOAL := deploy\ndeploy:\n\t${PUSH}\n`,
   });
   assert.equal(run('make', flipped).verdict, 'DENY', 'a later assignment in an include wins');
+});
+
+test('configuration closure, lint-staged: the config is what selects the body', () => {
+  // husky + lint-staged is the hook setup of a large share of JavaScript repositories. Analysing the hook body
+  // without resolving what lint-staged actually RUNS made every commit in those repositories ask — a false gate,
+  // which is a security property too. The config is read, so the verdict follows the commands it names.
+  const conf = (v: unknown) => JSON.stringify({ scripts: { build: 'tsc -p .' }, 'lint-staged': v });
+  const benign = workspace({
+    'package.json': conf({ '*.ts': ['eslint --fix', 'prettier -w'] }),
+    '.git/hooks/pre-commit': '#!/bin/sh\nnpx lint-staged\n',
+  });
+  assert.equal(run('git commit -m x', benign).verdict, 'ALLOW');
+  const hostile = workspace({
+    'package.json': conf({ '*.ts': ['eslint --fix', `${PUSH} --force`] }),
+    '.git/hooks/pre-commit': '#!/bin/sh\nnpx lint-staged\n',
+  });
+  assert.equal(run('git commit -m x', hostile).verdict, 'DENY');
+  // a JavaScript config is executable configuration: it cannot be read, and it is not claimed to be
+  const js = workspace({
+    'package.json': '{}',
+    'lint-staged.config.js': 'module.exports = {}',
+    '.git/hooks/pre-commit': '#!/bin/sh\nnpx lint-staged\n',
+  });
+  assert.notEqual(run('git commit -m x', js).verdict, 'ALLOW');
+  assert.match(scopes('git commit -m x', js), /config/);
 });
 
 test('the unified invariant: degrading ANY dimension never widens the verdict', () => {

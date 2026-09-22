@@ -1854,9 +1854,12 @@ const GIT_HOOK_EVENTS: Record<string, GitEvent[]> = {
   'post-index-change': ['index-change'],
 };
 
-/** The hooks a verb's events fire, deduplicated. */
-function hooksFor(verb: string): string[] {
+/** The hooks a verb's events fire, minus the events a suppression flag actually bypasses. */
+function hooksFor(verb: string, suppressed: readonly GitEvent[] = []): string[] {
   const events = new Set(GIT_VERB_EVENTS[verb] ?? []);
+  for (const e of suppressed) events.delete(e);
+  // `--no-verify` on a commit bypasses pre-commit and commit-msg; post-commit is NOT a verification hook and runs
+  if (suppressed.includes('commit-message')) events.delete('commit-created');
   if (!events.size) return [];
   return Object.entries(GIT_HOOK_EVENTS)
     .filter(([, listens]) => listens.some((e) => events.has(e)))
@@ -1877,9 +1880,16 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
   const verb = tokens.slice(1).find((t) => !t.startsWith('-'));
   if (!verb)
     return { kind: 'none', key: 'git:', body: null, reason: 'no verb', resolution: 'ABSENT_VERIFIED' };
-  // `--no-verify` skips the hooks, but NOT the configured helper programs: the two halves of the ambient closure
-  // are independent, and tying the config scan to the hook table left `git add` running a clean filter unseen.
-  const names = tokens.some((t) => t === '--no-verify' || t === '-n') ? [] : hooksFor(verb);
+  // SUPPRESSION IS PER-EVENT, NOT A SWITCH OVER THE WHOLE CLOSURE. `--no-verify` bypasses the VERIFICATION hooks
+  // of one event — pre-commit/commit-msg on a commit, pre-push on a push — and nothing else: post-commit,
+  // reference-transaction and post-index-change all still run. And a bare `-n` means `--no-verify` ONLY for
+  // commit and push; for fetch it is --no-tags, for pull --no-stat, for merge --no-stat. Treating either as
+  // "no hooks at all" turned the entire ambient closure off for every verb (challenge 7, finding 1) — the same
+  // meta-defect this phase exists to remove: a rule applied at the place being inspected, missing its siblings.
+  const noVerify =
+    tokens.includes('--no-verify') || (tokens.includes('-n') && (verb === 'commit' || verb === 'push'));
+  const suppressed: GitEvent[] = noVerify ? (verb === 'push' ? ['push'] : ['commit-message']) : [];
+  const names = hooksFor(verb, suppressed);
   const root = repoRootFor(ctx, env.cwd);
   if (root === null)
     return {
@@ -2442,6 +2452,85 @@ function resolveScriptCommand(
         ? `Makefile target ${wanted.join(', ')}; NOT fully resolved: ${gaps[0]!.why}`
         : `Makefile target ${wanted.join(', ')}`,
       resolution: gaps.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
+    };
+  }
+  // lint-staged runs the commands its CONFIG names, so the config is what selects the body. Resolving it is the
+  // same configuration-closure rule applied to a tool instead of to git or make — and it is what keeps `git
+  // commit` out of the way in the husky + lint-staged setup a large share of JavaScript repositories use.
+  if (head === 'lint-staged' || (head === 'npx' && tokens[1] === 'lint-staged')) {
+    const pkgPath = findUp(ctx, cwd, 'package.json');
+    const candidates = ['.lintstagedrc', '.lintstagedrc.json', '.lintstagedrc.yaml', '.lintstagedrc.yml']
+      .map((n) => join(cwd, n))
+      .filter((f) => fileExists(f));
+    // a JS/CJS/MJS config is code, and code is not resolvable by reading
+    const js = ['lint-staged.config.js', 'lint-staged.config.mjs', 'lint-staged.config.cjs', '.lintstagedrc.js']
+      .map((n) => join(cwd, n))
+      .find((f) => fileExists(f));
+    if (js)
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:${js}`,
+        body: null,
+        reason: 'the lint-staged configuration is JavaScript, so the commands it runs cannot be read',
+        resolution: 'UNSUPPORTED',
+        unresolved: [{ what: 'config', where: js, why: 'executable configuration' }],
+      };
+    const src = candidates[0] ?? pkgPath;
+    const text = src ? readInsideWorkspace(ctx, src) : null;
+    if (!src || text === null)
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:${src ?? cwd}`,
+        body: null,
+        reason: 'the lint-staged configuration could not be read',
+        resolution: src && fileExists(src) ? 'UNREADABLE' : 'ABSENT_VERIFIED',
+        unresolved: src ? [{ what: 'config', where: src, why: 'not readable' }] : [],
+      };
+    let conf: unknown;
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      conf = src === pkgPath ? parsed['lint-staged'] : parsed;
+    } catch {
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:${src}`,
+        body: null,
+        reason: 'the lint-staged configuration is not readable JSON',
+        resolution: 'UNREADABLE',
+        unresolved: [{ what: 'config', where: src, why: 'unparsable' }],
+      };
+    }
+    if (conf === undefined || conf === null)
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:${src}`,
+        body: null,
+        reason: 'no lint-staged configuration',
+        resolution: 'ABSENT_VERIFIED',
+      };
+    const body: string[] = [];
+    for (const v of Object.values(conf as Record<string, unknown>)) {
+      if (typeof v === 'string') body.push(v);
+      else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) body.push(...(v as string[]));
+      else
+        return {
+          kind: 'shell-script',
+          key: `lint-staged:${src}`,
+          body: body.length ? body : null,
+          bodyEnv: childEnvironment(env, { cwd, cwdVerified: env.cwdVerified }),
+          reason: 'a lint-staged entry is a function rather than a command',
+          resolution: 'PARTIAL',
+          unresolved: [{ what: 'config', where: src, why: 'a non-literal entry' }],
+        };
+    }
+    return {
+      kind: 'shell-script',
+      key: `lint-staged:${src}`,
+      body,
+      bodyEnv: childEnvironment(env, { cwd, cwdVerified: env.cwdVerified }),
+      reason: `lint-staged commands from ${src}`,
+      resolution: 'RESOLVED_COMPLETE',
+      provenance: { source: src, fingerprint: fingerprint(text) },
     };
   }
   if (head === 'git') return resolveGitAmbient(ctx, tokens, env);

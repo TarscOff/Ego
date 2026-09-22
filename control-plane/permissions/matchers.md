@@ -533,10 +533,19 @@ matchers:
     command: '^rm\s+-[a-zA-Z]*r'
   - capability: command.test
     tool: Bash
-    command: '^(npm\s+(test|run\s+test\S*)|(npx\s+)?(vitest|jest|mocha|playwright|ava|tap|karma)|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|node\s+--test)\b'
+    command: '^(npm\s+(test|run\s+test\S*)|(npx\s+)?(vitest|jest|mocha|playwright|ava|tap|karma)|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|node\s+--test|python3?\s+-m\s+(pytest|unittest))\b'
   - capability: command.build
     tool: Bash
-    command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|(npx\s+)?(tsc|esbuild|eslint|prettier|biome|vite|rollup|webpack|swc|turbo|nx|next|ng|tsup|parcel)\b|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
+    command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|(npx\s+)?(tsc|esbuild|eslint|prettier|biome|oxlint|dprint|lint-staged|vite|rollup|webpack|swc|turbo|nx|next|ng|tsup|parcel)\b|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
+  # Formatters, linters and type checkers with FIXED semantics: they read the workspace and rewrite source
+  # files in it, and nothing else. Whole ecosystems had no path to ALLOW for ordinary `gofmt`/`ruff`/`black`/
+  # `cargo fmt`, so a control plane that governs them all equally was unusable outside JavaScript (challenge 6,
+  # findings 14, 15). Deliberately EXCLUDES the project task runners — mvn, gradle, rake, bundle exec, dotnet,
+  # composer, tox — because those execute repository-defined tasks and are producers EGO does not yet model:
+  # calling them ALLOW would be exactly the unearned positive claim this phase exists to remove.
+  - capability: command.build
+    tool: Bash
+    command: '^(gofmt|goimports|golangci-lint|staticcheck|rustfmt|clang-format|shfmt|shellcheck|stylua|ktlint|google-java-format|php-cs-fixer|yamllint|markdownlint|hadolint|ruff|black|isort|flake8|mypy|pylint|rubocop|standardrb)\b|^cargo\s+fmt\b|^go\s+fmt\b|^terraform\s+(fmt|validate)\b|^python3?\s+-m\s+(black|ruff|isort|flake8|mypy|pylint)\b'
   # inline interpreters are opaque, so a body that NAMES a protected store fails closed to the same deny the literal verb receives.
   # Round 13: this block sits BEFORE command.read-only. Its `console.log(…)` / `print(…)` carve-out used to win
   # first-match and turn a credential read or a hook write into a silent ALLOW.
