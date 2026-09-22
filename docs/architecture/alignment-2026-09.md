@@ -27,7 +27,7 @@ change is the smallest coherent one, keeps canonical ownership in the kernel, an
 | 19 | Issue freshness | EQUIVALENT | Q55, Q62. |
 | 20 | DONE ≠ issue closed | EQUIVALENT (Q98 note) | Q59 unchanged: local DONE never closes an issue. `forge.issue.close` moves from absolute to organization-locked, so an organization may delegate closing; the default stays DENY. |
 | 21 | Supply-chain trust | EQUIVALENT | Q77–Q97. External skills carry identity, pin, checksum, source, provenance, license, compatibility (Q11). |
-| 22 | Harness self-maintenance | EQUIVALENT (rule made explicit) | Q9 HARNESS_MAINTENANCE keeps protections active; the conformance suite adds the invariant "a weakened guard is never validated by an execution under itself" as a checked property in phase 7. |
+| 22 | Harness self-maintenance | EQUIVALENT (rule made explicit) | Q9 EGO_MAINTENANCE keeps protections active; the conformance suite adds the invariant "a weakened guard is never validated by an execution under itself" as a checked property in phase 7. |
 | 23 | Harness garbage collection | MISSING | `harness gc --proposals` (phase 3): deterministic detection of dead capability IDs, unused policies, duplicated rules, stale skills, adapters for unsupported hosts, permanently ignored warnings, expired fallbacks; produces a reviewable proposal, never removes automatically. |
 | 24 | Stable contracts, replaceable implementations | EQUIVALENT | The kernel's exported types are the contracts; host details live in adapters. |
 
@@ -36,7 +36,7 @@ change is the smallest coherent one, keeps canonical ownership in the kernel, an
 Item 4 conflicts with the baseline's absolute-deny list. The mechanism now distinguishes two locks:
 
 - `absolute`: never widenable by any layer, in any profile, mode or host. Proposed content: destructive filesystem
-  roots, credential-store writes, hook and trust configuration tampering outside HARNESS_MAINTENANCE, gate bypass,
+  roots, credential-store writes, hook and trust configuration tampering outside EGO_MAINTENANCE, gate bypass,
   nested-host invocation from tools, and every production mutation category (the product promise is "never mutate
   production"; the organization gets analysis, comparison and planning, not execution).
 - `organization`: DENY at the core layer, widenable only by the organization policy layer (`policies/organization/

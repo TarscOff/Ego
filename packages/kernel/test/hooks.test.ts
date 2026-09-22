@@ -131,16 +131,16 @@ test('grants: recognised once, negations respected, only ASK moves; corrections 
     recognizeCorrection('ok. From now on always run lint first.'),
     'From now on always run lint first.',
   );
-  assert.equal(recognizeModeMarker('some text\nEGO MODE: HARNESS_MAINTENANCE\nmore'), 'HARNESS_MAINTENANCE');
+  assert.equal(recognizeModeMarker('some text\nEGO MODE: EGO_MAINTENANCE\nmore'), 'EGO_MAINTENANCE');
   assert.equal(recognizeModeMarker('ego mode: harness_maintenance'), null);
   const d = handleHook(
     ev(root, 'UserPromptSubmit', {
-      prompt: 'assign it to me. From now on always run lint first.\nEGO MODE: HARNESS_MAINTENANCE',
+      prompt: 'assign it to me. From now on always run lint first.\nEGO MODE: EGO_MAINTENANCE',
     }),
     rt,
   );
   assert.match(d.context ?? '', /grant recorded, forge.issue.assign/);
-  assert.match(d.context ?? '', /HARNESS_MAINTENANCE is available only in the EGO source repository/);
+  assert.match(d.context ?? '', /EGO_MAINTENANCE is available only in the EGO source repository/);
   const rr = openRuntimeRoot(root, { runtimeSha256: rt.pin.integrity, version: rt.pin.version }, rt.now());
   const s = readSession(rr, 's1')!;
   assert.deepEqual(s.grants, ['forge.issue.assign']);
@@ -312,7 +312,7 @@ function egoLikeProject(): { root: string; rt: HookRuntime } {
   const root = mkdtempSync(join(tmpdir(), 'ego-fake-src-'));
   spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: root });
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@tarscoff/ego', version: '0.0.1' }));
-  // the EGO source repo runs its OWN control-plane from inside the repo (the unforgeable HARNESS_MAINTENANCE signal)
+  // the EGO source repo runs its OWN control-plane from inside the repo (the unforgeable EGO_MAINTENANCE signal)
   cpSync(CP, join(root, 'control-plane'), { recursive: true });
   mkdirSync(join(root, 'packages', 'kernel'), { recursive: true });
   writeFileSync(join(root, 'packages', 'kernel', 'package.json'), '{}');
@@ -340,13 +340,13 @@ function egoLikeProject(): { root: string; rt: HookRuntime } {
   };
 }
 
-test('mode marker: HARNESS_MAINTENANCE only inside the EGO repository, PRODUCTION_ADVISORY anywhere, BENCHMARK never by prompt', () => {
+test('mode marker: EGO_MAINTENANCE only inside the EGO repository, PRODUCTION_ADVISORY anywhere, BENCHMARK never by prompt', () => {
   const { root, rt } = egoLikeProject();
-  const d = handleHook(ev(root, 'UserPromptSubmit', { prompt: 'EGO MODE: HARNESS_MAINTENANCE' }), rt);
-  assert.match(d.context ?? '', /authority mode is now HARNESS_MAINTENANCE/);
+  const d = handleHook(ev(root, 'UserPromptSubmit', { prompt: 'EGO MODE: EGO_MAINTENANCE' }), rt);
+  assert.match(d.context ?? '', /authority mode is now EGO_MAINTENANCE/);
   const rr = openRuntimeRoot(root, { runtimeSha256: rt.pin.integrity, version: rt.pin.version }, rt.now());
-  assert.equal(readSession(rr, 's1')!.mode, 'HARNESS_MAINTENANCE');
-  assert.ok(readLedger(rr, { kinds: ['mode.set'] }).some((e) => e.data?.['mode'] === 'HARNESS_MAINTENANCE'));
+  assert.equal(readSession(rr, 's1')!.mode, 'EGO_MAINTENANCE');
+  assert.ok(readLedger(rr, { kinds: ['mode.set'] }).some((e) => e.data?.['mode'] === 'EGO_MAINTENANCE'));
   // control-plane edits become ALLOW under maintenance; absolute denies stay DENY
   assert.equal(
     handleHook(
@@ -605,7 +605,7 @@ test('a budget breach never weakens a DENY into an escalation; a forged maintena
   handleHook(ev(root, 'SessionStart', { source: 'startup' }), rt);
   const s = readSession(rr, 's1')!;
   s.counters.iterations = 1000; // far past STANDARD maxIterations: on_exceed ESCALATE
-  s.mode = 'HARNESS_MAINTENANCE'; // written by something other than the prompt hook
+  s.mode = 'EGO_MAINTENANCE'; // written by something other than the prompt hook
   writeSession(rr, s);
   const deny = handleHook(
     ev(root, 'PreToolUse', { tool: { name: 'Bash', input: { command: 'rm -rf /' } } }),
@@ -621,7 +621,7 @@ test('a budget breach never weakens a DENY into an escalation; a forged maintena
   delete s2.budgetState;
   s2.counters.iterations = 0;
   writeSession(rr, s2);
-  // HARNESS_MAINTENANCE would soften fs.hook-config.write from DENY to ASK; outside the EGO repository it must not
+  // EGO_MAINTENANCE would soften fs.hook-config.write from DENY to ASK; outside the EGO repository it must not
   const hookCfg = handleHook(
     ev(root, 'PreToolUse', {
       tool: { name: 'Write', input: { file_path: join(root, '.claude', 'settings.json') } },
@@ -631,7 +631,7 @@ test('a budget breach never weakens a DENY into an escalation; a forged maintena
   assert.equal(
     hookCfg.action,
     'deny',
-    'HARNESS_MAINTENANCE overrides do not apply outside the EGO repository',
+    'EGO_MAINTENANCE overrides do not apply outside the EGO repository',
   );
 });
 
@@ -777,7 +777,7 @@ test('retry hard stop: a no-op PREPENDED before the failing command cannot mint 
   }
 });
 
-test('mode: HARNESS_MAINTENANCE cannot be unlocked by forging the EGO package files in a governed consumer repo', () => {
+test('mode: EGO_MAINTENANCE cannot be unlocked by forging the EGO package files in a governed consumer repo', () => {
   // a consumer repo that forges the isEgoSourceRepository files but whose running kernel control-plane is ELSEWHERE
   const root = mkdtempSync(join(tmpdir(), 'ego-spoof-'));
   spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: root });
@@ -805,9 +805,9 @@ test('mode: HARNESS_MAINTENANCE cannot be unlocked by forging the EGO package fi
     controlPlaneRoot: CP, // the REAL kernel control-plane, NOT inside the spoofed repo
     env: { EGO_HOME: mkdtempSync(join(tmpdir(), 'ego-h-')), CLAUDE_PROJECT_DIR: root },
   };
-  const d = handleHook(ev(root, 'UserPromptSubmit', { prompt: 'EGO MODE: HARNESS_MAINTENANCE' }), rt);
-  // the mode marker is refused and the session mode never becomes HARNESS_MAINTENANCE
+  const d = handleHook(ev(root, 'UserPromptSubmit', { prompt: 'EGO MODE: EGO_MAINTENANCE' }), rt);
+  // the mode marker is refused and the session mode never becomes EGO_MAINTENANCE
   assert.match(d.context ?? '', /available only in the EGO source repository|mode unchanged/i);
   const rr = openRuntimeRoot(root, { runtimeSha256: rt.pin.integrity, version: rt.pin.version }, rt.now());
-  assert.notEqual(readSession(rr, 's1')?.mode, 'HARNESS_MAINTENANCE', 'forged EGO files must not unlock HARNESS_MAINTENANCE');
+  assert.notEqual(readSession(rr, 's1')?.mode, 'EGO_MAINTENANCE', 'forged EGO files must not unlock EGO_MAINTENANCE');
 });

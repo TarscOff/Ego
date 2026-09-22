@@ -1,6 +1,6 @@
 ---
 schema: ego.mode/1
-id: HARNESS_MAINTENANCE
+id: EGO_MAINTENANCE
 kind: authority
 title: Harness maintenance
 only_in_ego_repository: true
@@ -14,7 +14,7 @@ overrides:
   - capability: fs.generated.write
     verdict: ASK
 ---
-# HARNESS_MAINTENANCE
+# EGO_MAINTENANCE
 
 Changes the Harness itself: control plane, hook configuration, generators, trust seed. Available only in the EGO
 source repository (a consumer never edits these files; it upgrades). Security-critical protections stay active:

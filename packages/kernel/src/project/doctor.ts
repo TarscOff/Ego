@@ -403,7 +403,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
   );
   add(
     'hosts',
-    'HARNESS_MAINTENANCE',
+    'EGO_MAINTENANCE',
     'INFO',
     isEgoSourceRepository(root)
       ? 'available (EGO source repository)'

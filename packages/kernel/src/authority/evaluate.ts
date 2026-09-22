@@ -15,7 +15,7 @@ export interface EvaluationContext {
   egoHome?: string;
   /** capability ids granted ASK→ALLOW for the current task */
   grants?: string[];
-  /** true when running inside the EGO source repository under HARNESS_MAINTENANCE */
+  /** true when running inside the EGO source repository under EGO_MAINTENANCE */
   inEgoRepository?: boolean;
   cwd?: string;
   /** effect resolution (alignment item 5): override file access for tests; default reads the real filesystem */

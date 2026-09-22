@@ -428,10 +428,10 @@ function modes(
       `${m.id}${m.isDefault ? ' (default)' : ''}${m.onlyInEgoRepository ? (inEgo ? ' (available here)' : ' (EGO source repository only)') : ''}: ${m.title}; overrides ${m.overrides.length ? m.overrides.map((o) => `${o.capability}=${o.verdict}`).join(', ') : 'none'}`,
     );
   io.out(
-    'Intents (audit, documentation, grilling-room, harness-upgrade, policy-review, workspace-discovery) route work and never change authority.',
+    'Intents (audit, documentation, grilling-room, ego-upgrade, policy-review, workspace-discovery) route work and never change authority.',
   );
   io.out(
-    'next: put `EGO MODE: <MODE>` on its own line in a prompt (HARNESS_MAINTENANCE only in the EGO repository), or `ego modes set <MODE> --session <id>`',
+    'next: put `EGO MODE: <MODE>` on its own line in a prompt (EGO_MAINTENANCE only in the EGO repository), or `ego modes set <MODE> --session <id>`',
   );
   return 0;
 }

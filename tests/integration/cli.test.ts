@@ -393,7 +393,7 @@ test('human-only commands refuse agent shells; codex-cli hook path fails closed 
   assert.match(human.out, /budget extended \(maxToolCalls=5000\)/);
   assert.equal((await run(['modes', 'set', 'PRODUCTION_ADVISORY', '--session', 'h1'], dir, env)).code, 0);
   assert.equal(
-    (await run(['modes', 'set', 'HARNESS_MAINTENANCE', '--session', 'h1'], dir, env)).code,
+    (await run(['modes', 'set', 'EGO_MAINTENANCE', '--session', 'h1'], dir, env)).code,
     2,
     'not the EGO repository',
   );

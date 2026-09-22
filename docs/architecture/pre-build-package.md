@@ -312,7 +312,7 @@ typecheck → lint → unit → integration → conformance → adversarial (inc
 - Secrets: Markdown taxonomy; structured curl parsing; redaction before logging, delegation, evidence, MCP, docs, diagnostic bundles and local error reports; locked core minimums; registry and source tokens never written to project files, logs or receipts; EGO emits no telemetry.
 - Human-gate integrity: prevent in-band, detect out-of-band, managed tier in HIGH_ASSURANCE.
 - Release integrity: Ed25519 per-key signatures over `SHA256SUMS`; machine-local trust store seeded under bootstrap trust and extended only by cross-signed releases; explicit revocation; bootstrap trust documented separately from runtime verification; emergency recovery.
-- HARNESS_MAINTENANCE and BENCHMARK keep every security-critical protection active and cannot cross a decision gate.
+- EGO_MAINTENANCE and BENCHMARK keep every security-critical protection active and cannot cross a decision gate.
 - Profiles STANDARD, STRICT (enterprise default), HIGH_ASSURANCE.
 
 ---

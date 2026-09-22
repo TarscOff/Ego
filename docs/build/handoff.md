@@ -34,7 +34,7 @@ deterministic test in the same round, then committed.
 | 1–3  | 49 / 18 / 14+D1    | `6abcd6e` and earlier | pre-this-session; see build-log |
 | 4    | 8                  | `92f14b6` | env -S, forge fields, pax, hooks honesty |
 | 5    | 19                 | `b8fddc3` | interpreter-body writes, archive dests, mv source, trust dir-node, glued syntax |
-| 6    | 16                 | `ed757a4` | zip/bsdtar/tar --directory, trust globs, ANSI-C, HARNESS_MAINTENANCE spoof, worktree fail-open |
+| 6    | 16                 | `ed757a4` | zip/bsdtar/tar --directory, trust globs, ANSI-C, EGO_MAINTENANCE spoof, worktree fail-open |
 | 7    | 3 (partial)        | `c040519` | **usage limit cut 13/16 agents**; the 3 that ran found 3 HIGH, fixed by hand |
 | 8    | 6                  | `734d696` | complete run; tar write modes, quoted commit flags, multi-digit redirects, redaction span leak, Slack xapp-/xoxe-, control-plane write matcher |
 | 9    | 10                 | `a1341c3` | secret-scan gaps (npm/pypi/azure-SAS/DigitalOcean/Docker), >| redirect, commit $IFS splice, .git gitlink file, nested hook config |
@@ -107,7 +107,7 @@ classifying obfuscated opaque code, and lets the loop converge.
   so a more-specific DENY must precede a general one (e.g. the interpreter-body denies sit before
   `command.interpreter-inline`). Regexes are single-backslash in YAML single-quotes.
 - `packages/kernel/src/hooks/handle.ts` — hook kernel: budgets/modes, retry hard-stop key normalisation,
-  `HARNESS_MAINTENANCE` gated on `pathInside(cpRoot, projectRoot)` (unforgeable), policy-cache widening clamp.
+  `EGO_MAINTENANCE` gated on `pathInside(cpRoot, projectRoot)` (unforgeable), policy-cache widening clamp.
 - `packages/kernel/src/project/githooks.ts` + `runtime/posix/git-hook.sh` — hook install/shim (spaced paths, linked
   worktree resolves `.harness` via the git common dir, pre-push scan no longer trusts `--remotes`).
 - `packages/kernel/src/control-plane/load.ts` + `util/markdown.ts` — fail-closed loader (ordered-list / malformed

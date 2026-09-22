@@ -75,7 +75,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     pending; only `ego init` from a human terminal accepts it. `policies/organization/**` and `.harness/mcp-trust.md`
     are protected paths; `ego init --profile`/`--task-source` on a pinned project is refused from an agent shell.
   - **Budgets and modes** (`hooks/handle.ts`): a budget breach or retry cap never turns a DENY into an ASK; the
-    session-record mode is honoured only when it exists in the compiled table (HARNESS_MAINTENANCE only in the EGO
+    session-record mode is honoured only when it exists in the compiled table (EGO_MAINTENANCE only in the EGO
     repository); the iteration counter resets only on a real session start.
   - **Git hooks** (`githooks.ts`, `git-hook.sh`): one chaining shim in every layout (default, custom `core.hooksPath`,
     husky), so a pre-existing hook keeps its stdin and its language and a missing shim in a pinned checkout fails
@@ -184,7 +184,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     `: ;`/`true &&`/`x=1 ` no-op cannot mint a fresh key either.
   - **Malformed checkbox** (1 LOW, `load.ts`): a bullet with a malformed checkbox (`- [-]`, `- [~]`, `- [ x]`) fails
     closed instead of silently dropping the capability.
-  - **HARNESS_MAINTENANCE spoof** (1 MEDIUM, `handle.ts`): the mode is gated on the unforgeable signal that the running
+  - **EGO_MAINTENANCE spoof** (1 MEDIUM, `handle.ts`): the mode is gated on the unforgeable signal that the running
     kernel's control-plane lives inside the repo (`pathInside`), not on package files an agent can forge.
   - **Worktree fail-open** (1 MEDIUM, `githooks.ts`): a linked worktree's shim now resolves `.harness` in the main
     worktree via the git common dir, so governance runs (it previously fell through to "not governed").
@@ -227,7 +227,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   - **Control-plane write matcher** (MEDIUM, `matchers.md`): `control-plane/**` and the `policies/{baselines,frameworks,
     schemas,templates}/**` baselines had no file-tool matcher, so an in-repo agent could rewrite the EGO authority
     baseline (Write/Edit or shell) at ALLOW; they now map to `ego.control-plane.edit` (DENY outside
-    HARNESS_MAINTENANCE), which also covers shell writes via the containment check.
+    EGO_MAINTENANCE), which also covers shell writes via the containment check.
   Pinned by `bypass.test.ts` round-8 residuals and `redact.test.ts` round-8 cases. Suite: 144 tests.
 - **Round 9** (workflow `ego-phase1-review-round9`, 31 agents, complete run, adversarial refutation): 10 confirmed
   findings (7 HIGH, 3 MEDIUM), each reproduced and fixed and pinned. Most were secret-detector coverage gaps:

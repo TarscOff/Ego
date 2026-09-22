@@ -141,7 +141,7 @@ test('EGO_HOME trust store writes are ego.trust.tamper in every profile', () => 
   const dir = workspace({});
   const home = join(dir, 'home');
   for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE']) {
-    for (const mode of ['NORMAL_DELIVERY', 'HARNESS_MAINTENANCE']) {
+    for (const mode of ['NORMAL_DELIVERY', 'EGO_MAINTENANCE']) {
       const c = ctx(dir, { profile, mode, egoHome: home, inEgoRepository: true });
       const r = evaluate(table, c, { tool: 'Write', input: { file_path: join(home, 'trust', 'keys.json') } });
       assert.equal(r.verdict, 'DENY', `${profile}/${mode}`);

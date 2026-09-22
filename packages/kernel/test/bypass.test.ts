@@ -185,7 +185,7 @@ test('every spelling of the hook entry points is gate bypass', () => {
     'npx ego hook claude-code UserPromptSubmit',
     'npx @tarscoff/ego hook claude-code UserPromptSubmit',
     'ego budget extend --session s1 --tool-calls 9999',
-    'ego modes set HARNESS_MAINTENANCE --session s1',
+    'ego modes set EGO_MAINTENANCE --session s1',
     'ego sources add file:/tmp/x',
     '$(which harness) hook claude-code UserPromptSubmit',
   ]) {

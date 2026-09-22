@@ -136,15 +136,15 @@ function handleLocked(
   session.heartbeatAt = now;
   // The three files isEgoSourceRepository checks (root package.json name, control-plane/…/absolute-denies.md,
   // packages/kernel/package.json) are all writable in a consumer repo, so an agent could forge them to unlock the
-  // authority-widening HARNESS_MAINTENANCE mode. The unforgeable signal is that the RUNNING kernel's control-plane
+  // authority-widening EGO_MAINTENANCE mode. The unforgeable signal is that the RUNNING kernel's control-plane
   // lives inside this repo (the EGO source repo runs its own dev build); a consumer runs the installed/cached kernel,
   // whose control-plane is elsewhere. An agent cannot relocate the running kernel, so it cannot satisfy this.
   const inEgo = isEgoSourceRepository(rt.projectRoot) && pathInside(cpRoot, rt.projectRoot);
   // the session record is not trusted to widen authority: a mode the record names is honoured only when it exists in
-  // the compiled table and, for HARNESS_MAINTENANCE, only inside the EGO source repository (never a governed repo)
+  // the compiled table and, for EGO_MAINTENANCE, only inside the EGO source repository (never a governed repo)
   const knownModes = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {});
   const effectiveMode =
-    knownModes.includes(session.mode) && !(session.mode === 'HARNESS_MAINTENANCE' && !inEgo)
+    knownModes.includes(session.mode) && !(session.mode === 'EGO_MAINTENANCE' && !inEgo)
       ? session.mode
       : cache.table.defaultMode;
   const ctx: EvaluationContext = {
@@ -219,9 +219,9 @@ function handleLocked(
       if (marker) {
         const mode = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {}).find((m) => m === marker);
         if (!mode) notes.push(`EGO: unknown mode "${marker}" ignored.`);
-        else if (mode === 'HARNESS_MAINTENANCE' && !inEgo)
+        else if (mode === 'EGO_MAINTENANCE' && !inEgo)
           notes.push(
-            'EGO: HARNESS_MAINTENANCE is available only in the EGO source repository; mode unchanged.',
+            'EGO: EGO_MAINTENANCE is available only in the EGO source repository; mode unchanged.',
           );
         else if (mode === 'BENCHMARK')
           notes.push(

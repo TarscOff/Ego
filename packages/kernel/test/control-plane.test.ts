@@ -44,8 +44,8 @@ test('compiles a deterministic authority table with correct precedence', () => {
   assert.equal(t1.profiles['STRICT']!.modes['NORMAL_DELIVERY']!['git.local.commit'], 'ASK');
   assert.equal(t1.profiles['STANDARD']!.modes['NORMAL_DELIVERY']!['git.local.commit'], 'ALLOW');
   assert.equal(t1.profiles['STANDARD']!.modes['PRODUCTION_ADVISORY']!['fs.repo.write'], 'DENY');
-  assert.equal(t1.profiles['STANDARD']!.modes['HARNESS_MAINTENANCE']!['ego.control-plane.edit'], 'ALLOW');
-  assert.equal(t1.profiles['HIGH_ASSURANCE']!.modes['HARNESS_MAINTENANCE']!['git.remote.push'], 'DENY');
+  assert.equal(t1.profiles['STANDARD']!.modes['EGO_MAINTENANCE']!['ego.control-plane.edit'], 'ALLOW');
+  assert.equal(t1.profiles['HIGH_ASSURANCE']!.modes['EGO_MAINTENANCE']!['git.remote.push'], 'DENY');
   assert.ok(t1.preDeniedCommandClasses.includes('git.remote.push'));
   assert.ok(t1.preDeniedCommandClasses.includes('production.k8s.mutate'));
   assert.ok(t1.organizationLocked.includes('forge.pr.merge'));

@@ -7,7 +7,7 @@ title: Harness self-governance and distribution
 # Harness self-governance and distribution
 
 Capabilities EGO exercises on itself. Editing the control plane, hook configuration or trust files is normal work only
-in the EGO repository under HARNESS_MAINTENANCE; everywhere else generated artifacts are regenerated, never edited.
+in the EGO repository under EGO_MAINTENANCE; everywhere else generated artifacts are regenerated, never edited.
 Human decision gates have no capability that opens them: answering a decision is a human act through the prompt hook.
 
 ## Allowed
@@ -27,6 +27,6 @@ Human decision gates have no capability that opens them: answering a decision is
 
 ## Denied
 
-- [x] `ego.control-plane.edit` — edit `control-plane/`, `policies/` baselines or trust files outside HARNESS_MAINTENANCE in the EGO repository.
-- [x] `ego.hooks.edit` — edit generated hook configuration outside HARNESS_MAINTENANCE in the EGO repository.
+- [x] `ego.control-plane.edit` — edit `control-plane/`, `policies/` baselines or trust files outside EGO_MAINTENANCE in the EGO repository.
+- [x] `ego.hooks.edit` — edit generated hook configuration outside EGO_MAINTENANCE in the EGO repository.
 - [x] `ego.decision.answer` — record a human decision from any tool, shell, file or subagent.

@@ -48,5 +48,5 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
 - [x] `fs.outside-workspace.write` — write files outside registered repositories and the EGO home.
 - [x] `fs.env-file.write` — write `.env` and similar local secret files.
 - [x] `fs.credential-store.read` — read SSH keys, cloud credential files, kubeconfig credentials, password stores, netrc, npmrc, pypirc.
-- [x] `fs.hook-config.write` — edit host hook or permission configuration (`.claude/settings*.json`, `.codex/**`, `.git/hooks/**`, `.husky/**`, `core.hooksPath`) outside HARNESS_MAINTENANCE in the EGO repository.
+- [x] `fs.hook-config.write` — edit host hook or permission configuration (`.claude/settings*.json`, `.codex/**`, `.git/hooks/**`, `.husky/**`, `core.hooksPath`) outside EGO_MAINTENANCE in the EGO repository.
 - [x] `fs.git-internals.write` — write inside `.git/` (refs, config, index, objects) from a file tool or a shell write; git operates on its internals through governed git commands only.

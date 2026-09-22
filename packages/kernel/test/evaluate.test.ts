@@ -43,7 +43,7 @@ test('shell segmentation handles operators, quotes and substitutions', () => {
 
 test('absolute denies win in every profile and mode, including compound commands', () => {
   for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE']) {
-    for (const mode of ['NORMAL_DELIVERY', 'HARNESS_MAINTENANCE', 'PRODUCTION_ADVISORY', 'BENCHMARK']) {
+    for (const mode of ['NORMAL_DELIVERY', 'EGO_MAINTENANCE', 'PRODUCTION_ADVISORY', 'BENCHMARK']) {
       const c = ctx({ profile, mode });
       assert.equal(bash('git push origin main', c).verdict, 'DENY', `${profile}/${mode}`);
       assert.equal(bash('git push --force', c).decisive?.capability, 'git.remote.push.force');

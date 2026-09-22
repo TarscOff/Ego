@@ -82,7 +82,7 @@ export function selfIsDevelopment(): boolean {
   return isDevelopmentVersion(selfVersion()) || !isBundled();
 }
 
-/** True when `dir` is the EGO source repository itself (HARNESS_MAINTENANCE is available only there). */
+/** True when `dir` is the EGO source repository itself (EGO_MAINTENANCE is available only there). */
 export function isEgoSourceRepository(dir: string): boolean {
   const pkg = join(dir, 'package.json');
   if (!isFile(pkg)) return false;
