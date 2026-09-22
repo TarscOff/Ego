@@ -1118,3 +1118,70 @@ test('round-14 residuals: Q98 target resolution takes the MOST RESTRICTIVE signa
     assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
   }
 })
+
+test('round-14 residuals: git long-option abbreviations, transport programs, awk/sed escapes, env-selected targets', () => {
+  const c = ctx();
+  // [1] git accepts any unambiguous abbreviation of a long option; every governed one is expanded before matching
+  assert.equal(bash('git branch --de --forc feature', c).decisive?.capability, 'git.local.branch.delete');
+  assert.equal(bash('git checkout --forc other', c).decisive?.capability, 'git.local.restore');
+  assert.equal(bash('git commit --amen -m x', c).decisive?.capability, 'git.local.amend');
+  assert.equal(bash('git clone --no-local --upload-pac=./evil.sh ./src dest', c).decisive?.capability, 'git.alias.inline');
+
+  // [2] git options that hand git a program to run, or that install hooks
+  assert.equal(bash('git clone --no-local -u ./evil.sh ./src dest', c).decisive?.capability, 'git.alias.inline');
+  assert.equal(bash('git merge-index ./evil.sh -a', c).decisive?.capability, 'git.alias.inline');
+  assert.equal(bash('git clone --template=./tpl ./src dest', c).decisive?.capability, 'git.hooks.bypass');
+  assert.equal(bash('git pull --no-verify --no-rebase origin main', c).decisive?.capability, 'git.hooks.bypass');
+  // a forcing refspec overwrites a local branch and destroys unpushed commits
+  assert.equal(
+    bash('git fetch origin +refs/heads/feature:refs/heads/feature', c).decisive?.capability,
+    'git.local.reset',
+  );
+  for (const cmd of ['git clone https://x/y.git', 'git fetch origin', 'git pull origin main', 'git commit -m x'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+
+  // [3] awk and sed escape to a shell through a pipe on either side of a quoted string, and through sed's `e`
+  for (const cmd of [
+    'awk \'BEGIN{"id" | getline}\'',
+    'awk \'BEGIN{ "rm -rf /" | getline x }\'',
+    'sed \'1e id\' file',
+    'awk -f ./evil.awk',
+    'rg --pre ./evil.sh pattern .',
+  ]) {
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+  }
+  for (const cmd of ['awk {print $1}', 'sed -n 1p file', 'rg pattern .', "sed 's/a/b/' f"])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+
+  // [4] an environment variable that SELECTS the database or cluster is part of the target, not noise
+  assert.equal(
+    bash('PGHOST=db.prod.acme.com psql -c "DROP TABLE users"', c).decisive?.capability,
+    'production.database.mutate',
+  );
+  assert.equal(bash('PGHOST=localhost psql -c "select 1"', c).verdict, 'ALLOW');
+  // a URI anywhere inside a token, not only at its start
+  assert.equal(
+    bash('flyway -url=jdbc:postgresql://prod-db.example.com:5432/app -user=admin migrate', c).decisive?.capability,
+    'production.database.mutate',
+  );
+  assert.equal(bash('flyway -url=jdbc:postgresql://localhost:5432/app migrate', c).verdict, 'ALLOW');
+
+  // [5] the short-option scan must not invent an option from a letter inside a value: rsync's `-t` is --times,
+  // not --target-directory, so the destination is still the last operand. (rsync itself has no matcher, so a
+  // harmless destination lands on command.unknown/ASK — what matters is that the destination is resolved.)
+  assert.equal(bash('rsync -avt src .git/hooks/', c).decisive?.capability, 'fs.git-internals.write');
+  assert.notEqual(bash('rsync -avt src dest', c).verdict, 'DENY');
+
+  // [6] wrappers, interpreters, forge and containers
+  assert.equal(bash('su -lc "rm -rf /" root', c).decisive?.capability, 'fs.destructive-root');
+  assert.notEqual(bash('python3 -uc "import os; os.system(\'git push origin main\')"', c).verdict, 'ALLOW');
+  assert.equal(bash('gh api -i -X DELETE repos/o/r', c).decisive?.capability, 'forge.api.mutate');
+  assert.equal(bash('gh api --method $M repos/o/r', c).decisive?.capability, 'forge.api.mutate');
+  assert.equal(bash('gh api repos/o/r', c).verdict, 'ALLOW');
+  // a bind mount hands the container the host path
+  assert.equal(
+    bash('docker run --rm -v ~:/h alpine cat /h/.ssh/id_rsa', c).decisive?.capability,
+    'fs.credential-store.read',
+  );
+  assert.equal(bash('docker run --rm -v ./src:/app alpine make', c).verdict, 'ALLOW');
+})

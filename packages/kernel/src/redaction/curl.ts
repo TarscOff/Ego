@@ -137,7 +137,9 @@ const OAUTH_FLAGS = new Set(['--oauth2-bearer']);
 export function redactCurl(text: string): CurlRedaction {
   const counts = new Map<string, number>();
   const bump = (k: string) => counts.set(k, (counts.get(k) ?? 0) + 1);
-  const lines = text.split('\n');
+  // a backslash-newline continuation joins the logical command: splitting on '\n' first hid every flag that sat on
+  // a continuation line, so `-u user:pass` on line 2 was never seen (round 14)
+  const lines = text.replace(/\\\r?\n[ \t]*/g, ' ').split('\n');
   const outLines = lines.map((line) => {
     // a curl inside a command substitution or assignment (`RESP=`curl -u u:p …``, `x=$(curl …)`) is still a curl
     if (!/(^|[\s;&|(`=$])curl(\s|$)/.test(line)) return line;
@@ -184,12 +186,12 @@ export function redactCurl(text: string): CurlRedaction {
           replacement = `-H${r}`;
           bump('curl.header');
         }
-      } else if (/^-[a-zA-Z]*u$/.test(t.raw) && !t.raw.startsWith('--')) {
+      } else if (/^-[a-zA-Z]*[uU]$/.test(t.raw) && !t.raw.startsWith('--')) {
         // a combined short-option cluster ending in `u` (`-sSu`, `-fsSLu`) takes the credentials as the NEXT token
         expect = 'user';
-      } else if (/^-[a-zA-Z]*u.+/.test(t.raw) && !t.raw.startsWith('--')) {
-        // glued credentials, plain (`-uUSER:PASS`) or after a cluster (`-sSuUSER:PASS`)
-        const at = t.value.indexOf('u', 1);
+      } else if (/^-[a-zA-Z]*[uU].+/.test(t.raw) && !t.raw.startsWith('--')) {
+        // glued credentials, plain (`-uUSER:PASS`) or after a cluster (`-sSuUSER:PASS`); `-U` is --proxy-user
+        const at = Math.max(t.value.indexOf('u', 1), t.value.indexOf('U', 1));
         replacement = `${t.value.slice(0, at + 1)}${redactUserPass(t.value.slice(at + 1))}`;
         bump('curl.user');
       } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t.value)) {

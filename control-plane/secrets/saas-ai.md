@@ -33,6 +33,42 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:sendgrid-key]'
+  - id: saas.xai
+    name: xAI API key
+    pattern: '\bxai-[A-Za-z0-9]{60,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:xai-key]'
+  - id: saas.perplexity
+    name: Perplexity API key
+    pattern: '\bpplx-[A-Za-z0-9]{40,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:perplexity-key]'
+  - id: saas.langsmith
+    name: LangSmith API key
+    pattern: '\blsv2_(pt|sk)_[A-Za-z0-9]{32}_[A-Za-z0-9]{10}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:langsmith-key]'
+  - id: saas.pinecone
+    name: Pinecone API key
+    pattern: '\bpcsk_[A-Za-z0-9_]{40,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:pinecone-key]'
+  - id: saas.notion-internal
+    name: Notion internal integration token
+    pattern: '\bsecret_[A-Za-z0-9]{43}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:notion-token]'
+  - id: saas.linear-oauth
+    name: Linear OAuth token
+    pattern: '\blin_oauth_[A-Za-z0-9]{40,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:linear-oauth]'
   - id: saas.replicate
     name: Replicate API token
     pattern: '\br8_[A-Za-z0-9]{37,}\b'

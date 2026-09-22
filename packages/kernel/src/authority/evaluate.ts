@@ -218,7 +218,7 @@ export function splitShellSegments(command: string): string[] {
 function operandWrapperBody(tokens: string[], from: number): string | null {
   for (let i = from + 1; i < tokens.length; i++) {
     const t = tokens[i]!;
-    if (t === '-c' || t === '--command' || t === '--session-command') return tokens[i + 1] ?? null;
+    if (t === '--command' || t === '--session-command' || /^-[a-zA-Z]*c$/.test(t)) return tokens[i + 1] ?? null;
     const m = /^(?:--command|--session-command)=([\s\S]*)$/.exec(t);
     if (m) return m[1]!;
   }
@@ -228,11 +228,16 @@ function operandWrapperBody(tokens: string[], from: number): string | null {
 export function normalizeSegment(segment: string): string[] {
   let s = segment.trim();
   const extra: string[] = [];
+  // Assignments that SELECT THE TARGET of a database or Kubernetes client are not noise: stripping them made
+  // `PGHOST=prod-db psql -c "DROP TABLE users"` read as the local socket (round 14). They are re-attached below so
+  // the target resolver sees them, and are judged nowhere else.
+  const targetEnv: string[] = [];
   // leading VAR=value assignments: stripped, except the ones that change what runs (surfaced as `env-inject VAR`)
   for (;;) {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"[^"]*"|\S*)\s+/.exec(s);
     if (!m) break;
     if (ENV_INJECT_RE.test(m[1]!)) extra.push(`env-inject ${m[1]}`);
+    if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
     s = s.slice(m[0].length);
   }
   const tokens = tokenize(s);
@@ -336,10 +341,34 @@ export function normalizeSegment(segment: string): string[] {
     head = head.slice(head.lastIndexOf('/') + 1);
     rest = [head, ...rest.slice(1)];
   }
+  // git long options may be abbreviated: expand them before any matcher or flag test looks at them
+  if (head === 'git') rest = expandGitAbbreviations(rest);
+  if (targetEnv.length && TARGET_ENV_HEADS.has(head)) rest = [...rest, ...targetEnv];
   const stripped = stripToolGlobalOptions(head, rest);
   rest = stripped.rest;
   extra.push(...stripped.extra);
   return [...extra, ...normalizeTail(rest)];
+}
+
+/** git accepts any UNAMBIGUOUS abbreviation of a long option, so `--no-verif`, `--forc`, `--amen` and `--de` all work.
+ *  Every governance-relevant option is expanded to its canonical spelling before matching; accepting an abbreviation
+ *  that git would reject as ambiguous is fail-closed, never fail-open. */
+const GIT_LONG_OPTS = [
+  '--no-verify', '--force', '--force-with-lease', '--delete', '--amend', '--upload-pack', '--receive-pack',
+  '--exec', '--template', '--discard-changes', '--prune', '--mirror', '--tags', '--all', '--hard', '--no-edit',
+  '--set-upstream', '--unset-upstream', '--move', '--copy', '--config-env', '--global', '--system', '--unset',
+];
+function expandGitAbbreviations(tokens: string[]): string[] {
+  return tokens.map((t) => {
+    const m = /^(--[a-z][a-z-]*)(=.*)?$/s.exec(t);
+    if (!m) return t;
+    const [, name, value = ''] = m;
+    if (GIT_LONG_OPTS.includes(name!)) return t;
+    const hits = GIT_LONG_OPTS.filter((o) => o.startsWith(name!));
+    // `--de` prefixes both --delete and --discard-changes: expanding to the FIRST governed match keeps the deny,
+    // which is the safe direction. git itself would refuse the ambiguity, so nothing legitimate is lost.
+    return hits.length ? hits[0]! + value : t;
+  });
 }
 
 /** Rejoins argv tokens into a command string, re-quoting any token that carries whitespace or a shell operator, so a
@@ -475,6 +504,8 @@ const GIT_GLOBAL_WITH_ARG = new Set([
 ]);
 /** gh / glab flags that take a value (so the next token is not a verb) */
 const FORGE_VALUE_FLAGS = new Set([
+  // NB: gh's `-i` is --include (a boolean) and must NOT be listed here; listing it made `gh api -i -X DELETE`
+  // consume `-X` as its value and hid the method from the mutation matcher (round 14).
   '-R',
   '--repo',
   '--hostname',
@@ -517,7 +548,6 @@ const FORGE_VALUE_FLAGS = new Set([
   '--field',
   '-X',
   '--method',
-  '-i',
   '--input',
   '--cache',
   '-c',
@@ -636,7 +666,9 @@ export function redirectionTargets(segment: string): string[] {
   const out: string[] = [];
   // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
-  const unglued = segment.replace(/([^\s&|<>])(>{1,2})/g, '$1 $2');
+  // a backslash-newline continuation is erased by the shell before it opens the file, so erase it first too
+  const joined = segment.replace(/\\\r?\n[ \t]*/g, ' ');
+  const unglued = joined.replace(/([^\s&|<>])(>{1,2})/g, '$1 $2');
   // a target is a run of quoted and unquoted chunks: `"control-plane"/permissions/x`, `control-plan\e/x`, 'a b'/c
   const re = /(?:^|\s)(?:\d?>>?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
   let m: RegExpExecArray | null;
@@ -1022,6 +1054,9 @@ function optionValue(tokens: string[], short: string, longs: string[]): string |
     if (!short || !t.startsWith('-') || t.startsWith('--')) continue;
     const at = t.indexOf(short, 1);
     if (at < 0) continue;
+    // the characters between the dash and the option letter must themselves be option letters: without this, the
+    // `h` inside `-url=jdbc:postgresql://localhost:5432/app` reads as `-h` and invents a host (round 14)
+    if (!/^-[A-Za-z]*$/.test(t.slice(0, at))) continue;
     const glued = t.slice(at + 1);
     if (glued) return glued;
     return tokens[i + 1] ?? null;
@@ -1526,6 +1561,14 @@ function opaqueHit(
 // shared cluster is an external effect; with no resolvable target it is TARGET_UNCLASSIFIED, never a silent "local".
 // ---------------------------------------------------------------------------------------------------------------
 
+/** Environment variables that choose which database or cluster a client talks to. */
+const TARGET_ENV_RE =
+  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|CLICKHOUSE_HOST)$/;
+const TARGET_ENV_HEADS = new Set([
+  'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
+  'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
+]);
+
 const K8S_MUTATING_VERBS = new Set([
   'apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon',
   'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward',
@@ -1584,6 +1627,9 @@ function optionValues(tokens: string[], short: string, longs: string[]): string[
     if (matched || !short || !t.startsWith('-') || t.startsWith('--')) continue;
     const at = t.indexOf(short, 1);
     if (at < 0) continue;
+    // the characters between the dash and the option letter must themselves be option letters: without this, the
+    // `h` inside `-url=jdbc:postgresql://localhost:5432/app` reads as `-h` and invents a host (round 14)
+    if (!/^-[A-Za-z]*$/.test(t.slice(0, at))) continue;
     const glued = t.slice(at + 1);
     if (glued) out.push(glued);
     else if (tokens[i + 1] !== undefined) out.push(tokens[i + 1]!);
@@ -1635,6 +1681,10 @@ function resolveK8sTarget(
   };
   add(optionValues(tokens, '', ['--context', '--kube-context']), targets.k8sLocalContexts, 'context');
   add(optionValues(tokens, '', ['--kubeconfig']), [], 'kubeconfig');
+  for (const t of tokens) {
+    const env = /^(KUBECONFIG|KUBERNETES_MASTER)=(.+)$/.exec(t);
+    if (env) signals.push({ cls: classifyTargetName(env[2]!, [], targets), target: env[1]! + '=' + env[2]! });
+  }
   add(optionValues(tokens, '', ['--server', '--kube-apiserver', '-s']), [], 'server');
   for (const ns of optionValues(tokens, 'n', ['--namespace']))
     if (!isOpaqueTarget(ns) && hasProductionMarker(ns, targets.productionMarkers))
@@ -1662,10 +1712,16 @@ function resolveDbTarget(
     signals.push({ cls: classifyTargetName(v, targets.dbLocalHosts, targets), target: `${kind} ${v}` });
 
   for (const t of tokens) {
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) {
-      if (isOpaqueTarget(t)) signals.push({ cls: 'UNCLASSIFIED', target: t });
-      else push(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]*@)?\[?([^\]:/?\s]+)\]?/i.exec(t)?.[1] ?? '', 'uri host');
+    // a URI anywhere in the token, not only at its start: `-url=jdbc:postgresql://prod-db/app` hid the host
+    for (const m of t.matchAll(/[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]*@)?\[?([^\]:/?\s]+)\]?/gi)) {
+      if (isOpaqueTarget(m[0]!)) signals.push({ cls: 'UNCLASSIFIED', target: m[0]! });
+      else push(m[1] ?? '', 'uri host');
     }
+    // an environment variable that selects the server, re-attached by normalizeSegment
+    const env = /^(PGHOST|PGHOSTADDR|MYSQL_HOST|REDIS_HOST|CLICKHOUSE_HOST)=(.+)$/.exec(t);
+    if (env) push(env[2]!, env[1]! + '=');
+    if (/^(PGSERVICE|PGURI|DATABASE_URL|REDIS_URL|MONGODB_URI|MONGO_URL)=/.test(t) && !/:\/\//.test(t))
+      signals.push({ cls: 'UNCLASSIFIED', target: t.split('=')[0]! });
     // libpq / MySQL keyword-value conninfo: `psql "host=db.acme.com dbname=app"` names the host without a URI
     for (const m of t.matchAll(/(?:^|[\s"'])host(?:addr)?\s*=\s*([^\s"';]+)/gi)) push(m[1]!, 'conninfo host');
     // a service name resolves through a file the kernel cannot read: unknowable, so never local
@@ -2073,7 +2129,11 @@ function classifyShellPaths(
       const operands = bareOperands(COPY_VALUE_OPTS);
       // `-t DIR` / `--target-directory=DIR` moves the destination off the operand list entirely: every operand is
       // then a source and DIR is what gets written (round 13)
-      const targetDir = optionValue(tokens, 't', ['--target-directory']);
+      const targetDir = optionValue(
+        tokens,
+        ['cp', 'install', 'mv', 'gcp', 'gmv'].includes(head) ? 't' : '',
+        ['--target-directory'],
+      );
       // cpio -p reads its file list from stdin and copies INTO its sole operand; cp/rsync/... write the last operand
       dest = targetDir
         ? targetDir

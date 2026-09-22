@@ -281,3 +281,51 @@ test('round-13 residuals: provider detectors, sensitive file names and curl cred
   }
   assert.equal(redactCurl('curl https://example.com/plain').findings.length, 0);
 });
+
+test('round-14 residuals: aliased and spaced secret key names, more providers, curl continuation and -U', () => {
+  const AWS = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+  // the key name may be spaced (an `aws configure` transcript), carry a CLI prompt default, or use a short alias
+  for (const s of [
+    `AWS Secret Access Key [None]: ${AWS}`,
+    `AWS_SECRET_KEY=${AWS}`,
+    `aws_secret_key: ${AWS}`,
+  ]) {
+    const r = redact(s, detectors);
+    assert.ok(r.blocked && !r.text.includes(AWS), `must block: ${s.slice(0, 40)}`);
+  }
+  // a warn-level generic assignment must not swallow a PEM block and destroy its anchor
+  const pem =
+    'GOOGLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n-----END PRIVATE KEY-----';
+  const r = redact(pem, detectors);
+  assert.ok(r.blocked && !r.text.includes('MIIEvQIBADAN'), 'the private key block must still be found');
+  assert.ok(r.findings.some((f) => f.detector === 'infra.private-key-block'));
+
+  const MORE: Array<[string, string]> = [
+    ['gitlab feature-flag token', 'glffct-9f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c'],
+    ['notion internal token', 'secret_9f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2bX'],
+    ['linear oauth token', 'lin_oauth_0123456789abcdef0123456789abcdef01234567890a'],
+    ['xai key', 'xai-9f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c6d5e'],
+    ['perplexity key', 'pplx-9f3a2b1c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c'],
+    ['sonarqube token', 'sqp_0123456789abcdef0123456789abcdef01234567'],
+    ['cloudinary url', 'cloudinary://123456789012345:abcdefghijklmnopqrstuvwxyz1@mycloud'],
+    ['authorization with a scheme', 'Authorization: SSWS 00QCjAl4MlV-WPXMRNmFwVzp8QMNvHOK0F5IGKtGiE'],
+    ['kube token as JSON', '{"user":{"token":"kubernetes-dashboard-token-abcdefghij"}}'],
+  ];
+  for (const [name, secret] of MORE) {
+    const out = redact(secret, detectors);
+    assert.ok(out.blocked, `must block: ${name}`);
+  }
+  assert.equal(redact('normal text with no secret at all', detectors).blocked, false);
+
+  // curl: a backslash-newline continuation is one logical command, and -U is --proxy-user
+  const PW = 'Qp7nRt3Wz9Lk2Vb4';
+  for (const line of [
+    `curl -sS \\\n  -u svc-ci:${PW} \\\n  https://artifacts.example.com/y.tgz`,
+    `curl -sSU svc-proxy:${PW} -x proxy.corp:3128 https://artifacts.example.com`,
+    `curl --proxy-user alice:${PW} https://x`,
+  ]) {
+    const out = redactCurl(line);
+    assert.ok(!out.text.includes(PW), `must redact: ${line.slice(0, 40)}`);
+    assert.ok(out.findings.some((f) => f.kind === 'curl.user'));
+  }
+});

@@ -91,7 +91,7 @@ matchers:
     command: '^git\s+commit\b.*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+(push|merge)\b.*\s--no-verify\b'
+    command: '^git\s+(push|merge|pull|rebase|cherry-pick|revert|am)\b.*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
     # `-c core.hooksPath=…` is a bypass wherever it sits, including AFTER the verb (`git clone -c core.hooksPath=…`,
@@ -150,6 +150,10 @@ matchers:
   - capability: forge.api.mutate
     tool: Bash
     command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
+  - capability: forge.api.mutate
+    tool: Bash
+    # the method arrives from a variable or a substitution: it cannot be shown to be a read, so it fails closed
+    command: '^(gh|glab)\s+api\b(?=.*\s(-X|--method|--request)(\s+|=)?[$`])'
   - capability: forge.repo.read
     tool: Bash
     command: '^(gh\s+(repo\s+view|api)|glab\s+(repo\s+view|api))\b'
@@ -349,6 +353,22 @@ matchers:
   - capability: git.alias.inline
     tool: Bash
     command: '^git\b[^|;&]*\s(--upload-pack|--receive-pack|--exec)(=|\s)'
+  # `-u` is the short form of --upload-pack for the transport verbs (it means something else for push/stash)
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\s+(clone|fetch|ls-remote|pull)\b[^|;&]*\s-u\s+\S'
+  # merge-index runs the program named as its first operand
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\s+merge-index\b'
+  # a clone template directory is copied into .git, hooks included: it installs hooks that then run
+  - capability: git.hooks.bypass
+    tool: Bash
+    command: '^git\s+(clone|init)\b[^|;&]*\s--template(=|\s)'
+  # a forcing refspec (leading +) overwrites a local branch, destroying unpushed commits
+  - capability: git.local.reset
+    tool: Bash
+    command: '^git\s+(fetch|pull)\b[^|;&]*\s\+\S+:\S'
   - capability: git.local.branch.delete
     tool: Bash
     command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*[dD]|--delete)\b'
@@ -446,6 +466,11 @@ matchers:
   - capability: container.inspect
     tool: Bash
     command: '^(docker|podman)\s+(ps|images|inspect|logs|top|stats|version|info|image\s+ls)\b'
+  # a bind mount hands the container the host path: mounting home, the filesystem root or a credential directory
+  # reads it just as surely as `cat` would (round 14)
+  - capability: fs.credential-store.read
+    tool: Bash
+    command: '^(docker|podman)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|[^:\s]*\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
   - capability: container.registry.push
     tool: Bash
     command: '^(docker|podman)\s+(push\b|buildx\s+build\b[^|;&]*--push)'
@@ -500,14 +525,24 @@ matchers:
   # awk and sed are read-only only while their program neither escapes to a shell nor writes a file
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place)'
+    # a pipe on EITHER side of a quoted string inside an awk program is a shell command (`"cmd" | getline`,
+    # `print | "cmd"`); sed's `e` command and the s///e flag execute their result; `w` writes a file
+    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|[0-9$]\s*e\s|s/[^/]*/[^/]*/[a-z]*e)'
+  # a program supplied by FILE is opaque: it is judged like any other script, not as a read-only one-liner
+  - capability: command.interpreter-script
+    tool: Bash
+    command: '^(awk|gawk|mawk|nawk|sed)\b[^|;&]*\s(-f|--file|--source)(=|\s)'
+  # read-only search tools that can hand a file to an arbitrary program
+  - capability: command.interpreter-script
+    tool: Bash
+    command: '^(rg|ripgrep|grep|ag)\b[^|;&]*\s(--pre|--hostname-bin|--pre-glob)(=|\s)'
   - capability: command.read-only
     tool: Bash
     command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history)\b|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+--version\b)'
   # interposed interpreter options (`python3 -u -c`, `node --no-warnings -e`) must not escape the ^-anchored match
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(?:(?:node|nodejs|deno|bun|tsx|ts-node)\s+(?:-[-\w=.]+\s+)*(?:-e|--eval|-p|--print)|(?:python3?|ruby|perl|php|Rscript)\s+(?:-[-\w=.]+\s+)*(?:-c|-e|-r|-E))\b'
+    command: '^(?:(?:node|nodejs|deno|bun|tsx|ts-node)\s+(?:-[-\w=.]+\s+)*(?:-e|--eval|-p|--print|-[A-Za-z]*e)|(?:python3?|ruby|perl|php|Rscript)\s+(?:-[-\w=.]+\s+)*(?:-c|-e|-r|-E|-[A-Za-z]*[cerE]))\b'
   - capability: command.interpreter-script
     tool: Bash
     command: '^(node|python3?|tsx|ts-node|bun|deno\s+run|ruby|perl|php)\s+(?!-)[^\s]+\.(js|mjs|cjs|ts|mts|py|rb|pl|php)\b'
