@@ -175,25 +175,25 @@ test('runtime state, generated artifacts, hooks and git internals cannot be writ
 
 test('every spelling of the hook entry points is gate bypass', () => {
   for (const cmd of [
-    'harness hook claude-code UserPromptSubmit',
+    'ego hook claude-code UserPromptSubmit',
     'echo "{}" | ego hook claude-code UserPromptSubmit',
     'sh .harness/hooks/ego-hook.sh claude-code UserPromptSubmit',
     'sh "$CLAUDE_PROJECT_DIR/.harness/hooks/ego-hook.sh" claude-code SessionStart',
     `node ${home}/runtimes/abc/dist/ego.js hook claude-code UserPromptSubmit`,
     'node dist/ego.js hook codex-cli PreToolUse',
     'node bin/harness.js hook claude-code Stop',
-    'npx harness hook claude-code UserPromptSubmit',
+    'npx ego hook claude-code UserPromptSubmit',
     'npx @tarscoff/ego hook claude-code UserPromptSubmit',
-    'harness budget extend --session s1 --tool-calls 9999',
-    'harness modes set HARNESS_MAINTENANCE --session s1',
-    'harness sources add file:/tmp/x',
+    'ego budget extend --session s1 --tool-calls 9999',
+    'ego modes set HARNESS_MAINTENANCE --session s1',
+    'ego sources add file:/tmp/x',
     '$(which harness) hook claude-code UserPromptSubmit',
   ]) {
     const r = bash(cmd);
     assert.equal(r.verdict, 'DENY', cmd);
     assert.equal(r.decisive?.capability, 'harness.gate.bypass', cmd);
   }
-  assert.equal(bash('harness status').verdict, 'ASK');
+  assert.equal(bash('ego status').verdict, 'ASK');
 });
 
 test('an EGO_HOME under the home directory is still protected against symlinked spellings', () => {
@@ -450,7 +450,7 @@ test('round-4 residuals: env -S command carrier, pax destination, carried sh -c,
     'env -S "gh pr merge 3"',
     'env -S "kubectl delete pod x -n production"',
     'env -S "cat ~/.ssh/id_rsa"',
-    'env -S "harness hook claude-code UserPromptSubmit"',
+    'env -S "ego hook claude-code UserPromptSubmit"',
     'env -S "cp forged.json .harness/generated/policy.json"',
   ]) {
     const r = bash(cmd, c);

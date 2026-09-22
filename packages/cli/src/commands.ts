@@ -84,7 +84,7 @@ export const PHASE_LATER: Record<string, string> = {
   conformance: 'phase 6',
   upgrade: 'phase 6 (upgrade protocol)',
   rollback: 'phase 6 (rollback protocol)',
-  verify: 'phase 6 (`harness verify --range`)',
+  verify: 'phase 6 (`ego verify --range`)',
 };
 
 export async function runCommand(argv: string[], io: CliIo, project: ProjectContext | null): Promise<number> {
@@ -92,7 +92,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
   const { positional, flags } = parseFlags(rest);
   if (project && project.prePromotion && !PRE_PROMOTION_SET.has(cmd)) {
     io.err(
-      `EGO: profile ${project.pin.profile} permits only the pre-promotion set until the pinned runtime reaches signed-release trust (Q96). Run \`harness sync\`; \`harness doctor\` shows the trust transition.`,
+      `EGO: profile ${project.pin.profile} permits only the pre-promotion set until the pinned runtime reaches signed-release trust (Q96). Run \`ego sync\`; \`ego doctor\` shows the trust transition.`,
     );
     return 2;
   }
@@ -117,7 +117,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
       const r = runDoctor(dopts);
       io.out(formatDoctor(r));
       io.out(
-        r.ok ? 'next: `harness status`' : 'next: fix the NOT SATISFIED lines, then `harness doctor` again',
+        r.ok ? 'next: `ego status`' : 'next: fix the NOT SATISFIED lines, then `ego doctor` again',
       );
       return r.ok ? 0 : 1;
     }
@@ -157,18 +157,18 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
       const later = PHASE_LATER[cmd];
       if (later) {
         io.err(
-          `harness ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`,
+          `ego ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`,
         );
         return 2;
       }
-      io.err(`unknown command "${cmd}". Try \`harness help\`.`);
+      io.err(`unknown command "${cmd}". Try \`ego help\`.`);
       return 2;
     }
   }
 }
 
 function notInitialized(io: CliIo): number {
-  io.err('not initialized; run `harness init`');
+  io.err('not initialized; run `ego init`');
   return 2;
 }
 
@@ -179,7 +179,7 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
     io.out(
       isFile(doc)
         ? (readTextIfExists(doc) ?? '')
-        : 'Installation docs ship with the runtime under docs/installation/ (authored in a later phase). Online: `npm install -g @tarscoff/ego` then `harness init`. Offline: `npm install -g ./ego-X.Y.Z.tgz`, `harness distribution import <bundle>`, `harness init --offline`.',
+        : 'Installation docs ship with the runtime under docs/installation/ (authored in a later phase). Online: `npm install -g @tarscoff/ego` then `ego init`. Offline: `npm install -g ./ego-X.Y.Z.tgz`, `ego distribution import <bundle>`, `ego init --offline`.',
     );
     return 0;
   }
@@ -188,8 +188,8 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
     const det = detectProject(io.cwd);
     lines.push(
       `You are ${det.gitRoot ? `in ${det.gitRoot} (not initialized)` : 'outside a git repository'}.`,
-      'What you can do now: `harness init` (in a git checkout), `harness version`, `harness bootstrap doctor`, `harness distribution verify <tarball>`, `harness help installation`.',
-      'Next: `harness init`',
+      'What you can do now: `ego init` (in a git checkout), `ego version`, `ego bootstrap doctor`, `ego distribution verify <tarball>`, `ego help installation`.',
+      'Next: `ego init`',
       'Say: "Initialize EGO."',
     );
   } else {
@@ -197,10 +197,10 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
     lines.push(
       `You are in ${project.root}, governed by EGO ${project.pin.version} (${project.pin.integrity.slice(0, 12)}), profile ${project.pin.profile}, task source ${project.pin.taskSource ?? 'ad-hoc'}, trust ${idx.trust ?? 'none'}.`,
       project.prePromotion
-        ? 'Only the pre-promotion set is available until `harness sync` promotes trust.'
+        ? 'Only the pre-promotion set is available until `ego sync` promotes trust.'
         : 'Available now: `status`, `doctor`, `check`, `capabilities`, `explain capability <id>`, `modes`, `context explain`, `sources`, `budget extend`, `redact`, `sync`, `version`.',
       'Coming in later phases: tasks and issues (2), skills and catalog (3), grilling and benchmark (4), policies and decisions (5), upgrade and conformance (6).',
-      'Next: `harness status`',
+      'Next: `ego status`',
       'Say: "Is EGO healthy?"',
     );
   }
@@ -248,7 +248,7 @@ function init(io: CliIo, flags: Record<string, string | boolean>): number {
     `generated: ${r.generated.join(', ')}`,
     '',
     r.doctorText,
-    'next: `harness doctor` any time; `harness help` for what you can do here',
+    'next: `ego doctor` any time; `ego help` for what you can do here',
     'Say: "What can I do here?"',
   ];
   io.out(lines.join('\n'));
@@ -278,7 +278,7 @@ function status(io: CliIo, project: ProjectContext | null): number {
         `  ${s.sessionId} on ${s.host} mode ${s.mode} grants [${s.grants.join(', ')}] tool calls ${s.counters.toolCalls} network ${s.counters.networkOperations} subagents ${s.counters.concurrentSubagents}${s.budgetState ? ` BUDGET ${s.budgetState.action}` : ''}${s.activeCorrections.length ? ` corrections ${s.activeCorrections.length}` : ''}`,
     ),
     'decisions waiting: none (decision gate lands in phase 5)',
-    'next: `harness help`',
+    'next: `ego help`',
   ];
   io.out(lines.join('\n'));
   return 0;
@@ -313,7 +313,7 @@ function capabilities(
     const c = table.capabilities[id]!;
     io.out(`${v.padEnd(5)} ${id}${c.lock !== 'none' ? ` [${c.lock}]` : ''} — ${c.description}`);
   }
-  io.out('next: `harness explain capability <id>`');
+  io.out('next: `ego explain capability <id>`');
   return 0;
 }
 
@@ -326,13 +326,13 @@ function explain(
   if (!project) return notInitialized(io);
   const [what, id] = positional;
   if (what !== 'capability' || !id) {
-    io.err('usage: harness explain capability <id>');
+    io.err('usage: ego explain capability <id>');
     return 2;
   }
   const table = tableFor(project);
   const c = table.capabilities[id];
   if (!c) {
-    io.err(`unknown capability "${id}"; see \`harness capabilities\``);
+    io.err(`unknown capability "${id}"; see \`ego capabilities\``);
     return 2;
   }
   const profile = flagString(flags, 'profile') ?? project.pin.profile;
@@ -370,7 +370,7 @@ function explain(
     lines.push(
       'This is an organization-locked deny: only the organization policy layer (policies/organization/permissions.md in the governance repository) can widen it; overlays, grants, modes, skills and models never can.',
     );
-  lines.push(`next: \`harness capabilities ${c.family}\` for profile ${profile}`);
+  lines.push(`next: \`ego capabilities ${c.family}\` for profile ${profile}`);
   io.out(lines.join('\n'));
   return 0;
 }
@@ -388,7 +388,7 @@ function modes(
     const mode = positional[1];
     const sessionId = flagString(flags, 'session');
     if (!mode || !sessionId) {
-      io.err('usage: harness modes set <MODE> --session <id> (a human act from your own terminal)');
+      io.err('usage: ego modes set <MODE> --session <id> (a human act from your own terminal)');
       return 2;
     }
     if (isAgentShell(io.env)) {
@@ -431,7 +431,7 @@ function modes(
     'Intents (audit, documentation, grilling-room, harness-upgrade, policy-review, workspace-discovery) route work and never change authority.',
   );
   io.out(
-    'next: put `EGO MODE: <MODE>` on its own line in a prompt (HARNESS_MAINTENANCE only in the EGO repository), or `harness modes set <MODE> --session <id>`',
+    'next: put `EGO MODE: <MODE>` on its own line in a prompt (HARNESS_MAINTENANCE only in the EGO repository), or `ego modes set <MODE> --session <id>`',
   );
   return 0;
 }
@@ -439,7 +439,7 @@ function modes(
 function context(io: CliIo, project: ProjectContext | null, positional: string[]): number {
   if (!project) return notInitialized(io);
   if (positional[0] !== 'explain') {
-    io.err('usage: harness context explain');
+    io.err('usage: ego context explain');
     return 2;
   }
   const inv = contextInventory(project.root, project.pin, tableFor(project));
@@ -449,7 +449,7 @@ function context(io: CliIo, project: ProjectContext | null, positional: string[]
       `${i.loaded ? 'LOADED    ' : 'NOT LOADED'} ~${String(i.tokens).padStart(5)} ${i.item}: ${i.reason}`,
     );
   io.out(
-    'next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `harness init`',
+    'next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `ego init`',
   );
   return 0;
 }
@@ -460,7 +460,7 @@ function sources(io: CliIo, project: ProjectContext | null, positional: string[]
   if (!sub || sub === 'list') {
     for (const s of project.pin.sources) io.out(s);
     io.out(
-      'order governs acquisition; any release-metadata source may promote trust. next: `harness sources add file:/path/to/releases`',
+      'order governs acquisition; any release-metadata source may promote trust. next: `ego sources add file:/path/to/releases`',
     );
     return 0;
   }
@@ -469,7 +469,7 @@ function sources(io: CliIo, project: ProjectContext | null, positional: string[]
     return 2;
   }
   if (!value) {
-    io.err('usage: harness sources add|remove <source>');
+    io.err('usage: ego sources add|remove <source>');
     return 2;
   }
   parseSource(value);
@@ -481,7 +481,7 @@ function sources(io: CliIo, project: ProjectContext | null, positional: string[]
       : [...project.pin.sources, value];
   else if (sub === 'remove') base.sources = project.pin.sources.filter((s) => s !== value);
   else {
-    io.err('usage: harness sources add|remove <source>');
+    io.err('usage: ego sources add|remove <source>');
     return 2;
   }
   writePin(project.root, base);
@@ -498,7 +498,7 @@ function budget(
   if (!project) return notInitialized(io);
   if (positional[0] !== 'extend') {
     io.err(
-      'usage: harness budget extend --session <id> [--tool-calls N] [--iterations N] [--duration-minutes N] [--network-operations N] [--retries N] [--subagents N] [--delegation-depth N]',
+      'usage: ego budget extend --session <id> [--tool-calls N] [--iterations N] [--duration-minutes N] [--network-operations N] [--retries N] [--subagents N] [--delegation-depth N]',
     );
     return 2;
   }
@@ -510,7 +510,7 @@ function budget(
   }
   const sessionId = flagString(flags, 'session');
   if (!sessionId) {
-    io.err('--session <id> is required (see `harness status`)');
+    io.err('--session <id> is required (see `ego status`)');
     return 2;
   }
   const root = openRuntimeRoot(
@@ -570,7 +570,7 @@ function hook(io: CliIo, project: ProjectContext | null, positional: string[]): 
   }
   if (!host || !event || !isHostId(host) || !isHookEventName(event)) {
     io.err(
-      'usage: harness hook <claude-code|codex-cli> <HookEvent> (payload on stdin) | harness hook git <pre-commit|pre-push>',
+      'usage: ego hook <claude-code|codex-cli> <HookEvent> (payload on stdin) | ego hook git <pre-commit|pre-push>',
     );
     return 2;
   }

@@ -179,11 +179,11 @@ function handleLocked(
           : '',
         launcher
           ? ''
-          : 'WARNING: the `harness` launcher is not resolvable on PATH; hook shims fail closed until it is.',
+          : 'WARNING: the `ego` launcher is not resolvable on PATH; hook shims fail closed until it is.',
         ev.source === 'compact' || ev.source === 'resume'
-          ? 'Resumed: durable task state, not this transcript, is the source of truth. Run `harness status` before continuing.'
+          ? 'Resumed: durable task state, not this transcript, is the source of truth. Run `ego status` before continuing.'
           : '',
-        'Use `harness help` for what you can do here, `harness status` for the current state, `harness explain capability <id>` for any refusal.',
+        'Use `ego help` for what you can do here, `ego status` for the current state, `ego explain capability <id>` for any refusal.',
       ].filter(Boolean);
       ledger('session.start', {
         host: ev.host,
@@ -295,7 +295,7 @@ function handleLocked(
         writeSession(root, session);
         const what = bv.breaches.map((b) => `${b.dimension} ${b.observed} > ${b.limit}`).join(', ');
         ledger('budget.breach', { action: bv.action, breaches: bv.breaches, tool: tool.name });
-        const reason = `EGO execution budget exceeded (${what}); ${bv.action === 'BLOCK' ? 'governed tool calls are blocked' : 'human decision required'} until a human runs \`harness budget extend\` for this session.`;
+        const reason = `EGO execution budget exceeded (${what}); ${bv.action === 'BLOCK' ? 'governed tool calls are blocked' : 'human decision required'} until a human runs \`ego budget extend\` for this session.`;
         return {
           event: ev.event,
           action: bv.action === 'BLOCK' ? 'deny' : 'ask',
@@ -340,7 +340,7 @@ function handleLocked(
           summary,
           prePromotion: true,
         });
-        const reason = `EGO: profile ${rt.pin.profile} permits no governed mutation (${cap}) until the pinned runtime reaches signed-release trust; run \`harness sync\` (Q96).`;
+        const reason = `EGO: profile ${rt.pin.profile} permits no governed mutation (${cap}) until the pinned runtime reaches signed-release trust; run \`ego sync\` (Q96).`;
         return { event: ev.event, action: 'deny', reason, userMessage: reason, exitCode: 0 };
       }
       ledger('tool.pre', {
@@ -359,7 +359,7 @@ function handleLocked(
       };
       if (action === 'deny') {
         const cap = evaluation.decisive?.capability ?? 'unknown';
-        decision.userMessage = `EGO refused ${tool.name}: ${cap} is DENY. \`harness explain capability ${cap}\` explains why.`;
+        decision.userMessage = `EGO refused ${tool.name}: ${cap} is DENY. \`ego explain capability ${cap}\` explains why.`;
       }
       return decision;
     }

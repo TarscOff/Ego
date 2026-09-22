@@ -9,8 +9,7 @@
   },
   "type": "module",
   "bin": {
-    "harness": "bin/harness.js",
-    "ego": "bin/harness.js"
+    "ego": "bin/ego.js"
   },
   "files": [
     "bin/",

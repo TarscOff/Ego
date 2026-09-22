@@ -1,4 +1,4 @@
-// `harness check`: generated freshness, policy compilation, context budget, pin integrity. Exit non-zero on any failure.
+// `ego check`: generated freshness, policy compilation, context budget, pin integrity. Exit non-zero on any failure.
 import { join } from 'node:path';
 import { readPin } from '../launcher/pin.ts';
 import { selfIdentity, selfVersion, controlPlaneDir } from '../launcher/self.ts';
@@ -58,7 +58,7 @@ export function runCheck(projectRoot: string): CheckReport {
   });
   const manifest = readGeneratedManifest(projectRoot);
   if (!manifest)
-    items.push({ name: 'generated artifacts', ok: false, detail: 'manifest missing; run `harness init`' });
+    items.push({ name: 'generated artifacts', ok: false, detail: 'manifest missing; run `ego init`' });
   else {
     const stale: string[] = [];
     for (const [rel, hash] of Object.entries(manifest.files)) {
@@ -70,7 +70,7 @@ export function runCheck(projectRoot: string): CheckReport {
     for (const [rel, hash] of Object.entries(manifest.sources ?? {})) {
       const full = join(projectRoot, rel);
       const current = isFile(full) ? sha256Hex(readTextIfExists(full) ?? '') : null;
-      if (current !== hash) stale.push(`${rel} changed since generation (regenerate with \`harness init\`)`);
+      if (current !== hash) stale.push(`${rel} changed since generation (regenerate with \`ego init\`)`);
     }
     if (manifest.runtimeSha256 !== self.runtimeSha256)
       stale.push(
@@ -88,6 +88,6 @@ export function runCheck(projectRoot: string): CheckReport {
 export function formatCheck(r: CheckReport): string {
   return [
     ...r.items.map((i) => `${i.ok ? 'OK  ' : 'FAIL'} ${i.name}: ${i.detail}`),
-    r.ok ? 'check: PASSED' : 'check: FAILED (run `harness init` to regenerate, or fix the listed sources)',
+    r.ok ? 'check: PASSED' : 'check: FAILED (run `ego init` to regenerate, or fix the listed sources)',
   ].join('\n');
 }

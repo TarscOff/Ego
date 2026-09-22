@@ -22,10 +22,10 @@ if [ -n "$hooksdir" ]; then
     fi
   done
 fi
-if ! command -v harness >/dev/null 2>&1; then
-  echo "EGO: harness launcher not found on PATH; git $name check cannot run (failing closed)" >&2
+if ! command -v ego >/dev/null 2>&1; then
+  echo "EGO: ego launcher not found on PATH; git $name check cannot run (failing closed)" >&2
   exit 1
 fi
-if [ "$name" = "pre-push" ]; then printf '%s\n' "$input" | harness hook git "$name" "$@"
-else harness hook git "$name" "$@" </dev/null
+if [ "$name" = "pre-push" ]; then printf '%s\n' "$input" | ego hook git "$name" "$@"
+else ego hook git "$name" "$@" </dev/null
 fi

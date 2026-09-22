@@ -1,4 +1,4 @@
-// `harness doctor`: every guarantee reported as SATISFIED / NOT SATISFIED / SKIPPED / UNVERIFIED, never claimed.
+// `ego doctor`: every guarantee reported as SATISFIED / NOT SATISFIED / SKIPPED / UNVERIFIED, never claimed.
 import { join, resolve, sep } from 'node:path';
 import { detectProject } from './detect.ts';
 import { readPin, hasPin, type Pin } from '../launcher/pin.ts';
@@ -103,7 +103,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       'project',
       'pin',
       'NOT SATISFIED',
-      det.gitRoot ? 'not initialized; run `harness init`' : 'not a git repository',
+      det.gitRoot ? 'not initialized; run `ego init`' : 'not a git repository',
     );
     return { ok: false, lines, projectRoot: det.gitRoot };
   }
@@ -148,7 +148,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     requiresSigned
       ? isSignedTrust(pinTrust)
         ? `${pinTrust}`
-        : `trust is ${pinTrust ?? 'none'}; only the pre-promotion set runs until \`harness sync\` promotes it (Q96)`
+        : `trust is ${pinTrust ?? 'none'}; only the pre-promotion set runs until \`ego sync\` promotes it (Q96)`
       : 'STANDARD operates at any trust level with disclosure',
   );
   add(
@@ -159,7 +159,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       ? `${home.runtimes}/${pin.integrity.slice(0, 12)}…`
       : pinMatch
         ? 'executing from the equal launcher runtime'
-        : 'pinned runtime missing from the cache; run `harness sync`',
+        : 'pinned runtime missing from the cache; run `ego sync`',
   );
 
   // generated freshness and policy
@@ -177,7 +177,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       'policy',
       'pending widening',
       'NOT SATISFIED',
-      `${cache.pendingWidening.widenings.length} widening(s) in the layer files are not applied until a human runs \`harness init\` from their own terminal: ${cache.pendingWidening.widenings.slice(0, 3).join('; ')}`,
+      `${cache.pendingWidening.widenings.length} widening(s) in the layer files are not applied until a human runs \`ego init\` from their own terminal: ${cache.pendingWidening.widenings.slice(0, 3).join('; ')}`,
       false,
     );
   if (cache) {
@@ -198,7 +198,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     );
   }
   const manifest = readGeneratedManifest(root);
-  if (!manifest) add('generated', 'artifacts', 'NOT SATISFIED', 'no generated manifest; run `harness init`');
+  if (!manifest) add('generated', 'artifacts', 'NOT SATISFIED', 'no generated manifest; run `ego init`');
   else {
     const stale = [
       ...Object.entries(manifest.files)
@@ -245,7 +245,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
         ? h === 'claude-code'
           ? '.claude/settings.json'
           : '.codex/hooks.json'
-        : 'missing; run `harness init`',
+        : 'missing; run `ego init`',
       h === 'claude-code',
     );
     add(
@@ -274,10 +274,10 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     'git hooks',
     insideRepo && hooks.ok ? 'SATISFIED' : 'NOT SATISFIED',
     !insideRepo
-      ? `core.hooksPath comes from the global git configuration and resolves outside this repository (${hooks.dir}); EGO never writes there. Set a repository-local hooks path and run \`harness init\``
+      ? `core.hooksPath comes from the global git configuration and resolves outside this repository (${hooks.dir}); EGO never writes there. Set a repository-local hooks path and run \`ego init\``
       : hooks.ok
         ? `${hooks.dir.startsWith(root) ? hooks.dir.slice(root.length + 1) : hooks.dir}/pre-commit, pre-push (bypassable with --no-verify: backstop is \`harness verify --range\` on a protected branch, phase 6)`
-        : `${hooks.problems.join('; ')} (run \`harness init\`)`,
+        : `${hooks.problems.join('; ')} (run \`ego init\`)`,
     true,
   );
 

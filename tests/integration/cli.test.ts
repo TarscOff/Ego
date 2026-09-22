@@ -105,7 +105,7 @@ test('init → doctor → check → hooks → status on a fresh repository', asy
   assert.match(readFileSync(join(dir, '.gitignore'), 'utf8'), /\.harness\/runtime\//);
   // init again never re-pins
   const again = await run(['init'], dir, env);
-  assert.match(again.out, /pinned to .* \(installed .*\); use `harness upgrade` to change the pin/);
+  assert.match(again.out, /pinned to .* \(installed .*\); use `ego upgrade` to change the pin/);
   // STRICT is refused for a development identity
   const strict = await run(['init', '--profile', 'STRICT'], dir, env);
   assert.equal(strict.code, 2);
@@ -669,8 +669,8 @@ test('chained pre-existing pre-push hook cannot eat the ref list; a user hook wi
   spawnSync('chmod', ['+x', join(hooksDir, 'pre-push.pre-ego')]);
   // a fake launcher on PATH records what stdin the EGO check receives
   const fakeBin = mkdtempSync(join(tmpdir(), 'ego-fakebin-'));
-  writeFileSync(join(fakeBin, 'harness'), `#!/bin/sh\ncat > ${fakeBin}/seen.txt\nexit 0\n`);
-  spawnSync('chmod', ['+x', join(fakeBin, 'harness')]);
+  writeFileSync(join(fakeBin, 'ego'), `#!/bin/sh\ncat > ${fakeBin}/seen.txt\nexit 0\n`);
+  spawnSync('chmod', ['+x', join(fakeBin, 'ego')]);
   const r = spawnSync(
     '/bin/sh',
     [
@@ -714,7 +714,7 @@ test('init: --repin replaces a hand-edited pin only from a human shell; task sou
   writeFileSync(pinPath, readFileSync(pinPath, 'utf8').replace('profile: STANDARD', 'profile: STRICT'));
   const plain = await run(['init'], dir, env);
   assert.equal(plain.code, 2);
-  assert.match(plain.err, /harness init --repin/);
+  assert.match(plain.err, /ego init --repin/);
   assert.equal(
     (await run(['init', '--repin'], dir, { ...env, CLAUDECODE: '1' })).code,
     2,
@@ -948,8 +948,8 @@ test('custom hooks directory: user hooks keep their stdin and their language', a
   const init = await run(['init'], dir, env);
   assert.equal(init.code, 0, init.out);
   const fakeBin = mkdtempSync(join(tmpdir(), 'ego-fakebin-'));
-  writeFileSync(join(fakeBin, 'harness'), '#!/bin/sh\ncat >/dev/null\nexit 0\n');
-  spawnSync('chmod', ['+x', join(fakeBin, 'harness')]);
+  writeFileSync(join(fakeBin, 'ego'), '#!/bin/sh\ncat >/dev/null\nexit 0\n');
+  spawnSync('chmod', ['+x', join(fakeBin, 'ego')]);
   const pathEnv = { ...gitEnv(), PATH: `${fakeBin}:${process.env['PATH'] ?? '/usr/bin:/bin'}` } as Record<
     string,
     string

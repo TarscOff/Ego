@@ -1,5 +1,5 @@
 // Compiles the authored control plane plus overlays into the compiled authority table: the single generated object
-// that hooks evaluate, `harness capabilities` renders, `explain capability` justifies and CI diffs for
+// that hooks evaluate, `ego capabilities` renders, `explain capability` justifies and CI diffs for
 // `authority_changes` (decision Q84). Deterministic and reproducible: no timestamps, sorted keys.
 import { basename } from 'node:path';
 import { sha256Canonical } from '../util/hash.ts';

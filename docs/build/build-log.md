@@ -72,8 +72,8 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
     scoped deletion, not a whole-tree wipe; Grep/Glob/LS over a credential store or HOME are denied.
   - **Authority never widens from the working tree** (D1, `policy/cache.ts`): a hook applies a layer edit that
     narrows at once, but an edit that widens anything is clamped to the last human-accepted table and recorded as
-    pending; only `harness init` from a human terminal accepts it. `policies/organization/**` and `.harness/mcp-trust.md`
-    are protected paths; `harness init --profile`/`--task-source` on a pinned project is refused from an agent shell.
+    pending; only `ego init` from a human terminal accepts it. `policies/organization/**` and `.harness/mcp-trust.md`
+    are protected paths; `ego init --profile`/`--task-source` on a pinned project is refused from an agent shell.
   - **Budgets and modes** (`hooks/handle.ts`): a budget breach or retry cap never turns a DENY into an ASK; the
     session-record mode is honoured only when it exists in the compiled table (HARNESS_MAINTENANCE only in the EGO
     repository); the iteration counter resets only on a real session start.

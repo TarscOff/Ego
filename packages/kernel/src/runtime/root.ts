@@ -34,7 +34,7 @@ export interface RuntimeRoot {
 export class StampIncompatibleError extends Error {
   constructor(stamp: RuntimeStamp) {
     super(
-      `runtime-root stamp incompatible: the workspace runtime state uses schema ${stamp.runtimeStateSchema} (written by ${stamp.version}), which this runtime cannot read (readable: ${COMPATIBILITY.readableRuntimeStateSchemas.join(', ')}). Run \`harness upgrade --workspace\` from a runtime that reads it, or \`harness rollback\` to the stamped runtime.`,
+      `runtime-root stamp incompatible: the workspace runtime state uses schema ${stamp.runtimeStateSchema} (written by ${stamp.version}), which this runtime cannot read (readable: ${COMPATIBILITY.readableRuntimeStateSchemas.join(', ')}). Run \`ego upgrade --workspace\` from a runtime that reads it, or \`ego rollback\` to the stamped runtime.`,
     );
     this.name = 'StampIncompatibleError';
   }

@@ -31,15 +31,15 @@ test('git hooks are never installed into an enclosing repository of a non-toplev
 
 test('chained hooks run and do not word-split when the repository path contains a space', () => {
   const noGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k)));
-  // a real repo whose absolute path contains a space, plus a fake `harness` on PATH so the shim exits 0
+  // a real repo whose absolute path contains a space, plus a fake `ego` on PATH so the shim exits 0
   const base = mkdtempSync(join(tmpdir(), 'ego sp-'));
   const repo = join(base, 'my repo');
   mkdirSync(repo, { recursive: true });
   spawnSync('git', ['init', '-q'], { cwd: repo, env: noGit() });
   const bin = join(base, 'bin');
   mkdirSync(bin);
-  writeFileSync(join(bin, 'harness'), '#!/bin/sh\nexit 0\n');
-  chmodSync(join(bin, 'harness'), 0o755);
+  writeFileSync(join(bin, 'ego'), '#!/bin/sh\nexit 0\n');
+  chmodSync(join(bin, 'ego'), 0o755);
   const env = { ...noGit(), PATH: `${bin}:${process.env.PATH ?? ''}` };
 
   // (1) governed path: a pre-existing executable pre-commit hook is chained by installGitHooks (runs git-hook.sh)

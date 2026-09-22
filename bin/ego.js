@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const bundle = join(here, '..', 'dist', 'ego.js');
 if (!existsSync(bundle)) {
-  console.error('harness: dist/ego.js is missing. Run `npm run build` in the EGO source repository.');
+  console.error('ego: dist/ego.js is missing. Run `npm run build` in the EGO source repository.');
   process.exit(2);
 }
 const mod = await import(pathToFileURL(bundle).href);

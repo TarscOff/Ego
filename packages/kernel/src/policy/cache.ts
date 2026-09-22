@@ -145,7 +145,7 @@ export function policyCacheFreshness(
   }
   if (cached.pendingWidening)
     reasons.push(
-      `policy widening pending human acceptance (${cached.pendingWidening.widenings.length}: ${cached.pendingWidening.widenings.slice(0, 3).join('; ')}${cached.pendingWidening.widenings.length > 3 ? '; …' : ''}); a human runs \`harness init\` from their own terminal to accept`,
+      `policy widening pending human acceptance (${cached.pendingWidening.widenings.length}: ${cached.pendingWidening.widenings.slice(0, 3).join('; ')}${cached.pendingWidening.widenings.length > 3 ? '; …' : ''}); a human runs \`ego init\` from their own terminal to accept`,
     );
   else if (fresh.table.tableHash !== cached.table.tableHash)
     reasons.push('compiled authority table differs from the cache (control plane or overlay changed)');
@@ -209,7 +209,7 @@ function sameSources(a: Record<string, string> | undefined, b: Record<string, st
  * Loads the cache, recompiling when the runtime or a layer file changed. A layer edit that NARROWS applies at once. A
  * layer edit that WIDENS anything (an organization widening, a removed overlay narrowing) is never applied from the
  * working tree by a hook: the table is clamped to the last accepted one (or to the core table when none was accepted)
- * and the widening is recorded as pending until a human runs `harness init` from their own terminal (Q98, K1).
+ * and the widening is recorded as pending until a human runs `ego init` from their own terminal (Q98, K1).
  */
 export function ensurePolicyCache(
   controlPlaneRoot: string,

@@ -88,7 +88,7 @@ export async function launch(argv: string[], io: CliIo, opts: LaunchOptions = {}
   if (!projectRoot) {
     if (OUTSIDE_PROJECT_SET.has(cmd)) return runCommand(argv, io, null);
     io.err(
-      `not initialized${gitRoot ? ` (${gitRoot} has no .harness/harness.md)` : ' (not inside a git repository)'}; run \`harness init\``,
+      `not initialized${gitRoot ? ` (${gitRoot} has no .harness/harness.md)` : ' (not inside a git repository)'}; run \`ego init\``,
     );
     return 2;
   }
@@ -100,7 +100,7 @@ export async function launch(argv: string[], io: CliIo, opts: LaunchOptions = {}
     if (cmd === 'init' && e instanceof PinError) return runCommand(argv, io, null);
     io.err(
       e instanceof PinError
-        ? `${e.message.split(';')[0]}; a human may run \`harness init --repin\` from their own terminal`
+        ? `${e.message.split(';')[0]}; a human may run \`ego init --repin\` from their own terminal`
         : `pin unreadable: ${(e as Error).message}`,
     );
     return 2;
@@ -113,7 +113,7 @@ export async function launch(argv: string[], io: CliIo, opts: LaunchOptions = {}
   const idx = readIndex(home, pin.name, pin.version);
   if (idx && idx.identity !== pin.integrity) {
     io.err(
-      `IDENTITY_CONFLICT: the index maps ${pin.name}@${pin.version} to runtime ${idx.identity.slice(0, 12)}… but the pin says ${pin.integrity.slice(0, 12)}…; resolve with \`harness bootstrap doctor\` (see displaced identities) before continuing.`,
+      `IDENTITY_CONFLICT: the index maps ${pin.name}@${pin.version} to runtime ${idx.identity.slice(0, 12)}… but the pin says ${pin.integrity.slice(0, 12)}…; resolve with \`ego bootstrap doctor\` (see displaced identities) before continuing.`,
     );
     return 2;
   }
@@ -122,17 +122,17 @@ export async function launch(argv: string[], io: CliIo, opts: LaunchOptions = {}
   );
   if (crossName) {
     io.err(
-      `IDENTITY_CONFLICT: version ${pin.version} is already mapped to runtime ${crossName.identity.slice(0, 12)}… under ${crossName.name}, the pin says ${pin.integrity.slice(0, 12)}…; one version string maps to exactly one runtime identity (Q79). See \`harness bootstrap doctor\`.`,
+      `IDENTITY_CONFLICT: version ${pin.version} is already mapped to runtime ${crossName.identity.slice(0, 12)}… under ${crossName.name}, the pin says ${pin.integrity.slice(0, 12)}…; one version string maps to exactly one runtime identity (Q79). See \`ego bootstrap doctor\`.`,
     );
     return 2;
   }
   if (idx?.state) {
     const remedy =
       idx.state === 'TAMPERED'
-        ? 'harness distribution import --re-materialize <tarball>'
+        ? 'ego distribution import --re-materialize <tarball>'
         : idx.state === 'REVOKED'
-          ? 'harness upgrade --to <version> (re-signed metadata required)'
-          : 'harness sync';
+          ? 'ego upgrade --to <version> (re-signed metadata required)'
+          : 'ego sync';
     io.err(`pinned runtime ${pin.integrity.slice(0, 12)}… is ${idx.state}; remedy: \`${remedy}\``);
     return 2;
   }
@@ -169,13 +169,13 @@ export async function launch(argv: string[], io: CliIo, opts: LaunchOptions = {}
     // Q96 is applied by the launcher before delegating; the pinned runtime re-applies it with the effective profile
     if (project.prePromotion && !PRE_PROMOTION_SET.has(cmd)) {
       io.err(
-        `EGO: profile ${pin.profile} permits only the pre-promotion set until the pinned runtime reaches signed-release trust (Q96). Run \`harness sync\`; \`harness doctor\` shows the trust transition.`,
+        `EGO: profile ${pin.profile} permits only the pre-promotion set until the pinned runtime reaches signed-release trust (Q96). Run \`ego sync\`; \`ego doctor\` shows the trust transition.`,
       );
       return 2;
     }
     const dir = runtimeDir(home, pin.integrity);
     if (!existsSync(join(dir, 'manifest.internal.json'))) {
-      io.err(`cached runtime ${pin.integrity.slice(0, 12)} has no internal manifest; run \`harness sync\``);
+      io.err(`cached runtime ${pin.integrity.slice(0, 12)} has no internal manifest; run \`ego sync\``);
       return 2;
     }
     const mod = (await import(pathToFileURL(join(dir, 'dist', 'ego.js')).href)) as {
@@ -202,7 +202,7 @@ export async function launch(argv: string[], io: CliIo, opts: LaunchOptions = {}
     });
   }
   io.err(
-    `EGO ${pin.version} (runtime ${pin.integrity.slice(0, 12)}…) is pinned but not installed. Run \`harness sync\`.`,
+    `EGO ${pin.version} (runtime ${pin.integrity.slice(0, 12)}…) is pinned but not installed. Run \`ego sync\`.`,
   );
   return 2;
 }
@@ -245,7 +245,7 @@ async function launcherCommand(
     }
     case 'sync': {
       if (!projectRoot) {
-        io.err('not initialized; run `harness init`');
+        io.err('not initialized; run `ego init`');
         return 2;
       }
       let pin;
@@ -288,15 +288,15 @@ async function launcherCommand(
         return r.ok ? 0 : 2;
       }
       if (sub === 'bundle') {
-        io.err('harness distribution bundle lands in phase 6 (air-gap bundle production)');
+        io.err('ego distribution bundle lands in phase 6 (air-gap bundle production)');
         return 2;
       }
-      io.err('usage: harness distribution import <tarball> [--re-materialize] | verify <tarball>');
+      io.err('usage: ego distribution import <tarball> [--re-materialize] | verify <tarball>');
       return 2;
     }
     case 'bootstrap': {
       if (positional[0] !== 'doctor') {
-        io.err('usage: harness bootstrap doctor [--reverify]');
+        io.err('usage: ego bootstrap doctor [--reverify]');
         return 2;
       }
       const r = bootstrapDoctor(home, controlPlaneDir(), io.now(), {
@@ -309,7 +309,7 @@ async function launcherCommand(
     case 'upgrade':
     case 'rollback': {
       io.err(
-        `harness ${cmd}: the upgrade and rollback protocols land in phase 6; the pin is unchanged. Trust state: ${projectRoot ? describeTrust(home, projectRoot) : 'no project'}`,
+        `ego ${cmd}: the upgrade and rollback protocols land in phase 6; the pin is unchanged. Trust state: ${projectRoot ? describeTrust(home, projectRoot) : 'no project'}`,
       );
       return 2;
     }

@@ -67,7 +67,7 @@ classifying obfuscated opaque code, and lets the loop converge.
   - `8bf035d` **Q98-2**: the v1 ASK ceiling. An organization may enable an admin-governed external write, never to
     unattended ALLOW; a widening to ALLOW compiles to ASK and the provenance records the clamp.
   Still to do: the HARD_LOCK tier decision (#16 §5), failure reason codes (#16 §10), the 22 deterministic tests
-  (#16 §11), docs/doctor/receipts terminology (#16 §12), and the `harness init` local-target wizard (#16 §7).
+  (#16 §11), docs/doctor/receipts terminology (#16 §12), and the `ego init` local-target wizard (#16 §7).
   Then round 14 must validate the NEW boundary before `INDEPENDENT-AGENT REVIEW` can go to PASSED.
 
 ## Remaining

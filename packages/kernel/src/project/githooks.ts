@@ -77,7 +77,7 @@ done
 for base in "$top" "$maintop"; do
   [ -n "$base" ] || continue
   if [ -f "$base/.harness/harness.md" ]; then
-    echo "EGO: $base/.harness/hooks/git-hook.sh is missing in a checkout pinned to EGO; failing closed (run harness init)" >&2
+    echo "EGO: $base/.harness/hooks/git-hook.sh is missing in a checkout pinned to EGO; failing closed (run ego init)" >&2
     exit 1
   fi
 done
@@ -130,7 +130,7 @@ export function installGitHooks(projectRoot: string, hooksPath: string | null): 
     !insideProject(projectRoot, gitDir)
   ) {
     // a machine-wide core.hooksPath (global or system git config) is never written: it would govern every repository
-    const refused = `git hooks NOT installed: core.hooksPath=${hooksPath} comes from the global git configuration and resolves outside this repository (${gitDir}); set a repository-local hooks path (\`git config core.hooksPath .githooks\`) and run \`harness init\` again`;
+    const refused = `git hooks NOT installed: core.hooksPath=${hooksPath} comes from the global git configuration and resolves outside this repository (${gitDir}); set a repository-local hooks path (\`git config core.hooksPath .githooks\`) and run \`ego init\` again`;
     notes.push(refused);
     return { installed, notes, refused };
   }

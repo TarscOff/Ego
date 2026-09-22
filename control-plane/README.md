@@ -47,7 +47,7 @@ cannot see (missing, outside the workspace, dynamic commands, an interpreter pro
 - **A capability**: add a checked item under the right section of the family file in `permissions/capabilities/`, with
   a stable dotted identifier and a one-line description; add a matcher in `permissions/matchers.md` when the operation
   can be recognised deterministically. A checked item under any other heading is a compile error, never silently
-  ignored. Run `npm test` here (the loader tests compile the control plane) and `harness check` in a consumer;
+  ignored. Run `npm test` here (the loader tests compile the control plane) and `ego check` in a consumer;
   `harness policy compile` arrives with phase 5.
 - **A permission change for a product**: in the consumer, edit `.harness/permissions.md` using the same sections; it
   may only narrow.
@@ -58,4 +58,4 @@ cannot see (missing, outside the workspace, dynamic commands, an interpreter pro
 - **A mode**: add `modes/<id>.md` with `kind: authority` and its overrides; never widen an absolute deny.
 - **An intent**: add `intents/<id>.md`; intents route work and change no authority.
 
-`harness catalog` (phase 3) regenerates `HARNESS_CATALOG.md` from these files.
+`ego catalog` (phase 3) regenerates `HARNESS_CATALOG.md` from these files.

@@ -56,7 +56,7 @@ test('absolute denies win in every profile and mode, including compound commands
         bash('harness decision answer "D-1 option 2"', c).decisive?.capability,
         'harness.gate.bypass',
       );
-      assert.equal(bash('echo x | harness hook UserPromptSubmit', c).verdict, 'DENY');
+      assert.equal(bash('echo x | ego hook UserPromptSubmit', c).verdict, 'DENY');
       assert.equal(
         bash('claude -p "D-1 option 2"', c).decisive?.capability,
         'harness.launcher.invoke-nested',

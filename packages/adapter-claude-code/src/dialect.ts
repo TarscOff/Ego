@@ -155,13 +155,13 @@ export const SLASH_COMMANDS: Array<{ name: string; description: string; run: str
   {
     name: 'harness',
     description: 'EGO home: where you are, what you can do, next actions',
-    run: 'harness help',
+    run: 'ego help',
   },
-  { name: 'harness-status', description: 'Current task, session, grants, budgets', run: 'harness status' },
+  { name: 'harness-status', description: 'Current task, session, grants, budgets', run: 'ego status' },
   {
     name: 'harness-doctor',
     description: 'EGO health: runtime identity, trust, hooks, freshness',
-    run: 'harness doctor',
+    run: 'ego doctor',
   },
   { name: 'harness-issues', description: 'Open issues for this repository', run: 'harness issue list' },
   {
@@ -173,7 +173,7 @@ export const SLASH_COMMANDS: Array<{ name: string; description: string; run: str
   {
     name: 'harness-context',
     description: 'What is loaded in context and why',
-    run: 'harness context explain',
+    run: 'ego context explain',
   },
   { name: 'harness-decisions', description: 'Human decisions waiting', run: 'harness decision list' },
   { name: 'harness-grill', description: 'Grill the current work', run: 'harness grill $ARGUMENTS' },

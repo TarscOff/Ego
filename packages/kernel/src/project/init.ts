@@ -1,4 +1,4 @@
-// `harness init`: detect, propose, pin (never re-pin), generate the thin overlay, adapter files and git hooks, verify
+// `ego init`: detect, propose, pin (never re-pin), generate the thin overlay, adapter files and git hooks, verify
 // freshness, run doctor, explain. Authored overlays are never overwritten; generated files carry provenance.
 import { join, relative } from 'node:path';
 import { chmodSync, copyFileSync, existsSync, renameSync } from 'node:fs';
@@ -106,7 +106,7 @@ export function initProject(opts: InitOptions): InitReport {
   if (hasPin(projectRoot) && opts.repin) {
     try {
       readPin(projectRoot);
-      throw new Error('--repin refused: the pin is intact; use `harness upgrade` (phase 6) to change it');
+      throw new Error('--repin refused: the pin is intact; use `ego upgrade` (phase 6) to change it');
     } catch (e) {
       if (!(e instanceof PinError)) throw e;
       tamperedPin = e.message;
@@ -120,7 +120,7 @@ export function initProject(opts: InitOptions): InitReport {
     } catch (e) {
       if (e instanceof PinError)
         throw new PinError(
-          `${e.message.split(';')[0]}; a human may run \`harness init --repin\` from their own terminal to pin this repository to the executing runtime again`,
+          `${e.message.split(';')[0]}; a human may run \`ego init --repin\` from their own terminal to pin this repository to the executing runtime again`,
         );
       throw e;
     }
@@ -147,7 +147,7 @@ export function initProject(opts: InitOptions): InitReport {
     pin = profile !== existing.profile || ts !== existing.taskSource ? writePin(projectRoot, base) : existing;
     pinned = 'kept';
     notes.push(
-      `pinned to ${existing.version} (installed ${version}); use \`harness upgrade\` to change the pin`,
+      `pinned to ${existing.version} (installed ${version}); use \`ego upgrade\` to change the pin`,
     );
     if (existing.integrity !== self.runtimeSha256)
       notes.push(
@@ -159,14 +159,14 @@ export function initProject(opts: InitOptions): InitReport {
     const own = readIndex(home, self.name, version);
     if (own?.state === 'TAMPERED' || own?.state === 'REVOKED')
       throw new Error(
-        `refused: the executing runtime ${self.runtimeSha256.slice(0, 12)}… is ${own.state} in the index; a pin written now would be refused by every launch (see \`harness bootstrap doctor\`)`,
+        `refused: the executing runtime ${self.runtimeSha256.slice(0, 12)}… is ${own.state} in the index; a pin written now would be refused by every launch (see \`ego bootstrap doctor\`)`,
       );
     const clash = listIndexEntries(home).find(
       (e) => e.version === version && e.identity !== self.runtimeSha256,
     );
     if (clash)
       throw new Error(
-        `IDENTITY_CONFLICT: version ${version} is already mapped to runtime ${clash.identity.slice(0, 12)}… (${clash.name}) but the executing runtime is ${self.runtimeSha256.slice(0, 12)}…; a pin written now would be refused by every launch. Rebuild from a clean tree or resolve the index with \`harness bootstrap doctor\`.`,
+        `IDENTITY_CONFLICT: version ${version} is already mapped to runtime ${clash.identity.slice(0, 12)}… (${clash.name}) but the executing runtime is ${self.runtimeSha256.slice(0, 12)}…; a pin written now would be refused by every launch. Rebuild from a clean tree or resolve the index with \`ego bootstrap doctor\`.`,
       );
     const taskSource = opts.taskSource ?? detection.proposedTaskSource;
     if (!TASK_SOURCES.includes(taskSource))
@@ -216,7 +216,7 @@ export function initProject(opts: InitOptions): InitReport {
       notes.push(promo.message);
     } else if (opts.offline)
       notes.push(
-        'trust promotion skipped: offline; run `harness sync` when a release-metadata source is reachable',
+        'trust promotion skipped: offline; run `ego sync` when a release-metadata source is reachable',
       );
   }
 
@@ -283,7 +283,7 @@ export function initProject(opts: InitOptions): InitReport {
   generated.push(rel(projectRoot, join(projectRoot, POLICY_CACHE_RELATIVE)));
   if (cache.pendingWidening)
     notes.push(
-      `policy widening NOT applied (${cache.pendingWidening.widenings.length} cell(s)): widenings take effect only when a human runs \`harness init\` from their own terminal`,
+      `policy widening NOT applied (${cache.pendingWidening.widenings.length} cell(s)): widenings take effect only when a human runs \`ego init\` from their own terminal`,
     );
 
   // ---- generated root instructions
@@ -309,7 +309,7 @@ export function initProject(opts: InitOptions): InitReport {
   } else notes.push('EGO source repository: AGENTS.md is authored here, not generated');
   if (root.overBudget)
     notes.push(
-      `WARNING: generated root instructions use ~${root.tokens} tokens, over the ${pin.profile} budget of ${root.budget}; trim .harness/overlay/standing-rules.md (\`harness check\` fails until then)`,
+      `WARNING: generated root instructions use ~${root.tokens} tokens, over the ${pin.profile} budget of ${root.budget}; trim .harness/overlay/standing-rules.md (\`ego check\` fails until then)`,
     );
 
   // ---- hook shims, adapter configuration, git hooks
@@ -403,7 +403,7 @@ title: Product permission overlay
 # Product permission overlay
 
 This file narrows EGO's compiled authority table for this product. It can move a capability toward DENY (ALLOW → ASK,
-ASK → DENY) and never widen. Absolute denies cannot be referenced. Identifiers come from \`harness capabilities\`.
+ASK → DENY) and never widen. Absolute denies cannot be referenced. Identifiers come from \`ego capabilities\`.
 
 ## Requires human approval
 
@@ -439,7 +439,7 @@ const STANDING_RULES_TEMPLATE = `---
 schema: ego.standing-rules/1
 ---
 <!-- Standing rules for this product: folded into the generated root AGENTS.md under the profile context budget.
-     Keep them short; \`harness context explain\` shows their token cost. Run \`harness init\` after editing. -->
+     Keep them short; \`ego context explain\` shows their token cost. Run \`ego init\` after editing. -->
 `;
 
 const OVERLAY_README = `# .harness/overlay
@@ -450,7 +450,7 @@ Authored product overlay. EGO never overwrites files here.
 - \`matchers.md\` (optional, schema \`ego.matchers/1\`): extra operation → capability matchers; narrowing only.
 - \`skills/\` (phase 3): product skills.
 
-Generated artifacts live in \`.harness/generated/\` and are regenerated by \`harness init\`, \`sync\`, \`upgrade\`,
+Generated artifacts live in \`.harness/generated/\` and are regenerated by \`ego init\`, \`sync\`, \`upgrade\`,
 \`rollback\` and \`check\`; runtime state lives in \`.harness/runtime/\`. Both are gitignored.
 `;
 
