@@ -276,7 +276,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     !insideRepo
       ? `core.hooksPath comes from the global git configuration and resolves outside this repository (${hooks.dir}); EGO never writes there. Set a repository-local hooks path and run \`ego init\``
       : hooks.ok
-        ? `${hooks.dir.startsWith(root) ? hooks.dir.slice(root.length + 1) : hooks.dir}/pre-commit, pre-push (bypassable with --no-verify: backstop is \`harness verify --range\` on a protected branch, phase 6)`
+        ? `${hooks.dir.startsWith(root) ? hooks.dir.slice(root.length + 1) : hooks.dir}/pre-commit, pre-push (bypassable with --no-verify: backstop is \`ego verify --range\` on a protected branch, phase 6)`
         : `${hooks.problems.join('; ')} (run \`ego init\`)`,
     true,
   );
