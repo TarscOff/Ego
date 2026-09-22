@@ -162,3 +162,53 @@ test('URLs: localhost allowed, public read asks in STRICT and is denied in HIGH_
 test('unknown MCP tools are denied by default', () => {
   assert.equal(evaluate(table, ctx(), { tool: 'mcp__foo__bar', input: {} }).verdict, 'DENY');
 });
+
+test('structured tool surface: nothing falls through to ALLOW, and every write primitive is classified', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ego-eval-home-'));
+  const c = ctx({ profile: 'STANDARD', egoHome: home });
+  const go = (tool: string, input: Record<string, unknown>) => evaluate(table, c, { tool, input });
+
+  // `*** Move to:` is the destination of a rename — an unconditional, attacker-chosen write that was never
+  // classified at all (challenge finding 7)
+  const patch = (header: string) => `*** Begin Patch\n${header}\n+x\n*** End Patch`;
+  assert.equal(
+    go('apply_patch', { command: patch(`*** Move to: ${home}/trust/keys.json`) }).decisive?.capability,
+    'ego.trust.tamper',
+  );
+  assert.equal(
+    go('apply_patch', { command: patch('*** Move to: .git/hooks/pre-commit') }).decisive?.capability,
+    'fs.hook-config.write',
+  );
+  assert.equal(go('apply_patch', { command: patch('*** Update File: src/a.ts') }).verdict, 'ALLOW');
+
+  // A tool the evaluator does not model, or a modelled tool whose operand is missing, used to return a positive
+  // ALLOW — which on claude-code is rendered as permissionDecision "allow" and SUPPRESSES the host's own prompt
+  // (challenge findings 8 and 13).
+  for (const [tool, input] of [
+    ['SomeFutureTool', { whatever: 1 }],
+    ['Bash', {}],
+    ['Write', {}],
+    ['Read', {}],
+    ['apply_patch', { patch: '' }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    assert.notEqual(go(tool, input).verdict, 'ALLOW', `${tool} ${JSON.stringify(input)}`);
+  }
+
+  // a search carries no url but is still public network egress
+  assert.equal(go('WebSearch', { query: 'x' }).decisive?.capability, 'network.public-read');
+  assert.equal(
+    evaluate(table, ctx({ profile: 'HIGH_ASSURANCE', egoHome: home }), {
+      tool: 'WebSearch',
+      input: { query: 'x' },
+    }).verdict,
+    'DENY',
+  );
+  assert.equal(
+    go('WebSearch', { query: 'x', allowed_domains: ['localhost:3000'] }).decisive?.capability,
+    'network.localhost',
+  );
+
+  // ordinary structured work is untouched
+  assert.equal(go('Read', { file_path: join(repo, 'src/a.ts') }).verdict, 'ALLOW');
+  assert.equal(go('Write', { file_path: join(repo, 'src/a.ts') }).verdict, 'ALLOW');
+});

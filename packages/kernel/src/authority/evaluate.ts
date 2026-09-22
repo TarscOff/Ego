@@ -36,6 +36,8 @@ export interface CapabilityHit {
   grantApplied?: boolean;
   /** set when the hit was found inside the effect of a script, package script or make target */
   effectOf?: string;
+  /** opacity that means "something WILL run that could not be read", as opposed to "the target does not exist" */
+  opaqueUnread?: boolean;
 }
 
 export interface Evaluation {
@@ -1168,9 +1170,6 @@ export function classifyPath(
 const MAX_EFFECT_DEPTH = 4;
 const MAX_SCRIPT_BYTES = 64 * 1024;
 /** classes that only say "the kernel cannot see inside"; they never escalate a command whose class the matchers declared */
-/** Reasons that mean "something WILL run that we could not read", as opposed to "the target does not exist". */
-const EXECUTES_UNREAD = /not readable inside the workspace|is not a shell script|uses variable commands/;
-
 const OPACITY_CLASSES = new Set(['command.unknown', 'command.interpreter-script', 'command.script-opaque']);
 /** keywords that prefix a command on the same line: strip and classify the remainder (`if git push`, `do npm test`) */
 const PREFIX_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', '!', '{', '}', 'time']);
@@ -1294,12 +1293,15 @@ function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null
   return (ctx.readFile ?? defaultReadFile)(abs);
 }
 
+/** Finds the nearest `name` walking upward. Returns the path when the file EXISTS, whether or not we could read it:
+ *  conflating "not there" with "there but unreadable" is what let an oversized or unreadable manifest keep a
+ *  declared class's ALLOW (challenge finding 1). The caller decides what an unreadable one means. */
 function findUp(ctx: EvaluationContext, start: string, name: string): string | null {
   let dir = resolve(start);
   for (let i = 0; i < 64; i++) {
     const candidate = join(dir, name);
-    const text = readInsideWorkspace(ctx, candidate);
-    if (text !== null) return candidate;
+    if (readInsideWorkspace(ctx, candidate) !== null || (insideRoots(candidate, ctx) && fileExists(candidate)))
+      return candidate;
     const parent = dirname(dir);
     if (parent === dir || !insideRoots(parent, ctx)) return null;
     dir = parent;
@@ -1372,6 +1374,34 @@ function scriptSegments(text: string): string[] | null {
   return out;
 }
 
+/** True when the path exists on disk, whatever our ability to read it. */
+function fileExists(abs: string): boolean {
+  try {
+    statSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A manifest we could not read: `unread` when it is there (too large, wrong encoding, no permission, outside the
+ *  workspace), `missing` when it is not — the command then fails on its own and nothing executes. */
+function manifestUnresolved(
+  ctx: EvaluationContext,
+  abs: string | null,
+  key: string,
+  what: string,
+): { kind: 'npm-script'; key: string; body: null; reason: string; unresolved: 'missing' | 'unread' } {
+  const exists = abs !== null && fileExists(abs);
+  return {
+    kind: 'npm-script',
+    key,
+    body: null,
+    reason: exists ? `${what} present but not readable` : `no ${what}`,
+    unresolved: exists ? 'unread' : 'missing',
+  };
+}
+
 function resolveScriptCommand(
   ctx: EvaluationContext,
   norm: string,
@@ -1380,6 +1410,11 @@ function resolveScriptCommand(
   key: string;
   body: string[] | null;
   reason: string;
+  /** Why the body is null. `missing`: the target does not exist, so nothing can execute and the command fails on
+   *  its own. `unread`: something WILL execute that could not be read — unreadable, too large, malformed, wrongly
+   *  encoded, reached through another working directory, dynamically constructed or unsupported. Only `missing`
+   *  may keep a declared class's verdict; `unread` is opacity at every depth (decision "option B"). */
+  unresolved?: 'missing' | 'unread';
 } | null {
   const tokens = tokenize(norm);
   const head = tokens[0] ?? '';
@@ -1404,6 +1439,7 @@ function resolveScriptCommand(
         key: `script:${abs}`,
         body: null,
         reason: 'script not readable inside the workspace',
+        unresolved: 'unread',
       };
     if (
       !/^#!.*\b(sh|bash|zsh|dash|ksh)\b/.test(text) &&
@@ -1419,6 +1455,7 @@ function resolveScriptCommand(
         key: `script:${abs}`,
         body: null,
         reason: 'executable is not a shell script',
+        unresolved: 'unread',
       };
     }
     const body = scriptSegments(text);
@@ -1427,6 +1464,7 @@ function resolveScriptCommand(
       key: `script:${abs}`,
       body,
       reason: body ? 'shell script analysed' : 'shell script uses dynamic commands',
+      ...(body ? {} : { unresolved: 'unread' as const }),
     };
   }
   // package manager scripts
@@ -1440,12 +1478,12 @@ function resolveScriptCommand(
       const pkgPath = findUp(ctx, cwd, 'package.json');
       const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
       if (text === null)
-        return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json not readable' };
+        return manifestUnresolved(ctx, pkgPath, 'npm:install', 'package.json');
       let scripts: Record<string, unknown> = {};
       try {
         scripts = (JSON.parse(text) as { scripts?: Record<string, unknown> }).scripts ?? {};
       } catch {
-        return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json unparsable' };
+        return { kind: 'npm-script', key: 'npm:install', body: null, reason: 'package.json unparsable', unresolved: 'unread' };
       }
       const names = ['preinstall', 'install', 'postinstall', 'prepare', 'prepublish', 'preprepare', 'postprepare', 'dependencies'].filter(
         (n) => typeof scripts[n] === 'string',
@@ -1468,13 +1506,13 @@ function resolveScriptCommand(
     const pkgPath = findUp(ctx, cwd, 'package.json');
     const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
     if (text === null)
-      return { kind: 'npm-script', key: `npm:${script}`, body: null, reason: 'package.json not readable' };
+      return manifestUnresolved(ctx, pkgPath, `npm:${script}`, 'package.json');
     let scripts: Record<string, unknown> = {};
     try {
       const pkg = JSON.parse(text) as { scripts?: Record<string, unknown> };
       scripts = pkg.scripts ?? {};
     } catch {
-      return { kind: 'npm-script', key: `npm:${script}`, body: null, reason: 'package.json unparsable' };
+      return { kind: 'npm-script', key: `npm:${script}`, body: null, reason: 'package.json unparsable', unresolved: 'unread' };
     }
     const names = [`pre${script}`, script, `post${script}`].filter((n) => typeof scripts[n] === 'string');
     if (!names.includes(script)) {
@@ -1490,6 +1528,7 @@ function resolveScriptCommand(
         key: `npm:${script}`,
         body: null,
         reason: `script "${script}" not found in package.json`,
+        unresolved: 'missing',
       };
     }
     const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
@@ -1530,13 +1569,21 @@ function resolveScriptCommand(
           .map((n) => join(makeDir, n))
           .find((f) => readInsideWorkspace(ctx, f) !== null);
     const text = mkPath ? readInsideWorkspace(ctx, mkPath) : null;
-    if (text === null)
+    if (text === null) {
+      // "no Makefile anywhere" is missing: `make` fails and nothing runs. "a Makefile is there but we did not read
+      // it" is unread: its recipe WILL run. Decided by existence, never by a reason string (challenge finding 1).
+      const candidates = makeFile
+        ? [resolve(makeDir, makeFile)]
+        : ['Makefile', 'makefile', 'GNUmakefile'].map((n) => join(makeDir, n));
+      const exists = candidates.some((f) => fileExists(f));
       return {
         kind: 'make-target',
         key: `make:${targets.join(',')}`,
         body: null,
-        reason: 'Makefile not readable',
+        reason: exists ? 'Makefile present but not readable' : 'no Makefile',
+        unresolved: exists ? 'unread' : 'missing',
       };
+    }
     const lines = text.split(/\r?\n/);
     const recipes = new Map<string, string[]>();
     let current: string[] | null = null;
@@ -1557,7 +1604,7 @@ function resolveScriptCommand(
     const body: string[] = [];
     for (const t of wanted) {
       const r = recipes.get(t);
-      if (!r) return { kind: 'make-target', key: `make:${t}`, body: null, reason: `target "${t}" not found` };
+      if (!r) return { kind: 'make-target', key: `make:${t}`, body: null, reason: `target "${t}" not found`, unresolved: 'missing' };
       for (const rl of r) {
         const cmd = rl.replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
@@ -1567,6 +1614,7 @@ function resolveScriptCommand(
             key: `make:${t}`,
             body: null,
             reason: 'recipe uses variable commands',
+            unresolved: 'unread',
           };
         for (const seg of splitShellSegments(cmd)) body.push(seg);
       }
@@ -1586,6 +1634,7 @@ function opaqueHit(
   ctx: EvaluationContext,
   norm: string,
   reason: string,
+  unread = true,
 ): CapabilityHit {
   return {
     capability: 'command.script-opaque',
@@ -1593,6 +1642,9 @@ function opaqueHit(
     via: reason,
     segment: norm,
     absolute: false,
+    // true when something WILL run that could not be read; such a hit survives the opacity filter of an enclosing
+    // declared class, because that is exactly the case the fail-safe rule exists for
+    opaqueUnread: unread,
   };
 }
 
@@ -1603,6 +1655,17 @@ function opaqueHit(
 // ---------------------------------------------------------------------------------------------------------------
 
 /** Environment variables that choose which database or cluster a client talks to. */
+/** Options that hand an arbitrary program to an otherwise well-behaved command. The list is a real family, not a
+ *  spelling chase: every entry is "this option's value is executed". */
+const PROGRAM_OPERAND_RE =
+  /\s(--use-compress-program|--checkpoint-action|--to-command|--rsh-command|-I|--rsh|-e(?=\s+\S*(ssh|sh|bash|python|perl|ruby|node))|--exec|--ok-dir|-TT|--unzip-command|--filter=.*command|--pre|--hostname-bin|--upload-pack|--receive-pack|--editor|--pager|--ssh-command|--proxy-command)(=|\s)/;
+
+const DB_CLIENT_HEADS = new Set([
+  'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'sqlite3', 'redis-cli', 'clickhouse-client', 'cqlsh',
+]);
+const DB_EXECUTES_UNREAD =
+  /\s(-f|--file)(=|\s)|\s<\s|\\!|\.shell\b|\.system\b|\.read\b|\bSYSTEM\b|TO\s+PROGRAM\b/i;
+
 const TARGET_ENV_RE =
   /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|CLICKHOUSE_HOST)$/;
 const TARGET_ENV_HEADS = new Set([
@@ -1805,11 +1868,28 @@ function resolveDbTarget(
       signals.push({ cls: 'UNCLASSIFIED', target: 'a connection service name' });
   }
   for (const h of optionValues(tokens, 'h', ['--host'])) push(h, 'host');
-  const bare = tokens.slice(1).find((t) => !t.startsWith('-'));
+  // the first operand that is not an option NOR an option's value
+  let bare: string | undefined;
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t.startsWith('-')) {
+      if (/^(-f|--file|-c|--command|-e|--execute|--eval|-U|--username|-p|--port|-d|--dbname|-o|--output)$/.test(t)) i++;
+      continue;
+    }
+    bare = t;
+    break;
+  }
   if (signals.length === 0 && bare && isOpaqueTarget(bare))
     return { cls: 'UNCLASSIFIED', target: bare, executes };
-  // mongosh/psql/mysql accept a bare `host[:port][/db]` with no scheme at all
-  if (signals.length === 0 && bare && /^[A-Za-z0-9][A-Za-z0-9.-]*(:\d+)?(\/[^\s]*)?$/.test(bare) && /[.:]/.test(bare))
+  // mongosh/psql/mysql accept a bare `host[:port][/db]` with no scheme at all — but a filename is not a host
+  const FILE_EXT = /\.(sql|js|mjs|cjs|ts|json|txt|csv|sh|py|rb|dump|bak|gz|zip|db|sqlite3?)$/i;
+  if (
+    signals.length === 0 &&
+    bare &&
+    !FILE_EXT.test(bare) &&
+    /^[A-Za-z0-9][A-Za-z0-9.-]*(:\d+)?(\/[^\s]*)?$/.test(bare) &&
+    /[.:]/.test(bare)
+  )
     push(bare.split(/[:/]/)[0]!, 'host');
   if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
@@ -1908,26 +1988,16 @@ function classifyNormalized(
   if (state.seen.has(effect.key)) return hits;
   const seen = new Set(state.seen).add(effect.key);
   if (effect.body === null) {
-    // The effect could not be resolved AT ALL — the script, recipe or target was not readable. That is unknown
-    // execution, and the layered security contract (decision "option B", 2026-09-22) forbids it from becoming a
-    // silent ALLOW merely because the outer command matched a friendly class:
-    //     KNOWN + AUTHORIZED          -> execute according to policy
-    //     UNKNOWN/OPAQUE + CONTAINED  -> execute inside the containment boundary
-    //     UNKNOWN/OPAQUE + NO SANDBOX -> ASK or DENY, never silently ALLOW
-    // EGO claims no containment today (real sandboxing is issue #26, and only HIGH_ASSURANCE will require it), so
-    // the honest answer is the human gate. A declared class whose body IS resolved keeps its verdict below —
-    // opacity INSIDE a resolved effect does not escalate it (September alignment item 5).
-    if (!declared) return [opaqueHit(table, ctx, norm, effect.reason)];
-    // A declared class keeps its verdict when the target simply DOES NOT EXIST — `npm test` with no test script
-    // fails harmlessly and must not interrupt ordinary work. It does NOT keep it when something WILL run that
-    // could not be read: an unreadable script, a non-script executable, a recipe built from a variable. That is
-    // unknown execution, and the layered contract (decision "option B", 2026-09-22) forbids it from becoming a
-    // silent ALLOW while EGO claims no containment:
+    // The effect could not be resolved. The layered security contract (decision "option B", 2026-09-22) forbids
+    // unresolved EXECUTION from becoming a silent ALLOW while EGO claims no containment:
     //     KNOWN + AUTHORIZED          -> execute according to policy
     //     UNKNOWN/OPAQUE + CONTAINED  -> execute inside the containment boundary   (issue #26, not built)
     //     UNKNOWN/OPAQUE + NO SANDBOX -> ASK or DENY, never silently ALLOW
-    // This narrows September alignment item 5, which let a declared class absorb an unresolvable effect.
-    return EXECUTES_UNREAD.test(effect.reason) ? [...hits, opaqueHit(table, ctx, norm, effect.reason)] : hits;
+    // The only exception is a target that DOES NOT EXIST: `npm test` with no test script fails on its own, nothing
+    // runs, and ordinary work must not be interrupted. That difference is decided structurally by
+    // `effect.unresolved`, never by reading a prose reason (challenge finding 1).
+    if (!declared) return [opaqueHit(table, ctx, norm, effect.reason)];
+    return effect.unresolved === 'missing' ? hits : [...hits, opaqueHit(table, ctx, norm, effect.reason)];
   }
   const inner: CapabilityHit[] = [];
   for (const seg of effect.body) {
@@ -1937,8 +2007,14 @@ function classifyNormalized(
     }
   }
   if (declared) {
-    // positive effects (push, production, destructive, network...) escalate a declared class; opacity inside it does not
-    return [...hits, ...inner.filter((h) => !OPACITY_CLASSES.has(h.capability))];
+    // Positive effects (push, production, destructive, network…) escalate a declared class. Opacity inside it does
+    // not — EXCEPT opacity that means "something will run that we could not read", which is the very case the rule
+    // above exists for. Dropping it here let one level of indirection cancel the gate: an npm script whose body is
+    // `make -C ./sub lint` silently regained ALLOW (challenge findings 2, 16, 20).
+    return [
+      ...hits,
+      ...inner.filter((h) => !OPACITY_CLASSES.has(h.capability) || h.opaqueUnread === true),
+    ];
   }
   // undeclared script fully analysed: its effect replaces the unknown verdict
   return inner.length ? inner : [opaqueHit(table, ctx, norm, `${effect.reason}: empty`)];
@@ -2108,6 +2184,32 @@ function classifyShellPaths(
   const paths = pathTokens(seg, cwd);
   // a container bind mount hands the host path to the container: the SOURCE is read and written, whatever the
   // command inside the container then does. Resolving it as a path beats guessing at its spelling with a regex.
+  // A KNOWN, ALLOW-classed command whose OPERAND names a program the class does not bound is not really known:
+  // `tar -I /tmp/pwn`, `tar --checkpoint-action=exec=…`, `zip -TT prog`, `rsync -e prog`, `git -c *.command=…`
+  // all run an arbitrary program under a friendly class. This is the fourth line of the contract — KNOWN CLASS +
+  // UNBOUNDED PROGRAM OPERAND -> treat as UNKNOWN/OPAQUE (challenge finding 14).
+  const program = PROGRAM_OPERAND_RE.exec(seg);
+  if (program)
+    hits.push({
+      capability: 'command.script-opaque',
+      verdict: verdictFor(table, ctx, 'command.script-opaque'),
+      via: `the option ${program[1]} names a program the command class does not bound`,
+      segment: seg,
+      absolute: false,
+      opaqueUnread: true,
+    });
+  // A database client handed a program file, or carrying an in-band shell escape, executes code the kernel never
+  // read: `psql -f x.sql`, `\!`, sqlite3 `.shell`/`.system`, mysql `SYSTEM`, `COPY … TO PROGRAM` (challenge
+  // finding 5). This is an ADDITIONAL hit so it can never mask a stronger verdict from the target resolution.
+  if (DB_CLIENT_HEADS.has(head) && DB_EXECUTES_UNREAD.test(seg))
+    hits.push({
+      capability: 'command.script-opaque',
+      verdict: verdictFor(table, ctx, 'command.script-opaque'),
+      via: 'the client runs a program or an in-band shell escape the kernel has not read',
+      segment: seg,
+      absolute: false,
+      opaqueUnread: true,
+    });
   if (head === 'docker' || head === 'podman') {
     for (const src of containerMountSources(tokenize(seg))) {
       const expanded = expandHome(src) ?? src;
@@ -2808,7 +2910,11 @@ export function evaluate(
         : typeof req.input['patch'] === 'string'
           ? req.input['patch']
           : '';
-    const paths = [...patch.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm)].map((m) => m[1]!.trim());
+    // `*** Move to:` names the DESTINATION of a rename and was never classified: an unconditional, fully
+    // attacker-controlled write to any path, at ALLOW (challenge finding 7)
+    const paths = [...patch.matchAll(/^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+)$/gm)].map((m) =>
+      m[1]!.trim(),
+    );
     if (paths.length === 0) {
       return {
         verdict: 'DENY',
@@ -2820,6 +2926,26 @@ export function evaluate(
   } else if (tool === 'WebFetch' || tool === 'WebSearch') {
     const url = typeof req.input['url'] === 'string' ? req.input['url'] : '';
     if (url) hits = [classifyUrl(table, ctx, url)];
+    else {
+      // A search carries no url, but it is still public network egress. It reached ALLOW even in HIGH_ASSURANCE,
+      // where `network.public-read` is DENY and egress control is a required containment control (challenge
+      // finding 9). A search restricted to local domains is localhost traffic.
+      const domains = Array.isArray(req.input['allowed_domains'])
+        ? (req.input['allowed_domains'] as unknown[]).map(String)
+        : [];
+      const local = domains.length > 0 && domains.every((dm) => /^(localhost|127\.|::1|\[::1\])/i.test(dm));
+      const capability = local ? 'network.localhost' : 'network.public-read';
+      hits = [
+        {
+          capability,
+          verdict: verdictFor(table, ctx, capability),
+          via: domains.length
+            ? `web search limited to ${domains.join(', ')}`
+            : 'web search over the public internet',
+          absolute: false,
+        },
+      ];
+    }
   } else if (tool.startsWith('mcp__')) {
     // MCP: resolved by the trust file by the caller (mcp.ts); here only the unknown default applies
     hits = [
@@ -2832,8 +2958,18 @@ export function evaluate(
     ];
   }
   hits = hits.map((h) => applyGrants(h, ctx));
-  if (hits.length === 0)
-    return { verdict: 'ALLOW', hits, reason: 'no governed operation recognised for this tool' };
+  if (hits.length === 0) {
+    // NOTHING fell through to ALLOW any more. A tool the evaluator does not model, or a modelled tool whose
+    // operand is missing or of an unexpected shape, is unknown capability — and on claude-code an `allow` is
+    // rendered as `permissionDecision: "allow"`, which SUPPRESSES the host's own prompt. Returning ALLOW there was
+    // strictly worse than saying nothing (challenge findings 8 and 13). `command.unknown` is ASK and its
+    // description is "the host's own permission prompt decides".
+    return {
+      verdict: verdictFor(table, ctx, 'command.unknown'),
+      hits,
+      reason: `no governed operation could be resolved for tool "${tool}" (unmodelled tool, or a missing or unexpected operand); the host's own permission prompt decides`,
+    };
+  }
   const weight = (h: CapabilityHit) =>
     VERDICT_RANK[h.verdict] * 10 +
     (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'organization' ? 1 : 0);

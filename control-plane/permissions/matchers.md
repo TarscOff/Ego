@@ -467,6 +467,18 @@ matchers:
   - capability: db.local.start
     tool: Bash
     command: '^(pg_ctl|postgres|mysqld|redis-server|mongod)\b'
+  # A container is only a boundary when it is actually a boundary. These options remove the isolation the runtime
+  # would otherwise give, so the command inside is running on the host (challenge finding 4).
+  - capability: command.privileged
+    tool: Bash
+    command: '^(docker|podman)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--cap-add[= ]?(ALL|SYS_ADMIN))'
+  # `docker|podman exec` enters an ALREADY-RUNNING container whose isolation EGO never established, and runs an
+  # unclassified command there. `run` is judged by its own flags and bind mounts above and below, so it is not
+  # gated wholesale: that would make ordinary local development ask on every invocation. The unverified isolation
+  # of the container runtime itself is a containment requirement (#26), not a per-invocation prompt.
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^(docker|podman)(\s+compose)?\s+exec\b'
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'
@@ -563,7 +575,12 @@ matchers:
     command: '^(node|python3?|tsx|ts-node|bun|deno\s+run|ruby|perl|php)\s+(?!-)[^\s]+\.(js|mjs|cjs|ts|mts|py|rb|pl|php)\b'
   - capability: command.local-mutation
     tool: Bash
-    command: '^(npm\s+(install|i|ci|uninstall|update|run\s+(format:fix|lint:fix|generate|codegen))|npx\s+(prettier|eslint)\b.*(--write|--fix)|pnpm\s+(install|add|remove)|yarn\s+(add|remove|install)|pip\s+install|poetry\s+(install|add)|go\s+(mod|get)|cargo\s+(add|update)|(mkdir|touch|cp|mv|ln|tar|zip|unzip)\b|chmod\s+[0-7+]|node\b|python3?\b|tsx\b|ts-node\b)'
+    command: '^(npm\s+(install|i|ci|uninstall|update|run\s+(format:fix|lint:fix|generate|codegen))|npx\s+(prettier|eslint)\b.*(--write|--fix)|pnpm\s+(install|add|remove)|yarn\s+(add|remove|install)|pip\s+install|poetry\s+(install|add)|go\s+(mod|get)|cargo\s+(add|update)|(mkdir|touch|cp|mv|ln|tar|zip|unzip)\b|chmod\s+[0-7+])'
+  # Any remaining interpreter invocation runs a program the kernel has not read. It is opaque, not a local
+  # mutation: `node dist/index`, `node .`, `python3 -m pkg`, `deno task x` (challenge finding 3).
+  - capability: command.interpreter-script
+    tool: Bash
+    command: '^(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b'
   # --- network classes (WebFetch / MCP url tools) ---
   - capability: network.localhost
     tool: WebFetch
@@ -582,5 +599,8 @@ Consumers may add matchers in `.harness/overlay/matchers.md`; they may only map 
 ASK or DENY in the effective table (narrowing), never introduce an ALLOW mapping for a command the core classifies
 as unknown or stricter.
 
-MCP tools (`mcp__<server>__<tool>`) are not listed here: they resolve through the consumer's `.harness/mcp-trust.md`
-to `mcp.local.*` or `mcp.remote.*` capabilities, and to `mcp.unknown` when the server or tool is not listed.
+MCP tools (`mcp__<server>__<tool>`) are not listed here. **Today every one of them resolves to `mcp.unknown`**:
+`ego init` writes `.harness/mcp-trust.md` into the consumer repository, but nothing parses it yet, so no
+`mcp.local.*` or `mcp.remote.*` capability is ever reached. The resolution is phase-2 work (issue #10), and the
+failure is in the safe direction — an unresolved MCP tool is treated as unknown, never as trusted. This paragraph
+previously described the resolver as if it existed (challenge finding 10).

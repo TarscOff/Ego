@@ -361,3 +361,64 @@ test('round-15 residuals: key-name aliases, PEM anchors and further providers', 
   }
   assert.equal(redact('normal text with no secret at all', detectors).blocked, false);
 });
+
+test('every detector added as a round-13/14/15 fix still fires on its fixture', () => {
+  // Challenge finding 18: 31 of 91 block-severity detectors were never exercised. Each of these exists because a
+  // reviewer demonstrated that a real provider credential passed the scan unblocked; without a fixture, a bad edit
+  // or a deletion silently reopens that confirmed finding.
+  const FIXTURES: Record<string, string> = {
+    'saas.databricks': 'dapi0123456789abcdef0123456789abcdef',
+    'saas.shopify': 'shpat_0123456789abcdef0123456789abcdef',
+    'infra.terraform-cloud': 'abcdefghijklmn.atlasv1.' + 'A'.repeat(64),
+    'saas.newrelic': 'NRAK-' + 'A'.repeat(27),
+    'saas.grafana-sa': 'glsa_' + 'a'.repeat(32) + '_0a1b2c3d',
+    'saas.square': 'sq0atp-0123456789abcdefghijklmn',
+    'oauth.google-client-secret': 'GOCSPX-0123456789abcdefghijklmnopqr',
+    'saas.stripe-webhook': 'whsec_0123456789abcdefghijklmnopqrstuvwx',
+    'forge.github.fine-grained': 'github_pat_' + 'A'.repeat(60) + '_' + 'B'.repeat(20),
+    'saas.linear': 'lin_api_0123456789abcdefghijklmnopqrstuvwxyz01234',
+    'saas.notion': 'ntn_0123456789abcdefghijklmnopqrstuvwxyz01234',
+    'saas.figma': 'figd_0123456789abcdefghijklmnopqrstuvwxyz01234',
+    'saas.doppler': 'dp.pt.0123456789abcdefghijklmnopqrstuvwxyz01234',
+    'infra.planetscale': 'pscale_pw_0123456789abcdefghijklmnopqrstuvwx',
+    'saas.sentry-auth': 'sntrys_0123456789abcdefghijklmnopqrstuvwxyz01234',
+    'saas.postman': 'PMAK-' + '0'.repeat(24) + '-' + 'a'.repeat(34),
+    'infra.tailscale': 'tskey-auth-0123456789abcdefghijklmn',
+    'infra.supabase': 'sbp_0123456789abcdef0123456789abcdef01234567',
+    'cloud.digitalocean.token': 'dop_v1_' + '0'.repeat(64),
+    'cloud.gcp.oauth-access-token': 'ya29.0123456789abcdefghijklmnopqrstuvwxyz',
+    'saas.replicate': 'r8_' + 'a'.repeat(37),
+    'saas.groq': 'gsk_' + 'a'.repeat(40),
+    'saas.mailgun': 'key-0123456789abcdef0123456789abcdef',
+    'payments.braintree': 'access_token$production$0123456789abcdef$0123456789abcdef0123456789abcdef',
+    'saas.netlify': 'nfp_' + 'a'.repeat(36),
+    'saas.render': 'rnd_' + 'a'.repeat(20),
+    'registry.rubygems': 'rubygems_' + '0'.repeat(48),
+    'registry.nuget': 'oy2' + 'a'.repeat(40),
+    'saas.xai': 'xai-' + 'a'.repeat(60),
+    'saas.perplexity': 'pplx-' + 'a'.repeat(40),
+    'saas.langsmith': 'lsv2_pt_' + 'a'.repeat(32) + '_' + 'b'.repeat(10),
+    'saas.pinecone': 'pcsk_' + 'a'.repeat(40),
+    'saas.notion-internal': 'secret_' + 'a'.repeat(43),
+    'saas.linear-oauth': 'lin_oauth_' + 'a'.repeat(40),
+    'infra.flyio': 'FlyV1 ' + 'a'.repeat(40),
+    'infra.sonarqube': 'sqp_' + '0'.repeat(40),
+    'saas.newrelic-license': '0'.repeat(35) + 'NRAL',
+    'saas.hubspot': 'pat-na1-01234567-89ab-cdef-0123-456789abcdef',
+    'saas.airtable': 'pat' + 'A'.repeat(14) + '.' + '0'.repeat(64),
+    'saas.dropbox': 'sl.' + 'A'.repeat(70),
+    'saas.dynatrace': 'dt0c01.' + 'A'.repeat(24) + '.' + '0'.repeat(64),
+    'saas.meta-graph': 'EAA' + 'a'.repeat(90),
+    'infra.dockerhub.pat': 'dckr_pat_0123456789abcdefghijklm',
+  };
+  const missed: string[] = [];
+  for (const [id, secret] of Object.entries(FIXTURES)) {
+    const r = redact(secret, detectors);
+    if (!r.findings.some((f) => f.detector === id) || r.text.includes(secret)) missed.push(id);
+  }
+  assert.deepEqual(missed, [], `these detectors no longer fire on their own fixture: ${missed.join(', ')}`);
+
+  // and the catalogue must not silently shrink
+  const blocking = detectors.filter((d) => d.severity === 'block').length;
+  assert.ok(blocking >= 90, `block-severity detector count fell to ${blocking}`);
+});

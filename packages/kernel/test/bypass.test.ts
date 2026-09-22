@@ -1179,10 +1179,13 @@ test('round-14 residuals: git long-option abbreviations, transport programs, awk
   assert.equal(bash('gh api --method $M repos/o/r', c).decisive?.capability, 'forge.api.mutate');
   assert.equal(bash('gh api repos/o/r', c).verdict, 'ALLOW');
   // a bind mount hands the container the host path
-  assert.equal(
-    bash('docker run --rm -v ~:/h alpine cat /h/.ssh/id_rsa', c).decisive?.capability,
-    'fs.credential-store.read',
-  );
+  {
+    // the mount is judged as a host path: a DENY, and the credential reach is among the hits whatever the
+    // most-restrictive pick happens to be
+    const r = bash('docker run --rm -v ~:/h alpine cat /h/.ssh/id_rsa', c);
+    assert.equal(r.verdict, 'DENY');
+    assert.ok(r.hits.some((h) => h.capability === 'fs.credential-store.read'));
+  }
   assert.equal(bash('docker run --rm -v ./src:/app alpine make', c).verdict, 'ALLOW');
 })
 
@@ -1274,4 +1277,57 @@ test('round-15 residuals: semantic classes, not spellings', () => {
   // a local tag is a ref: deleting or moving it destroys it exactly as a branch does
   assert.equal(bash('git tag -d v1.0.0', c).decisive?.capability, 'git.local.branch.delete');
   assert.equal(bash('git tag v1', c).verdict, 'ALLOW');
+})
+
+test('layered contract, round 2: unresolved execution fails safe at every depth and nothing falls through to ALLOW', () => {
+  const c = ctx();
+  // [RC1] the unresolved discriminator is structural: a target that DOES NOT EXIST keeps a declared class, a
+  // target that exists but could not be read does not — including through one level of indirection.
+  // (The file-level cases live in effects.test.ts, which can build real unreadable fixtures.)
+
+  // [RC2] no positive default remains: an interpreter invocation that matched nothing else is opaque, not a
+  // local mutation. `node dist/index` and `node .` run programs the kernel never read.
+  for (const cmd of ['node dist/index', 'node .', 'python3 -m pkg', 'deno task build'])
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+
+  // a container is only a boundary when it is one
+  for (const cmd of [
+    'docker run --privileged alpine sh',
+    'docker run --net=host alpine sh',
+    'docker run --pid=host alpine sh',
+    'docker exec mycontainer sh -c "git push origin main"',
+  ]) {
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+  }
+  // ordinary local container work is untouched
+  for (const cmd of ['docker compose up -d', 'docker compose down', 'docker build .', 'docker ps', 'docker run -v ./src:/app alpine make'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+
+  // a database client handed a program file or an in-band shell escape runs code the kernel never read
+  for (const cmd of ['psql -f migrate.sql', 'sqlite3 db ".shell rm -rf /"', 'psql -c "COPY t TO PROGRAM \'sh\'"', 'mysql -e "SYSTEM id"'])
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+  assert.equal(bash('psql -c "select 1"', c).verdict, 'ALLOW');
+  // and it must never mask a stronger verdict from the target
+  assert.equal(bash('psql -h db.acme.internal -f migrate.sql', c).decisive?.capability, 'db.nonlocal.mutate');
+
+  // [RC4] KNOWN CLASS + an operand naming a program the class does not bound -> opaque
+  for (const cmd of [
+    'tar -I /tmp/pwn -cf a.tgz src',
+    'tar --use-compress-program=/tmp/pwn -cf a.tgz src',
+    'tar --checkpoint-action=exec=/tmp/pwn -xf a.tar',
+    'zip -T -TT /tmp/pwn a.zip',
+  ]) {
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+  }
+  for (const cmd of ['tar -czf a.tgz src', 'zip -r a.zip src', 'tar -xf a.tar -C /tmp/x'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+
+  // [RC5] the backslash-newline redirection class, which had no test at all: reverting the fix silently allowed a
+  // write outside the governed workspace
+  assert.equal(
+    bash('echo x > \\\n/etc/cron.d/evil', c).decisive?.capability,
+    'fs.outside-workspace.write',
+  );
+  assert.deepEqual(redirectionTargets('echo x > \\\n/etc/cron.d/evil'), ['/etc/cron.d/evil']);
+  assert.deepEqual(redirectionTargets('printf x 1<> .git/hooks/pre-commit'), ['.git/hooks/pre-commit']);
 })

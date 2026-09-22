@@ -42,18 +42,32 @@ KNOWN + AUTHORIZED           -> execute according to policy
 UNKNOWN / OPAQUE + CONTAINED -> execute only inside the permitted containment boundary
 UNKNOWN / OPAQUE + NO ADEQUATE SANDBOX -> ASK or DENY according to policy and risk
                                        -> NEVER a silent ALLOW
+KNOWN CLASS + AN OPERAND NAMING A PROGRAM, SCRIPT OR DESTINATION
+THAT THE CLASS DOES NOT BOUND          -> treat as UNKNOWN / OPAQUE
 ```
+
+The fourth line was added after the first challenge of this contract. Without it the rule *endorsed*
+`tar -I /tmp/pwn`: the class is known (`command.local-mutation`), the class is authorized (`ALLOW`), and an arbitrary
+program runs. A class only counts as known when it bounds what its operands can do.
 
 **A sandbox is a containment boundary. A parser is not.** EGO therefore never converts "the classifier did not
 recognise this" into "this is fine". It converts it into a question for a human, unless a real boundary is present to
 make the question unnecessary.
 
-This is enforced in the evaluator: a command whose effect could not be resolved reaches
-`command.script-opaque` / `command.unknown`, which are `ASK`. A *declared* class (a build, a test) keeps its verdict
-when its effect could not be resolved because the target **does not exist** — `npm test` with no test script fails
-harmlessly — and loses it when something **will run that could not be read**: an unreadable script, a non-script
-executable, a recipe built from a variable. That narrows September alignment item 5, which previously let a declared
-class absorb any unresolvable effect.
+This is enforced in the evaluator, and the distinction is **structural, not textual**. `resolveScriptCommand`
+returns `unresolved: 'missing' | 'unread'`, decided by whether the file EXISTS — not by whether we happened to read
+it, and never by matching a prose reason string. `missing` means nothing can execute (`npm test` with no test
+script fails on its own) and a declared class keeps its verdict. `unread` means something WILL execute that could
+not be read — unreadable, too large, malformed, wrongly encoded, reached through another working directory,
+dynamically constructed or unsupported — and the human gate applies **at every depth**, including through an
+enclosing declared class. That narrows September alignment item 5.
+
+Nothing falls through to `ALLOW` any more. A tool the evaluator does not model, a modelled tool with a missing or
+unexpected operand, an interpreter invocation that matched nothing else, an `exec` into an unknown container, a
+database client handed a program file or an in-band shell escape, and a `WebSearch` with no url are all resolved to
+a governed capability rather than to silence. On claude-code an `allow` is rendered as `permissionDecision: "allow"`,
+which *suppresses the host's own prompt* — so returning `ALLOW` for something unmodelled was strictly worse than
+saying nothing.
 
 ## What each profile may honestly claim
 

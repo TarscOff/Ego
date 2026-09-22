@@ -192,3 +192,46 @@ test('layered contract: unknown execution never becomes a silent ALLOW without c
   // and an undeclared opaque command still asks, as it always did
   assert.equal(bash('./unknown-binary --do-it', c).decisive?.capability, 'command.script-opaque');
 });
+
+test('layered contract, round 2: missing vs unread is decided by EXISTENCE, at every depth', () => {
+  // Challenge finding 1: the discriminator used to be a prose regex over the reason string, and it collapsed
+  // "the file is not there" into "the file is there but I could not read it". With the identical recipe behind an
+  // oversized, unreadable, malformed or out-of-workspace manifest, a declared class kept ALLOW.
+  const RECIPE = 'git push --force origin main';
+  const BIG = '# pad\n'.repeat(12000); // > MAX_SCRIPT_BYTES
+
+  const readable = workspace({ Makefile: `build:\n\t${RECIPE}\n` });
+  assert.equal(bash('make build', ctx(readable)).decisive?.capability, 'git.remote.push.force');
+
+  // the SAME recipe, only the readability changes -> the human gate, in every profile
+  const oversized = workspace({ Makefile: BIG + `build:\n\t${RECIPE}\n` });
+  for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE']) {
+    const r = bash('make build', ctx(oversized, { profile }));
+    assert.equal(r.verdict, 'ASK', profile);
+    assert.equal(r.decisive?.capability, 'command.script-opaque', profile);
+  }
+
+  // no Makefile at all: `make` fails on its own, nothing runs, ordinary work is not interrupted
+  assert.equal(bash('make build', ctx(workspace({}))).verdict, 'ALLOW');
+  assert.equal(bash('npm test', ctx(workspace({}))).verdict, 'ALLOW');
+
+  // the same for a manifest: oversized and malformed are unread; absent is missing
+  const bigPkg = workspace({ 'package.json': JSON.stringify({ pad: BIG, scripts: { test: RECIPE } }) });
+  assert.equal(bash('npm test', ctx(bigPkg)).decisive?.capability, 'command.script-opaque');
+  const bomPkg = workspace({ 'package.json': '﻿' + JSON.stringify({ scripts: { test: RECIPE } }) });
+  assert.equal(bash('npm test', ctx(bomPkg)).decisive?.capability, 'command.script-opaque');
+  // an install lifecycle behind an unread manifest is unread too
+  assert.equal(bash('npm install', ctx(bigPkg)).decisive?.capability, 'command.script-opaque');
+
+  // ONE LEVEL OF INDIRECTION must not cancel the gate (challenge findings 2, 16, 20)
+  const indirect = workspace({
+    'package.json': JSON.stringify({ scripts: { lint: 'sh ./big.sh', build: 'make -f big.mk all' } }),
+    'big.sh': '#!/bin/sh\n' + BIG + RECIPE + '\n',
+    'big.mk': BIG + `all:\n\t${RECIPE}\n`,
+  });
+  assert.equal(bash('npm run lint', ctx(indirect)).decisive?.capability, 'command.script-opaque');
+  assert.equal(bash('npm run build', ctx(indirect)).decisive?.capability, 'command.script-opaque');
+
+  // a resolved effect is still judged by what it actually does, in both directions
+  assert.equal(bash('make build', ctx(workspace({ Makefile: 'build:\n\techo hi\n' }))).verdict, 'ALLOW');
+});
