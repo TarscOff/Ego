@@ -40,7 +40,13 @@ Commands are classified by their effect, not their spelling: `npm run <script>` 
 `package.json`, `./x.sh` and `bash x.sh` by the lines of the script when it is inside the workspace and static,
 `make <target>` by the recipe; the most restrictive verdict found anywhere in the effect wins. A script the kernel
 cannot see (missing, outside the workspace, dynamic commands, an interpreter program) is `command.script-opaque` or
-`command.interpreter-script` (ASK) unless the matchers already declared the outer command's class.
+`command.interpreter-script` (ASK).
+
+Since decision "option B" (2026-09-22, `docs/architecture/security-model.md`) a declared outer class no longer
+absorbs that opacity in general. It keeps its verdict only when the target **does not exist** — `npm test` with no
+test script fails harmlessly. When something **will run that could not be read**, the human gate applies whatever the
+outer command was called. The classifier's limits are stated in the security model: it recognises known semantic
+effects and is not a containment boundary, so unknown execution asks a human rather than being waved through.
 
 ## How to add things
 

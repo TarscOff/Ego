@@ -13,6 +13,24 @@ substitutes for an independent-agent review; a deferred check is never marked pa
   rewritten, per "honest over fake parity / never mark a check passed that did not pass".
 - IN-SESSION REVIEW: PASSED
 - INDEPENDENT-AGENT REVIEW: DEFERRED_BUDGET (subagent budget exhausted at the time; re-run folded into the phase 1 review below)
+
+#### Rounds 13-15 (2026-09-22)
+
+| Round | Instrument | Claimed | Confirmed | Fix commits |
+|------:|---|--------:|----------:|---|
+| 13 | 14 adversarial clusters with shared reproduction probes | 76 | 61 | `fbf8643`, `c4c64e6` |
+| 14 | the same 14 clusters | 94 | 76 | `703ba13`, `cd08a98` |
+| 15 | the same 14 clusters, so the count is comparable | 84 | 67 | `356ff2c`, `fc68ca9` |
+
+Every confirmed finding of rounds 13-15 was fixed and pinned; re-probing both corpora against HEAD reports zero
+reaching ALLOW (44 land on ASK, 23 on DENY for round 15). Round 15's findings were classified A/B/C/D per the
+product owner's instruction: 14 regressions, 23 generalizable classifier defects, 29 enumeration-tail cases mapped to
+the containment requirement on issue #26, and 1 non-bypass.
+
+A further **independent challenge of the new layered contract** (not of the shell-syntax surface) ran on 2026-09-22
+and confirmed **22 findings against the contract itself**, 17 of them HIGH. They are unresolved. Phase 1 therefore
+does NOT meet exit-criterion point 10 and is not complete.
+
 - CONFORMANCE: NOT RUN (nothing to conform yet)
 
 ## Phase 1 — kernel core (2026-09-14 → 2026-09-15; local commits 257e2d9, ff122a0, and the round-3 fix commit)

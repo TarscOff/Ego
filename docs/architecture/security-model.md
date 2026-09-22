@@ -59,16 +59,24 @@ class absorb any unresolvable effect.
 
 Containment is a property of the host and the profile, never of the classifier. Issue #26 owns the implementation.
 
-| Profile | Isolation actually provided | What EGO may claim |
-|---|---|---|
-| **STANDARD** | Current checkout; policies, hooks, claims, validation | Normal local work stays fluid, and known-safe `LOCAL_WORKSPACE` operations are `ALLOW`. EGO must **not** pretend arbitrary opaque execution is physically contained. Ambiguous actions able to escape the governed workspace `ASK` or `DENY`. |
-| **STRICT** | Adds a dedicated branch and worktree | Everything STANDARD claims. **Worktree isolation is not filesystem, network or process containment**, so the same truthfulness rule applies unless real containment is available. |
-| **HIGH_ASSURANCE** | Worktree plus a sandbox or managed boundary: restricted filesystem, credentials, network, external targets and tool surface | Here, and only here, EGO may rely on containment for behaviour that cannot be safely inferred from command syntax. |
+**Today, no profile provides OS-level containment.** The table below therefore has two separate columns: what the
+profile is *designed* to provide once issue #26 lands, and what is *actually in force right now*. They must never be
+conflated, and the second column is the one any claim about EGO's security has to rest on.
+
+| Profile | Designed isolation (#26, not built) | Actually in force today | What EGO may claim today |
+|---|---|---|---|
+| **STANDARD** | Current checkout; policies, hooks, claims, validation | Policies, hooks, claims, validation. No process, filesystem or network restriction. | Normal local work stays fluid, and known-safe `LOCAL_WORKSPACE` operations are `ALLOW`. EGO must **not** pretend arbitrary opaque execution is physically contained. Ambiguous actions able to escape the governed workspace `ASK` or `DENY`. |
+| **STRICT** | A dedicated branch and worktree per task | **Nothing beyond STANDARD.** The branch/worktree execution strategy is not implemented. | Exactly what STANDARD claims, and nothing more. Even once built, **worktree isolation is not filesystem, network or process containment.** |
+| **HIGH_ASSURANCE** | Worktree plus a sandbox or managed boundary: restricted filesystem, credentials, network, external targets and tool surface | Managed-settings tamper protection and the narrowed capability set only. **No sandbox, no filesystem, credential, network or tool-surface restriction.** | Exactly what STANDARD claims. It may **not** yet rely on containment for anything. |
+
+The third column is why the fail-safe rule currently resolves to `ASK` in *every* profile: there is no boundary to
+defer to anywhere. When issue #26 lands, only the profile whose containment is both required and verified may move
+unknown execution from `ASK` to a contained `ALLOW`.
 
 When the host provides hooks only, EGO claims hooks only. `control-plane/containment/controls.md` declares each
-control and `packages/kernel/src/hosts/matrix.ts` records whether a host actually supports it; `ego doctor` reports
-what is genuinely in force. A control that is required by a profile but unsupported by the host is reported as not
-satisfied — never silently assumed.
+control together with its per-host support, and `ego doctor` reports what a given host satisfies. Note a real gap:
+`packages/kernel/src/hosts/matrix.ts` carries its own capability keys and **is not** the source doctor consults for
+containment, so the two tables can drift apart with nothing to catch it. Reconciling them is part of issue #26.
 
 ## What the regression corpus is for
 
