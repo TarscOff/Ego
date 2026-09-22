@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { isFile, readJson } from '../util/fs.ts';
 import { computeRuntimeIdentity, isDevelopmentVersion, type RuntimeIdentity } from './identity.ts';
 import { git } from '../util/git.ts';
+import { LAUNCHER_NAMES } from '../util/path-resolve.ts';
 
 declare const __EGO_VERSION__: string | undefined;
 declare const __EGO_PACKAGE_NAME__: string | undefined;
@@ -35,7 +36,7 @@ export function packageRoot(): string {
     const pkg = join(dir, 'package.json');
     if (isFile(pkg)) {
       const p = readJson<{ name?: string; bin?: Record<string, string> }>(pkg);
-      if (p.name === EGO_PACKAGE_NAME || (p.bin && 'harness' in p.bin)) {
+      if (p.name === EGO_PACKAGE_NAME || (p.bin && LAUNCHER_NAMES.some((n) => n in p.bin!))) {
         cachedRoot = dir;
         return dir;
       }

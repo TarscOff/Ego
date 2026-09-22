@@ -18,7 +18,7 @@ import { gitHookStatus } from './githooks.ts';
 import { gitConfigScope } from '../util/git.ts';
 import { isFile, readJsonIfExists, readTextIfExists } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
-import { resolveOnPath } from '../util/path-resolve.ts';
+import { resolveLauncher } from '../util/path-resolve.ts';
 import { HOST_MATRIX, HOST_IDS, type HostId } from '../hosts/matrix.ts';
 import { loadControlPlane } from '../control-plane/load.ts';
 import { approxTokens } from '../context/root-instructions.ts';
@@ -89,12 +89,12 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     process.versions.node.split('.')[0]! >= '24' ? 'SATISFIED' : 'NOT SATISFIED',
     `node ${process.versions.node} (floor >= 24)`,
   );
-  const launcher = resolveOnPath('harness', opts.env);
+  const launcher = resolveLauncher(opts.env);
   add(
     'runtime',
     'launcher on PATH',
     launcher ? 'SATISFIED' : 'NOT SATISFIED',
-    launcher ?? 'harness is not resolvable; hook shims fail closed (K25)',
+    launcher ?? '`ego` is not resolvable on PATH; hook shims fail closed (K25)',
     false,
   );
 

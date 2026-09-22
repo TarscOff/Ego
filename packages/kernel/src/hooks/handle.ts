@@ -26,7 +26,7 @@ import { isFile } from '../util/fs.ts';
 import { realpathSync } from 'node:fs';
 import type { HookEvent, HookDecision } from './events.ts';
 import { frameForContext, provenance } from '../context/trust.ts';
-import { resolveOnPath } from '../util/path-resolve.ts';
+import { resolveLauncher } from '../util/path-resolve.ts';
 
 export interface HookRuntime {
   projectRoot: string;
@@ -167,7 +167,7 @@ function handleLocked(
     case 'SessionStart': {
       if (ev.source === 'startup' || ev.source === 'clear') session.counters.iterations = 0; // compact / resume continue the same budget
       writeSession(root, session);
-      const launcher = resolveOnPath('harness', rt.env ?? process.env);
+      const launcher = resolveLauncher(rt.env ?? process.env);
       const lines = [
         `EGO ${self.version} (runtime ${self.runtimeSha256.slice(0, 12)}) governs this repository. Profile ${rt.pin.profile}, mode ${session.mode}, task source ${rt.pin.taskSource ?? 'ad-hoc'}.`,
         `Authority: ${cache.table.absoluteDenies.length} absolute denies and ${cache.table.organizationLocked.length} organization-locked denies are enforced deterministically; ASK capabilities prompt the human once per grant.`,
