@@ -1526,8 +1526,16 @@ interface MakeFileModel {
   firstTarget: string | null;
   defaultGoal: string | null;
   oneShell: boolean;
-  /** constructs this resolver does not model, so "not found" can never be reported as proven absence */
+  /** constructs that affect the WHOLE file, so no conclusion drawn from it is complete ($(eval), VPATH, an
+   *  include this resolver could not read or whose path is computed) */
   unsupported: string[];
+  /** constructs that affect ONLY the targets defined under them, chiefly conditionals. Attributing these to the
+   *  whole file made one `ifeq` or one `%.o:` rule gate every unrelated target — a proportionality break, not a
+   *  security property (challenge 6, findings 22 and 27). */
+  unsupportedFor: Map<string, string[]>;
+  /** true when the file has pattern rules, which can build a target no literal rule defines: it bears only on
+   *  whether ABSENCE can be proven, never on a target whose own recipe was read */
+  hasPatternRules: boolean;
   sources: string[];
   text: string;
 }
@@ -1562,6 +1570,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     defaultGoal: null,
     oneShell: false,
     unsupported: [],
+    unsupportedFor: new Map(),
+    hasPatternRules: false,
     sources: [],
     text: '',
   };
@@ -1574,6 +1584,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   model.text = text;
   const lines = makeLogicalLines(text);
   let current: MakeRule | null = null;
+  const openConditions: string[] = [];
   // GNU make lets `.RECIPEPREFIX` replace the tab that introduces a recipe line. A parser that only knows the tab
   // sees an EMPTY recipe and reports the target fully resolved — its own gap becoming a positive claim.
   let prefix = '\t';
@@ -1613,6 +1624,9 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           } else model.rules.set(t, { recipes: [...r.recipes], prereqs: [...r.prereqs] });
         }
         model.unsupported.push(...sub.unsupported);
+        for (const [t, u] of sub.unsupportedFor)
+          model.unsupportedFor.set(t, [...(model.unsupportedFor.get(t) ?? []), ...u]);
+        if (sub.hasPatternRules) model.hasPatternRules = true;
         model.sources.push(...sub.sources);
         if (!model.defaultGoal && sub.defaultGoal) model.defaultGoal = sub.defaultGoal;
         if (sub.oneShell) model.oneShell = true;
@@ -1622,7 +1636,9 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     // constructs whose effect this resolver cannot compute — recorded, never silently ignored
     if (/^(ifeq|ifneq|ifdef|ifndef|else|endif)\b/.test(trimmed)) {
-      if (!/^(else|endif)\b/.test(trimmed)) model.unsupported.push(`conditional: ${trimmed}`);
+      if (/^endif\b/.test(trimmed)) openConditions.pop();
+      else if (/^else\b/.test(trimmed)) openConditions[openConditions.length - 1] = `conditional: ${trimmed}`;
+      else openConditions.push(`conditional: ${trimmed}`);
       current = null;
       continue;
     }
@@ -1650,12 +1666,13 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     if (rule && !/^\s/.test(line)) {
       const targets = rule[1]!.trim().split(/\s+/).filter(Boolean);
       const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
-      if (targets.some((t) => /[%$]/.test(t)))
-        model.unsupported.push(`pattern or computed rule: ${targets.join(' ')}`);
-      if (prereqs.some((p) => /[$]/.test(p))) model.unsupported.push(`computed prerequisites: ${trimmed}`);
+      if (targets.some((t) => /[%$]/.test(t))) model.hasPatternRules = true;
       const shared: MakeRule = { recipes: [], prereqs };
       if (rule[3] && rule[3].trim()) shared.recipes.push(rule[3].trim()); // `target: ; cmd` one-line form
+      const localBlind = [...openConditions];
+      if (prereqs.some((p) => /[$]/.test(p))) localBlind.push(`computed prerequisites: ${trimmed}`);
       for (const t of targets) {
+        if (localBlind.length) model.unsupportedFor.set(t, [...(model.unsupportedFor.get(t) ?? []), ...localBlind]);
         const existing = model.rules.get(t);
         if (existing) {
           // both branches of a conditional, or a `::` rule declared twice: keep EVERY recipe, never the last one
@@ -1897,7 +1914,14 @@ function resolveScriptCommand(
       };
     let script: string | null = null;
     const sub = tokens[1] ?? '';
-    const INSTALL_SUBS = new Set(['install', 'i', 'ci', 'add', 'update', 'up', 'upgrade']);
+    // npm accepts a long list of aliases for install, including the deliberate typo `isntall`; `npm it` is
+    // install-test. Missing one meant the ambient closure was skipped entirely and the install reached ALLOW
+    // (challenge 6, finding 33). Taken from npm-install(1) and npm-ci(1) rather than guessed.
+    const INSTALL_SUBS = new Set([
+      'install', 'i', 'in', 'ins', 'inst', 'insta', 'instal', 'isnt', 'isnta', 'isntal', 'isntall',
+      'install-test', 'it', 'install-ci-test', 'cit', 'clean-install', 'clean-install-test',
+      'ci', 'add', 'update', 'up', 'upgrade', 'udpate', 'rebuild', 'rb',
+    ]);
     if (INSTALL_SUBS.has(sub) || (head === 'yarn' && sub === '')) {
       const pkgPath = findUp(ctx, cwd, 'package.json');
       const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
@@ -1914,7 +1938,9 @@ function resolveScriptCommand(
       const body = names.map((n) => scripts[n] as string); // pre/main/post are separate processes
       // A5 — the install's execution closure includes the DEPENDENCY TREE's lifecycle scripts, which EGO cannot
       // read. `--ignore-scripts` is the one spelling that provably runs none of them.
-      const ignore = tokens.some((t) => t === '--ignore-scripts' || t === '--no-scripts');
+      // ONLY `--ignore-scripts` is real. npm silently ignores `--no-scripts` and runs every lifecycle script, so
+      // accepting it was a positive claim that had not been earned (challenge 6, finding 34).
+      const ignore = tokens.some((t) => t === '--ignore-scripts' || t === '--ignore-scripts=true');
       if (!ignore)
         return {
           kind: 'npm-script',
@@ -2048,7 +2074,17 @@ function resolveScriptCommand(
       };
     }
     // merge every -f file, following includes
-    const merged: MakeFileModel = { rules: new Map(), firstTarget: null, defaultGoal: null, oneShell: false, unsupported: [], sources: [], text: '' };
+    const merged: MakeFileModel = {
+      rules: new Map(),
+      firstTarget: null,
+      defaultGoal: null,
+      oneShell: false,
+      unsupported: [],
+      unsupportedFor: new Map(),
+      hasPatternRules: false,
+      sources: [],
+      text: '',
+    };
     for (const p of paths) {
       const m = parseMakefile(ctx, p, makeDir);
       for (const [t, r] of m.rules) {
@@ -2059,6 +2095,9 @@ function resolveScriptCommand(
         } else merged.rules.set(t, { recipes: [...r.recipes], prereqs: [...r.prereqs] });
       }
       merged.unsupported.push(...m.unsupported);
+      for (const [t, u] of m.unsupportedFor)
+        merged.unsupportedFor.set(t, [...(merged.unsupportedFor.get(t) ?? []), ...u]);
+      if (m.hasPatternRules) merged.hasPatternRules = true;
       merged.sources.push(...m.sources);
       merged.text += m.text + '\n';
       if (m.oneShell) merged.oneShell = true;
@@ -2073,9 +2112,11 @@ function resolveScriptCommand(
     // A5 — EXECUTION CLOSURE: a target's prerequisites run BEFORE it, so their recipes are part of what this
     // command executes (challenge 5, finding 8). Walked transitively with a cycle guard and a depth bound.
     const visited = new Set<string>();
+    const touchedBlind: string[] = [];
     const walk = (t: string, depth: number): void => {
       if (visited.has(t)) return;
       visited.add(t);
+      touchedBlind.push(...(merged.unsupportedFor.get(t) ?? []));
       const rule = merged.rules.get(t);
       if (!rule) {
         // a prerequisite with no rule is usually a FILE, which executes nothing; a requested TARGET with no rule is
@@ -2107,7 +2148,9 @@ function resolveScriptCommand(
     if (missing.length) {
       // "my parser did not find the target" is NOT "the target does not exist". Only a makefile using nothing this
       // resolver cannot model may claim proven absence (challenge 5, findings 5 and 12).
-      const blind = merged.unsupported.length > 0;
+      // absence is only PROVEN when nothing in this file could define the target invisibly: a pattern rule, a
+      // computed include or an $(eval) all could. A conditional around an UNRELATED target could not.
+      const blind = merged.unsupported.length > 0 || merged.hasPatternRules || merged.unsupportedFor.size > 0;
       return {
         kind: 'make-target',
         key,
@@ -2122,7 +2165,8 @@ function resolveScriptCommand(
     }
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
-    const unsupported = partial ?? (merged.unsupported.length ? merged.unsupported[0]! : null);
+    const unsupported =
+      partial ?? (merged.unsupported.length ? merged.unsupported[0]! : (touchedBlind[0] ?? null));
     return {
       kind: 'make-target',
       key,

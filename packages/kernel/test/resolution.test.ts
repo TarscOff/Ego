@@ -106,6 +106,22 @@ test('A2 monotonicity end to end: degrading a resolution never widens the verdic
   assert.equal(run('make build', plain).verdict, 'ALLOW');
   // and a benign recipe under a changed recipe prefix is still ordinary work
   assert.equal(run('make build', workspace({ Makefile: '.RECIPEPREFIX = >\nbuild:\n>tsc -p .\n' })).verdict, 'ALLOW');
+
+  // PROPORTIONALITY: a blind spot belongs to the targets it actually affects. Attributing it to the whole file
+  // made one pattern rule — present in most real Makefiles — gate every unrelated target (challenge 6, 22 and 27).
+  const real = workspace({
+    Makefile: '%.o: %.c\n\tcc -c $<\nbuild:\n\ttsc -p .\ntest:\n\tnpm test\nlint:\n\teslint .\n',
+  });
+  for (const t of ['build', 'test', 'lint'])
+    assert.equal(run(`make ${t}`, real).verdict, 'ALLOW', `make ${t}: a pattern rule elsewhere must not gate it`);
+  // but that same pattern rule DOES prevent proving a target absent, because it could build one
+  assert.notEqual(run('make nosuch', real).verdict, 'ALLOW');
+  // a conditional around one target does not gate another
+  const cond = workspace({
+    Makefile: 'ifeq ($(E),p)\ndeploy:\n\tgit push origin main\nendif\nbuild:\n\ttsc -p .\n',
+  });
+  assert.equal(run('make build', cond).verdict, 'ALLOW');
+  assert.equal(run('make deploy', cond).verdict, 'DENY');
 });
 
 test('A4 freshness: a source rewritten by the same command cannot justify a later ALLOW', () => {
@@ -185,7 +201,12 @@ test('A5 execution closure: prerequisites, default goals, includes and alternate
 
   // the dependency tree's install scripts are ambient too, and --ignore-scripts is the spelling that runs none
   const pkg = workspace({ 'package.json': JSON.stringify({ name: 'x' }) });
-  assert.equal(run('npm install', pkg).verdict, 'ASK');
+  // every real npm install alias reaches the closure — `isntall` and `it` are genuine npm spellings, and missing
+  // one skipped the closure entirely (challenge 6, finding 33)
+  for (const cmd of ['npm install', 'npm i', 'npm in', 'npm it', 'npm isntall', 'npm install-test', 'npm ci'])
+    assert.equal(run(cmd, pkg).verdict, 'ASK', `${cmd} runs third-party lifecycle scripts`);
+  // `--no-scripts` is NOT an npm flag: npm ignores it and runs them all, so it proves nothing
+  assert.equal(run('npm i --no-scripts', pkg).verdict, 'ASK');
   assert.equal(run('npm ci --ignore-scripts', pkg).verdict, 'ALLOW');
 });
 
