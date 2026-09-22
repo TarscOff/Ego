@@ -2821,7 +2821,11 @@ function analyzeSegments(
           segment: seg,
           absolute: false,
         });
-      continue;
+      // NO `continue` HERE, and none may be added (challenge 5, finding 1). Recognising a segment's HEAD must never
+      // remove that segment from the rest of the pipeline: `cd . > ~/.ssh/authorized_keys` truncates the file, and
+      // while this branch skipped ahead the redirection scan below never saw it, so an absolute core deny reached
+      // ALLOW. Tracking the directory is a side effect of walking the segment, never a substitute for analysing it.
+      // `cd`/`pushd`/`popd` with no redirection are classified as read-only shell structure by matchers.md.
     }
     // `git commit` hook bypass: --no-verify, or a short-flag cluster containing `n` (`-n`, `-nm`, `-nam`, `-vn`).
     // Scanned on quote-aware tokens so a `-n` inside the `-m` message (a quoted token) is never a false positive. The

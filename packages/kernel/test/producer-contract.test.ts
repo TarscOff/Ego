@@ -169,3 +169,46 @@ test('producer contract: the source has no second path around the canonical anal
     );
   }
 });
+
+test('by construction: recognising a segment HEAD never removes that segment from the pipeline', () => {
+  // Challenge 5, finding 1 — a NEW failure class, "known head + unexamined remainder". The cwd-tracking branch
+  // `continue`d as soon as the head was `cd`/`pushd`, so the rest of the per-segment body — the hook-bypass scan,
+  // the trust-store scan, path classification and the redirection scan — never saw that segment. A redirection on a
+  // shell builtin is still performed (`sh -c 'cd . > victim'` truncates victim), so absolute core denies were
+  // reachable at ALLOW in every profile. Tracking the directory is a side effect of walking a segment, never a
+  // substitute for analysing it.
+  const dir = workspace({});
+  const c = ctx(dir);
+  const pairs: Array<[string, string]> = [
+    ['cd .', ':'],
+    ['pushd .', ':'],
+    ['cd -- .', ':'],
+    ['cd -P .', ':'],
+    ['cd /etc', ':'],
+  ];
+  const targets = ['~/.ssh/authorized_keys', '~/.ego/trust/releases.json', '~/.aws/credentials'];
+  for (const [head, control] of pairs) {
+    for (const t of targets) {
+      for (const op of ['>', '>>']) {
+        const expected = run(`echo ok && ${control} ${op} ${t}`, c);
+        const got = run(`echo ok && ${head} ${op} ${t}`, c);
+        assert.notEqual(got.verdict, 'ALLOW', `"${head} ${op} ${t}" must not be ALLOW`);
+        assert.equal(
+          got.verdict,
+          expected.verdict,
+          `"${head} ${op} ${t}" must be judged exactly as "${control} ${op} ${t}" (${expected.verdict})`,
+        );
+      }
+    }
+  }
+  // the same at depth, so this is the canonical analyzer and not a top-level patch
+  const mk = workspace({ Makefile: 'run:\n\t@cd . > ~/.ssh/authorized_keys\n' });
+  assert.notEqual(run('make run', ctx(mk)).verdict, 'ALLOW');
+  const np = workspace({ 'package.json': JSON.stringify({ scripts: { run: 'echo hi && cd . > ~/.ssh/authorized_keys' } }) });
+  assert.notEqual(run('npm run run', ctx(np)).verdict, 'ALLOW');
+
+  // and an ordinary cd is still silent: changing directory is not an event
+  for (const ok of ['cd src && cat index.ts', 'cd /etc && ls', 'cd -- build && ls', 'popd', 'pushd build && ls']) {
+    assert.equal(run(ok, c).verdict, 'ALLOW', `"${ok}" must stay ALLOW`);
+  }
+});
