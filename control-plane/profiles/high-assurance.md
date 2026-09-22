@@ -36,7 +36,7 @@ narrow:
 # HIGH_ASSURANCE
 
 Everything STRICT requires, plus tamper protection through the host's managed tier (Claude Code managed settings with
-`allowManagedHooksOnly` and `allowManagedPermissionRulesOnly`; Codex `requirements.toml`), a remote `harness verify
+`allowManagedHooksOnly` and `allowManagedPermissionRulesOnly`; Codex `requirements.toml`), a remote `ego verify
 --range` backstop on a protected branch, worktree isolation for concurrent sessions (a second live session is refused in
 a bound checkout), and no public network use by tools. Assurance comes from enforcement and evidence, not from more
 prompt text: the context budget is the same as STRICT.

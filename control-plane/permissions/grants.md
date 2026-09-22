@@ -52,7 +52,7 @@ grants:
   - capability: ego.skills.install
     phrases: ["install the skill", "install the skills", "you can install the skill", "installe le skill", "installe les skills"]
   - capability: ego.pin.change
-    phrases: ["upgrade the harness", "upgrade ego", "rollback the harness", "you can upgrade the harness", "mets a jour le harness", "upgrade le harness"]
+    phrases: ["upgrade ego", "rollback ego", "you can upgrade ego", "mets a jour ego", "upgrade the harness", "rollback the harness"]
   - capability: command.privileged
     phrases: ["you can use sudo", "run it with sudo", "tu peux utiliser sudo"]
   - capability: command.network-tool

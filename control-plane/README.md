@@ -48,13 +48,13 @@ cannot see (missing, outside the workspace, dynamic commands, an interpreter pro
   a stable dotted identifier and a one-line description; add a matcher in `permissions/matchers.md` when the operation
   can be recognised deterministically. A checked item under any other heading is a compile error, never silently
   ignored. Run `npm test` here (the loader tests compile the control plane) and `ego check` in a consumer;
-  `harness policy compile` arrives with phase 5.
+  `ego policy compile` arrives with phase 5.
 - **A permission change for a product**: in the consumer, edit `.harness/permissions.md` using the same sections; it
   may only narrow.
 - **A secret detector or redaction rule**: add an entry to the relevant family in `secrets/` with `severity` (`block` or
   `warn`); core detectors carry `locked: true` and their severity may be raised, never lowered, by overlays.
 - **A validation, reviewer, technology, skill, external skill provider, user intent, lexicon example, policy domain,
-  compliance framework, forge provider, model adapter**: `docs/extending-the-harness/` is authored with phase 3.
+  compliance framework, forge provider, model adapter**: `docs/extending-ego/` is authored with phase 3.
 - **A mode**: add `modes/<id>.md` with `kind: authority` and its overrides; never widen an absolute deny.
 - **An intent**: add `intents/<id>.md`; intents route work and change no authority.
 
