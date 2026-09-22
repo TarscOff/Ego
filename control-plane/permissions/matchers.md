@@ -142,14 +142,14 @@ matchers:
     command: '^(gh\s+issue\s+(view|list|status)|glab\s+issue\s+(view|list))\b'
   - capability: forge.api.mutate
     tool: Bash
-    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*\bmutation\b)'
+    command: '^(gh|glab)\s+api\s+graphql\b(?=[\s\S]*\bmutation\b)'
   - capability: forge.api.mutate
     tool: Bash
     # graphql body loaded from a file/stdin (field=@path): cannot inspect it, so a mutation cannot be ruled out -> fail closed
-    command: '^(gh|glab)\s+api\b(?=.*\bgraphql\b)(?=.*(=@|\s--input\b|\s-i\s+\S|=\s*[$`]))'
+    command: '^(gh|glab)\s+api\s+graphql\b(?=[\s\S]*(=@|\s--input\b|\s-(\s|$)|=\s*[$`]))'
   - capability: forge.api.mutate
     tool: Bash
-    command: '^(gh|glab)\s+api\b(?!.*\bgraphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
+    command: '^(gh|glab)\s+api\b(?!\s+graphql\b)(?=.*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
   - capability: forge.api.mutate
     tool: Bash
     # the method arrives from a variable or a substitution: it cannot be shown to be a read, so it fails closed
@@ -385,6 +385,9 @@ matchers:
   - capability: git.local.recovery.destroy
     tool: Bash
     command: '^git\s+(reflog\s+(expire|delete)|gc\b[^|;&]*--prune|stash\s+(clear|drop))\b'
+  - capability: git.local.branch.delete
+    tool: Bash
+    command: '^git\s+tag\b[^|;&]*\s(-[a-zA-Z]*[df][a-zA-Z]*|--delete|--force)(\s|$)'
   - capability: git.remote.configure
     tool: Bash
     command: '^git\s+remote\s+(add|remove|rm|rename|set-url|set-branches|set-head|prune)\b'
@@ -534,7 +537,12 @@ matchers:
     tool: Bash
     # a pipe on EITHER side of a quoted string inside an awk program is a shell command (`"cmd" | getline`,
     # `print | "cmd"`); sed's `e` command and the s///e flag execute their result; `w` writes a file
-    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|[0-9$]\s*e\s|s/[^/]*/[^/]*/[a-z]*e)'
+    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|\|\s*&?\s*getline|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|(^|[;{''"\s])[0-9$,~+]*\s*e[\s;}]|s(.)(?:(?!\3).)*\3(?:(?!\3).)*\3[a-z]*e)'
+  # sed's `e` FLAG on a substitution executes the result, with ANY delimiter (`s|x|id|e`, `s#x#id#e`).
+  # A dedicated matcher keeps the backreference unambiguous.
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(?:sed|gsed)\b[\s\S]*\ss(.)(?:(?!\1)[\s\S])*\1(?:(?!\1)[\s\S])*\1[a-z]*e'
   # a program supplied by FILE is opaque: it is judged like any other script, not as a read-only one-liner
   - capability: command.interpreter-script
     tool: Bash
@@ -549,7 +557,7 @@ matchers:
   # interposed interpreter options (`python3 -u -c`, `node --no-warnings -e`) must not escape the ^-anchored match
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(?:(?:node|nodejs|deno|bun|tsx|ts-node)\s+(?:-[-\w=.]+\s+)*(?:-e|--eval|-p|--print|-[A-Za-z]*e)|(?:python3?|ruby|perl|php|Rscript)\s+(?:-[-\w=.]+\s+)*(?:-c|-e|-r|-E|-[A-Za-z]*[cerE]))\b'
+    command: '^(?:(?:node|nodejs|deno|bun|tsx|ts-node)\s+(?:-[-\w=.]+\s+)*(?:-e|--eval|-p|--print|-r|--require|-[A-Za-z]*[er])|(?:python3?|ruby|perl|php|Rscript)\s+(?:-[-\w=.]+\s+)*(?:-c|-e|-r|-E|-[A-Za-z]*[cerE]))'
   - capability: command.interpreter-script
     tool: Bash
     command: '^(node|python3?|tsx|ts-node|bun|deno\s+run|ruby|perl|php)\s+(?!-)[^\s]+\.(js|mjs|cjs|ts|mts|py|rb|pl|php)\b'

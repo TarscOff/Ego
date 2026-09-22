@@ -340,3 +340,24 @@ test('round-15 residuals: the -u/-U option letter is the first one, not the last
     }
   }
 });
+
+test('round-15 residuals: key-name aliases, PEM anchors and further providers', () => {
+  const AWS = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+  const noPrefix = redact(`secret_access_key: ${AWS}`, detectors);
+  assert.ok(noPrefix.blocked && !noPrefix.text.includes(AWS), 'the key name need not carry an `aws` prefix');
+  // a warn-level .env line must not splice away the PEM header and orphan the key body
+  const pem = redact('PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQ\n-----END PRIVATE KEY-----', detectors);
+  assert.ok(pem.findings.some((f) => f.detector === 'infra.private-key-block'));
+  assert.ok(!pem.text.includes('MIIEvQIBADAN'));
+  for (const [name, secret] of [
+    ['new relic license', '0123456789abcdef0123456789abcdef012NRAL'],
+    ['supabase secret', 'sb_secret_0123456789abcdef0123456789abcdef'],
+    ['airtable pat', 'patAbCdEfGhIjKlMn.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'],
+    ['hubspot pat', 'pat-na1-01234567-89ab-cdef-0123-456789abcdef'],
+    ['dropbox short-lived', 'sl.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_ABCDEFGHIJ'],
+    ['dynatrace', 'dt0c01.ABCDEFGHIJKLMNOPQRSTUVWX.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'],
+  ] as Array<[string, string]>) {
+    assert.ok(redact(secret, detectors).blocked, `must block: ${name}`);
+  }
+  assert.equal(redact('normal text with no secret at all', detectors).blocked, false);
+});

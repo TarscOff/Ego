@@ -119,7 +119,7 @@ detectors:
     replacement: '[REDACTED:tailscale-key]'
   - id: infra.supabase
     name: Supabase access token
-    pattern: '\bsbp_[a-f0-9]{40}\b'
+    pattern: '\b(sbp_[a-f0-9]{40}|sb_(secret|publishable)_[A-Za-z0-9_-]{28,})\b'
     severity: block
     locked: true
     replacement: '[REDACTED:supabase-token]'

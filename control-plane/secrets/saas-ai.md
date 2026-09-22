@@ -69,6 +69,42 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:linear-oauth]'
+  - id: saas.newrelic-license
+    name: New Relic license key
+    pattern: '\b[a-f0-9]{35}NRAL\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:newrelic-license]'
+  - id: saas.hubspot
+    name: HubSpot private-app access token
+    pattern: '\bpat-[a-z]{2}\d?-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:hubspot-token]'
+  - id: saas.airtable
+    name: Airtable personal access token
+    pattern: '\bpat[A-Za-z0-9]{14}\.[a-f0-9]{64}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:airtable-token]'
+  - id: saas.dropbox
+    name: Dropbox short-lived access token
+    pattern: '\bsl\.[A-Za-z0-9_-]{70,}'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:dropbox-token]'
+  - id: saas.dynatrace
+    name: Dynatrace API token
+    pattern: '\bdt0c01\.[A-Z0-9]{24}\.[a-f0-9]{64}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:dynatrace-token]'
+  - id: saas.meta-graph
+    name: Meta / Facebook Graph API access token
+    pattern: '\bEAA[A-Za-z0-9]{90,}'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:meta-token]'
   - id: saas.replicate
     name: Replicate API token
     pattern: '\br8_[A-Za-z0-9]{37,}\b'

@@ -1224,3 +1224,54 @@ test('round-15 residuals: defects introduced by the round-14 fixes themselves', 
   for (const cmd of ['git checkout -B main', 'git switch -C main', 'git branch -M main', 'git branch -C a b'])
     assert.equal(bash(cmd, c).decisive?.capability, 'git.local.reset', cmd);
 })
+
+test('round-15 residuals: semantic classes, not spellings', () => {
+  const c = ctx();
+  // a generic output option names a write destination whatever the tool is called
+  assert.equal(bash('tree -o .git/hooks/pre-commit', c).decisive?.capability, 'fs.hook-config.write');
+  assert.equal(bash('tree', c).verdict, 'ALLOW');
+  // the `<>` operator opens its target for read-WRITE
+  assert.equal(bash('printf x 1<> .git/hooks/pre-commit', c).decisive?.capability, 'fs.hook-config.write');
+  // a bind mount is resolved as a real path, not guessed at with a regex
+  for (const cmd of [
+    'docker run -v /Users/tarik:/h alpine cat /h/.ssh/id_rsa',
+    'docker run --mount type=bind,source=/Users/tarik,target=/h alpine sh',
+  ]) {
+    assert.equal(bash(cmd, c).verdict, 'DENY', cmd);
+  }
+  assert.equal(bash('docker run -v ./src:/app alpine make', c).verdict, 'ALLOW');
+  // a pipe into getline is a command pipe whatever the left side is; sed's `e` takes any delimiter or address
+  for (const cmd of ["awk 'BEGIN{c=\"id\"; c|getline x; print x}'", "sed 'e id' /tmp/in", "sed 's|x|id|e' f.txt"])
+    assert.notEqual(bash(cmd, c).verdict, 'ALLOW', cmd);
+  for (const cmd of ['awk {print $1}', "sed 's/a/b/g' f", 'sed -n 1p f'])
+    assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
+  // an interpreter body glued to its flag, and node's module preload
+  assert.notEqual(bash('python3 -c\'import os;os.system("git push")\'', c).verdict, 'ALLOW');
+  assert.notEqual(bash('node -r ./evil.js app.js', c).verdict, 'ALLOW');
+  // su/runuser command options may be abbreviated or glued
+  assert.equal(bash("su --comm='rm -rf /' root", c).decisive?.capability, 'fs.destructive-root');
+  assert.equal(bash("su -c'rm -rf /' root", c).decisive?.capability, 'fs.destructive-root');
+  // the kubectl verb is never an option's VALUE, and a glued -s names the server
+  assert.equal(bash('kubectl -n logs apply -f evil.yaml --context=acme-eks', c).decisive?.capability, 'k8s.nonlocal.mutate');
+  assert.equal(
+    bash('kubectl --context kind-dev -shttps://api.acme.com apply -f evil.yaml', c).decisive?.capability,
+    'k8s.nonlocal.mutate',
+  );
+  // a scheme-less positional connection string, a digit in the option cluster, and a runner in front of the tool
+  assert.equal(
+    bash('mongosh prod-db.acme.com:27017/admin --eval "db.dropDatabase()"', c).decisive?.capability,
+    'production.database.mutate',
+  );
+  assert.equal(bash('psql -1h prod-db.acme.com -c "DROP TABLE users"', c).decisive?.capability, 'production.database.mutate');
+  assert.equal(
+    bash('DATABASE_URL=postgres://prod-db.acme.com:5432/app npx dbmate up', c).decisive?.capability,
+    'production.database.mutate',
+  );
+  assert.equal(bash('DATABASE_URL=postgres://localhost/app npx dbmate up', c).verdict, 'ALLOW');
+  // the graphql lookahead binds to the SUBCOMMAND: a repository named "graphql-gateway" is not a graphql call
+  assert.equal(bash('gh api -X DELETE repos/acme/graphql-gateway', c).decisive?.capability, 'forge.api.mutate');
+  assert.equal(bash('gh api repos/o/r', c).verdict, 'ALLOW');
+  // a local tag is a ref: deleting or moving it destroys it exactly as a branch does
+  assert.equal(bash('git tag -d v1.0.0', c).decisive?.capability, 'git.local.branch.delete');
+  assert.equal(bash('git tag v1', c).verdict, 'ALLOW');
+})

@@ -29,7 +29,7 @@ sensitive_files:
 detectors:
   - id: file.env-line
     name: KEY=value line in a .env-style document
-    pattern: '^(\s*[A-Z][A-Z0-9_]*\s*=\s*["'']?)([^"''\r\n]{6,})'
+    pattern: '^(\s*[A-Z][A-Z0-9_]*\s*=\s*["'']?)(?!-----BEGIN)([^"''\r\n]{6,})'
     flags: 'gm'
     group: 2
     severity: warn

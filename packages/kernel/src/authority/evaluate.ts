@@ -218,8 +218,12 @@ export function splitShellSegments(command: string): string[] {
 function operandWrapperBody(tokens: string[], from: number): string | null {
   for (let i = from + 1; i < tokens.length; i++) {
     const t = tokens[i]!;
-    if (t === '--command' || t === '--session-command' || /^-[a-zA-Z]*c$/.test(t)) return tokens[i + 1] ?? null;
-    const m = /^(?:--command|--session-command)=([\s\S]*)$/.exec(t);
+    // `--comm=`, `--sess=` … : any unambiguous abbreviation, and the body may be GLUED to a short cluster
+    if (/^--(com|ses|sess)/.test(t) && !t.includes('=')) return tokens[i + 1] ?? null;
+    if (/^-[a-zA-Z]*c$/.test(t)) return tokens[i + 1] ?? null;
+    const glued = /^-[a-zA-Z]*c([\s\S]+)$/.exec(t);
+    if (glued && !t.startsWith('--')) return glued[1]!;
+    const m = /^--(?:com|ses|sess)[a-z-]*=([\s\S]*)$/.exec(t);
     if (m) return m[1]!;
   }
   return null;
@@ -685,9 +689,9 @@ export function redirectionTargets(segment: string): string[] {
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
   // a backslash-newline continuation is erased by the shell before it opens the file, so erase it first too
   const joined = segment.replace(/\\\r?\n/g, '');
-  const unglued = joined.replace(/([^\s&|<>])(>{1,2})/g, '$1 $2');
+  const unglued = joined.replace(/([^\s&|<>])(<>|>{1,2})/g, '$1 $2');
   // a target is a run of quoted and unquoted chunks: `"control-plane"/permissions/x`, `control-plan\e/x`, 'a b'/c
-  const re = /(?:^|\s)(?:\d?>>?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
+  const re = /(?:^|\s)(?:\d?<>|\d?>>?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(unglued))) {
     const target = unquoteShellWord(m[1]!);
@@ -1079,7 +1083,7 @@ function legacyOptionValue(tokens: string[], short: string, longs: string[]): st
     if (at < 0) continue;
     // the characters between the dash and the option letter must themselves be option letters: without this, the
     // `h` inside `-url=jdbc:postgresql://localhost:5432/app` reads as `-h` and invents a host (round 14)
-    if (!/^-[A-Za-z]*$/.test(t.slice(0, at))) continue;
+    if (!/^-[A-Za-z0-9]*$/.test(t.slice(0, at))) continue;
     const glued = t.slice(at + 1);
     if (glued) return glued;
     return tokens[i + 1] ?? null;
@@ -1601,6 +1605,8 @@ const TARGET_ENV_RE =
 const TARGET_ENV_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
   'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
+  // a runner does not change what the wrapped tool connects to
+  'npx', 'pnpm', 'yarn', 'bunx', 'pnpx', 'bun', 'npm',
 ]);
 
 const K8S_MUTATING_VERBS = new Set([
@@ -1636,6 +1642,10 @@ const KUBECTL_VERBS = new Set([
   ...['get', 'describe', 'logs', 'top', 'explain', 'api-resources', 'api-versions', 'version', 'config', 'cluster-info', 'wait', 'diff', 'events', 'kustomize'],
   ...['apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon', 'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward', 'debug', 'certificate', 'proxy', 'auth', 'apply-set'],
 ]);
+/** kubectl/helm options that consume the NEXT token; their value must never be mistaken for the verb. */
+const K8S_VALUE_OPTS =
+  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v)$/;
+
 const HELM_VERBS = new Set([
   ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency'],
   ...['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test', 'repo', 'plugin', 'create', 'package'],
@@ -1663,7 +1673,7 @@ function optionValues(tokens: string[], short: string, longs: string[]): string[
     if (at < 0) continue;
     // the characters between the dash and the option letter must themselves be option letters: without this, the
     // `h` inside `-url=jdbc:postgresql://localhost:5432/app` reads as `-h` and invents a host (round 14)
-    if (!/^-[A-Za-z]*$/.test(t.slice(0, at))) continue;
+    if (!/^-[A-Za-z0-9]*$/.test(t.slice(0, at))) continue;
     const glued = t.slice(at + 1);
     if (glued) out.push(glued);
     else if (tokens[i + 1] !== undefined) out.push(tokens[i + 1]!);
@@ -1703,7 +1713,18 @@ function resolveK8sTarget(
   // otherwise displace it and silently turn a mutation into a read (round 14).
   const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
   const mutate = head === 'helm' ? HELM_MUTATING_VERBS : K8S_MUTATING_VERBS;
-  const verb = tokens.slice(1).find((t) => !t.startsWith('-') && known.has(t));
+  let verb: string | undefined;
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t.startsWith('-')) {
+      if (K8S_VALUE_OPTS.test(t)) i++; // its value is a namespace/context/file, never the verb
+      continue;
+    }
+    if (known.has(t)) {
+      verb = t;
+      break;
+    }
+  }
   // an unrecognised verb fails closed: the kernel cannot show it is a read
   const mutating = verb === undefined ? true : mutate.has(verb);
   // EVERY signal that can select the cluster is classified, and the MOST RESTRICTIVE one decides. kubectl resolves
@@ -1719,7 +1740,7 @@ function resolveK8sTarget(
     const env = /^(KUBECONFIG|KUBERNETES_MASTER)=(.+)$/.exec(t);
     if (env) signals.push({ cls: classifyTargetName(env[2]!, [], targets), target: env[1]! + '=' + env[2]! });
   }
-  add(optionValues(tokens, '', ['--server', '--kube-apiserver', '-s']), [], 'server');
+  add(optionValues(tokens, 's', ['--server', '--kube-apiserver']), [], 'server');
   for (const ns of optionValues(tokens, 'n', ['--namespace']))
     if (!isOpaqueTarget(ns) && hasProductionMarker(ns, targets.productionMarkers))
       signals.push({ cls: 'PRODUCTION', target: `namespace ${ns}` });
@@ -1730,6 +1751,24 @@ function resolveK8sTarget(
 }
 
 /** Resolves the database target of a normalized segment and whether a statement is executed against it. */
+/** Bind-mount sources of a container run: `-v SRC:DST`, `--volume SRC:DST`, `--mount type=bind,source=SRC,...`.
+ *  Handing a host path to a container reads and writes it, so the source is classified like any other path. */
+export function containerMountSources(tokens: string[]): string[] {
+  const out: string[] = [];
+  for (const v of optionValues(tokens, 'v', ['--volume'])) {
+    const src = v.split(':')[0];
+    if (src && (src.startsWith('/') || src.startsWith('~') || src.startsWith('.') || src.startsWith('$')))
+      out.push(src);
+  }
+  for (const m of tokens.join(' ').matchAll(/--mount[= ]\s*([^\s]+)/g)) {
+    const spec = m[1]!;
+    if (!/type=bind/.test(spec)) continue;
+    const src = /(?:^|,)(?:source|src)=([^,\s]+)/.exec(spec)?.[1];
+    if (src) out.push(src);
+  }
+  return out;
+}
+
 function resolveDbTarget(
   tokens: string[],
   targets: LocalTargets,
@@ -1766,6 +1805,9 @@ function resolveDbTarget(
   const bare = tokens.slice(1).find((t) => !t.startsWith('-'));
   if (signals.length === 0 && bare && isOpaqueTarget(bare))
     return { cls: 'UNCLASSIFIED', target: bare, executes };
+  // mongosh/psql/mysql accept a bare `host[:port][/db]` with no scheme at all
+  if (signals.length === 0 && bare && /^[A-Za-z0-9][A-Za-z0-9.-]*(:\d+)?(\/[^\s]*)?$/.test(bare) && /[.:]/.test(bare))
+    push(bare.split(/[:/]/)[0]!, 'host');
   if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { cls: worst.cls, target: worst.target, executes };
@@ -2043,6 +2085,40 @@ function classifyShellPaths(
   const head = head0.slice(head0.lastIndexOf('/') + 1);
   if (!head || head.startsWith('$')) return hits;
   const paths = pathTokens(seg, cwd);
+  // a container bind mount hands the host path to the container: the SOURCE is read and written, whatever the
+  // command inside the container then does. Resolving it as a path beats guessing at its spelling with a regex.
+  if (head === 'docker' || head === 'podman') {
+    for (const src of containerMountSources(tokenize(seg))) {
+      const expanded = expandHome(src) ?? src;
+      if (/[$`]/.test(expanded)) {
+        hits.push({
+          capability: 'command.unknown',
+          verdict: verdictFor(table, ctx, 'command.unknown'),
+          via: `bind mount source ${src} cannot be resolved`,
+          segment: seg,
+          absolute: false,
+        });
+        continue;
+      }
+      const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded));
+      // a bind mount is read-write by default: judge it as BOTH, and keep whichever is more restrictive
+      for (const tool of ['Write', 'Read'] as const) {
+        const h = classifyPath(table, ctx, tool, abs);
+        if (h.verdict !== 'ALLOW')
+          hits.push({ ...h, via: `bind mount source ${src} (${h.via})`, segment: seg });
+      }
+      const posix = abs.split(sep).join('/');
+      const homePosix = canonicalPath(homedir()).split(sep).join('/');
+      if (posix === homePosix || homePosix.startsWith(posix + '/') || posix === '/')
+        hits.push({
+          capability: 'fs.credential-store.read',
+          verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+          via: `bind mount of ${src} hands the container every credential store under it`,
+          segment: seg,
+          absolute: false,
+        });
+    }
+  }
   const home = canonicalPath(homedir()).split(sep).join('/');
   const recursive =
     RECURSIVE_HEADS.has(head) &&
@@ -2062,7 +2138,8 @@ function classifyShellPaths(
       'borg',
     ].includes(head) ||
       tokens.some((t) => RECURSIVE_FLAG_RE.test(t)));
-  const write = WRITE_HEADS.has(head);
+  const genericOutput = optionValue(tokenize(seg), 'o', ['--output', '--output-file', '--out-file']);
+  const write = WRITE_HEADS.has(head) || (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
   if (write) {
@@ -2205,6 +2282,9 @@ function classifyShellPaths(
     )
       dest = 'ALL'; // for ln every operand counts: a link TARGET inside a protected tree opens a route into it
   }
+  // a generic `-o FILE` / `--output FILE` names a write destination whatever the tool is called; enumerating every
+  // "read-only" tool that happens to accept one is the losing game (round 15)
+  if (!dest && genericOutput && /[/.]/.test(genericOutput)) dest = genericOutput;
   if (dest && dest !== 'ALL' && dest !== 'AFTER_DASHDASH' && !paths.some((p) => p.raw === dest)) {
     const expanded = expandHome(dest);
     if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: dest, abs: null, glob: false });
