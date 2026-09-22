@@ -100,6 +100,51 @@ discarding the whole target, or a partly-parsed makefile passing for a complete 
 EGO does **not** reimplement GNU make, the shell, npm or git. It models a subset and records every construct it does
 not model; the unmodelled part fails safe.
 
+## The verified execution environment
+
+`{cwd, cwdVerified}` was one dimension, and it was the only one EGO made earn its keep. Everything else that decides
+**which bytes run** was assumed: the configuration that selects the body, the binding that turns a name into a
+program, the freshness of the sources a conclusion rests on, the events an operation raises. Each of those silently
+re-points the analysis at a different reality while the verdict still reads RESOLVED. The environment is therefore
+multi-dimensional, and the invariant is:
+
+> A positive ALLOW may exist only when the relevant execution closure is **context-verified**,
+> **configuration-complete enough**, **binding-resolved where required**, **fresh**, and **fully passed through the
+> canonical analyzer**.
+
+"Relevant" is doing deliberate work: a claim must prove the dimensions it actually depends on, not all of them —
+proving all of them would gate ordinary development, and proving only the directory was the hole.
+
+| Dimension | What it decides | How it fails safe |
+|---|---|---|
+| **cwd / workspace** | what a relative path means | dynamic `cd`, unresolvable `-C`, logical/physical disagreement, a directory outside every registered root |
+| **configuration** | *which* body the tool selects | `core.hooksPath`, makefile precedence, an unreadable `include`, a workspace selector |
+| **binding** | which *program* a name runs | a makefile or command line assigning `SHELL`, `.SHELLFLAGS` or `PATH` |
+| **freshness** | whether the bytes read are the bytes that run | the write ledger, shared across every depth |
+| **ambient events** | what runs that the command never names | git hooks by event, install lifecycle scripts |
+| **sources** | what a conclusion rests on | fingerprints, so a conclusion can be re-checked |
+
+**Typed dispatch.** `ProducerResult | null` gave every producer a second, untyped return channel that silently
+meant `ABSENT_VERIFIED` — the strongest claim in the ladder, made by omission. `null` is gone. `kind: 'none'` means
+*no registered producer claims this head*, which is a fact about the producer table, not a conclusion about
+execution, and it is reached by a lookup rather than by a producer giving up.
+
+**Scoped opacity.** An unknown now names which part of the closure it is about — `binding:Makefile`,
+`config:gen.mk`, `body:deploy`, `ambient:install` — so a reader sees what EGO could not see, and a local unknown
+stops poisoning unrelated safe work: an unresolved `deploy` target leaves `build` and `test` at ALLOW.
+
+**Transitive freshness.** The write ledger belongs to the *command*, not to one producer, and is mutated in place
+across every depth. `./configure && make build` no longer reuses the Makefile that `configure` rewrote one level
+down.
+
+**Self-modifying producers.** A makefile that is itself a target of that makefile is remade and re-run by make, so
+what EGO read is the pre-image of what executes. That is reported as a freshness gap rather than asserted complete.
+
+**Ambient events.** Hooks are resolved in two steps — the semantic events an operation raises, then the hooks those
+events listen to. `reference-transaction` fires on *any* ref update and `post-index-change` on *any* index change,
+which a verb-to-hook table cannot express: a verb added later only declares what it does, a hook only what it
+listens to.
+
 ## Execution closure
 
 Security analysis cannot consider only the executable text present in the command. The **execution closure** of an

@@ -1279,26 +1279,90 @@ function findUp(ctx: EvaluationContext, start: string, name: string): string | n
   return null;
 }
 
-/** The execution context a semantic conclusion was computed against (product decision, 2026-09-22).
+/* ------------------------------------------------------------------------------------------------------------- *
+ * THE VERIFIED EXECUTION ENVIRONMENT (product decision, 2026-09-22).
  *
- *  EGO may report an effect as KNOWN only when the context required to resolve it has itself been VERIFIED. A
- *  resolver that cannot prove its context inputs match the real execution context must downgrade its conclusion to
- *  UNKNOWN/OPAQUE. Absence of proof is not proof of a safe context. */
-export interface ResolutionContext {
+ * `{cwd, cwdVerified}` was one dimension, and it was the only one EGO made earn its keep. Everything else that
+ * decides WHICH BYTES RUN was assumed: the configuration that selects the body (git's core.hooksPath, make's
+ * makefile precedence and SHELL, npm's .npmrc), the binding that turns a NAME into a PROGRAM (PATH,
+ * node_modules/.bin), the freshness of the sources a conclusion rests on, and the events an operation raises.
+ * Each of those silently re-points the analysis at a different reality while the verdict still says RESOLVED.
+ *
+ * The environment is therefore multi-dimensional, and a positive claim requires the dimensions the claim actually
+ * DEPENDS ON to be proven — not all of them, which would gate ordinary work, and not just the directory, which
+ * was the hole.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** WHICH part of an execution closure could not be resolved. Opacity has a scope: a local unknown must not poison
+ *  unrelated safe work, and a reader must be able to see what EGO could not see. */
+export interface Unresolved {
+  what: 'body' | 'config' | 'binding' | 'context' | 'freshness' | 'ambient';
+  /** the specific target, file, name or event the gap is about */
+  where: string;
+  why: string;
+}
+
+/** How a bare NAME becomes a PROGRAM in this environment. `default` is the host's ordinary lookup, which EGO does
+ *  not model and does not need to: it is the same lookup the operator already trusts. `redefined` means the
+ *  environment ITSELF changes the lookup — a makefile assigning PATH or SHELL, an env-injected PATH — and then the
+ *  identity of every program the body names is no longer implied by its spelling. */
+export interface Binding {
+  kind: 'default' | 'redefined';
+  why?: string;
+}
+
+/** The execution environment a semantic conclusion was computed against. */
+export interface ExecutionEnvironment {
   /** the directory this segment's relative operands resolve against */
   cwd: string;
-  /** false when that directory could not be proven: a dynamic `cd`, an unresolvable `-C`, an unmodelled workspace
-   *  selector. Any conclusion drawn from a relative path is then opaque rather than confident-and-wrong. */
+  /** PROVEN only when that directory exists and lies inside a registered repository root. A dynamic `cd`, an
+   *  unresolvable `-C`, an unmodelled workspace selector or a logical/physical disagreement all clear it. */
   cwdVerified: boolean;
+  /** CONFIGURATION CLOSURE: what EGO read to know which body executes, and what it could not read. A positive
+   *  claim is valid only when this is complete enough for the claim being made. */
+  config: { read: string[]; unresolved: Unresolved[] };
+  /** BINDING RESOLUTION: see `Binding`. */
+  binding: Binding;
+  /** TRANSITIVE FRESHNESS: canonical paths that an earlier unit of THIS COMMAND writes. Shared and mutated in
+   *  place across every depth, so a write inside a producer body invalidates a later conclusion outside it —
+   *  `./configure && make` must not reuse the Makefile configure just rewrote. */
+  written: Set<string>;
+  /** fingerprints of the sources this environment was built from, so a conclusion can be re-checked */
+  sources: Record<string, string>;
+}
+
+/** The environment of a fresh top-level invocation: nothing proven that was not checked. */
+export function baseEnvironment(cwd: string, cwdVerified: boolean): ExecutionEnvironment {
+  return {
+    cwd,
+    cwdVerified,
+    config: { read: [], unresolved: [] },
+    binding: { kind: 'default' },
+    written: new Set(),
+    sources: {},
+  };
+}
+
+/** A child environment for a resolved body: a new directory and its own configuration, but the SAME write ledger,
+ *  because freshness is a property of the command, not of one producer. */
+function childEnvironment(
+  parent: ExecutionEnvironment,
+  over: Partial<Omit<ExecutionEnvironment, 'written'>>,
+): ExecutionEnvironment {
+  return {
+    cwd: over.cwd ?? parent.cwd,
+    cwdVerified: over.cwdVerified ?? parent.cwdVerified,
+    config: over.config ?? { read: [], unresolved: [] },
+    binding: over.binding ?? parent.binding,
+    written: parent.written, // SHARED, never copied: this is what makes freshness transitive
+    sources: { ...parent.sources, ...(over.sources ?? {}) },
+  };
 }
 
 interface EffectState {
   depth: number;
   seen: Set<string>;
-  res: ResolutionContext;
-  /** A4 — FRESHNESS. Canonical paths that an EARLIER unit of this same command writes. A resolution whose source
-   *  is in this ledger is STALE: the bytes EGO read are not the bytes that will run. */
-  written: ReadonlySet<string>;
+  env: ExecutionEnvironment;
 }
 
 function stripComment(line: string): string {
@@ -1495,7 +1559,12 @@ function manifestUnresolved(
  *  or a hit, and `resolution` is REQUIRED — a producer cannot omit its completeness state, and every value except
  *  the two proven ones is opacity. `packages/kernel/test/producer-contract.test.ts` pins the rest. */
 export interface ProducerResult {
-  kind: 'shell-script' | 'npm-script' | 'make-target' | 'git-ambient';
+  /** TYPED DISPATCH. `none` means NO REGISTERED PRODUCER CLAIMS THIS HEAD — a structural fact about the producer
+   *  table, not a claim about what will execute. It is the only honest use of "nothing here", and it is decided by
+   *  a table lookup rather than by a producer giving up. A producer that DOES claim the head must return a
+   *  resolution state; it may not fall back to an untyped `null` channel that silently meant ABSENT_VERIFIED
+   *  (challenge 6, finding 28). */
+  kind: 'shell-script' | 'npm-script' | 'make-target' | 'git-ambient' | 'none';
   /** execution IDENTITY for the cycle guard: everything that makes this a distinct execution — the directory, the
    *  makefile or manifest actually read, and the target. A bare name collided across directories and across
    *  `-f other.mk` (challenge 4, findings 20, 34). */
@@ -1507,7 +1576,10 @@ export interface ProducerResult {
   reason: string;
   /** The execution context the BODY's relative operands resolve against. `make -C sub` runs its recipe in `sub`;
    *  an npm script runs in the manifest's directory; a shell script runs in the caller's directory. */
-  bodyRes?: ResolutionContext;
+  bodyEnv?: ExecutionEnvironment;
+  /** SCOPED OPACITY: exactly which parts of the execution closure are unresolved. A PARTIAL result says what is
+   *  missing rather than declaring the whole operation unknown. */
+  unresolved?: Unresolved[];
   /** How complete/fresh/proven this resolution is. REQUIRED: only RESOLVED_COMPLETE and ABSENT_VERIFIED carry a
    *  positive claim; everything else is opacity at every depth. */
   resolution: ResolutionOutcome;
@@ -1536,6 +1608,10 @@ interface MakeFileModel {
   /** true when the file has pattern rules, which can build a target no literal rule defines: it bears only on
    *  whether ABSENCE can be proven, never on a target whose own recipe was read */
   hasPatternRules: boolean;
+  /** CONFIGURATION CLOSURE + BINDING: assignments that change WHICH PROGRAM a recipe line runs, rather than what
+   *  the line says. `SHELL := ./bin/badsh` and `export PATH := ./bin:$(PATH)` both make every command in every
+   *  recipe mean something else, while the recipe text stays honest (challenge 6, findings 18, 24). */
+  rebinds: string[];
   sources: string[];
   text: string;
 }
@@ -1572,6 +1648,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     unsupported: [],
     unsupportedFor: new Map(),
     hasPatternRules: false,
+    rebinds: [],
     sources: [],
     text: '',
   };
@@ -1627,6 +1704,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         for (const [t, u] of sub.unsupportedFor)
           model.unsupportedFor.set(t, [...(model.unsupportedFor.get(t) ?? []), ...u]);
         if (sub.hasPatternRules) model.hasPatternRules = true;
+        model.rebinds.push(...sub.rebinds);
         model.sources.push(...sub.sources);
         if (!model.defaultGoal && sub.defaultGoal) model.defaultGoal = sub.defaultGoal;
         if (sub.oneShell) model.oneShell = true;
@@ -1643,6 +1721,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       continue;
     }
     if (/^(vpath|VPATH\s*[:+?]?=)/.test(trimmed)) model.unsupported.push(`VPATH: ${trimmed}`);
+    // an assignment that redefines the interpreter or the lookup path for EVERY recipe line
+    if (/^(export\s+)?(SHELL|\.SHELLFLAGS|PATH)\s*[:+?]?=/.test(trimmed)) model.rebinds.push(trimmed);
     if (/\$\(eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
     if (/^\.ONESHELL\s*:/.test(trimmed)) {
       // the WHOLE recipe goes to one shell, so a `cd` on one line leaks into the next
@@ -1710,20 +1790,78 @@ function defaultMakefile(dir: string): string[] {
   return [];
 }
 
-/** Hooks each git verb actually fires. The ambient execution closure of that verb is those hook files. */
-const GIT_HOOK_TRIGGERS: Record<string, string[]> = {
-  commit: ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit'],
-  merge: ['pre-merge-commit', 'prepare-commit-msg', 'commit-msg', 'post-merge'],
-  pull: ['pre-merge-commit', 'post-merge', 'post-checkout'],
-  checkout: ['post-checkout'],
-  switch: ['post-checkout'],
-  clone: ['post-checkout'],
-  rebase: ['pre-rebase', 'post-rewrite'],
-  push: ['pre-push'],
-  am: ['applypatch-msg', 'pre-applypatch', 'post-applypatch'],
-  cherry: ['post-rewrite'],
-  revert: ['prepare-commit-msg', 'commit-msg', 'post-commit'],
+/* AMBIENT EXECUTION CLOSURE, INDEXED BY EVENT.
+ *
+ * Modelling hooks as `verb -> hook names` is wrong about git: `reference-transaction` fires on ANY ref update and
+ * `post-index-change` on any index change, whatever the verb that caused it, and several verbs raise events the
+ * table did not list (challenge 6, findings 30, 31). The closure is therefore computed in two steps — the SEMANTIC
+ * EVENTS an operation raises, then the hooks those events fire — so a verb added later only has to declare what it
+ * DOES, and a hook added later only has to declare what it listens to.
+ */
+type GitEvent =
+  | 'commit-created'
+  | 'commit-message'
+  | 'merge'
+  | 'checkout'
+  | 'rewrite'
+  | 'push'
+  | 'patch-apply'
+  | 'ref-update'
+  | 'index-change';
+
+/** What each git verb DOES, semantically. */
+const GIT_VERB_EVENTS: Record<string, GitEvent[]> = {
+  commit: ['commit-message', 'commit-created', 'ref-update', 'index-change'],
+  merge: ['merge', 'commit-message', 'commit-created', 'ref-update', 'index-change'],
+  pull: ['merge', 'checkout', 'ref-update', 'index-change'],
+  fetch: ['ref-update'],
+  checkout: ['checkout', 'ref-update', 'index-change'],
+  switch: ['checkout', 'ref-update', 'index-change'],
+  restore: ['index-change'],
+  clone: ['checkout', 'ref-update'],
+  rebase: ['rewrite', 'checkout', 'commit-created', 'ref-update', 'index-change'],
+  push: ['push', 'ref-update'],
+  am: ['patch-apply', 'commit-created', 'ref-update', 'index-change'],
+  apply: ['index-change'],
+  'cherry-pick': ['commit-message', 'commit-created', 'ref-update', 'index-change'],
+  revert: ['commit-message', 'commit-created', 'ref-update', 'index-change'],
+  stash: ['index-change', 'ref-update'],
+  reset: ['ref-update', 'index-change'],
+  branch: ['ref-update'],
+  tag: ['ref-update'],
+  'update-ref': ['ref-update'],
+  worktree: ['checkout', 'ref-update'],
+  'filter-branch': ['rewrite', 'ref-update'],
+  bisect: ['checkout', 'ref-update'],
 };
+
+/** What each hook listens to. */
+const GIT_HOOK_EVENTS: Record<string, GitEvent[]> = {
+  'pre-commit': ['commit-created'],
+  'prepare-commit-msg': ['commit-message'],
+  'commit-msg': ['commit-message'],
+  'post-commit': ['commit-created'],
+  'pre-merge-commit': ['merge'],
+  'post-merge': ['merge'],
+  'post-checkout': ['checkout'],
+  'pre-rebase': ['rewrite'],
+  'post-rewrite': ['rewrite'],
+  'pre-push': ['push'],
+  'applypatch-msg': ['patch-apply'],
+  'pre-applypatch': ['patch-apply'],
+  'post-applypatch': ['patch-apply'],
+  'reference-transaction': ['ref-update'],
+  'post-index-change': ['index-change'],
+};
+
+/** The hooks a verb's events fire, deduplicated. */
+function hooksFor(verb: string): string[] {
+  const events = new Set(GIT_VERB_EVENTS[verb] ?? []);
+  if (!events.size) return [];
+  return Object.entries(GIT_HOOK_EVENTS)
+    .filter(([, listens]) => listens.some((e) => events.has(e)))
+    .map(([name]) => name);
+}
 
 /**
  * AMBIENT EXECUTION CLOSURE for git (A5). Executable content attached to repository STATE rather than named in the
@@ -1735,12 +1873,14 @@ const GIT_HOOK_TRIGGERS: Record<string, string[]> = {
  * third-party body. Anything else — including the `.pre-ego` hooks the shim chains — is an ordinary body and goes
  * through the canonical analyzer.
  */
-function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], res: ResolutionContext): ProducerResult | null {
+function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: ExecutionEnvironment): ProducerResult {
   const verb = tokens.slice(1).find((t) => !t.startsWith('-'));
-  const names = verb ? GIT_HOOK_TRIGGERS[verb] : undefined;
-  if (!names) return null;
-  if (tokens.some((t) => t === '--no-verify' || t === '-n')) return null; // already its own governed capability
-  const root = repoRootFor(ctx, res.cwd);
+  const names = verb ? hooksFor(verb) : undefined;
+  // a verb that raises no hook event, and `--no-verify`, which is already its own governed capability: no ambient
+  // body exists, and that is a fact about git's own semantics rather than a resolver giving up
+  if (!names || !names.length || tokens.some((t) => t === '--no-verify' || t === '-n'))
+    return { kind: 'none', key: `git:${verb ?? ''}`, body: null, reason: 'no hook event', resolution: 'ABSENT_VERIFIED' };
+  const root = repoRootFor(ctx, env.cwd);
   if (root === null)
     return {
       kind: 'git-ambient',
@@ -1778,8 +1918,7 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], res: Resolu
   const sources: string[] = [];
   let unresolved: string | null = null;
   for (const name of names) {
-    for (const file of [join(dir, name), join(dir, `${name}.pre-ego`)]) {
-      if (!fileExists(file)) continue;
+    for (const file of chainedHookFiles(dir, name)) {
       const text = readInsideWorkspace(ctx, file);
       if (text === null) {
         unresolved = `${file} fires on \`git ${verb}\` but could not be read`;
@@ -1800,20 +1939,45 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], res: Resolu
       kind: 'git-ambient',
       key: `git-hooks:${dir}:${verb}`,
       body: body.length ? body : null,
-      bodyRes: { cwd: root, cwdVerified: res.cwdVerified },
+      bodyEnv: childEnvironment(env, { cwd: root, cwdVerified: env.cwdVerified }),
       reason: unresolved,
       resolution: 'AMBIENT_UNRESOLVED',
     };
-  if (!body.length) return null; // no hook, or EGO's own shim only: `git commit` stays an ordinary local operation
+  // no hook, or EGO's own shim only (recognised byte for byte): nothing third-party runs, and that IS proven —
+  // the directory git will actually use was read, not guessed
+  if (!body.length)
+    return {
+      kind: 'git-ambient',
+      key: `git-hooks:${dir}:${verb}`,
+      body: null,
+      reason: `no hook fires for \`git ${verb}\``,
+      resolution: 'ABSENT_VERIFIED',
+    };
   return {
     kind: 'git-ambient',
     key: `git-hooks:${dir}:${verb}`,
     body,
-    bodyRes: { cwd: root, cwdVerified: res.cwdVerified },
+    bodyEnv: childEnvironment(env, { cwd: root, cwdVerified: env.cwdVerified }),
     reason: `git hooks fired by \`git ${verb}\``,
     resolution: 'RESOLVED_COMPLETE',
     provenance: { source: sources.join(','), fingerprint: fingerprint(body.join('\n')) },
   };
+}
+
+/** Every file `git <verb>` will execute for one hook name: the hook itself plus the `<name>.pre-ego*` chain EGO's
+ *  own shim execs. Reading only the exact `<name>.pre-ego` missed `<name>.pre-ego.1` (challenge 6, finding 32). */
+function chainedHookFiles(dir: string, name: string): string[] {
+  const out: string[] = [];
+  if (fileExists(join(dir, name))) out.push(join(dir, name));
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const e of entries.sort())
+    if (e === `${name}.pre-ego` || e.startsWith(`${name}.pre-ego.`)) out.push(join(dir, e));
+  return out;
 }
 
 /** The registered repository root containing `dir`, or null. */
@@ -1830,12 +1994,12 @@ function repoRootFor(ctx: EvaluationContext, dir: string): string | null {
 function resolveScriptCommand(
   ctx: EvaluationContext,
   norm: string,
-  res: ResolutionContext,
-  written: ReadonlySet<string> = new Set(),
-): ProducerResult | null {
+  env: ExecutionEnvironment,
+): ProducerResult {
   const tokens = tokenize(norm);
   const head = tokens[0] ?? '';
-  const cwd = res.cwd;
+  const cwd = env.cwd;
+  const written = env.written;
   /** A4 — FRESHNESS. A source rewritten by an earlier unit of the SAME command can no longer justify a later
    *  ALLOW: `printf 'build:\n\tgit push' > Makefile && make build` was classified from the old contents. */
   //  `\0any` is the wildcard: an EARLIER unit of this command could not be classified, so it may have written
@@ -1846,7 +2010,7 @@ function resolveScriptCommand(
     written.has('\0any') || paths.some((p) => written.has(canonicalPath(p)));
   // A3 — a semantic conclusion drawn from a RELATIVE path is only trustworthy when the directory it is relative to
   // has been proven. Absence of proof is not proof.
-  if (!res.cwdVerified)
+  if (!env.cwdVerified)
     return {
       kind: 'shell-script',
       key: `unverified:${norm}`,
@@ -1906,7 +2070,7 @@ function resolveScriptCommand(
       kind: 'shell-script',
       key: `script:${abs}`,
       body,
-      bodyRes: res,
+      bodyEnv: env,
       oneShell: true,
       reason: body ? 'shell script analysed' : 'shell script uses dynamic commands',
       resolution: body ? 'RESOLVED_COMPLETE' : 'DYNAMIC',
@@ -1964,16 +2128,24 @@ function resolveScriptCommand(
           kind: 'npm-script',
           key: `npm:${pkgPath ? dirname(pkgPath) : cwd}:install`,
           body: body.length ? body : null,
-          bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
+          bodyEnv: childEnvironment(env, { cwd: dirname(pkgPath), cwdVerified: env.cwdVerified }),
           reason: 'install runs the dependency tree’s lifecycle scripts, which EGO cannot read (--ignore-scripts runs none)',
           resolution: 'AMBIENT_UNRESOLVED',
         };
-      if (!body.length) return null; // --ignore-scripts and no local lifecycle scripts: an ordinary local mutation
+      // --ignore-scripts and no local lifecycle script: the manifest was fully read, so absence is PROVEN
+      if (!body.length)
+        return {
+          kind: 'npm-script',
+          key: `npm:install:none`,
+          body: null,
+          reason: 'no lifecycle script and --ignore-scripts',
+          resolution: 'ABSENT_VERIFIED',
+        };
       return {
         kind: 'npm-script',
         key: `npm:${dirname(pkgPath)}:install`,
         body,
-        bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
+        bodyEnv: childEnvironment(env, { cwd: dirname(pkgPath), cwdVerified: env.cwdVerified }),
         reason: 'install lifecycle scripts',
         resolution: 'RESOLVED_COMPLETE',
         provenance: { source: pkgPath, fingerprint: fingerprint(text) },
@@ -1988,7 +2160,8 @@ function resolveScriptCommand(
       !PACKAGE_MANAGER_BUILTINS.has(sub)
     )
       script = sub;
-    if (script === null) return null;
+    if (script === null)
+      return { kind: 'none', key: `npm:${sub}`, body: null, reason: 'not a script invocation', resolution: 'ABSENT_VERIFIED' };
     const pkgPath = findUp(ctx, cwd, 'package.json');
     if (pkgPath !== null && stale(pkgPath))
       return {
@@ -2031,7 +2204,7 @@ function resolveScriptCommand(
       kind: 'npm-script',
       key: `npm:${dirname(pkgPath)}:${script}`,
       body,
-      bodyRes: { cwd: dirname(pkgPath), cwdVerified: res.cwdVerified },
+      bodyEnv: childEnvironment(env, { cwd: dirname(pkgPath), cwdVerified: env.cwdVerified }),
       reason: `package.json script "${script}"`,
       resolution: 'RESOLVED_COMPLETE',
       provenance: { source: pkgPath, fingerprint: fingerprint(text) },
@@ -2044,6 +2217,7 @@ function resolveScriptCommand(
       '--load-average', '-o', '--old-file', '-W', '--what-if', '-I', '--include-dir',
     ]);
     const targets: string[] = [];
+    const cliRebinds: string[] = [];
     let makeDir = cwd;
     const makeFiles: string[] = []; // every -f/--file/--makefile: make reads them ALL, not just the last
     for (let i = 1; i < tokens.length; i++) {
@@ -2059,7 +2233,11 @@ function resolveScriptCommand(
         if (MAKE_ARG_OPTS.has(t)) i++;
         continue;
       }
-      if (t.includes('=')) continue; // a variable assignment, not a target
+      if (t.includes('=')) {
+        // a command-line variable assignment is not a target — but SHELL/PATH change what every recipe line RUNS
+        if (/^(SHELL|\.SHELLFLAGS|PATH)=/.test(t)) cliRebinds.push(t);
+        continue;
+      }
       targets.push(t);
     }
     if (tokens.slice(1).some((t) => /[$`]/.test(t)))
@@ -2105,6 +2283,7 @@ function resolveScriptCommand(
       unsupported: [],
       unsupportedFor: new Map(),
       hasPatternRules: false,
+      rebinds: [],
       sources: [],
       text: '',
     };
@@ -2121,6 +2300,7 @@ function resolveScriptCommand(
       for (const [t, u] of m.unsupportedFor)
         merged.unsupportedFor.set(t, [...(merged.unsupportedFor.get(t) ?? []), ...u]);
       if (m.hasPatternRules) merged.hasPatternRules = true;
+      merged.rebinds.push(...m.rebinds);
       merged.sources.push(...m.sources);
       merged.text += m.text + '\n';
       if (m.oneShell) merged.oneShell = true;
@@ -2166,7 +2346,8 @@ function resolveScriptCommand(
     };
     for (const t of wanted) walk(t, 0);
     const provenance = { source: merged.sources.join(','), fingerprint: fingerprint(merged.text) };
-    const bodyRes = { cwd: makeDir, cwdVerified: res.cwdVerified };
+    const mkName = merged.sources[0] ?? makeDir;
+    const bodyEnv = childEnvironment(env, { cwd: makeDir, cwdVerified: env.cwdVerified });
     const key = `make:${merged.sources.join(',') || makeDir}:${wanted.join(',')}`;
     if (missing.length) {
       // "my parser did not find the target" is NOT "the target does not exist". Only a makefile using nothing this
@@ -2178,7 +2359,7 @@ function resolveScriptCommand(
         kind: 'make-target',
         key,
         body: body.length ? body : null,
-        bodyRes,
+        bodyEnv,
         provenance,
         reason: blind
           ? `target "${missing.join(', ')}" is not visible to this resolver, which does not model: ${merged.unsupported.slice(0, 3).join('; ')}`
@@ -2188,24 +2369,42 @@ function resolveScriptCommand(
     }
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
-    const unsupported =
-      partial ?? (merged.unsupported.length ? merged.unsupported[0]! : (touchedBlind[0] ?? null));
+    const gaps: Unresolved[] = [];
+    if (partial) gaps.push({ what: 'body', where: wanted.join(','), why: partial });
+    for (const u of merged.unsupported) gaps.push({ what: 'config', where: mkName, why: u });
+    for (const u of touchedBlind) gaps.push({ what: 'body', where: wanted.join(','), why: u });
+    // BINDING RESOLUTION — a recipe whose interpreter or lookup path the makefile itself redefines does not mean
+    // what it says. The text is honest and the programs are not, so the body is analysed AND the binding gap is
+    // reported rather than the whole target being declared unknown.
+    for (const r of [...cliRebinds, ...merged.rebinds])
+      gaps.push({ what: 'binding', where: mkName, why: `the environment redefines program lookup: ${r}` });
+    // SELF-MODIFYING PRODUCER — make REMAKES a makefile that is itself a target, then restarts and runs the new
+    // one. The source EGO read is then the pre-image of what executes (challenge 6, finding 9).
+    for (const src of merged.sources)
+      if (merged.rules.has(src) || merged.rules.has(src.slice(makeDir.length + 1)))
+        gaps.push({
+          what: 'freshness',
+          where: src,
+          why: 'this makefile is itself a target of this makefile: make remakes it and restarts',
+        });
     return {
       kind: 'make-target',
       key,
       body,
-      bodyRes,
+      bodyEnv,
       provenance,
       // .ONESHELL hands the WHOLE recipe to one shell, so a `cd` leaks into the next line (challenge 5, finding 10)
       oneShell: merged.oneShell,
-      reason: unsupported
-        ? `Makefile target ${wanted.join(', ')}; NOT fully resolved: ${unsupported}`
+      unresolved: gaps,
+      reason: gaps.length
+        ? `Makefile target ${wanted.join(', ')}; NOT fully resolved: ${gaps[0]!.why}`
         : `Makefile target ${wanted.join(', ')}`,
-      resolution: unsupported ? 'PARTIAL' : 'RESOLVED_COMPLETE',
+      resolution: gaps.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
     };
   }
-  if (head === 'git') return resolveGitAmbient(ctx, tokens, res);
-  return null;
+  if (head === 'git') return resolveGitAmbient(ctx, tokens, env);
+  // NO REGISTERED PRODUCER CLAIMS THIS HEAD. This is a lookup result, not a conclusion about execution.
+  return { kind: 'none', key: `none:${head}`, body: null, reason: 'no producer', resolution: 'ABSENT_VERIFIED' };
 }
 
 function opaqueHit(
@@ -2570,8 +2769,10 @@ function classifyNormalized(
     // Analysis truncation is UNKNOWN, never "whatever the parent was". Returning the enclosing declared class let a
     // chain of indirection launder anything past the gate (challenge findings 2, 11, 20, 29, 36).
     return [...hits, opaqueHit(table, ctx, norm, `analysis truncated at depth ${MAX_EFFECT_DEPTH}`)];
-  const effect = resolveScriptCommand(ctx, norm, state.res, state.written);
-  if (!effect) return hits;
+  const effect = resolveScriptCommand(ctx, norm, state.env);
+  // TYPED DISPATCH: `none` is the producer TABLE saying no producer claims this head. It is the only place
+  // "nothing here" is allowed, and it cannot be reached by a producer giving up.
+  if (effect.kind === 'none') return hits;
   if (state.seen.has(effect.key)) return hits;
   const seen = new Set(state.seen).add(effect.key);
   // THE WHOLE RULE, total over ResolutionOutcome (product decision, 2026-09-22 — "positive security claims must be
@@ -2583,13 +2784,17 @@ function classifyNormalized(
   // A declared class keeps its verdict ONLY for ABSENT_VERIFIED — proof that nothing executes, so `npm test` with
   // no test script stays out of the operator's way. "My parser did not find it" is not that proof.
   const { opaque } = resolutionEffect(effect.resolution);
+  // SCOPED OPACITY: the hit names WHICH part of the execution closure is unresolved, so a reader can see what EGO
+  // could not see and an organization can govern the parts separately.
+  const gaps = effect.unresolved ?? [];
+  const scope = gaps.length ? gaps.map((u) => `${u.what}:${u.where}`).join(', ') : effect.resolution;
   const remainder = opaque
     ? [
         opaqueHit(
           table,
           ctx,
           norm,
-          `${effect.reason} [${effect.resolution}]`,
+          `${effect.reason} [${effect.resolution}; unresolved ${scope}]`,
           true,
           // an unresolved AMBIENT producer is its own governed capability, so an organization can decide about
           // "installs run third-party code" separately from "this script is unreadable" (Q98: every lock is
@@ -2602,15 +2807,16 @@ function classifyNormalized(
     if (!declared) return remainder.length ? remainder : hits;
     return [...hits, ...remainder];
   }
-  // the body resolves against ITS OWN execution context, not the caller's
-  const bodyRes = effect.bodyRes ?? state.res;
+  // the body resolves against ITS OWN execution environment, not the caller's — but the SAME write ledger, so a
+  // write inside this body invalidates a conclusion drawn after it, one level up (transitive freshness)
+  const bodyEnv = effect.bodyEnv ?? state.env;
   // the producer's body re-enters THE SAME pipeline, with its own execution context — never a weaker sub-layer
   const inner = analyzeSegments(
     table,
     ctx,
     compiled,
     effect.body,
-    { depth: state.depth + 1, seen, res: bodyRes, written: state.written },
+    { depth: state.depth + 1, seen, env: bodyEnv },
     // a script is ONE shell; make recipe lines and npm pre/post are independent shells — unless .ONESHELL hands
     // the whole recipe to one shell, which the producer reports through `oneShell`
     !(effect.oneShell ?? effect.kind === 'shell-script'),
@@ -3316,10 +3522,11 @@ function analyzeSegments(
   isolatedShells = false,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
-  // A4 — the write ledger grows as we walk: a source rewritten by an earlier unit of this same command can no
-  // longer justify a later positive claim (`> Makefile && make build`).
-  const written = new Set(state.written);
-  const startCwd = state.res.cwdVerified ? state.res.cwd : '\0dynamic';
+  // TRANSITIVE FRESHNESS: the ledger belongs to the COMMAND, not to one producer, and is mutated in place. A copy
+  // here is what made `./configure && make build` reuse the Makefile configure had just rewritten — the write
+  // happened one level down and never came back out (challenge 6, findings 6, 13, 19).
+  const written = state.env.written;
+  const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
   const units = segments.flatMap((u) => (isolatedShells ? [splitShellSegments(u)] : [[u]]));
@@ -3334,7 +3541,7 @@ function analyzeSegments(
     const cdArgs = cdTokens ? cdTokens.filter((a) => a !== '--' && !a.startsWith('-')) : null;
     if (cdArgs && cdArgs.length) {
       const target = expandHome(cdArgs[cdArgs.length - 1]!);
-      const base = cwd === '\0dynamic' ? state.res.cwd : cwd;
+      const base = cwd === '\0dynamic' ? state.env.cwd : cwd;
       const logical = target === null ? null : isAbsolute(target) ? target : resolve(base, target);
       let resolvedCd = target === null || /[$`*?]/.test(target) ? null : canonicalPath(logical!);
       // `cd` is LOGICAL by default and PHYSICAL under -P: after a symlinked component, a `..` segment goes to two
@@ -3381,12 +3588,12 @@ function analyzeSegments(
         segment: seg,
         absolute: isAbsoluteCap(table, 'git.hooks.bypass'),
       });
-    const effectiveCwd = cwd === '\0dynamic' ? state.res.cwd : cwd;
+    const effectiveCwd = cwd === '\0dynamic' ? state.env.cwd : cwd;
     // the tracked working directory IS the resolution context; when `cd` went somewhere dynamic it is not proven,
     // and every conclusion drawn from a relative path below is downgraded rather than guessed
-    const res: ResolutionContext = { cwd: effectiveCwd, cwdVerified: cwd !== '\0dynamic' };
+    const env: ExecutionEnvironment = { ...state.env, cwd: effectiveCwd, cwdVerified: cwd !== '\0dynamic' };
     for (const norm of normalizeSegment(seg)) {
-      const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, res, written });
+      const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
       for (const h of normHits) hits.push(h);
       // a locked operation carried by any wrapper, launcher or placeholder the normalizer does not know is still found:
       // every suffix of the token list that starts with a governed tool is matched against the locked matchers
@@ -3499,8 +3706,7 @@ export function classifyCommand(
   return analyzeSegments(table, ctx, compiled, splitShellSegments(command), {
     depth: 0,
     seen: new Set(),
-    res: { cwd, cwdVerified },
-    written: new Set(),
+    env: baseEnvironment(cwd, cwdVerified),
   });
 }
 
