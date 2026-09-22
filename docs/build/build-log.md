@@ -362,7 +362,15 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   spelling on a case-insensitive filesystem, which had unhooked the freshness ledger; four real `npm install`
   aliases skipped the ambient closure and `--no-scripts` was accepted although npm ignores it; and a
   PROPORTIONALITY regression of ours — one pattern rule made every unrelated target ASK. The remaining findings are
-  reported to the product owner as architectural classes, not patched. This line stays IN PROGRESS. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  reported to the product owner as architectural classes, not patched. The eight classes were then unified into a
+  first-class **verified execution environment** (typed dispatch, multi-dimensional context, configuration closure,
+  binding resolution, scoped opacity, transitive freshness, self-modifying producers, ambient events by semantic
+  event), pinned by `packages/kernel/test/environment.test.ts`. Challenge 7 ran against THAT and returned **29
+  confirmed findings and 4 claimed new architectural classes**. Reproduced and closed in session: a bare `-n`
+  discarded the ENTIRE ambient hook closure for every git verb (suppression is now per EVENT), and three of the six
+  declared environment dimensions were initialised, threaded and never read — the same "accepted but unconsumed"
+  defect this phase removed from doctor, committed in the artifact whose purpose is honesty. The four new classes
+  are reported to the product owner, not patched. This line stays IN PROGRESS. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
