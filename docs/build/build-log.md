@@ -370,7 +370,17 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   discarded the ENTIRE ambient hook closure for every git verb (suppression is now per EVENT), and three of the six
   declared environment dimensions were initialised, threaded and never read — the same "accepted but unconsumed"
   defect this phase removed from doctor, committed in the artifact whose purpose is honesty. The four new classes
-  are reported to the product owner, not patched. This line stays IN PROGRESS. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  are reported to the product owner, not patched. Those four were then unified into COMPLETE PROVENANCE — process
+  inputs, dispatch ownership, trust delegation, tree state — with an authored bounded-command vocabulary
+  (`control-plane/workspace/bounded-commands.md`) replacing the silence of a producer lookup, pinned by
+  `packages/kernel/test/provenance.test.ts`. Challenge 8 ran against THAT and returned **27 confirmed findings and
+  4 new architectural classes**: positional incompleteness of an execution-input dimension (`env VAR=x cmd`),
+  positive-by-default closure (`ABSENT_VERIFIED` as the fallback for an unclassified head), producer subject
+  identity (the git closure resolved against the workspace root rather than the repository the command targets),
+  and non-canonical command identity (`npx` read by the matchers but not by the dispatch). All four instances were
+  reproduced in session with real ground truth and closed, together with the instance findings. The trend across
+  four rounds of this architecture — 12, 11, 4, 4 claimed new classes — is falling but has not reached zero, which
+  is why this line stays IN PROGRESS. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
