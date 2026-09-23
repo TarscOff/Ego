@@ -61,5 +61,13 @@ grants:
 # Human grant verb table
 
 Grants are the only way a human widens authority for a task, and only from ASK to ALLOW. The table is exact on
-purpose: a grant is authority, and authority is never inferred from fuzzy intent. Organizations may add phrases and
-languages in their overlay for existing ASK capabilities; they cannot add a grant for a DENY or absolute capability.
+purpose: a grant is authority, and authority is never inferred from fuzzy intent. A grant can never apply to a DENY
+or an absolute capability.
+
+**This table is the whole vocabulary today.** There is no overlay layer for grant phrases: an organization that
+needs another phrase or another language edits this file in its own control plane, which is a control-plane change
+and is reviewed as one. An earlier revision of this paragraph said organizations "may add phrases and languages in
+their overlay", and no such layer existed — the kind of promise this control plane must not make. The layer that
+does exist is `policies/organization/permissions.md` for capability verdicts and
+`policies/organization/bounded-commands.md` for the command vocabulary; both are widenings, refused from the
+working tree until a human accepts them with `ego init`.
