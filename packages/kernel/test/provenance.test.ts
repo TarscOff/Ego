@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { loadControlPlane } from '../src/control-plane/load.ts';
@@ -171,6 +172,25 @@ test('provenance of TREE STATE: an operation that replaces repository content in
   assert.equal(run('make build && git checkout main', dir).verdict, 'ALLOW');
   for (const op of ['git status', 'git log --oneline', 'git diff', 'git branch -a', 'git fetch origin'])
     assert.equal(run(`${op} && make build`, dir).verdict, 'ALLOW', `${op} does not replace repository content`);
+});
+
+test('the SUBJECT of a producer is the object the command acts on, not the workspace root', () => {
+  // Every provenance leg asks "is this INPUT resolved?". None asked "is the OBJECT this producer resolved the
+  // object the command will act on?" — so a repository nested inside the workspace had EGO read the OUTER
+  // repository's hooks and trust anchor while the INNER one's fired (challenge 8, PRODUCER SUBJECT IDENTITY).
+  const outer = workspace({ 'package.json': '{}' });
+  spawnSync('git', ['init', '-q'], { cwd: outer });
+  const inner = join(outer, 'inner');
+  mkdirSync(join(inner, '.git', 'hooks'), { recursive: true });
+  spawnSync('git', ['init', '-q'], { cwd: inner });
+  writeFileSync(join(inner, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n${PUSH} --force\n`);
+  chmodSync(join(inner, '.git', 'hooks', 'pre-commit'), 0o755);
+  // both ways of naming the inner repository must find ITS hooks
+  assert.equal(run('cd inner && git commit -m x', outer).verdict, 'DENY');
+  assert.equal(run('git -C inner commit -m x', outer).verdict, 'DENY');
+  // and the outer repository, which has no hook, is untouched
+  assert.equal(run('git commit -m x', outer).verdict, 'ALLOW');
+  assert.equal(run('git -C inner status', outer).verdict, 'ALLOW');
 });
 
 test('PROPERTY: less provenance never widens authority, on any dimension', () => {

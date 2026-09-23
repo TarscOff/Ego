@@ -2048,7 +2048,12 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
     tokens.includes('--no-verify') || (tokens.includes('-n') && (verb === 'commit' || verb === 'push'));
   const suppressed: GitEvent[] = noVerify ? (verb === 'push' ? ['push'] : ['commit-message']) : [];
   const names = hooksFor(verb, suppressed);
-  const root = repoRootFor(ctx, env.cwd);
+  // PRODUCER SUBJECT IDENTITY. Every provenance leg asks "is this INPUT resolved?"; none asked "is the OBJECT
+  // this producer resolved the object the command will act on?". The subject of `git` is the repository git
+  // itself would resolve from the effective directory — `git rev-parse --show-toplevel`, adjusted by `-C` — not
+  // the registered workspace root. A repository nested inside the workspace made EGO read the OUTER repository's
+  // hooks and trust anchor while the INNER one's fired (challenge 8).
+  const root = gitSubjectRepository(ctx, tokens, env);
   if (root === null)
     return {
       kind: 'git-ambient',
@@ -2216,6 +2221,43 @@ function chainedHookFiles(dir: string, name: string): string[] {
   for (const e of entries.sort())
     if (e === `${name}.pre-ego` || e.startsWith(`${name}.pre-ego.`)) out.push(join(dir, e));
   return out;
+}
+
+const gitToplevelCache = new Map<string, string | null>();
+/** `git rev-parse --show-toplevel` for a directory, memoised for the life of the process. */
+function gitToplevel(dir: string): string | null {
+  const key = canonicalPath(dir);
+  const hit = gitToplevelCache.get(key);
+  if (hit !== undefined) return hit;
+  const r = git(['rev-parse', '--show-toplevel'], dir);
+  const top = r.ok && r.stdout ? canonicalPath(r.stdout.trim()) : null;
+  gitToplevelCache.set(key, top);
+  return top;
+}
+
+/** The repository `git` will actually act on: resolved from the effective directory the way git resolves it, and
+ *  accepted only when it lies inside a registered root — EGO may not read hooks it has no mandate over. */
+function gitSubjectRepository(
+  ctx: EvaluationContext,
+  tokens: string[],
+  env: ExecutionEnvironment,
+): string | null {
+  let dir = env.cwd;
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const eq = /^(?:--work-tree=|-C)(.+)$/.exec(t);
+    if ((t === '-C' || t === '--work-tree') && tokens[i + 1]) dir = resolve(dir, tokens[i + 1]!);
+    else if (eq) dir = resolve(dir, eq[1]!);
+  }
+  // A subprocess per git segment is far too expensive — the kernel has a 60 ms budget and the regression corpus
+  // is 200k commands — and the answer only depends on the directory, so it is memoised. The common case does not
+  // reach it at all: when the effective directory IS a registered root, that root is the subject.
+  const direct = repoRootFor(ctx, dir);
+  if (direct !== null && canonicalPath(dir) === direct) return direct;
+  const top = gitToplevel(dir);
+  if (top === null) return repoRootFor(ctx, dir);
+  // the subject must be one EGO governs; a repository outside every registered root is not one it may read
+  return repoRootFor(ctx, top) === null ? null : top;
 }
 
 /** The registered repository root containing `dir`, or null. */
@@ -4017,6 +4059,17 @@ function analyzeSegments(
       envInputs: { ...state.env.envInputs, ...segmentEnvInputs(seg) },
       treeFresh,
     };
+    // `git -C dir …` genuinely runs in `dir`, and normalization strips the option before any producer sees it.
+    // The directory a command runs in belongs to the ENVIRONMENT, so it is recorded here rather than rediscovered
+    // downstream from a string the normalizer has already rewritten (challenge 8, producer subject identity).
+    const gitDir = /^git\s+(?:[^\s]+\s+)*?(?:-C\s*|--work-tree[= ])(\S+)/.exec(seg.trim());
+    if (gitDir) {
+      const target = expandHome(gitDir[1]!);
+      if (target !== null && !/[$`*?]/.test(target)) {
+        env.cwd = isAbsolute(target) ? target : resolve(effectiveCwd, target);
+        env.cwdVerified = env.cwdVerified && directoryExists(env.cwd);
+      } else env.cwdVerified = false;
+    }
     for (const norm of normalizeSegment(seg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
       for (const h of normHits) hits.push(h);
