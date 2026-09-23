@@ -560,3 +560,20 @@ test('a rebinding assignment and a plugin declaration are found in every shape t
   assert.notEqual(run('mypy .', py({ 'setup.cfg': '[mypy]\nplugins = evil.py\n' })).verdict, 'ALLOW');
   assert.equal(run('mypy .', py({ 'mypy.ini': '[mypy]\nstrict = True\n' })).verdict, 'ALLOW');
 });
+
+test('EGO_HOME is EGO’s own runtime state, and a dependency tree is what the toolchain runs', () => {
+  const d = workspace({});
+  const home = mkdtempSync(join(tmpdir(), 'ego-h-'));
+  const c: EvaluationContext = { ...ctx(d), egoHome: home };
+  const w = (p: string) => evaluate(table, c, { tool: 'Write', input: { file_path: p, content: 'x' } }).verdict;
+  // protecting only `trust/` left `index.json` — the file that records which runtime is trusted — writable, and a
+  // path matcher cannot cover this because EGO_HOME is wherever the operator put it
+  assert.equal(w(join(home, 'trust', 'keys.json')), 'DENY');
+  assert.equal(w(join(home, 'index.json')), 'DENY');
+  assert.equal(w(join(home, 'cache', 'x.json')), 'DENY');
+  // `node_modules/.bin/<name>` is usually a SYMLINK, so protecting the link and not its target left the
+  // composition open: write the target, then run the bare name
+  assert.equal(w(join(d, 'node_modules', '.bin', 'tsc')), 'DENY', 'the program run by bare name');
+  assert.equal(w(join(d, 'node_modules', 'tspkg', 'bin.js')), 'ASK', 'the symlink target deserves a look');
+  assert.equal(w(join(d, 'src', 'a.ts')), 'ALLOW', 'and ordinary repository work is ordinary');
+});

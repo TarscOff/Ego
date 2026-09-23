@@ -40,6 +40,9 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
   Declared in `control-plane/workspace/bounded-commands.md`. EGO does not emulate these tools, so they cannot
   hold a positive semantic claim; an organization that accepts the risk for a given tool moves it to the
   `bounded` list in its overlay, and that decision is recorded rather than assumed.
+- [x] `fs.dependency-tree.write` — writing inside `node_modules/`. A package manager writes there in a
+  subprocess EGO never sees; an agent writing there directly is replacing a program the toolchain will run
+  by bare name, which is worth a human look. Reading and running the tree is untouched.
 - [x] `command.ambient-unresolved` — an operation whose EXECUTION CLOSURE includes executable content attached to
   repository state rather than named in the command, which EGO could not read: the dependency tree's install
   lifecycle scripts (`npm install` without `--ignore-scripts`), or a git hook that fires for the verb and could

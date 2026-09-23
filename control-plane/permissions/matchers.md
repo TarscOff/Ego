@@ -64,6 +64,15 @@ matchers:
   - capability: ego.runtime.tamper
     tool: Write
     path: '.harness/harness.md'
+  # EGO_HOME is EGO's OWN runtime state: the index that says which runtime is trusted, the cache it is loaded
+  # from, the pins. Protecting only `trust/` left `~/.ego/index.json` writable, and that file decides which
+  # runtime EGO believes in (exit review).
+  - capability: ego.trust.tamper
+    tool: Write
+    path: '~/.ego/**'
+  - capability: ego.trust.tamper
+    tool: Edit
+    path: '~/.ego/**'
   - capability: ego.trust.tamper
     tool: Write
     path: '~/.ego/trust/**'
@@ -318,6 +327,15 @@ matchers:
   - capability: fs.hook-config.write
     tool: Edit
     path: '**/node_modules/.bin/**'
+  # `node_modules/.bin/<name>` is usually a SYMLINK into the package it belongs to, so protecting the link and not
+  # its target left the composition open: write the target, then run the bare name. A package manager writes here
+  # in a subprocess EGO never sees; an agent writing here directly deserves a human look.
+  - capability: fs.dependency-tree.write
+    tool: Write
+    path: '**/node_modules/**'
+  - capability: fs.dependency-tree.write
+    tool: Edit
+    path: '**/node_modules/**'
   # a kubeconfig names an exec-credential PROGRAM kubectl runs on every call
   - capability: fs.credential-store.write
     tool: Write

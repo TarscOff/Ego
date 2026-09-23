@@ -1149,11 +1149,15 @@ export function classifyPath(
   if (tool !== 'Read' && ctx.egoHome && 'ego.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
-    if (underTrustDir(posix, home)) {
+    // EGO_HOME is EGO's OWN runtime state, not just its trust directories: the index that records which runtime
+    // is trusted, the cache it is loaded from, the pins. Protecting only `trust/` left `index.json` writable, and
+    // that file decides which runtime EGO believes in (exit review). A path matcher cannot cover this, because
+    // EGO_HOME is wherever the operator put it.
+    if (posix === home || posix.startsWith(home + '/')) {
       return {
         capability: 'ego.trust.tamper',
         verdict: verdictFor(table, ctx, 'ego.trust.tamper'),
-        via: 'EGO_HOME trust store',
+        via: underTrustDir(posix, home) ? 'EGO_HOME trust store' : 'EGO_HOME runtime state',
         absolute: true,
       };
     }
