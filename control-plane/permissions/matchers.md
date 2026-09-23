@@ -511,7 +511,10 @@ matchers:
   # would otherwise give, so the command inside is running on the host (challenge finding 4).
   - capability: command.privileged
     tool: Bash
-    command: '^(docker|podman)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--cap-add[= ]?(ALL|SYS_ADMIN))'
+    # every flag that removes the isolation the accepted container decision relies on. `--device` hands the
+    # container a host device and `--security-opt seccomp=unconfined` / `apparmor=unconfined` remove the syscall
+    # filter; the residuals document claimed these gated before they did (decision challenge, finding 9).
+    command: '^(docker|podman)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--uts[= ]host|--cgroupns[= ]host|--device[= ]|--device-cgroup-rule|--security-opt[= ]?\S*(unconfined|seccomp=unconfined|apparmor=unconfined|no-new-privileges=false)|--cap-add[= ]?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH)|--pid[= ]container|--userns[= ]keep-id)'
   # `docker|podman exec` enters an ALREADY-RUNNING container whose isolation EGO never established, and runs an
   # unclassified command there. `run` is judged by its own flags and bind mounts above and below, so it is not
   # gated wholesale: that would make ordinary local development ask on every invocation. The unverified isolation
@@ -555,6 +558,16 @@ matchers:
   - capability: command.destructive
     tool: Bash
     command: '^rm\s+-[a-zA-Z]*r'
+  # Deleting ONE named file, or renaming one, is ordinary work inside a checkout — `fs.repo.delete` and
+  # `fs.repo.rename` are ALLOW capabilities that nothing routed to, so every `rm src/a.ts` asked while `mv`
+  # did not (decision challenge, finding 16). Recursive deletion keeps its own destructive class above, and the
+  # path operands are still classified, so `rm ~/.ssh/id_rsa` is judged on the path, not on the verb.
+  - capability: fs.repo.delete
+    tool: Bash
+    command: '^(rm|unlink)\s+(-[fiv]+\s+)*[^-]'
+  - capability: fs.repo.rename
+    tool: Bash
+    command: '^mv\s+(-[fivn]+\s+)*[^-]'
   - capability: command.test
     tool: Bash
     command: '^(npm\s+(test|run\s+test\S*)|(npx\s+)?(vitest|jest|mocha|playwright|ava|tap|karma)|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|node\s+--test|python3?\s+-m\s+(pytest|unittest))\b'

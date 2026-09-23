@@ -227,7 +227,10 @@ test('by construction: recognising a segment HEAD never removes that segment fro
   assert.notEqual(run('npm run run', ctx(np)).verdict, 'ALLOW');
 
   // and an ordinary cd is still silent: changing directory is not an event
-  for (const ok of ['cd src && cat index.ts', 'cd /etc && ls', 'cd -- build && ls', 'popd', 'pushd build && ls']) {
+  for (const ok of ['cd src && cat index.ts', 'cd -- build && ls', 'popd', 'pushd build && ls']) {
     assert.equal(run(ok, c).verdict, 'ALLOW', `"${ok}" must stay ALLOW`);
   }
+  // ... while a cd OUT of the checkout takes the command with it: listing a directory outside the workspace is
+  // an outside-workspace read whichever surface carries it
+  assert.equal(run('cd /etc && ls', c).verdict, 'ASK');
 });

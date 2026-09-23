@@ -2808,7 +2808,10 @@ function resolveScriptCommand(
       .map((n) => join(cwd, n))
       .filter((f) => fileExists(f));
     // a JS/CJS/MJS config is code, and code is not resolvable by reading
-    const js = ['lint-staged.config.js', 'lint-staged.config.mjs', 'lint-staged.config.cjs', '.lintstagedrc.js']
+    // every extension the tool resolves, derived rather than listed: `.lintstagedrc.cjs` was missing and reached
+    // ALLOW (decision challenge, finding 1)
+    const js = ['lint-staged.config', '.lintstagedrc']
+      .flatMap((b) => ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'].map((e) => `${b}${e}`))
       .map((n) => join(cwd, n))
       .find((f) => fileExists(f));
     if (js)
@@ -3983,7 +3986,14 @@ function classifyShellPaths(
     // reads: credential stores (any spelling, canonicalized), env files; recursive reads of HOME or `/` reach them too
     if (!write || !isDest) {
       const r = classifyPath(table, ctx, 'Read', p.abs);
-      if (r.via.startsWith('matcher path') || r.capability.startsWith('fs.credential'))
+      // `fs.outside-workspace.read` was dropped here, so the `Read` TOOL asked about a file outside the checkout
+      // while `cat` of the same file was ALLOW — the same effect judged differently by the surface that carried
+      // it (decision challenge, finding 18).
+      if (
+        r.via.startsWith('matcher path') ||
+        r.capability.startsWith('fs.credential') ||
+        (r.capability === 'fs.outside-workspace.read' && !/^\/dev\//.test(p.abs))
+      )
         hits.push({ ...r, via: `path argument ${p.raw} (${r.via})`, segment: seg });
       // a glob whose literal part is an ancestor of HOME (`/U*/me/.ssh/id_rsa`) can expand into a credential store too
       if (

@@ -291,9 +291,14 @@ test('round-2 residuals: credential paths in any spelling, cd tracking, recursiv
   // another user's home is opaque (ASK), never allowed
   assert.equal(bash('cat ~root/.ssh/id_rsa').verdict, 'ASK');
   // ordinary reads stay governed by the command class (reads outside the workspace are not path-classified for shells)
-  assert.equal(bash('cat ~/.config/myapp/settings.json').verdict, 'ALLOW');
-  assert.equal(bash('ls ~/Documents').verdict, 'ALLOW');
-  assert.equal(bash('cat /etc/hosts').verdict, 'ALLOW');
+  // reading a file outside the checkout is `fs.outside-workspace.read` — ASK — whichever surface carries it.
+  // The `Read` TOOL always said ASK here; the shell said ALLOW, and the shell was the exception (decision
+  // challenge, finding 18). What this line still pins is that it is NOT a credential store.
+  assert.equal(bash('cat ~/.config/myapp/settings.json').verdict, 'ASK');
+  assert.notEqual(bash('cat ~/.config/myapp/settings.json').decisive?.capability, 'fs.credential-store.read');
+  // both of these are outside the checkout, so both ask — the same answer the `Read` tool has always given
+  assert.equal(bash('ls ~/Documents').verdict, 'ASK');
+  assert.equal(bash('cat /etc/hosts').verdict, 'ASK');
   assert.equal(bash('grep -r foo src').verdict, 'ALLOW');
   assert.equal(bash('cat package.json').verdict, 'ALLOW');
   assert.equal(bash('cd src && cat index.ts').verdict, 'ALLOW');
@@ -921,6 +926,7 @@ test('round-13 residuals: interpreter carve-out, wrappers, write destinations, g
   assert.equal(bash('echo x > control-plan\\e/permissions/matchers.md', c).verdict, 'DENY');
   assert.equal(bash('echo x > /dev/../etc/cron.d/x', c).decisive?.capability, 'fs.outside-workspace.write');
   assert.equal(bash('echo x > /dev/null', c).verdict, 'ALLOW'); // a real device sink is still not a write
+  assert.equal(bash('cat /dev/null', c).verdict, 'ALLOW');
   assert.equal(bash('echo x > /dev/stderr', c).verdict, 'ALLOW');
 
   // [5] git: abbreviated long options, substitutions in flag position, post-verb hooksPath, transport programs
