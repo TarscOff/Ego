@@ -125,7 +125,6 @@ bounded:
   - 'make'
   - 'gmake'
   - 'cmake --version'
-  - 'cmake -E'
   - 'ninja --version'
   - 'ninja -t'
   - 'npm'

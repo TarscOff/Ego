@@ -323,3 +323,72 @@ test('the container runtime is enrolled in the target model, like every other hi
   // installing a plugin acquires and runs third-party code on the HOST, outside any container
   assert.equal(run('docker plugin install evil/p --grant-all-permissions', d).verdict, 'ASK');
 });
+
+test('an operand or a variable that NAMES A PROGRAM is not bounded by the class that carries it', () => {
+  // The accepted "known class + unbounded program operand" rule, applied to the heads this pass added to the
+  // bounded vocabulary. Adding compilers and coreutils without extending the rule reopened the class it exists
+  // for (decision challenge, findings 5, 25, 26, 27, 30, 33).
+  const d = workspace({});
+  for (const cmd of [
+    'clang -B /tmp/evil -c a.c',
+    'clang -fplugin=/tmp/e.so a.c',
+    'gcc -specs=/tmp/e.specs a.c',
+    'gcc -wrapper /tmp/evil -c a.c',
+    'go build -toolexec=/tmp/evil ./...',
+    'sort --compress-program=/tmp/evil f',
+    'javac -processorpath /tmp/e.jar -processor E A.java',
+    'cmake -E env EVIL=1 /tmp/evil',
+    'EDITOR=/tmp/evil git commit',
+    'CC=/tmp/e make build',
+    'RUSTC_WRAPPER=/tmp/e cargo build',
+  ])
+    assert.notEqual(run(cmd, d).verdict, 'ALLOW', `${cmd}: the operand names a program the class does not bound`);
+  // and ordinary compilation is untouched
+  for (const cmd of ['gcc -c a.c -o a.o', 'clang -O2 -Wall a.c', 'go build ./...', 'sort f', 'cmake --version'])
+    assert.equal(run(cmd, d).verdict, 'ALLOW', cmd);
+});
+
+test('configuration closure: the same config, found another way, is the same closure', () => {
+  const withCfg = (files: Record<string, string>) => workspace({ 'package.json': '{}', ...files });
+  // extension variants are DERIVED: every one of these tools resolves .ts/.mts/.cts beside the .js it declares
+  for (const ext of ['js', 'mjs', 'cjs', 'ts', 'mts', 'cts'])
+    assert.notEqual(
+      run('eslint .', withCfg({ [`eslint.config.${ext}`]: 'export default []' })).verdict,
+      'ALLOW',
+      `eslint.config.${ext}`,
+    );
+  // a config named on the COMMAND LINE is the same closure, written differently
+  const plain = withCfg({});
+  assert.equal(run('eslint .', plain).verdict, 'ALLOW');
+  for (const cmd of ['eslint --config /tmp/e.js .', 'vite build --config /tmp/v.ts', 'eslint -c /tmp/e.mjs .'])
+    assert.notEqual(run(cmd, plain).verdict, 'ALLOW', cmd);
+  // and a DATA config names code in YAML exactly as it does in JSON
+  assert.notEqual(run('eslint .', withCfg({ '.eslintrc.yml': 'plugins:\n  - evil\n' })).verdict, 'ALLOW');
+  assert.equal(run('eslint .', withCfg({ '.eslintrc.yml': 'rules:\n  eqeqeq: error\n' })).verdict, 'ALLOW');
+});
+
+test('what the host will execute by name or by configuration is a protected path', () => {
+  const d = workspace({});
+  const write = (p: string) =>
+    evaluate(table, ctx(d), { tool: 'Write', input: { file_path: join(d, p), content: 'x' } }).verdict;
+  // `.mcp.json` names the COMMAND each MCP server starts with; `node_modules/.bin` is a directory of programs the
+  // toolchain runs by bare name, so writing one and then running `npx <name>` replaces what a bounded head binds
+  // to (decision challenge, findings 19, 20, 35)
+  for (const p of ['.mcp.json', '.vscode/settings.json', 'node_modules/.bin/tsc', '.claude/settings.json'])
+    assert.equal(write(p), 'DENY', `${p} is what the host executes`);
+  assert.equal(write('src/a.ts'), 'ALLOW');
+});
+
+test('a database client that runs something it was handed is opaque in every spelling', () => {
+  const d = workspace({});
+  for (const cmd of [
+    'sqlite3 -init /tmp/e.sql db',
+    'sqlite3 db ".load /tmp/e.so"',
+    'psql -c "COPY t FROM PROGRAM \'evil\'"',
+    'psql -c "COPY t TO PROGRAM \'evil\'"',
+    'psql -f x.sql',
+  ])
+    assert.notEqual(run(cmd, d).verdict, 'ALLOW', cmd);
+  for (const cmd of ['psql -c "SELECT 1"', 'mysql -e "SELECT 1"', 'sqlite3 ./dev.db "delete from t"'])
+    assert.equal(run(cmd, d).verdict, 'ALLOW', `${cmd}: ordinary statements are ordinary work`);
+});

@@ -298,6 +298,30 @@ matchers:
   - capability: ego.mcp-trust.edit
     tool: Write
     path: '.harness/mcp-trust.md'
+  # `.mcp.json` names the COMMAND each MCP server is started with, so writing it is writing what the host will
+  # execute — the same surface as a hook entry (decision challenge, finding 20).
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.mcp.json'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.vscode/settings.json'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.cursor/**'
+  # `node_modules/.bin` is a directory of PROGRAMS the toolchain executes by bare name: writing one of them and
+  # then running `npx <name>` replaces what a bounded head binds to (decision challenge, findings 19, 35). A
+  # package manager writes these in a subprocess EGO never sees; an agent writing one directly does not.
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/node_modules/.bin/**'
+  - capability: fs.hook-config.write
+    tool: Edit
+    path: '**/node_modules/.bin/**'
+  # a kubeconfig names an exec-credential PROGRAM kubectl runs on every call
+  - capability: fs.credential-store.write
+    tool: Write
+    path: '**/.kube/**'
   - capability: fs.hook-config.write
     tool: Write
     path: '**/.claude/settings.json'

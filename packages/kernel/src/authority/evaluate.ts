@@ -1407,12 +1407,21 @@ function childEnvironment(
 
 /** Which process inputs materially change what each producer resolves. EGO does not model the environment: it
  *  captures only the inputs required to justify the semantic claim the producer is about to make. */
+const PROGRAM_NAMING_ENV =
+  /^(EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|LD_PRELOAD|DYLD_[A-Z_]+)$/;
+
 const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
-  'make-target': [/^(MAKEFILES|MAKEFLAGS|GNUMAKEFLAGS|MAKE|SHELL|PATH)$/],
-  'npm-script': [/^(npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/],
-  'shell-script': [/^(SHELL|BASH_ENV|ENV|PATH|CDPATH)$/],
-  'git-ambient': [/^(GIT_[A-Z_]+|PATH)$/],
-  none: [],
+  // A variable whose VALUE IS A PROGRAM re-points the tool itself, so it is relevant to EVERY producer and to no
+  // producer at all — `EDITOR=<prog> git commit` and `CC=<prog> make build` run <prog> whichever branch resolved
+  // the body. Listing it per kind meant it was relevant where someone remembered to list it.
+  'make-target': [PROGRAM_NAMING_ENV, /^(MAKEFILES|MAKEFLAGS|GNUMAKEFLAGS|MAKE|SHELL|PATH)$/],
+  'npm-script': [
+    PROGRAM_NAMING_ENV,
+    /^(npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/,
+  ],
+  'shell-script': [PROGRAM_NAMING_ENV, /^(SHELL|BASH_ENV|ENV|PATH|CDPATH)$/],
+  'git-ambient': [PROGRAM_NAMING_ENV, /^(GIT_[A-Z_]+|PATH)$/],
+  none: [PROGRAM_NAMING_ENV],
 };
 
 /** ENVIRONMENT-INPUT CLOSURE and TREE-STATE PROVENANCE, applied at the ONE place that knows which producer ran —
@@ -1429,6 +1438,22 @@ function environmentGaps(kind: ProducerResult['kind'], env: ExecutionEnvironment
       why: 'an earlier unit of this command replaces repository content, so this conclusion is a pre-image',
     });
   return gaps;
+}
+
+/** A configuration named on the COMMAND LINE rather than found on disk: `eslint --config x.js`, `vite -c v.ts`.
+ *  The file lookup could never see it, so the same closure escaped through a different spelling. */
+function commandLineConfig(tokens: string[], cwd: string): string | null {
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const eq = /^(?:--config=|--configfile=|--conf=|-c)(.+)$/.exec(t);
+    const value =
+      (t === '--config' || t === '--configfile' || t === '--conf' || t === '-c') && tokens[i + 1]
+        ? tokens[++i]!
+        : (eq?.[1] ?? null);
+    if (value === null) continue;
+    if (/\.(js|mjs|cjs|ts|mts|cts|py|rb)$/.test(value)) return isAbsolute(value) ? value : join(cwd, value);
+  }
+  return null;
 }
 
 /** A DATA configuration that NAMES code is not a bounded closure: `.eslintrc.json` with `"plugins": ["x"]` makes
@@ -1463,7 +1488,10 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
     // `plugins` and the rest always name a package the tool imports. `extends` is the exception: a value in the
     // tool's OWN namespace (`eslint:recommended`) is built in and loads nothing, so flagging it would gate the
     // most ordinary configuration there is.
-    if (/["\s](plugins|presets|preset|require|requires|loader|transform)["\s]*:\s*[[{"']/.test(scope)) return f;
+    // JSON writes `"plugins": ["x"]`, YAML writes `plugins:` then a list on the following lines. Requiring a
+    // bracket on the same line saw only the JSON shape (decision challenge, finding 6).
+    if (/(^|["\s])(plugins|presets|preset|require|requires|loader|transform)["\s]*:\s*(\[|\{|["']|\r?\n\s*-)/m.test(scope))
+      return f;
     const ext = /["\s]extends["\s]*:\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
     if (ext) {
       const values = [...ext[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
@@ -1481,7 +1509,9 @@ const TREE_CHANGING =
 /** Leading `VAR=value` assignments of a segment. Only the names below are kept: the ones that decide WHICH FILE a
  *  tool reads or WHICH PROGRAM it runs. Everything else is ordinary parameterisation and is not execution input. */
 const EXECUTION_ENV_INPUTS =
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+)$/;
+  // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
+  // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -2906,8 +2936,16 @@ function resolveScriptCommand(
   for (const entry of v.discoversConfig) {
     const [tool, ...configs] = entry.split(/\s+/);
     if (tool !== bare) continue;
+    // the extension variants are DERIVED rather than listed: every one of these tools resolves `.ts`, `.mts` and
+    // `.cts` beside the `.js` it was declared with, and listing them by hand missed exactly those (decision
+    // challenge, findings 2, 32)
+    const variants = configs.flatMap((c) =>
+      /\.(js|mjs|cjs)$/.test(c) ? [c, c.replace(/\.(js|mjs|cjs)$/, '.ts'), c.replace(/\.(js|mjs|cjs)$/, '.mts'), c.replace(/\.(js|mjs|cjs)$/, '.cts')] : [c],
+    );
     const present =
-      configs.map((c) => findUp(ctx, cwd, c)).find((f) => f !== null) ?? dataConfigNamingCode(ctx, cwd, bare);
+      variants.map((c) => findUp(ctx, cwd, c)).find((f) => f !== null) ??
+      commandLineConfig(tokens, cwd) ??
+      dataConfigNamingCode(ctx, cwd, bare);
     if (present === null || present === undefined)
       return {
         kind: 'none',
@@ -2969,7 +3007,14 @@ function opaqueHit(
 /** Options that hand an arbitrary program to an otherwise well-behaved command. The list is a real family, not a
  *  spelling chase: every entry is "this option's value is executed". */
 const PROGRAM_OPERAND_LONG =
-  '--use-compress-program|--checkpoint-action|--to-command|--rsh-command|--rsh|--exec|--ok-dir|-TT|--unzip-command|--filter=.*command|--pre|--hostname-bin|--upload-pack|--receive-pack|--editor|--pager|--ssh-command|--proxy-command|-e(?=\\s+\\S*(ssh|sh|bash|python|perl|ruby|node))';
+  '--use-compress-program|--checkpoint-action|--to-command|--rsh-command|--rsh|--exec|--ok-dir|-TT|--unzip-command|--filter=.*command|--pre|--hostname-bin|--upload-pack|--receive-pack|--editor|--pager|--ssh-command|--proxy-command' +
+  // The COMPILER family. Adding compilers and coreutils to the bounded vocabulary without extending this rule
+  // reopened the very class the rule exists for: `clang -B dir` and `gcc -wrapper prog` run prog instead of the
+  // real tool, `-fplugin=` and `-specs=` load code into the compiler, `go build -toolexec` wraps every tool
+  // invocation, `javac -processor` runs an annotation processor, and `sort --compress-program` runs a program
+  // under a capability literally named command.read-only (decision challenge, findings 5, 25, 26, 30).
+  '|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-B|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
+  '|-e(?=\\s+\\S*(ssh|sh|bash|python|perl|ruby|node))';
 const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
 /** the archive tools where a short `-I` names a compression PROGRAM (for make it is an include directory) */
 const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
@@ -2983,7 +3028,10 @@ const DB_EXECUTES_UNREAD =
   // so the de-escaped form — a `-c` value that BEGINS with `!` — is matched too. Matching a bare `!` anywhere
   // would be far too broad; anchoring it to the start of the statement is exactly the meta-command position
   // (challenge 8, finding 14).
-  /\s(-f|--file)(=|\s)|\s<\s|\\!|(-c|--command)(=|\s+)["']?\s*!|\.shell\b|\.system\b|\.read\b|\bSYSTEM\b|TO\s+PROGRAM\b/i;
+  // The family is "this client runs something it was handed": a program file, a shell escape, a loadable
+  // extension, or a COPY in either direction. Enumerating only one direction of COPY and only sqlite's `.shell`
+  // left the neighbours open (decision challenge, findings 12, 34).
+  /\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|(-c|--command|--eval)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
 
 const TARGET_ENV_RE =
   /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|CLICKHOUSE_HOST)$/;
