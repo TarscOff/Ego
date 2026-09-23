@@ -81,7 +81,12 @@ export interface CompiledAuthorityTable {
   localTargets: LocalTargets;
   /** the authored bounded / discovering command vocabulary (UNCLAIMED-HEAD CLOSURE). ARRAYS, not Sets: the
    *  compiled table is cached as JSON and a Set does not survive the round trip. */
-  boundedCommands: { bounded: string[]; discoversContent: string[]; discoversConfig: string[] };
+  boundedCommands: {
+    bounded: string[];
+    installsDependencies: string[];
+    discoversContent: string[];
+    discoversConfig: string[];
+  };
 }
 
 export interface CompileOptions {
@@ -277,6 +282,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     sanitizerLockedMinimums: sortRecord(sanitizerLockedMinimums),
     boundedCommands: {
       bounded: [...cp.boundedCommands.bounded].sort(),
+      installsDependencies: [...cp.boundedCommands.installsDependencies].sort(),
       discoversContent: [...cp.boundedCommands.discoversContent].sort(),
       discoversConfig: [...cp.boundedCommands.discoversConfig].sort(),
     },

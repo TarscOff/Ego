@@ -233,6 +233,33 @@ bounded:
   - 'sleep'
   - 'true'
   - 'false'
+installs_dependencies:
+  - 'pip install'
+  - 'pip3 install'
+  - 'pip install -r'
+  - 'pipenv install'
+  - 'poetry install'
+  - 'poetry add'
+  - 'poetry update'
+  - 'uv sync'
+  - 'uv pip install'
+  - 'uv add'
+  - 'conda install'
+  - 'bundle install'
+  - 'bundle update'
+  - 'gem install'
+  - 'composer install'
+  - 'composer update'
+  - 'composer require'
+  - 'cargo install'
+  - 'go install'
+  - 'mix deps.get'
+  - 'nuget restore'
+  - 'dotnet restore'
+  - 'swift package resolve'
+  - 'brew install'
+  - 'apt-get install'
+  - 'apt install'
 discovers_content:
   - 'node --test'
   - 'go test'
@@ -300,6 +327,18 @@ allowed, only that analysing the command text is analysing the whole of what exe
 
 `git` is bounded in this sense: the executable content it *can* pull in — hooks and configured helper programs —
 has its own producer, which resolves it explicitly.
+
+## `installs_dependencies`
+
+Commands that ACQUIRE third-party code and run it — a `setup.py`, a build backend, a gemspec, a `composer`
+script, a formula. This is the same execution surface as an `npm install` lifecycle script, and it was gating for
+npm while `pip install -r requirements.txt` and `poetry install` reached ALLOW. The inconsistency is closed here
+rather than argued away: acquiring and running third-party code is a human gate in every ecosystem.
+
+The seam with a BUILD is deliberate and is stated in
+`docs/architecture/phase-1-residuals.md`: acquiring code is a gate, compiling code already acquired is a
+containment dependency. `cargo build` sits on the build side and carries a documented residual risk, because a
+cold cache makes it acquire too.
 
 ## `discovers_content` and `discovers_config`
 

@@ -2521,15 +2521,30 @@ function resolveScriptCommand(
     const npmFlags = tokens.filter((t) =>
       /^--(script-shell|node-options|shell|ignore-scripts=false|foreground-scripts)(=|$)/.test(t),
     );
+    // the same settings live in `.npmrc` / `.yarnrc.yml`, which npm reads from the package directory upwards.
+    // A flag on the command line was modelled and the FILE that sets the identical key was not (challenge 8).
+    const rcFile = ['.npmrc', '.yarnrc.yml', '.yarnrc'].map((n) => findUp(ctx, cwd, n)).find((f) => f !== null);
+    const rcText = rcFile ? readInsideWorkspace(ctx, rcFile) : null;
+    const rcRebinds =
+      rcFile !== null && rcFile !== undefined && (rcText === null || /^\s*(script-shell|node-options|shell|nodeLinker|scriptShell)\s*[:=]/m.test(rcText))
+        ? [rcFile]
+        : [];
     return {
       kind: 'npm-script',
-      ...(npmFlags.length
+      ...(npmFlags.length || rcRebinds.length
         ? {
-            unresolved: npmFlags.map((f) => ({
-              what: 'binding' as const,
-              where: f,
-              why: 'an npm configuration flag re-points the interpreter this script runs in',
-            })),
+            unresolved: [
+              ...npmFlags.map((f) => ({
+                what: 'binding' as const,
+                where: f,
+                why: 'an npm configuration flag re-points the interpreter this script runs in',
+              })),
+              ...rcRebinds.map((f) => ({
+                what: 'config' as const,
+                where: f,
+                why: 'this file re-points the interpreter every package script runs in',
+              })),
+            ],
           }
         : {}),
       key: `npm:${dirname(pkgPath)}:${script}`,
@@ -2540,10 +2555,11 @@ function resolveScriptCommand(
         config: { read: [pkgPath], unresolved: [] },
         sources: { [pkgPath]: fingerprint(text) },
       }),
-      reason: npmFlags.length
-        ? `package.json script "${script}"; NOT fully resolved: ${npmFlags[0]}`
-        : `package.json script "${script}"`,
-      resolution: npmFlags.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
+      reason:
+        npmFlags.length || rcRebinds.length
+          ? `package.json script "${script}"; NOT fully resolved: ${npmFlags[0] ?? rcRebinds[0]}`
+          : `package.json script "${script}"`,
+      resolution: npmFlags.length || rcRebinds.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
       provenance: { source: pkgPath, fingerprint: fingerprint(text) },
     };
   }
@@ -2840,6 +2856,21 @@ function resolveScriptCommand(
   // an entry may name a head alone (`pytest`) or a head plus the arguments that make it discover (`node --test`,
   // `go test`), so `go build` stays bounded while `go test` does not
   const normTokens = tokens.join(' ');
+  // ACQUIRES third-party code and runs it: the same surface as an npm install lifecycle script, which is already
+  // a human gate. Leaving `pip install` and `poetry install` at ALLOW was an inconsistency, not a decision.
+  if (
+    table.boundedCommands.installsDependencies.some((e) =>
+      e.includes(' ') ? normTokens === e || normTokens.startsWith(e + ' ') : e === bare,
+    )
+  )
+    return {
+      kind: 'none',
+      key: `installs:${normTokens.slice(0, 40)}`,
+      body: null,
+      reason: `${bare} acquires third-party code and runs it, which this kernel cannot read`,
+      resolution: 'AMBIENT_UNRESOLVED',
+      unresolved: [{ what: 'ambient', where: bare, why: 'dependency build and install scripts' }],
+    };
   // shape 1 — runs repository code located by PATTERN. EGO will not emulate the tool, so the closure is unbounded.
   if (
     table.boundedCommands.discoversContent.some((e) =>

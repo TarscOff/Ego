@@ -185,6 +185,8 @@ export interface CoordinationConstants {
 export interface BoundedCommands {
   /** heads whose execution closure is exactly what their arguments name */
   bounded: string[];
+  /** heads that ACQUIRE third-party code and run it: the same surface as an install lifecycle script */
+  installsDependencies: string[];
   /** heads that run repository code located by PATTERN (test files, a task graph): unbounded without emulation */
   discoversContent: string[];
   /** heads that run whatever their CONFIGURATION names. Each entry is `<tool> <code-config-file>…`: the closure is

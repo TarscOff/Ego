@@ -547,7 +547,7 @@ matchers:
     command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|cmake|ninja|rustc|tsc)\b|^swift\s+build\b|^dart\s+compile\b'
   - capability: command.read-only
     tool: Bash
-    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle)\s+(-v|-V|--version|-version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b'
+    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs)\s+(-v|-V|--version|-version|version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b'
   # Formatters, linters and type checkers with FIXED semantics: they read the workspace and rewrite source
   # files in it, and nothing else. Whole ecosystems had no path to ALLOW for ordinary `gofmt`/`ruff`/`black`/
   # `cargo fmt`, so a control plane that governs them all equally was unusable outside JavaScript (challenge 6,
