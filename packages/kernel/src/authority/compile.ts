@@ -93,6 +93,8 @@ export interface CompileOptions {
   organization?: CapabilityDoc | null;
   overlay?: CapabilityDoc | null;
   overlayMatchers?: CompiledMatcher[];
+  /** heads the ORGANIZATION declares bounded, on top of the kernel's vocabulary (see LAYER_FILES) */
+  organizationBounded?: string[];
   /** project root used to relativize layer file paths so the table hash never depends on the checkout location */
   projectRoot?: string;
 }
@@ -281,7 +283,10 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     readOnlyCommandPatterns,
     sanitizerLockedMinimums: sortRecord(sanitizerLockedMinimums),
     boundedCommands: {
-      bounded: [...cp.boundedCommands.bounded].sort(),
+      // the organization's additions are merged in, and take precedence by being MORE SPECIFIC where they are:
+      // dispatch picks the longest matching entry across the lists, so `pytest -q` declared bounded by an
+      // organization beats the kernel's `pytest`
+      bounded: [...new Set([...cp.boundedCommands.bounded, ...(opts.organizationBounded ?? [])])].sort(),
       installsDependencies: [...cp.boundedCommands.installsDependencies].sort(),
       discoversContent: [...cp.boundedCommands.discoversContent].sort(),
       discoversConfig: [...cp.boundedCommands.discoversConfig].sort(),

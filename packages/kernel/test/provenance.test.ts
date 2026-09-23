@@ -15,6 +15,7 @@ import { loadControlPlane } from '../src/control-plane/load.ts';
 import { compileAuthority } from '../src/authority/compile.ts';
 import { evaluate, segmentEnvInputs, type EvaluationContext } from '../src/authority/evaluate.ts';
 import { shimScript } from '../src/project/githooks.ts';
+import { tableWidenings, clampToBaseline } from '../src/policy/cache.ts';
 import { packageRoot } from '../src/launcher/self.ts';
 
 const ROOT = new URL('../../../control-plane/', import.meta.url).pathname;
@@ -391,4 +392,26 @@ test('a database client that runs something it was handed is opaque in every spe
     assert.notEqual(run(cmd, d).verdict, 'ALLOW', cmd);
   for (const cmd of ['psql -c "SELECT 1"', 'mysql -e "SELECT 1"', 'sqlite3 ./dev.db "delete from t"'])
     assert.equal(run(cmd, d).verdict, 'ALLOW', `${cmd}: ordinary statements are ordinary work`);
+});
+
+test('the administrability the contract promises exists, and is a widening like any other', () => {
+  // phase-1-residuals.md justifies every UNKNOWN_PRODUCER entry by saying an organization can move the tool to
+  // `bounded`. That escape hatch did not exist: the vocabulary lives in the INSTALLED package's control plane,
+  // which a consumer cannot edit. Promising an escape hatch that is not there is the one thing this contract
+  // must not do (decision challenge, findings 21 and 29).
+  const cp = loadControlPlane(ROOT);
+  const base = compileAuthority(cp);
+  const extended = compileAuthority(cp, { organizationBounded: ['pytest'] });
+  assert.ok(!base.boundedCommands.bounded.includes('pytest'));
+  assert.ok(extended.boundedCommands.bounded.includes('pytest'), 'the organization layer must reach the table');
+
+  // and declaring a head bounded WIDENS what may hold a positive claim, so it travels the same road as any other
+  // organization widening: refused from the working tree, reported, accepted by a human running `ego init`.
+  const widenings = tableWidenings(base, extended);
+  assert.ok(
+    widenings.some((w) => /bounded vocabulary/.test(w) && /pytest/.test(w)),
+    `a vocabulary addition must be detected as a widening, got: ${widenings.join('; ')}`,
+  );
+  const clamped = clampToBaseline(extended, base);
+  assert.ok(!clamped.boundedCommands.bounded.includes('pytest'), 'and dropped until it is accepted');
 });

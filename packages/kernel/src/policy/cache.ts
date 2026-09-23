@@ -29,9 +29,28 @@ export const POLICY_CACHE_RELATIVE = join('.harness', 'generated', 'policy.json'
 
 export const LAYER_FILES = {
   organization: join('policies', 'organization', 'permissions.md'),
+  /** The organization may declare command heads BOUNDED that the kernel does not. Moving a tool out of the
+   *  discovering lists is a WIDENING, so it travels the same road as an organization capability widening: written
+   *  out of band, reported by doctor as pending, and accepted by a human running `ego init`. Documenting that
+   *  escape hatch while it did not exist was the one promise this contract made and could not keep. */
+  organizationBounded: join('policies', 'organization', 'bounded-commands.md'),
   overlay: join('.harness', 'permissions.md'),
   overlayMatchers: join('.harness', 'overlay', 'matchers.md'),
 } as const;
+
+/** The organization's additions to the bounded-command vocabulary: heads it declares introduce no further
+ *  executable closure. Only `bounded` may be extended — an organization may take responsibility for a tool, it
+ *  may not make the kernel treat more things as discovering by deleting entries it does not control. */
+export function loadOverlayBounded(file: string): string[] {
+  if (!isFile(file)) return [];
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.bounded-commands/1')
+    throw new ControlPlaneValidationError([`${file}: schema must be ego.bounded-commands/1`]);
+  const raw = doc.frontmatter['bounded'];
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new ControlPlaneValidationError([`${file}: frontmatter "bounded" must be a list`]);
+  return raw.map((v) => String(v));
+}
 
 export function loadOverlayMatchers(file: string): CompiledMatcher[] {
   if (!isFile(file)) return [];
@@ -84,9 +103,10 @@ export function compileProjectPolicy(
     return f;
   };
   const organization = loadOverlayCapabilities(rec(LAYER_FILES.organization), 'organization');
+  const organizationBounded = loadOverlayBounded(rec(LAYER_FILES.organizationBounded));
   const overlay = loadOverlayCapabilities(rec(LAYER_FILES.overlay), 'overlay');
   const overlayMatchers = loadOverlayMatchers(rec(LAYER_FILES.overlayMatchers));
-  const table = compileAuthority(cp, { organization, overlay, overlayMatchers, projectRoot });
+  const table = compileAuthority(cp, { organization, overlay, overlayMatchers, organizationBounded, projectRoot });
   return {
     schema: 'ego.policy-cache/1',
     runtimeSha256: self.runtimeSha256,
@@ -172,6 +192,12 @@ export function tableWidenings(baseline: CompiledAuthorityTable, next: CompiledA
         if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) out.push(`${p}/${m} ${cap}: ${b} -> ${v}`);
       }
     }
+  // Declaring a command head BOUNDED widens what may hold a positive semantic claim without changing any
+  // capability verdict, so comparing verdicts alone let the vocabulary layer apply straight from the working
+  // tree — the one thing the organization layer exists to prevent.
+  const baseBounded = new Set(baseline.boundedCommands?.bounded ?? []);
+  for (const e of next.boundedCommands?.bounded ?? [])
+    if (!baseBounded.has(e)) out.push(`bounded vocabulary: "${e}" declared to introduce no executable closure`);
   return out.sort();
 }
 
@@ -181,6 +207,11 @@ export function clampToBaseline(
   baseline: CompiledAuthorityTable,
 ): CompiledAuthorityTable {
   const t = structuredClone(next);
+  // an unaccepted vocabulary addition is dropped, not merely reported
+  if (t.boundedCommands && baseline.boundedCommands) {
+    const allowed = new Set(baseline.boundedCommands.bounded);
+    t.boundedCommands.bounded = t.boundedCommands.bounded.filter((e) => allowed.has(e));
+  }
   for (const [cap, v] of Object.entries(t.effective)) {
     const b = baseline.effective[cap];
     if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) t.effective[cap] = b;

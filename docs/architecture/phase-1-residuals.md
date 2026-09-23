@@ -102,9 +102,12 @@ from that repository pulls charts of unknown provenance — which is classified 
 
 ## UNKNOWN_PRODUCER / FAIL-SAFE — the contract working as designed
 
-These are **not defects**. EGO does not model their execution closure, so the human gate applies. Each is one line
-in `control-plane/workspace/bounded-commands.md` away from being declared bounded by an organization that accepts
-the risk, and that decision is then recorded rather than assumed.
+These are **not defects**. EGO does not model their execution closure, so the human gate applies. Each is one line in `policies/organization/bounded-commands.md` away from being declared bounded by an
+organization that accepts the risk — a real layer, loaded by the kernel, and a WIDENING like any other: it is
+refused from the working tree, reported by `ego doctor` as pending, and applied only when a human runs `ego init`
+from their own terminal. An agent shell cannot accept it. An earlier version of this document promised that escape
+hatch before it existed; the vocabulary lives in the installed package's control plane, which a consumer cannot
+edit, so the promise had nothing behind it.
 
 | Command | Why EGO does not model it | Verdict |
 |---|---|---|
@@ -115,9 +118,23 @@ the risk, and that decision is then recorded rather than assumed.
 | `npm run x -w pkg`, `pnpm --filter`, `npm --prefix` | select a manifest through a workspace graph EGO does not model | ASK |
 | a makefile larger than the read ceiling, an unreadable `include`, a `$(VAR)`-headed recipe | the source could not be read, or is built at runtime | ASK |
 
-**Proportionality cost, measured rather than asserted.** Across nine realistic repositories — a TypeScript monorepo
-with husky, Go, Python/poetry, Rust, Java/Maven, Ruby, PHP, a linked git worktree and an LFS repository — ordinary
-development gates on test commands, project task runners and dependency installs, and on nothing else.
+**Proportionality cost, measured rather than asserted — including where it is worst.**
+
+| Measured on | Ordinary commands | Gated | What gates |
+|---|---:|---:|---|
+| TypeScript monorepo, Go, Python/poetry, Rust, husky | 79 | 8 (10%) | test commands only |
+| Java/Maven, Ruby, PHP, LFS repository | 66 | 12 (9 non-test) | installs and project task runners |
+| **This repository (EGO itself)** | 44 | **7 (16%)** | see below |
+
+The third row is the honest one, and an earlier version of this document left it out. On EGO's own checkout the
+gates are `npm test` and `node --test …` (test runners), `npm run lint` and `eslint packages` (this repository has
+an executable `eslint.config.js`, so eslint imports and runs it), `npm run build` and `if npm run build; …` (the
+build script is `node scripts/build.mjs`, an interpreter running a program file — a gate that predates all of this
+work), and `git rebase` (its own capability, also pre-existing).
+
+So the rate is **10% on a typical consumer repository and 16% here**, and the difference is entirely EGO's own
+executable lint configuration and its `node`-driven build. Quoting only the lower number would have been true of
+the sample and misleading about the tool.
 
 ## CONTAINMENT_DEPENDENCY
 
