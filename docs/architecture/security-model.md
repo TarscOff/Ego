@@ -77,7 +77,7 @@ so every gap between EGO's grammar and the real tool was routed into the one sta
 `build test:` rule, a prerequisite, a `.DEFAULT_GOAL`, an `include` — all common make — hid a `git push` behind
 `command.build` ALLOW.
 
-Resolution is now a structured outcome, and **exactly two of its values carry a positive claim**:
+Resolution is now a structured outcome, and only the values marked below carry a positive claim:
 
 | Outcome | Meaning | Keeps a declared ALLOW |
 |---|---|:--:|
@@ -90,6 +90,8 @@ Resolution is now a structured outcome, and **exactly two of its values carry a 
 | `STALE` | resolved, but the source is rewritten before the effect runs | no |
 | `CONTEXT_UNVERIFIED` | the context the conclusion depends on was not proven | no |
 | `AMBIENT_UNRESOLVED` | an implicit producer attached to repository state was not resolved | no |
+| `NOT_A_PRODUCER` | **proven**: this head introduces no closure beyond what its arguments name | yes |
+| `UNKNOWN_PRODUCER` | the head discovers and runs content EGO was never shown | no |
 
 The consumer is a single total rule over that enum, and `resolutionEffect()` names the **proven** values rather than
 enumerating the unproven ones — so an outcome added later falls to the opaque side by construction rather than by
@@ -144,6 +146,64 @@ what EGO read is the pre-image of what executes. That is reported as a freshness
 events listen to. `reference-transaction` fires on *any* ref update and `post-index-change` on *any* index change,
 which a verb-to-hook table cannot express: a verb added later only declares what it does, a hook only what it
 listens to.
+
+## Complete provenance
+
+Decision of 2026-09-23, closing the last four classes as one problem rather than four patches:
+
+> A positive execution claim requires complete provenance of **process inputs**, **dispatch ownership**,
+> **trust delegation** and **repository/tree state**.
+
+**Process inputs.** `normalizeSegment` strips leading `VAR=value` assignments before the producer boundary, so a
+producer could satisfy "configuration-complete" *vacuously* about a tool the same command line had just re-pointed:
+`MAKEFILES=extra.mk make build` was ALLOW while make executed `extra.mk`. The environment now carries the
+assignments that materially change execution semantics — `MAKEFILES`, `MAKEFLAGS`, `SHELL`, `npm_config_*`, `PATH`,
+`GIT_*` and their neighbours — and the relevance is per producer kind. EGO does not model the environment; it
+captures the inputs required to justify the claim being made, and `FOO=bar make build` is untouched.
+
+**Dispatch ownership.** A producer table that does not claim a head was reporting `ABSENT_VERIFIED` — the strongest
+claim in the ladder — so every program that *discovers its own executable content* carried a positive ALLOW over a
+closure nobody had looked for. The silence of a lookup is now split three ways by an authored, administrable
+vocabulary (`control-plane/workspace/bounded-commands.md`):
+
+| | meaning | claim |
+|---|---|---|
+| `NOT_A_PRODUCER` | the head is **bounded**: its closure is exactly what its arguments name | positive |
+| `ABSENT_VERIFIED` | a producer claimed the head and proved nothing executes | positive |
+| `UNKNOWN_PRODUCER` | the head discovers and runs content EGO was never shown | opaque |
+
+A discovering tool has two shapes, and conflating them cost ordinary work for nothing. One runs repository code it
+locates by **pattern** — test files, a task graph — which EGO cannot bound without emulating the tool. The other
+runs whatever its **configuration** names, and is bounded while that configuration is data: `eslint .` is ALLOW in a
+repository whose config is JSON and a human gate in one whose config is `eslint.config.js`, because in the second
+case eslint imports and runs that file. This is the same configuration-closure rule EGO applies to git, make and
+lint-staged, applied to a tool.
+
+The cost is stated plainly: **test commands now ask.** `npm test`, `pytest`, `go test`, `cargo test` and
+`node --test` execute repository code EGO was never shown, so they cannot hold a positive claim. Measured across a
+TypeScript monorepo, a Go service, a poetry project, a Rust crate and a husky repository — 79 ordinary commands, 8
+gated, every one of them a test command. An organization that accepts the risk for a given tool moves it to
+`bounded` in its overlay, and that decision is recorded rather than assumed.
+
+**Trust delegation.** Trust is transitive. EGO's hook shim is recognised byte for byte, which *elides its body* —
+and that transfers its closure obligation to whatever it delegates to. The shim `exec`s
+`.harness/hooks/git-hook.sh`, a file inside the mutable workspace it governs. The entrypoint is trusted only while
+the whole chain is resolved, fingerprinted against what `ego init` installed, fresh, and inside the boundary. A
+missing, modified or possibly-rewritten delegate is an unanalysed body, not a trusted one.
+
+**Tree state.** A checkout, reset, stash pop, merge, rebase, cherry-pick, restore, clean or worktree switch replaces
+a repository-determined, **unenumerable** set of tracked files — which the per-path write ledger cannot express. The
+environment carries tree freshness, and a conclusion drawn from repository content after such an operation is a
+pre-image. `git checkout main && make build` is a human gate; `make build && git checkout main` is not, because
+order is respected; `git status && make build` is not, because status changes nothing.
+
+## The global invariant
+
+A positive ALLOW requires the relevant execution closure to be **dispatch-known**, **context-verified**,
+**environment-complete enough**, **configuration-complete enough**, **binding-resolved where required**,
+**trust-chain-complete**, **tree-state-fresh**, and **passed through the canonical analyzer**. Any required
+dimension unresolved means UNKNOWN/OPAQUE — named by scope, so the gap is legible and a local unknown does not
+poison unrelated safe work.
 
 ## Execution closure
 

@@ -1,0 +1,174 @@
+---
+schema: ego.bounded-commands/1
+id: bounded-commands
+title: Bounded commands and commands that discover executable content
+bounded:
+  - 'ls'
+  - 'cat'
+  - 'head'
+  - 'tail'
+  - 'wc'
+  - 'grep'
+  - 'egrep'
+  - 'fgrep'
+  - 'rg'
+  - 'tree'
+  - 'pwd'
+  - 'echo'
+  - 'printf'
+  - 'which'
+  - 'whoami'
+  - 'id'
+  - 'uname'
+  - 'date'
+  - 'df'
+  - 'du'
+  - 'stat'
+  - 'file'
+  - 'diff'
+  - 'uniq'
+  - 'cut'
+  - 'sort'
+  - 'jq'
+  - 'yq'
+  - 'find'
+  - 'fd'
+  - 'basename'
+  - 'dirname'
+  - 'realpath'
+  - 'readlink'
+  - 'touch'
+  - 'mkdir'
+  - 'cp'
+  - 'mv'
+  - 'rm'
+  - 'ln'
+  - 'chmod'
+  - 'tee'
+  - 'git'
+  - 'gh'
+  - 'glab'
+  - 'tsc'
+  - 'gofmt'
+  - 'goimports'
+  - 'rustfmt'
+  - 'shfmt'
+  - 'clang-format'
+  - 'black'
+  - 'isort'
+  - 'ruff'
+  - 'golangci-lint'
+  - 'esbuild'
+  - 'swc'
+  - 'yamllint'
+  - 'markdownlint'
+  - 'hadolint'
+  - 'docker'
+  - 'kubectl'
+  - 'helm'
+  - 'psql'
+  - 'mysql'
+  - 'curl'
+  - 'wget'
+  - 'tar'
+  - 'zip'
+  - 'unzip'
+  - 'sed'
+  - 'awk'
+  - 'xargs'
+  - 'env'
+  - 'sleep'
+  - 'true'
+  - 'false'
+discovers_content:
+  - 'node --test'
+  - 'go test'
+  - 'cargo test'
+  - 'dotnet test'
+  - 'swift test'
+  - 'python -m pytest'
+  - 'python3 -m pytest'
+  - 'python -m unittest'
+  - 'python3 -m unittest'
+  - 'pytest'
+  - 'tox'
+  - 'nox'
+  - 'vitest'
+  - 'jest'
+  - 'mocha'
+  - 'ava'
+  - 'tap'
+  - 'karma'
+  - 'playwright'
+  - 'cypress'
+  - 'turbo'
+  - 'nx'
+  - 'lerna'
+  - 'rake'
+  - 'pre-commit'
+discovers_config:
+  - 'eslint eslint.config.js eslint.config.mjs eslint.config.cjs eslint.config.ts .eslintrc.js .eslintrc.cjs'
+  - 'prettier prettier.config.js prettier.config.mjs prettier.config.cjs .prettierrc.js .prettierrc.cjs .prettierrc.mjs'
+  - 'stylelint stylelint.config.js stylelint.config.mjs stylelint.config.cjs .stylelintrc.js'
+  - 'vite vite.config.js vite.config.mjs vite.config.cjs vite.config.ts'
+  - 'rollup rollup.config.js rollup.config.mjs rollup.config.cjs rollup.config.ts'
+  - 'webpack webpack.config.js webpack.config.mjs webpack.config.cjs webpack.config.ts'
+  - 'parcel .parcelrc'
+  - 'next next.config.js next.config.mjs next.config.cjs next.config.ts'
+  - 'ng angular.json'
+  - 'tsup tsup.config.js tsup.config.mjs tsup.config.cjs tsup.config.ts'
+  - 'gulp gulpfile.js gulpfile.mjs gulpfile.cjs gulpfile.ts'
+  - 'grunt Gruntfile.js Gruntfile.cjs'
+  - 'mypy mypy_plugin.py'
+  - 'pylint pylintrc.py'
+  - 'flake8 setup.cfg'
+  - 'rubocop .rubocop.yml'
+---
+
+# Bounded commands
+
+Decision of 2026-09-23, closing the UNCLAIMED-HEAD CLOSURE class: **a producer table that does not claim a command
+head must not mean that nothing else executes.** Before this file, a head no producer modelled was reported as
+`ABSENT_VERIFIED` — the strongest claim in the resolution ladder — so every program that *discovers its own
+executable content* carried a positive ALLOW over a closure nobody ever looked for.
+
+The two lists below make the distinction explicit and administrable, rather than leaving it to the silence of a
+lookup table.
+
+## `bounded`
+
+Commands whose execution closure is exactly what their arguments name. They read and write files, they talk to a
+network or a cluster, they may be `DENY` for what they *do* — but they do not go and find further code to run.
+Their other effects are governed by the ordinary matchers; membership here says nothing about whether they are
+allowed, only that analysing the command text is analysing the whole of what executes.
+
+`git` is bounded in this sense: the executable content it *can* pull in — hooks and configured helper programs —
+has its own producer, which resolves it explicitly.
+
+## `discovers_content` and `discovers_config`
+
+A discovering tool has one of two shapes, and conflating them was costing ordinary work for nothing.
+
+`discovers_content` runs repository code it locates by PATTERN — test files, a task graph, another package's
+scripts. EGO cannot bound that without emulating the tool, so these never hold a positive semantic claim.
+
+`discovers_config` runs whatever its CONFIGURATION names. Each entry is the tool followed by the configuration
+files that would be CODE. When none of them is present the tool's configuration is data, the closure is bounded and
+the command is ordinary work; when one is present the tool imports and runs it, and the claim is not earned. This
+is the same configuration-closure rule EGO applies to git, make and lint-staged, applied to a tool.
+
+Membership is a statement about the tool, not a guess. `ruff`, `golangci-lint`, `esbuild` and `swc` are bounded
+because they load no external code: their configuration is data. `eslint`, `prettier`, `vite`, `rollup`, `webpack`,
+`next` and `mypy` are not, because their configuration is JavaScript or names plugins the tool imports and runs.
+
+Commands that locate and execute code EGO has not been shown: test files matched by a pattern, a configuration file
+and the plugins it loads, or another package's scripts. EGO does not model their closure and will not emulate them,
+so they cannot hold a positive semantic claim. They resolve to `command.unmodelled-closure`, which is a governed
+capability like any other: an organization that accepts the risk for a given tool moves it to `bounded` in its own
+overlay, and that decision is recorded rather than assumed.
+
+An entry may name a head alone (`pytest`) or a head and the arguments that make it discover (`node --test`,
+`go test`): the longer form is matched against the start of the normalized command, so `go build` stays bounded
+while `go test` does not.
+
+A head in neither list is simply unmodelled and reaches `command.unknown` as before.

@@ -35,6 +35,11 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
 - [x] `command.privileged` — commands requiring elevated privileges.
 - [x] `command.network-tool` — commands that themselves perform network transfers (curl, wget, scp, rsync to remote).
 - [x] `command.script-opaque` — a shell script or Makefile target whose effect cannot be classified statically (missing, outside the workspace, too large, or using `eval`, variable commands or dynamic sourcing).
+- [x] `command.unmodelled-closure` — a command that DISCOVERS and executes content EGO was never shown: test
+  files matched by a pattern, a configuration file and the plugins it loads, or another package's scripts.
+  Declared in `control-plane/workspace/bounded-commands.md`. EGO does not emulate these tools, so they cannot
+  hold a positive semantic claim; an organization that accepts the risk for a given tool moves it to the
+  `bounded` list in its overlay, and that decision is recorded rather than assumed.
 - [x] `command.ambient-unresolved` — an operation whose EXECUTION CLOSURE includes executable content attached to
   repository state rather than named in the command, which EGO could not read: the dependency tree's install
   lifecycle scripts (`npm install` without `--ignore-scripts`), or a git hook that fires for the verb and could

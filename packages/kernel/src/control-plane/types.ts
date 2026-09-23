@@ -179,6 +179,20 @@ export interface CoordinationConstants {
 
 /** Decision Q98: the authored set of targets that count as repository-owned local development surfaces. Authorization
  *  is target-aware, so a Kubernetes or database command is judged by WHERE it points, never by the tool's name. */
+/** Decision of 2026-09-23 (UNCLAIMED-HEAD CLOSURE): which command heads analysing the text analyses the WHOLE of
+ *  what executes, and which ones go and find further code to run. Authored, so the distinction is administrable
+ *  rather than hidden in the silence of a producer lookup. */
+export interface BoundedCommands {
+  /** heads whose execution closure is exactly what their arguments name */
+  bounded: string[];
+  /** heads that run repository code located by PATTERN (test files, a task graph): unbounded without emulation */
+  discoversContent: string[];
+  /** heads that run whatever their CONFIGURATION names. Each entry is `<tool> <code-config-file>…`: the closure is
+   *  bounded while none of those files is present, and opaque once one is. */
+  discoversConfig: string[];
+  file: string;
+}
+
 export interface LocalTargets {
   /** glob patterns for kube contexts that are local development clusters (kind-*, minikube, docker-desktop, …) */
   k8sLocalContexts: string[];
@@ -220,6 +234,7 @@ export interface ControlPlane {
   releaseKeys: ReleaseKeysDoc;
   coordination: CoordinationConstants;
   localTargets: LocalTargets;
+  boundedCommands: BoundedCommands;
   /** sha256 of every authored file, keyed by path relative to root, for provenance and freshness */
   sourceHashes: Record<string, string>;
 }

@@ -12,6 +12,7 @@ import {
   type MarkdownDoc,
   type Section,
 } from '../util/markdown.ts';
+import type { BoundedCommands } from './types.ts';
 import { readText, isFile, isDir, toPosix } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
 import type { YamlValue } from '../util/yaml.ts';
@@ -673,6 +674,25 @@ function parseLocalTargets(file: string, problems: string[]): LocalTargets {
   };
 }
 
+/** The authored bounded/discovering command vocabulary. Fails closed: an empty `discovers` list would silently
+ *  restore the defect this file exists to close. */
+function parseBoundedCommands(file: string, problems: string[]): BoundedCommands {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.bounded-commands/1')
+    problems.push(`${file}: schema must be ego.bounded-commands/1`);
+  const list = (key: string): string[] => {
+    const v = optionalStringList(doc, key);
+    if (v.length === 0) problems.push(`${file}: ${key} must list at least one entry`);
+    return v;
+  };
+  return {
+    bounded: list('bounded'),
+    discoversContent: list('discovers_content'),
+    discoversConfig: list('discovers_config'),
+    file,
+  };
+}
+
 export function loadControlPlane(root: string): ControlPlane {
   const problems: string[] = [];
   const sourceHashes: Record<string, string> = {};
@@ -740,6 +760,10 @@ export function loadControlPlane(root: string): ControlPlane {
     .filter((s): s is SecretsDoc => s !== null);
   const coordFile = req('workspace/coordination.md');
   const coordination = coordFile ? parseCoordination(coordFile, problems) : parseCoordinationDefaults();
+  const boundedFile = req('workspace/bounded-commands.md');
+  const boundedCommands = boundedFile
+    ? parseBoundedCommands(boundedFile, problems)
+    : { bounded: [], discoversContent: [], discoversConfig: [], file: '' };
   const targetsFile = req('workspace/local-targets.md');
   const localTargets = targetsFile
     ? parseLocalTargets(targetsFile, problems)
@@ -828,6 +852,7 @@ export function loadControlPlane(root: string): ControlPlane {
     releaseKeys,
     coordination,
     localTargets,
+    boundedCommands,
     sourceHashes,
   };
 }

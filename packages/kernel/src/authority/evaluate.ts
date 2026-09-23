@@ -3,6 +3,7 @@ import { homedir, tmpdir } from 'node:os';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir } from '../project/githooks.ts';
+import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
@@ -1329,6 +1330,16 @@ export interface ExecutionEnvironment {
   written: Set<string>;
   /** fingerprints of the sources this environment was built from, so a conclusion can be re-checked */
   sources: Record<string, string>;
+  /** ENVIRONMENT-INPUT CLOSURE: the leading `VAR=value` assignments of this segment that MATERIALLY change
+   *  execution semantics — which makefile is read, which interpreter runs a script, where a program is looked up.
+   *  `normalizeSegment` strips assignments before the producer boundary, so a producer could satisfy
+   *  "configuration-complete" VACUOUSLY about a tool the same command line had just re-pointed. Only the inputs
+   *  needed to justify a semantic claim are captured; EGO does not model the environment. */
+  envInputs: Record<string, string>;
+  /** TREE-STATE PROVENANCE: false once an earlier unit of this command may have replaced the repository content
+   *  that later conclusions rest on — a checkout, reset, stash pop, merge, rebase or worktree switch rewrites an
+   *  unenumerable set of files, which the per-path write ledger cannot express. */
+  treeFresh: boolean;
 }
 
 /** The environment of a fresh top-level invocation: nothing proven that was not checked. */
@@ -1340,6 +1351,8 @@ export function baseEnvironment(cwd: string, cwdVerified: boolean): ExecutionEnv
     binding: { kind: 'default' },
     written: new Set(),
     sources: {},
+    envInputs: {},
+    treeFresh: true,
   };
 }
 
@@ -1356,7 +1369,58 @@ function childEnvironment(
     binding: over.binding ?? parent.binding,
     written: parent.written, // SHARED, never copied: this is what makes freshness transitive
     sources: { ...parent.sources, ...(over.sources ?? {}) },
+    // a producer's body inherits the process inputs of the invocation that produced it, and its tree freshness
+    envInputs: over.envInputs ?? parent.envInputs,
+    treeFresh: over.treeFresh ?? parent.treeFresh,
   };
+}
+
+/** Which process inputs materially change what each producer resolves. EGO does not model the environment: it
+ *  captures only the inputs required to justify the semantic claim the producer is about to make. */
+const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
+  'make-target': [/^(MAKEFILES|MAKEFLAGS|GNUMAKEFLAGS|MAKE|SHELL|PATH)$/],
+  'npm-script': [/^(npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/],
+  'shell-script': [/^(SHELL|BASH_ENV|ENV|PATH|CDPATH)$/],
+  'git-ambient': [/^(GIT_[A-Z_]+|PATH)$/],
+  none: [],
+};
+
+/** ENVIRONMENT-INPUT CLOSURE and TREE-STATE PROVENANCE, applied at the ONE place that knows which producer ran —
+ *  so every producer, current and future, is covered without having to remember. */
+function environmentGaps(kind: ProducerResult['kind'], env: ExecutionEnvironment): Unresolved[] {
+  const gaps: Unresolved[] = [];
+  for (const [name, value] of Object.entries(env.envInputs))
+    if (RELEVANT_ENV_INPUTS[kind].some((re) => re.test(name)))
+      gaps.push({ what: 'context', where: name, why: `the environment sets ${name}=${value}, which changes what runs` });
+  if (!env.treeFresh && kind !== 'none')
+    gaps.push({
+      what: 'freshness',
+      where: 'tree-state',
+      why: 'an earlier unit of this command replaces repository content, so this conclusion is a pre-image',
+    });
+  return gaps;
+}
+
+/** Operations that replace repository content wholesale. Listed by what they DO, not by spelling: each one swaps
+ *  an unenumerable set of tracked files, so a conclusion drawn from repository content before it is a pre-image. */
+const TREE_CHANGING =
+  /^git\s+(?:-[^\s]+\s+|--[^\s]+(?:=\S+)?\s+)*(checkout|switch|restore|reset|merge|rebase|cherry-pick|revert|stash|pull|am|apply|clean|worktree|submodule|sparse-checkout|read-tree|archive\s+--remote)\b/;
+
+/** Leading `VAR=value` assignments of a segment. Only the names below are kept: the ones that decide WHICH FILE a
+ *  tool reads or WHICH PROGRAM it runs. Everything else is ordinary parameterisation and is not execution input. */
+const EXECUTION_ENV_INPUTS =
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+)$/;
+
+export function segmentEnvInputs(segment: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let s = segment.trim();
+  for (;;) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|\S*)\s+/.exec(s);
+    if (!m) break;
+    if (EXECUTION_ENV_INPUTS.test(m[1]!)) out[m[1]!] = m[2]!.replace(/^['"]|['"]$/g, '');
+    s = s.slice(m[0].length);
+  }
+  return out;
 }
 
 interface EffectState {
@@ -1481,7 +1545,13 @@ export type ResolutionOutcome =
   /** the execution context the conclusion depends on was not proven */
   | 'CONTEXT_UNVERIFIED'
   /** an implicit producer attached to repository state (git hooks, dependency install scripts) was not resolved */
-  | 'AMBIENT_UNRESOLVED';
+  | 'AMBIENT_UNRESOLVED'
+  /** PROVEN: this head introduces no executable closure beyond what its arguments name (authored vocabulary) */
+  | 'NOT_A_PRODUCER'
+  /** this head DISCOVERS and executes content EGO has not been shown — test files, a config and its plugins,
+   *  another package's scripts — and EGO does not model that closure. The silence of a producer lookup table is
+   *  not proof that nothing else runs (challenge 7, UNCLAIMED-HEAD CLOSURE). */
+  | 'UNKNOWN_PRODUCER';
 
 /**
  * INFORMATION MONOTONICITY. Less verified information must never produce a more permissive verdict, so the two
@@ -1493,6 +1563,7 @@ export function resolutionEffect(outcome: ResolutionOutcome): { proven: boolean;
   switch (outcome) {
     case 'RESOLVED_COMPLETE':
     case 'ABSENT_VERIFIED':
+    case 'NOT_A_PRODUCER':
       return { proven: true, opaque: false };
     default:
       return { proven: false, opaque: true };
@@ -1510,6 +1581,8 @@ export const INFORMATION_RANK: Record<ResolutionOutcome, number> = {
   DYNAMIC: 0,
   CONTEXT_UNVERIFIED: 0,
   AMBIENT_UNRESOLVED: 0,
+  NOT_A_PRODUCER: 2,
+  UNKNOWN_PRODUCER: 0,
 };
 
 /** A cheap content fingerprint, so a resolution can be invalidated when its source changes (freshness, A4). */
@@ -1955,7 +2028,16 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
         continue;
       }
       sources.push(file);
-      if (text === shimScript(name)) continue; // EGO's own shim, verified byte for byte: it delegates to EGO
+      if (text === shimScript(name)) {
+        // TRUST IS TRANSITIVE. Recognising this file by identity elides its body — which transfers its closure
+        // obligation to whatever it delegates to. The shim `exec`s `.harness/hooks/git-hook.sh`, a file inside the
+        // mutable workspace it governs. A trusted entrypoint is only trusted while the WHOLE chain is resolved,
+        // fingerprinted, fresh and inside the trust boundary (challenge 7, finding 14).
+        const chain = trustChainComplete(ctx, root, env);
+        if (chain === null) continue; // chain verified end to end: it delegates to EGO itself and adds no body
+        unresolved = chain;
+        continue;
+      }
       const segs = scriptSegments(text);
       if (segs === null) {
         unresolved = `${file} fires on \`git ${verb}\` and builds its commands dynamically`;
@@ -2016,6 +2098,25 @@ function gitLocalProgramValues(root: string): string[] {
   return out;
 }
 
+/** Verifies EGO's own delegation chain: the hook shim execs `.harness/hooks/git-hook.sh`, which `ego init` copies
+ *  byte for byte from `<package>/runtime/posix/git-hook.sh`. Returns null when the chain is complete, or the reason
+ *  it is not — a missing, unreadable, modified or stale delegate is an unanalysed body, not a trusted one. */
+function trustChainComplete(ctx: EvaluationContext, root: string, env: ExecutionEnvironment): string | null {
+  const delegate = join(root, '.harness', 'hooks', 'git-hook.sh');
+  if (!fileExists(delegate)) return `${delegate} is the shim's delegate and is missing`;
+  if (env.written.has('\0any') || env.written.has(canonicalPath(delegate)) || !env.treeFresh)
+    return `${delegate} is the shim's delegate and this command may have replaced it`;
+  const actual = readInsideWorkspace(ctx, delegate);
+  if (actual === null) return `${delegate} is the shim's delegate and could not be read`;
+  let shipped: string;
+  try {
+    shipped = readFileSync(join(packageRoot(), 'runtime', 'posix', 'git-hook.sh'), 'utf8');
+  } catch {
+    return `${delegate} is the shim's delegate and EGO's own copy of it could not be read for comparison`;
+  }
+  return actual === shipped ? null : `${delegate} is the shim's delegate and does not match what EGO installed`;
+}
+
 /** Every file `git <verb>` will execute for one hook name: the hook itself plus the `<name>.pre-ego*` chain EGO's
  *  own shim execs. Reading only the exact `<name>.pre-ego` missed `<name>.pre-ego.1` (challenge 6, finding 32). */
 function chainedHookFiles(dir: string, name: string): string[] {
@@ -2044,6 +2145,7 @@ function repoRootFor(ctx: EvaluationContext, dir: string): string | null {
 }
 
 function resolveScriptCommand(
+  table: CompiledAuthorityTable,
   ctx: EvaluationContext,
   norm: string,
   env: ExecutionEnvironment,
@@ -2060,6 +2162,7 @@ function resolveScriptCommand(
   //  step that regenerates its own makefile, all write files without being "write commands".
   const stale = (...paths: string[]): boolean =>
     written.has('\0any') || paths.some((p) => written.has(canonicalPath(p)));
+
   // A3 — a semantic conclusion drawn from a RELATIVE path is only trustworthy when the directory it is relative to
   // has been proven. Absence of proof is not proof.
   if (!env.cwdVerified)
@@ -2548,8 +2651,50 @@ function resolveScriptCommand(
     };
   }
   if (head === 'git') return resolveGitAmbient(ctx, tokens, env);
-  // NO REGISTERED PRODUCER CLAIMS THIS HEAD. This is a lookup result, not a conclusion about execution.
-  return { kind: 'none', key: `none:${head}`, body: null, reason: 'no producer', resolution: 'ABSENT_VERIFIED' };
+  // NO REGISTERED PRODUCER CLAIMS THIS HEAD — which says nothing about whether anything else executes. The
+  // authored vocabulary decides: a BOUNDED head's closure is exactly what its arguments name, a DISCOVERING head
+  // finds and runs content EGO was never shown, and a head in neither list is simply unmodelled.
+  const bare = head.replace(/\.(exe|cmd|bat)$/i, '');
+  // an entry may name a head alone (`pytest`) or a head plus the arguments that make it discover (`node --test`,
+  // `go test`), so `go build` stays bounded while `go test` does not
+  const normTokens = tokens.join(' ');
+  // shape 1 — runs repository code located by PATTERN. EGO will not emulate the tool, so the closure is unbounded.
+  if (
+    table.boundedCommands.discoversContent.some((e) =>
+      e.includes(' ') ? normTokens === e || normTokens.startsWith(e + ' ') : e === bare,
+    )
+  )
+    return {
+      kind: 'none',
+      key: `discovers:${bare}`,
+      body: null,
+      reason: `${bare} runs repository code it locates by pattern, which this kernel does not model`,
+      resolution: 'UNKNOWN_PRODUCER',
+      unresolved: [{ what: 'body', where: bare, why: 'test files or a task graph EGO was never shown' }],
+    };
+  // shape 2 — runs whatever its CONFIGURATION names. Bounded while no executable config is present: the same
+  // configuration-closure rule EGO applies to git, make and lint-staged, applied to a tool.
+  for (const entry of table.boundedCommands.discoversConfig) {
+    const [tool, ...configs] = entry.split(/\s+/);
+    if (tool !== bare) continue;
+    const present = configs.map((c) => join(cwd, c)).find((f) => fileExists(f));
+    if (present === undefined) break; // configuration is data: the closure is bounded
+    return {
+      kind: 'none',
+      key: `discovers-config:${present}`,
+      body: null,
+      reason: `${bare} imports and runs ${present}`,
+      resolution: 'UNKNOWN_PRODUCER',
+      unresolved: [{ what: 'config', where: present, why: 'executable configuration' }],
+    };
+  }
+  return {
+    kind: 'none',
+    key: `none:${bare}`,
+    body: null,
+    reason: 'no producer',
+    resolution: table.boundedCommands.bounded.includes(bare) ? 'NOT_A_PRODUCER' : 'ABSENT_VERIFIED',
+  };
 }
 
 function opaqueHit(
@@ -2558,7 +2703,10 @@ function opaqueHit(
   norm: string,
   reason: string,
   unread = true,
-  capability: 'command.script-opaque' | 'command.ambient-unresolved' = 'command.script-opaque',
+  capability:
+    | 'command.script-opaque'
+    | 'command.ambient-unresolved'
+    | 'command.unmodelled-closure' = 'command.script-opaque',
 ): CapabilityHit {
   return {
     capability,
@@ -2914,10 +3062,11 @@ function classifyNormalized(
     // Analysis truncation is UNKNOWN, never "whatever the parent was". Returning the enclosing declared class let a
     // chain of indirection launder anything past the gate (challenge findings 2, 11, 20, 29, 36).
     return [...hits, opaqueHit(table, ctx, norm, `analysis truncated at depth ${MAX_EFFECT_DEPTH}`)];
-  const effect = resolveScriptCommand(ctx, norm, state.env);
-  // TYPED DISPATCH: `none` is the producer TABLE saying no producer claims this head. It is the only place
-  // "nothing here" is allowed, and it cannot be reached by a producer giving up.
-  if (effect.kind === 'none') return hits;
+  const effect = resolveScriptCommand(table, ctx, norm, state.env);
+  // TYPED DISPATCH: `none` is the producer TABLE saying no producer claims this head — and it still goes THROUGH
+  // the ladder, because "no producer matched" is not itself a conclusion about execution. An early return here
+  // short-circuited the ladder and restored the very defect the typed dispatch was introduced to remove
+  // (challenge 7, finding 20).
   if (state.seen.has(effect.key)) return hits;
   const seen = new Set(state.seen).add(effect.key);
   // THE WHOLE RULE, total over ResolutionOutcome (product decision, 2026-09-22 — "positive security claims must be
@@ -2937,10 +3086,11 @@ function classifyNormalized(
       ? [{ what: 'binding', where: norm, why: state.env.binding.why ?? 'program lookup redefined by an enclosing environment' }]
       : [];
   const { opaque: outcomeOpaque } = resolutionEffect(effect.resolution);
-  const opaque = outcomeOpaque || inheritedBinding.length > 0;
+  const envGaps = environmentGaps(effect.kind, state.env);
+  const opaque = outcomeOpaque || inheritedBinding.length > 0 || envGaps.length > 0;
   // SCOPED OPACITY: the hit names WHICH part of the execution closure is unresolved, so a reader can see what EGO
   // could not see and an organization can govern the parts separately.
-  const gaps = [...(effect.unresolved ?? []), ...inheritedBinding];
+  const gaps = [...(effect.unresolved ?? []), ...inheritedBinding, ...envGaps];
   const scope = gaps.length ? gaps.map((u) => `${u.what}:${u.where}`).join(', ') : effect.resolution;
   const remainder = opaque
     ? [
@@ -2953,7 +3103,11 @@ function classifyNormalized(
           // an unresolved AMBIENT producer is its own governed capability, so an organization can decide about
           // "installs run third-party code" separately from "this script is unreadable" (Q98: every lock is
           // administrable, and a lock nobody can distinguish is a lock nobody can tune)
-          effect.resolution === 'AMBIENT_UNRESOLVED' ? 'command.ambient-unresolved' : 'command.script-opaque',
+          effect.resolution === 'AMBIENT_UNRESOLVED'
+            ? 'command.ambient-unresolved'
+            : effect.resolution === 'UNKNOWN_PRODUCER'
+              ? 'command.unmodelled-closure'
+              : 'command.script-opaque',
         ),
       ]
     : [];
@@ -3680,6 +3834,7 @@ function analyzeSegments(
   // here is what made `./configure && make build` reuse the Makefile configure had just rewritten — the write
   // happened one level down and never came back out (challenge 6, findings 6, 13, 19).
   const written = state.env.written;
+  let treeFresh = state.env.treeFresh;
   const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
@@ -3745,7 +3900,15 @@ function analyzeSegments(
     const effectiveCwd = cwd === '\0dynamic' ? state.env.cwd : cwd;
     // the tracked working directory IS the resolution context; when `cd` went somewhere dynamic it is not proven,
     // and every conclusion drawn from a relative path below is downgraded rather than guessed
-    const env: ExecutionEnvironment = { ...state.env, cwd: effectiveCwd, cwdVerified: cwd !== '\0dynamic' };
+    const env: ExecutionEnvironment = {
+      ...state.env,
+      cwd: effectiveCwd,
+      cwdVerified: cwd !== '\0dynamic',
+      // ENVIRONMENT-INPUT CLOSURE: captured HERE, before normalizeSegment strips the assignments, so the producer
+      // boundary sees what the command line did to the tool it is about to resolve
+      envInputs: { ...state.env.envInputs, ...segmentEnvInputs(seg) },
+      treeFresh,
+    };
     for (const norm of normalizeSegment(seg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
       for (const h of normHits) hits.push(h);
@@ -3823,6 +3986,10 @@ function analyzeSegments(
     }
     // and the write-ish commands, whose destination is an operand rather than a redirection
     for (const abs of writtenPathOperands(seg, effectiveCwd)) written.add(canonicalPath(abs));
+    // TREE-STATE PROVENANCE: a checkout, reset, stash pop, merge, rebase or worktree switch replaces a
+    // repository-determined, unenumerable set of files. The per-path ledger cannot express that, so the tree
+    // itself stops being fresh and every later conclusion drawn from repository content is STALE.
+    if (TREE_CHANGING.test(seg.trim())) treeFresh = false;
     // A4 — a segment whose own effect could not be determined may have written ANY file, so nothing resolved after
     // it in this unit is provably fresh. This is what makes freshness a property rather than a list of writers.
     if (

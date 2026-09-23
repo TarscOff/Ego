@@ -127,7 +127,10 @@ test('interpreters and inline code never bypass policy', () => {
   );
   assert.equal(bash('node -e "console.log(1)"', c).verdict, 'ALLOW');
   assert.equal(bash('node --version', c).verdict, 'ALLOW');
-  assert.equal(bash('node --test', c).verdict, 'ALLOW');
+  // `node --test` runs every file matching its pattern: repository code EGO was never shown. A producer table
+  // that does not claim the head is not proof that nothing else executes (challenge 7, UNCLAIMED-HEAD CLOSURE).
+  assert.equal(bash('node --test', c).verdict, 'ASK');
+  assert.equal(bash('node --version', c).verdict, 'ALLOW', 'a bounded invocation of the same head is untouched');
 });
 
 test('make targets are classified by their recipe', () => {
@@ -361,8 +364,12 @@ test('one pipeline: the same action gets the same security analysis at every dep
   assert.equal(bash('make trust', dc).decisive?.capability, 'ego.trust.tamper', 'same write, one level down');
   assert.equal(bash('make nested', dc).decisive?.capability, 'git.remote.push', 'cd inside a recipe is tracked');
 
-  // and ordinary development is still fluid
+  // and ordinary development is still fluid — for everything whose execution closure EGO can bound. A test runner
+  // executes repository code it finds by pattern, so `npm test` and `vitest run` are a human gate by decision, not
+  // by accident; `eslint` is bounded here because no executable eslint config is present.
   const plain = workspace({ Makefile: 'build:\n\ttsc -p .\n', 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .', test: 'vitest run' } }) });
-  for (const cmd of ['make build', 'npm run build', 'npm test', 'tsc -p .', 'eslint .', 'vitest run'])
+  for (const cmd of ['make build', 'npm run build', 'tsc -p .', 'eslint .'])
     assert.equal(bash(cmd, ctx(plain)).verdict, 'ALLOW', cmd);
+  for (const cmd of ['npm test', 'vitest run'])
+    assert.equal(bash(cmd, ctx(plain)).verdict, 'ASK', `${cmd}: runs test files EGO was never shown`);
 });
