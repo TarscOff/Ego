@@ -2495,8 +2495,22 @@ function resolveScriptCommand(
       };
     }
     const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
+    // npm accepts its configuration as flags anywhere on the line, including AFTER the script name, and
+    // `--script-shell` re-points the interpreter of every script (challenge 8, finding 3)
+    const npmFlags = tokens.filter((t) =>
+      /^--(script-shell|node-options|shell|ignore-scripts=false|foreground-scripts)(=|$)/.test(t),
+    );
     return {
       kind: 'npm-script',
+      ...(npmFlags.length
+        ? {
+            unresolved: npmFlags.map((f) => ({
+              what: 'binding' as const,
+              where: f,
+              why: 'an npm configuration flag re-points the interpreter this script runs in',
+            })),
+          }
+        : {}),
       key: `npm:${dirname(pkgPath)}:${script}`,
       body,
       bodyEnv: childEnvironment(env, {
@@ -2505,8 +2519,10 @@ function resolveScriptCommand(
         config: { read: [pkgPath], unresolved: [] },
         sources: { [pkgPath]: fingerprint(text) },
       }),
-      reason: `package.json script "${script}"`,
-      resolution: 'RESOLVED_COMPLETE',
+      reason: npmFlags.length
+        ? `package.json script "${script}"; NOT fully resolved: ${npmFlags[0]}`
+        : `package.json script "${script}"`,
+      resolution: npmFlags.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
       provenance: { source: pkgPath, fingerprint: fingerprint(text) },
     };
   }
@@ -2518,6 +2534,7 @@ function resolveScriptCommand(
     ]);
     const targets: string[] = [];
     const cliRebinds: string[] = [];
+    const cliInputs: string[] = [];
     let makeDir = cwd;
     const makeFiles: string[] = []; // every -f/--file/--makefile: make reads them ALL, not just the last
     for (let i = 1; i < tokens.length; i++) {
@@ -2534,8 +2551,10 @@ function resolveScriptCommand(
         continue;
       }
       if (t.includes('=')) {
-        // a command-line variable assignment is not a target — but SHELL/PATH change what every recipe line RUNS
+        // a command-line variable assignment is not a target — but make takes execution inputs in this position
+        // too, and the leading-assignment capture cannot see them (challenge 8, finding 2)
         if (/^(SHELL|\.SHELLFLAGS|PATH)=/.test(t)) cliRebinds.push(t);
+        else if (EXECUTION_ENV_INPUTS.test(t.slice(0, t.indexOf('=')))) cliInputs.push(t);
         continue;
       }
       targets.push(t);
@@ -2687,6 +2706,8 @@ function resolveScriptCommand(
     // reported rather than the whole target being declared unknown.
     for (const r of rebinds)
       gaps.push({ what: 'binding', where: mkName, why: `the environment redefines program lookup: ${r}` });
+    for (const i of cliInputs)
+      gaps.push({ what: 'context', where: i.slice(0, i.indexOf('=')), why: `make is given ${i}, which changes what it reads` });
     // SELF-MODIFYING PRODUCER — make REMAKES a makefile that is itself a target, then restarts and runs the new
     // one. The source EGO read is then the pre-image of what executes (challenge 6, finding 9).
     for (const src of merged.sources)
@@ -2901,7 +2922,11 @@ const DB_CLIENT_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'sqlite3', 'redis-cli', 'clickhouse-client', 'cqlsh',
 ]);
 const DB_EXECUTES_UNREAD =
-  /\s(-f|--file)(=|\s)|\s<\s|\\!|\.shell\b|\.system\b|\.read\b|\bSYSTEM\b|TO\s+PROGRAM\b/i;
+  // `\!` is psql's shell escape. Inside DOUBLE quotes the backslash is consumed before this test ever sees it,
+  // so the de-escaped form — a `-c` value that BEGINS with `!` — is matched too. Matching a bare `!` anywhere
+  // would be far too broad; anchoring it to the start of the statement is exactly the meta-command position
+  // (challenge 8, finding 14).
+  /\s(-f|--file)(=|\s)|\s<\s|\\!|(-c|--command)(=|\s+)["']?\s*!|\.shell\b|\.system\b|\.read\b|\bSYSTEM\b|TO\s+PROGRAM\b/i;
 
 const TARGET_ENV_RE =
   /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|CLICKHOUSE_HOST)$/;

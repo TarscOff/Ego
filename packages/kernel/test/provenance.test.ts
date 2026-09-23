@@ -69,6 +69,18 @@ test('provenance of PROCESS INPUTS: an assignment that re-points a tool is part 
     'nohup env MAKEFILES=extra.mk make build',
   ])
     assert.notEqual(run(cmd, dir).verdict, 'ALLOW', `${cmd}: the same input, another position`);
+  // an execution input written as an OPERAND rather than as a leading assignment is the same input: make takes
+  // variables on its command line and npm takes its configuration as flags anywhere, including after the script
+  // name (challenge 8, findings 2 and 3)
+  const mk = workspace({ Makefile: 'build:\n\ttsc -p .\n', 'evil.mk': `build:\n\t${PUSH}\n` });
+  assert.notEqual(run('make build MAKEFILES=evil.mk', mk).verdict, 'ALLOW');
+  assert.equal(run('make build FOO=bar', mk).verdict, 'ALLOW', 'ordinary variables are not execution inputs');
+  const ns = workspace({ 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }) });
+  assert.notEqual(run('npm run build --script-shell=./evil', ns).verdict, 'ALLOW');
+  assert.equal(run('npm run build', ns).verdict, 'ALLOW');
+  // a database client's in-band shell escape survives de-escaping inside double quotes
+  assert.notEqual(run(String.raw`psql -c "\! ${PUSH}"`, dir).verdict, 'ALLOW');
+  assert.equal(run('psql -c "SELECT 1"', dir).verdict, 'ALLOW');
   // EGO captures only what changes execution semantics: ordinary parameterisation is not an execution input
   assert.deepEqual(segmentEnvInputs('FOO=bar BAZ=1 make build'), {});
   assert.deepEqual(segmentEnvInputs('MAKEFILES=extra.mk make build'), { MAKEFILES: 'extra.mk' });
