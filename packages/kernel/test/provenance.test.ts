@@ -453,3 +453,14 @@ test('a repository-local git alias that runs a shell command is part of the ambi
   // setting one is itself governed
   assert.notEqual(run(`git config --local alias.y '!${PUSH}'`, dir).verdict, 'ALLOW');
 });
+
+test('doctor distinguishes what EGO verified from what EGO declared, everywhere', () => {
+  const src = readFileSync(new URL('../src/project/doctor.ts', import.meta.url), 'utf8');
+  // the blocking-hook claim comes from EGO's OWN host matrix, not from a measurement of the running host
+  const blocking = src.slice(src.indexOf('blocking PreToolUse`'), src.indexOf('const shim ='));
+  assert.match(blocking, /declared/i, 'a host-matrix status must not read as a measurement');
+  // and the shim is verified by CONTENT against the copy EGO ships, not by its presence
+  const shimBlock = src.slice(src.indexOf('const shim ='), src.indexOf('const hooks = gitHookStatus'));
+  assert.match(shimBlock, /packageRoot\(\)/, 'presence is not identity: compare against what EGO installs');
+  assert.match(shimBlock, /UNVERIFIED/, 'a present-but-different shim is UNVERIFIED, not satisfied');
+});

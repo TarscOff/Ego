@@ -17,6 +17,7 @@ import { readGeneratedManifest } from './init.ts';
 import { gitHookStatus } from './githooks.ts';
 import { gitConfigScope } from '../util/git.ts';
 import { isFile, readJsonIfExists, readTextIfExists } from '../util/fs.ts';
+import { packageRoot } from '../launcher/self.ts';
 import { sha256Hex } from '../util/hash.ts';
 import { resolveLauncher } from '../util/path-resolve.ts';
 import { HOST_MATRIX, HOST_IDS, type HostId } from '../hosts/matrix.ts';
@@ -248,20 +249,37 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
         : 'missing; run `ego init`',
       h === 'claude-code',
     );
+    // `blocking` is a status EGO authored in its own host matrix, not a fact it measured here. Printing the note
+    // alone read as "EGO checked that deny blocks the call"; it did not. Conformance is phase 6.
     add(
       'hooks',
       `${h} blocking PreToolUse`,
       blocking === 'SUPPORTED' ? 'SATISFIED' : 'UNVERIFIED',
-      m.capabilities['blocking-pre-tool-hook'].note,
+      `${m.capabilities['blocking-pre-tool-hook'].note}${blocking === 'SUPPORTED' ? ' (declared in EGO\u2019s own host matrix; verified against a running host by the phase-6 conformance suite)' : ''}`,
       false,
     );
   }
+  // The shim's PRESENCE was reported as satisfaction. `.harness/hooks` is a protected path, so an agent cannot
+  // write it through a governed tool — but "the file is there" is not "the file is the one EGO installed", and
+  // EGO ships the original, so it can say which.
   const shim = join(root, '.harness', 'hooks', 'ego-hook.sh');
+  const shimMatches = ((): boolean | null => {
+    if (!isFile(shim)) return null;
+    try {
+      return readTextIfExists(shim) === readTextIfExists(join(packageRoot(), 'runtime', 'posix', 'ego-hook.sh'));
+    } catch {
+      return null;
+    }
+  })();
   add(
     'hooks',
     'fail-closed shim',
-    isFile(shim) ? 'SATISFIED' : 'NOT SATISFIED',
-    isFile(shim) ? '.harness/hooks/ego-hook.sh' : 'missing',
+    shimMatches === true ? 'SATISFIED' : shimMatches === null && !isFile(shim) ? 'NOT SATISFIED' : 'UNVERIFIED',
+    shimMatches === true
+      ? '.harness/hooks/ego-hook.sh matches the copy EGO installs'
+      : isFile(shim)
+        ? '.harness/hooks/ego-hook.sh is present but does NOT match the copy EGO installs'
+        : 'missing',
   );
   // the directory git actually runs hooks from (husky user hooks resolved), the shim and the husky runner
   const hooks = gitHookStatus(root);
