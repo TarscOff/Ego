@@ -506,3 +506,24 @@ test('an option is read where it actually is, and an engine is selected by env a
   assert.equal(run('DOCKER_CONTEXT=kind-dev docker compose up', d).verdict, 'ALLOW');
   assert.equal(run('FOO=bar docker compose up', d).verdict, 'ALLOW');
 });
+
+test('a write nobody enumerated invalidates what comes after it, and a configured program is scoped to its verbs', () => {
+  const d = workspace({ Makefile: 'build:\n\ttsc -p .\n', 'package.json': '{}' });
+  // an extraction or a recursive copy writes a set of files the per-path ledger cannot express
+  for (const cmd of ['tar -xf p.tar -C sub && make build', 'unzip p.zip && make build', 'cp -r a b && make build'])
+    assert.notEqual(run(cmd, d).verdict, 'ALLOW', `${cmd}: the makefile may have been replaced`);
+  // ... while creating an archive or copying one file writes what it says
+  for (const cmd of ['make build', 'tar -cf p.tar src && make build', 'cp a.ts b.ts && make build'])
+    assert.equal(run(cmd, d).verdict, 'ALLOW', cmd);
+
+  // a repository-local configured program is scoped to the verbs that RUN it. Applying every one to every verb
+  // made `git status` and `git log` ask in any repository using Git LFS, whose ordinary installation configures
+  // `filter.lfs.clean`.
+  const lfs = workspace({ 'package.json': '{}' });
+  spawnSync('git', ['init', '-q'], { cwd: lfs });
+  spawnSync('git', ['config', '--local', 'filter.lfs.clean', 'git-lfs clean -- %f'], { cwd: lfs });
+  for (const cmd of ['git status', 'git log --oneline', 'git diff'])
+    assert.equal(run(cmd, lfs).verdict, 'ALLOW', `${cmd}: a content filter does not run for this verb`);
+  for (const cmd of ['git add -A', 'git checkout main'])
+    assert.notEqual(run(cmd, lfs).verdict, 'ALLOW', `${cmd}: this verb does run the filter`);
+});

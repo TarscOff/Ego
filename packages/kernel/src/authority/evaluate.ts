@@ -1633,6 +1633,20 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   return out;
 }
 
+/** True when a segment writes an UNENUMERABLE set of files: an archive extraction, or a recursive copy whose
+ *  destination is a directory. The per-path ledger cannot express either, and `tar -xf p.tar -C sub && make -C sub
+ *  build` was judged from a Makefile the extraction may have just replaced. */
+function writesUnenumerably(segment: string): boolean {
+  const tokens = tokenize(segment);
+  const head = tokens[0] ?? '';
+  if (/^(tar|bsdtar|gtar|pax)$/.test(head))
+    return tokens.some((t) => /^-{0,2}[a-zA-Z-]*x/.test(t) && !t.startsWith('--exclude'));
+  if (/^(unzip|7z|7za|unrar|bsdcpio|cpio)$/.test(head)) return true;
+  if (/^(rsync|cp)$/.test(head) && tokens.some((t) => /^-[a-zA-Z]*[ra]/.test(t))) return true;
+  if (head === 'git' && tokens.includes('checkout-index')) return true;
+  return false;
+}
+
 /** True when the path exists on disk, whatever our ability to read it. */
 function fileExists(abs: string): boolean {
   try {
@@ -2210,6 +2224,20 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
   };
 }
 
+/** Which verbs actually run each configured program. A content filter runs when git materialises or stages
+ *  content; a textconv when git renders a diff; an ssh command only on the network verbs. */
+const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]> = [
+  [
+    /^filter\.[^.]+\.(clean|smudge|process)$/i,
+    new Set(['add', 'checkout', 'switch', 'restore', 'commit', 'merge', 'stash', 'clone', 'pull', 'reset', 'rm', 'mv', 'apply', 'am', 'cherry-pick', 'rebase', 'revert', 'archive']),
+  ],
+  [/^diff\.[^.]+\.(textconv|command)$/i, new Set(['diff', 'show', 'log', 'blame', 'difftool', 'range-diff'])],
+  [/^core\.fsmonitor$/i, new Set(['status', 'add', 'diff', 'commit', 'checkout', 'switch', 'restore', 'stash'])],
+  [/^core\.pager$/i, new Set(['log', 'show', 'diff', 'blame', 'branch', 'tag', 'shortlog', 'grep'])],
+  [/^core\.(sshCommand|gitProxy)$/i, new Set(['fetch', 'push', 'pull', 'clone', 'ls-remote', 'submodule', 'remote'])],
+  [/^core\.editor$/i, new Set(['commit', 'rebase', 'tag', 'merge', 'revert', 'cherry-pick', 'config'])],
+];
+
 /** REPOSITORY-LOCAL git config whose VALUE is a command git will run: clean/smudge filters, textconv, fsmonitor
  *  and the like. Local scope only \u2014 these are the keys an agent or a dependency can write into the checkout. */
 function gitLocalProgramValues(root: string, verb: string): string[] {
@@ -2231,12 +2259,11 @@ function gitLocalProgramValues(root: string, verb: string): string[] {
       if (alias[1] === verb && value.startsWith('!')) out.push(value.slice(1));
       continue;
     }
-    if (
-      /^(filter\.[^.]+\.(clean|smudge|process)|diff\.[^.]+\.(textconv|command)|core\.(fsmonitor|pager|sshCommand|gitProxy|editor))$/i.test(
-        key,
-      )
-    )
-      out.push(value);
+    // ... and each key is scoped to the verbs that actually invoke it. Applying every configured program to
+    // every verb made `git status` and `git log` ask in any repository using Git LFS, which configures
+    // `filter.lfs.clean` as its ordinary installation.
+    const scope = CONFIG_PROGRAM_VERBS.find(([re]) => re.test(key));
+    if (scope && scope[1].has(verb)) out.push(value);
   }
   return out;
 }
@@ -4391,6 +4418,9 @@ function analyzeSegments(
     }
     // and the write-ish commands, whose destination is an operand rather than a redirection
     for (const abs of writtenPathOperands(seg, effectiveCwd)) written.add(canonicalPath(abs));
+    // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
+    // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect
+    if (writesUnenumerably(seg)) written.add('\0any');
     // a standalone assignment (`PATH=./bin:$PATH`, `export SHELL=…`) sets it for every LATER segment of this
     // shell, and a function or alias definition rebinds the name it declares
     const bare = seg.trim().replace(/^export\s+/, '');
