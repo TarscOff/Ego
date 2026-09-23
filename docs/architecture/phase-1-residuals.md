@@ -67,6 +67,23 @@ arbitrary repository into the scratch tree is therefore permitted; cloning into 
 Residual risk: content of unknown provenance lands on disk. It does not execute by being cloned, and executing it
 afterwards is classified on its own.
 
+### Writing the overlay policy layers
+
+`.harness/permissions.md` and `.harness/overlay/matchers.md` are writable at ALLOW; the organization layer
+`policies/organization/permissions.md` and the compiled cache `.harness/generated/policy.json` are DENY.
+
+That asymmetry is correct and was verified end to end through the real hook path, not assumed: the overlay layers
+may only **narrow**. An overlay that tries to widen makes the control plane fail validation —
+
+```text
+overlay layer attempts to widen "git.remote.push" from DENY to ALLOW; lower layers may only narrow
+overlay matcher may not map "^git\s+push" to ALLOW capability "command.read-only"; overlay matchers only narrow
+```
+
+— and the hook then fails closed rather than deciding. So an agent may tighten its own leash and may not loosen it.
+Residual risk: an agent can make the control plane invalid, which stops the session. That is a denial of its own
+service, not an escalation.
+
 ### `helm repo add`
 
 Writes local helm configuration. Permitted as a local-workspace operation. Residual risk: a later `helm install`

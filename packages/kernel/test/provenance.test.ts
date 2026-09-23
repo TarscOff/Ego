@@ -280,3 +280,19 @@ test('PROPERTY: less provenance never widens authority, on any dimension', () =>
     if (run(cmd, dir).verdict !== 'ALLOW')
       assert.ok(scopes(cmd, dir).length > 0, `${label}: the hit must say what is unresolved`);
 });
+
+test('the overlay policy layers may only narrow, whoever writes them', () => {
+  // `.harness/permissions.md` and `.harness/overlay/matchers.md` are writable at ALLOW, which is only safe
+  // because a widening in them is refused at LOAD time. Verified here rather than assumed, since the write
+  // permission rests on it entirely.
+  const src = readFileSync(new URL('../src/authority/compile.ts', import.meta.url), 'utf8');
+  assert.match(src, /only narrow/i, 'the narrowing rule must be enforced where the layers are compiled');
+  // and the organization layer and the compiled cache are NOT writable by an agent
+  const dir = workspace({});
+  const write = (p: string) =>
+    evaluate(table, ctx(dir), { tool: 'Write', input: { file_path: join(dir, p), content: 'x' } }).verdict;
+  assert.equal(write('policies/organization/permissions.md'), 'DENY');
+  assert.equal(write('.harness/generated/policy.json'), 'DENY');
+  assert.equal(write('.harness/harness.md'), 'DENY');
+  assert.equal(write('src/a.ts'), 'ALLOW', 'and an ordinary repository file is ordinary work');
+});
