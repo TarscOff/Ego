@@ -59,6 +59,15 @@ test('provenance of PROCESS INPUTS: an assignment that re-points a tool is part 
   const np = workspace({ 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }) });
   assert.equal(run('npm run build', np).verdict, 'ALLOW');
   assert.notEqual(run('npm_config_script_shell=./evil npm run build', np).verdict, 'ALLOW');
+  // ONE CAPTURE PATH: the same input carried by `env`, behind a wrapper, or inside `env -S` reaches the same
+  // dimension. Anchoring on the leading position made it blind to spellings the normalizer already parsed.
+  for (const cmd of [
+    'env MAKEFILES=extra.mk make build',
+    'env -- MAKEFILES=extra.mk make build',
+    'timeout 60 env MAKEFILES=extra.mk make build',
+    'nohup env MAKEFILES=extra.mk make build',
+  ])
+    assert.notEqual(run(cmd, dir).verdict, 'ALLOW', `${cmd}: the same input, another position`);
   // EGO captures only what changes execution semantics: ordinary parameterisation is not an execution input
   assert.deepEqual(segmentEnvInputs('FOO=bar BAZ=1 make build'), {});
   assert.deepEqual(segmentEnvInputs('MAKEFILES=extra.mk make build'), { MAKEFILES: 'extra.mk' });
@@ -87,6 +96,23 @@ test('provenance of DISPATCH OWNERSHIP: the table not claiming a head is not pro
   assert.notEqual(run('eslint .', cfg('{"extends":["airbnb"]}')).verdict, 'ALLOW', 'a shareable config is code');
   assert.equal(run('eslint .', cfg('{"extends":["eslint:recommended"]}')).verdict, 'ALLOW', 'built in');
   assert.equal(run('eslint .', cfg('{"rules":{"eqeqeq":"error"}}')).verdict, 'ALLOW', 'rules are data');
+  // THE DEFAULT IS NOT A POSITIVE CLAIM. Making ABSENT_VERIFIED the fallback for a head the vocabulary never
+  // classified turned the authored list into a blocklist whose completeness was assumed (challenge 8).
+  const src = readFileSync(new URL('../src/authority/evaluate.ts', import.meta.url), 'utf8');
+  const fallback = src.slice(src.indexOf('THE DEFAULT IS NOT A POSITIVE CLAIM'), src.indexOf('if (head === \'git\')'));
+  assert.ok(!/ABSENT_VERIFIED/.test(fallback), 'the unclassified fallback must not be a positive claim');
+
+  // ONE CANONICAL IDENTITY: a runner prefix must not make the matcher pass and the producer dispatch read two
+  // different commands. `npx vitest run` matched command.test as if the prefix were not there, while the dispatch
+  // saw the head `npx` and claimed a bounded closure (challenge 8).
+  for (const prefix of ['npx ', 'pnpm exec ', 'bunx ', 'yarn dlx ', 'npm exec '])
+    assert.equal(
+      run(`${prefix}vitest run`, dir).verdict,
+      run('vitest run', dir).verdict,
+      `${prefix}: a runner prefix must not change the verdict`,
+    );
+  assert.equal(run('npx tsc -p .', dir).verdict, 'ALLOW', 'and a bounded tool behind a runner stays frictionless');
+
   // the distinction is AUTHORED, so an organization can move a tool between the two lists
   const vocab = loadControlPlane(ROOT).boundedCommands;
   assert.ok(vocab.bounded.length > 10 && vocab.discoversContent.length > 5 && vocab.discoversConfig.length > 5);

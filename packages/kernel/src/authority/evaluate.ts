@@ -52,6 +52,12 @@ export interface Evaluation {
 }
 
 const WRAPPERS = new Set([
+  // package-manager runners resolve a name to a local or fetched binary and then exec it. They were handled
+  // inside individual matcher regexes (`(npx\s+)?…`) but NOT by the normalizer, so the matcher pass and the
+  // producer dispatch read two different commands: `npx vitest run` matched `command.test` as if it were
+  // `vitest run`, while the dispatch saw the head `npx` and claimed a bounded closure (challenge 8, finding 4).
+  'npx',
+  'bunx',
   'env',
   'nice',
   'time',
@@ -131,6 +137,14 @@ const WRAPPER_POSITIONALS: Record<string, RegExp> = {
 };
 /** wrappers whose first argument is their own operand, not the command: the command starts after it */
 const WRAPPERS_WITH_OPERAND = new Set(['flock', 'su', 'runuser']);
+/** two-word runners: the pair is stripped so the real command is what everything downstream sees */
+const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['pnpm', 'exec'],
+  ['pnpm', 'dlx'],
+  ['yarn', 'dlx'],
+  ['npm', 'exec'],
+  ['bun', 'x'],
+];
 /** environment assignments that change what a command executes or where governance looks: never silently stripped */
 const ENV_INJECT_RE =
   /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
@@ -255,6 +269,12 @@ export function normalizeSegment(segment: string): string[] {
     const m = /^(\S+)\s+/.exec(s);
     if (!m || !PREFIX_KEYWORDS.has(m[1]!)) break;
     s = s.slice(m[0].length).trim();
+  }
+  // two-word runners, stripped before wrapper handling so `pnpm exec vitest run` is `vitest run` everywhere
+  for (;;) {
+    const pair = WRAPPER_PAIRS.find((p) => new RegExp(`^${p[0]}\\s+${p[1]}\\s+`).test(s));
+    if (!pair) break;
+    s = s.replace(new RegExp(`^${pair[0]}\\s+${pair[1]}\\s+`), '');
   }
   const tokens = tokenize(s);
   if (tokens.length === 0) return extra;
@@ -1455,13 +1475,36 @@ const EXECUTION_ENV_INPUTS =
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
-  let s = segment.trim();
-  for (;;) {
-    const m = /^([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|\S*)\s+/.exec(s);
-    if (!m) break;
-    if (EXECUTION_ENV_INPUTS.test(m[1]!)) out[m[1]!] = m[2]!.replace(/^['"]|['"]$/g, '');
-    s = s.slice(m[0].length);
-  }
+  // `VAR=x cmd`, `env VAR=x cmd`, `env -- VAR=x cmd`, `env -S 'VAR=x cmd'`, and the same behind any wrapper
+  // (`timeout 60 env VAR=x cmd`). Anchoring on the LEADING position only made the dimension blind to spellings
+  // the normalizer already knew how to parse — two readers for one dimension (challenge 8, finding 1).
+  const scan = (text: string): void => {
+    let s = text.trim();
+    for (;;) {
+      // skip wrappers and their options so `timeout 60 env FOO=1 make` is reached
+      const w = /^(\S+)\s+/.exec(s);
+      if (w && (WRAPPERS.has(w[1]!) || w[1] === 'timeout' || w[1] === '--')) {
+        s = s.slice(w[0].length);
+        continue;
+      }
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|\S*)\s+/.exec(s);
+      if (m) {
+        if (EXECUTION_ENV_INPUTS.test(m[1]!)) out[m[1]!] = m[2]!.replace(/^['"]|['"]$/g, '');
+        s = s.slice(m[0].length);
+        continue;
+      }
+      // a numeric or flag operand of a wrapper (`timeout 60`, `env -C dir`, `nice -n 5`)
+      const opt = /^(-\S*|\d+\S*)\s+/.exec(s);
+      if (opt && /^(-|\d)/.test(opt[1]!)) {
+        s = s.slice(opt[0].length);
+        continue;
+      }
+      break;
+    }
+  };
+  scan(segment);
+  // `env -S 'VAR=x cmd'` carries a whole command line in one quoted value
+  for (const carried of carrierCommandValues(segment)) scan(carried);
   return out;
 }
 
@@ -2721,7 +2764,16 @@ function resolveScriptCommand(
     if (tool !== bare) continue;
     const present =
       configs.map((c) => join(cwd, c)).find((f) => fileExists(f)) ?? dataConfigNamingCode(ctx, cwd, bare);
-    if (present === undefined) break; // configuration is data and names no code: the closure is bounded
+    // configuration is data and names no code: the closure IS bounded, and saying so here is the whole point of
+    // the config shape — falling through to the default would gate the tool for not being in the other list
+    if (present === undefined)
+      return {
+        kind: 'none',
+        key: `bounded-config:${bare}`,
+        body: null,
+        reason: `${bare} configuration is data`,
+        resolution: 'NOT_A_PRODUCER',
+      };
     return {
       kind: 'none',
       key: `discovers-config:${present}`,
@@ -2731,12 +2783,19 @@ function resolveScriptCommand(
       unresolved: [{ what: 'config', where: present, why: 'executable configuration' }],
     };
   }
+  // THE DEFAULT IS NOT A POSITIVE CLAIM. `ABSENT_VERIFIED` is the ladder's "proven that nothing will execute", and
+  // making it the fallback for every head the vocabulary never classified turned the authored list into a
+  // BLOCKLIST whose completeness was assumed rather than checked — "a producer table not claiming a head must not
+  // mean ABSENT_VERIFIED", applied to the two named lists but not to the silence between them (challenge 8).
+  if (table.boundedCommands.bounded.includes(bare))
+    return { kind: 'none', key: `bounded:${bare}`, body: null, reason: 'bounded command', resolution: 'NOT_A_PRODUCER' };
   return {
     kind: 'none',
-    key: `none:${bare}`,
+    key: `unmodelled:${bare}`,
     body: null,
-    reason: 'no producer',
-    resolution: table.boundedCommands.bounded.includes(bare) ? 'NOT_A_PRODUCER' : 'ABSENT_VERIFIED',
+    reason: `${bare} is not declared bounded, so what else it executes is unknown`,
+    resolution: 'UNKNOWN_PRODUCER',
+    unresolved: [{ what: 'body', where: bare, why: 'no entry in the bounded-command vocabulary' }],
   };
 }
 
@@ -3128,7 +3187,13 @@ function classifyNormalized(
     state.env.binding.kind === 'redefined'
       ? [{ what: 'binding', where: norm, why: state.env.binding.why ?? 'program lookup redefined by an enclosing environment' }]
       : [];
-  const { opaque: outcomeOpaque } = resolutionEffect(effect.resolution);
+  // SCOPED OPACITY: when the command was not classified at all, `command.unknown` already says everything an
+  // extra "its closure is unmodelled" hit would, and it says it more precisely. Adding the second hit only
+  // changed which capability was decisive. It cannot weaken anything: the undeclared case is already ASK.
+  const { opaque: outcomeOpaque } =
+    effect.resolution === 'UNKNOWN_PRODUCER' && !declared
+      ? { opaque: false }
+      : resolutionEffect(effect.resolution);
   const envGaps = environmentGaps(effect.kind, state.env);
   const opaque = outcomeOpaque || inheritedBinding.length > 0 || envGaps.length > 0;
   // SCOPED OPACITY: the hit names WHICH part of the execution closure is unresolved, so a reader can see what EGO
