@@ -2113,7 +2113,7 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
   // LOCAL scope only. The operator's own global pager, editor or ssh command is their choice and is not part of
   // the repository's attack surface; gating on it would gate every `git status` on every developer machine. What
   // matters is config an agent or a dependency can write INTO THE CHECKOUT.
-  const configPrograms = gitLocalProgramValues(root);
+  const configPrograms = gitLocalProgramValues(root, verb);
   if (!names.length && configPrograms.length)
     return {
       kind: 'git-ambient',
@@ -2212,7 +2212,7 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
 
 /** REPOSITORY-LOCAL git config whose VALUE is a command git will run: clean/smudge filters, textconv, fsmonitor
  *  and the like. Local scope only \u2014 these are the keys an agent or a dependency can write into the checkout. */
-function gitLocalProgramValues(root: string): string[] {
+function gitLocalProgramValues(root: string, verb: string): string[] {
   const out: string[] = [];
   const dump = git(['config', '--local', '--list'], root);
   if (!dump.ok || !dump.stdout) return out;
@@ -2222,6 +2222,15 @@ function gitLocalProgramValues(root: string): string[] {
     const key = line.slice(0, eq);
     const value = line.slice(eq + 1).trim();
     if (!value || value === 'false' || value === '0') continue;
+    // `alias.<n> = !cmd` is a SHELL command git runs for `git <n>`. It sits in the same repository-local config
+    // as the filters, and nothing else in the closure would ever name it.
+    // ... scoped to the verb actually invoked: a repository with a legitimate `alias.lg = !git log` must not
+    // carry that body into every other git command
+    const alias = /^alias\.([^.]+)$/i.exec(key);
+    if (alias) {
+      if (alias[1] === verb && value.startsWith('!')) out.push(value.slice(1));
+      continue;
+    }
     if (
       /^(filter\.[^.]+\.(clean|smudge|process)|diff\.[^.]+\.(textconv|command)|core\.(fsmonitor|pager|sshCommand|gitProxy|editor))$/i.test(
         key,

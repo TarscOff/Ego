@@ -438,3 +438,18 @@ test('a body that REBINDS a name gates because the binding is modelled, not by a
   // and a body that rebinds nothing is ordinary work
   assert.equal(run('./run.sh', sh('tsc -p .\necho done')).verdict, 'ALLOW');
 });
+
+test('a repository-local git alias that runs a shell command is part of the ambient closure', () => {
+  // `alias.<n> = !cmd` sits in the same repository-local config as the clean/smudge filters and names a SHELL
+  // command git runs for `git <n>`. Nothing else in the closure would ever name it. Scoped to the verb actually
+  // invoked, so a legitimate `alias.lg = !git log` does not follow every other git command around.
+  const dir = workspace({ 'package.json': '{}' });
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  spawnSync('git', ['config', '--local', 'alias.x', `!${PUSH}`], { cwd: dir });
+  spawnSync('git', ['config', '--local', 'alias.lg', '!git log --oneline'], { cwd: dir });
+  assert.equal(run('git x', dir).verdict, 'DENY', 'the alias body is what runs');
+  assert.equal(run('git lg', dir).verdict, 'ALLOW', 'a benign alias is ordinary work');
+  assert.equal(run('git status', dir).verdict, 'ALLOW', 'and it does not follow other verbs around');
+  // setting one is itself governed
+  assert.notEqual(run(`git config --local alias.y '!${PUSH}'`, dir).verdict, 'ALLOW');
+});
