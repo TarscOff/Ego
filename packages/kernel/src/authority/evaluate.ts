@@ -3056,6 +3056,8 @@ const PROGRAM_OPERAND_LONG =
   '|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-B|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
   '|-e(?=\\s+\\S*(ssh|sh|bash|python|perl|ruby|node))';
 const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
+/** the short forms whose value is GLUED to the letter: `gcc -B/tmp/evil`, `clang -Xclangfoo`, `-loadplugin` */
+const PROGRAM_OPERAND_GLUED_RE = /\s(-B|-Xclang|-load|-fplugin|-specs|-wrapper)\S/;
 /** the archive tools where a short `-I` names a compression PROGRAM (for make it is an include directory) */
 const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
 const PROGRAM_OPERAND_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG}|-I)(=|\\s)`);
@@ -3708,7 +3710,9 @@ function classifyShellPaths(
   // UNBOUNDED PROGRAM OPERAND -> treat as UNKNOWN/OPAQUE (challenge finding 14).
   // `-I` names a compression PROGRAM for tar/pax but an include DIRECTORY for make and a pattern file for grep,
   // so the short form is scoped to the archive tools; the long spellings are unambiguous everywhere.
-  const program = (PROGRAM_OPERAND_TOOL_RE.test(seg) ? PROGRAM_OPERAND_RE : PROGRAM_OPERAND_LONG_RE).exec(seg);
+  const program =
+    (PROGRAM_OPERAND_TOOL_RE.test(seg) ? PROGRAM_OPERAND_RE : PROGRAM_OPERAND_LONG_RE).exec(seg) ??
+    PROGRAM_OPERAND_GLUED_RE.exec(seg);
   if (program)
     hits.push({
       capability: 'command.script-opaque',

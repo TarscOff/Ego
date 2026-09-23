@@ -527,3 +527,16 @@ test('a write nobody enumerated invalidates what comes after it, and a configure
   for (const cmd of ['git add -A', 'git checkout main'])
     assert.notEqual(run(cmd, lfs).verdict, 'ALLOW', `${cmd}: this verb does run the filter`);
 });
+
+test('a program operand is found whether its value is glued, separated or behind a verb-local flag', () => {
+  const d = workspace({});
+  // the short compiler options take a GLUED value, which the `(=|\s)` form of the rule could not see
+  for (const cmd of ['gcc -B/tmp/evil -c a.c', 'clang -B/tmp/e a.c'])
+    assert.notEqual(run(cmd, d).verdict, 'ALLOW', `${cmd}: -B takes its argument attached`);
+  // `git clone --config k=v` is clone's own spelling of the global `-c k=v`, and it sits AFTER the verb where the
+  // global-option stripper never looks
+  assert.equal(run('git clone --config core.sshCommand=/tmp/e https://x/y.git', d).verdict, 'DENY');
+  // and ordinary compilation and cloning are untouched
+  for (const cmd of ['gcc -c a.c -o a.o', 'clang -O2 a.c', 'git clone https://x/y.git', 'git clone --config user.name=me https://x/y.git'])
+    assert.equal(run(cmd, d).verdict, 'ALLOW', cmd);
+});
