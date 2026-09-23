@@ -104,8 +104,24 @@ bounded:
   - 'ruby'
   - 'perl'
   - 'php'
+  - 'swift'
+  - 'kotlinc'
+  - 'scalac'
+  - 'dart'
+  - 'elixir'
+  - 'erl'
   - 'java'
   - 'javac'
+  - 'gcc'
+  - 'g++'
+  - 'clang'
+  - 'clang++'
+  - 'cc'
+  - 'ld'
+  - 'ar'
+  - 'strip'
+  - 'objdump'
+  - 'nm'
   - 'make'
   - 'gmake'
   - 'cmake'
@@ -256,10 +272,13 @@ discovers_config:
   - 'tsup tsup.config.js tsup.config.mjs tsup.config.cjs tsup.config.ts'
   - 'gulp gulpfile.js gulpfile.mjs gulpfile.cjs gulpfile.ts'
   - 'grunt Gruntfile.js Gruntfile.cjs'
-  - 'mypy mypy_plugin.py'
-  - 'pylint pylintrc.py'
-  - 'flake8 setup.cfg'
-  - 'rubocop .rubocop.yml'
+  # these tools have no executable config file of their own; what they load is named INSIDE a data config, which
+  # the data-config check finds. Listing an ordinary `setup.cfg` or `.rubocop.yml` as code gated every Python and
+  # Ruby repository for nothing (challenge 8, findings 12 and 15).
+  - 'mypy conftest_plugin.py'
+  - 'pylint pylint_plugins.py'
+  - 'flake8 flake8_plugin.py'
+  - 'rubocop rubocop_ext.rb'
 ---
 
 # Bounded commands

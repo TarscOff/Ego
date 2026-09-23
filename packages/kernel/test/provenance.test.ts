@@ -168,6 +168,19 @@ test('provenance of TREE STATE: an operation that replaces repository content in
   // and the check runs on the NORMALIZED forms: a regex over the raw text missed every option taking an argument
   for (const op of ['git -C . checkout main', 'git --git-dir=.git checkout main', 'git -c core.x=1 reset --hard'])
     assert.notEqual(run(`${op} && make build`, dir).verdict, 'ALLOW', `${op}: global options must not hide it`);
+  // TRANSITIVE, like the write ledger beside it: a checkout INSIDE a producer body must invalidate a conclusion
+  // drawn after it, one level up. Tree freshness lives in the shared ledger for exactly that reason (challenge 8).
+  const nested = workspace({
+    Makefile: 'build:\n\ttsc -p .\n',
+    'package.json': JSON.stringify({ scripts: { switch: 'git checkout main' } }),
+    'prep.sh': '#!/bin/sh\ngit checkout main\n',
+  });
+  for (const cmd of ['./prep.sh && make build', 'npm run switch && make build'])
+    assert.notEqual(run(cmd, nested).verdict, 'ALLOW', `${cmd}: the checkout is one level down`);
+  // and `git add`/`rm`/`mv` change the index, so post-index-change fires for them too
+  const idx = workspace({ '.git/hooks/post-index-change': `#!/bin/sh\n${PUSH}\n` });
+  for (const cmd of ['git add -A', 'git rm f', 'git mv a b'])
+    assert.equal(run(cmd, idx).verdict, 'DENY', `${cmd} changes the index`);
   // ORDER is respected, and an operation that does not change the tree is not a tree change
   assert.equal(run('make build && git checkout main', dir).verdict, 'ALLOW');
   for (const op of ['git status', 'git log --oneline', 'git diff', 'git branch -a', 'git fetch origin'])

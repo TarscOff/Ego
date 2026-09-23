@@ -1358,8 +1358,10 @@ export interface ExecutionEnvironment {
   envInputs: Record<string, string>;
   /** TREE-STATE PROVENANCE: false once an earlier unit of this command may have replaced the repository content
    *  that later conclusions rest on — a checkout, reset, stash pop, merge, rebase or worktree switch rewrites an
-   *  unenumerable set of files, which the per-path write ledger cannot express. */
-  treeFresh: boolean;
+   *  unenumerable set of files, which the per-path write ledger cannot express. Recorded IN the shared ledger
+   *  under a sentinel, because that is the mechanism already proven to cross the producer boundary: a checkout
+   *  inside a script body must invalidate a conclusion drawn after it, one level up (challenge 8). */
+  readonly treeFresh: boolean;
 }
 
 /** The environment of a fresh top-level invocation: nothing proven that was not checked. */
@@ -1372,9 +1374,14 @@ export function baseEnvironment(cwd: string, cwdVerified: boolean): ExecutionEnv
     written: new Set(),
     sources: {},
     envInputs: {},
-    treeFresh: true,
+    get treeFresh(): boolean {
+      return !this.written.has(TREE_DIRTY);
+    },
   };
 }
+
+/** Ledger sentinel for "an earlier unit of this command replaced repository content". */
+const TREE_DIRTY = '\0tree';
 
 /** A child environment for a resolved body: a new directory and its own configuration, but the SAME write ledger,
  *  because freshness is a property of the command, not of one producer. */
@@ -1389,9 +1396,12 @@ function childEnvironment(
     binding: over.binding ?? parent.binding,
     written: parent.written, // SHARED, never copied: this is what makes freshness transitive
     sources: { ...parent.sources, ...(over.sources ?? {}) },
-    // a producer's body inherits the process inputs of the invocation that produced it, and its tree freshness
+    // a producer's body inherits the process inputs of the invocation that produced it; tree freshness is read
+    // from the SHARED ledger, so it crosses the producer boundary in both directions
     envInputs: over.envInputs ?? parent.envInputs,
-    treeFresh: over.treeFresh ?? parent.treeFresh,
+    get treeFresh(): boolean {
+      return !parent.written.has(TREE_DIRTY);
+    },
   };
 }
 
@@ -1424,7 +1434,7 @@ function environmentGaps(kind: ProducerResult['kind'], env: ExecutionEnvironment
 /** A DATA configuration that NAMES code is not a bounded closure: `.eslintrc.json` with `"plugins": ["x"]` makes
  *  the tool import and run `eslint-plugin-x`. The file is data; what it points at is not. Returns the config that
  *  names code, or undefined when the tool's configuration names none. */
-function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string): string | undefined {
+function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string): string | null {
   const names = [
     `.${tool}rc`,
     `.${tool}rc.json`,
@@ -1435,8 +1445,8 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
     'package.json',
   ];
   for (const n of names) {
-    const f = join(cwd, n);
-    if (!fileExists(f)) continue;
+    const f = findUp(ctx, cwd, n);
+    if (f === null) continue;
     const text = readInsideWorkspace(ctx, f);
     if (text === null) return f; // a configuration EGO cannot read cannot be shown to name no code
     const scope =
@@ -1460,7 +1470,7 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
       if (values.some((v) => !v.startsWith(`${tool}:`))) return f;
     }
   }
-  return undefined;
+  return null;
 }
 
 /** Operations that replace repository content wholesale. Listed by what they DO, not by spelling: each one swaps
@@ -1976,6 +1986,9 @@ const GIT_VERB_EVENTS: Record<string, GitEvent[]> = {
   checkout: ['checkout', 'ref-update', 'index-change'],
   switch: ['checkout', 'ref-update', 'index-change'],
   restore: ['index-change'],
+  add: ['index-change'],
+  rm: ['index-change'],
+  mv: ['index-change'],
   clone: ['checkout', 'ref-update'],
   rebase: ['rewrite', 'checkout', 'commit-created', 'ref-update', 'index-change'],
   push: ['push', 'ref-update'],
@@ -2804,8 +2817,12 @@ function resolveScriptCommand(
   for (const entry of table.boundedCommands.discoversConfig) {
     const [tool, ...configs] = entry.split(/\s+/);
     if (tool !== bare) continue;
+    // these tools search UPWARDS from the working directory, so anchoring the check to `cwd` let one `cd` flip
+    // the verdict on a repository whose configuration had not moved (challenge 8, findings 6 and 11)
     const present =
-      configs.map((c) => join(cwd, c)).find((f) => fileExists(f)) ?? dataConfigNamingCode(ctx, cwd, bare);
+      configs.map((c) => findUp(ctx, cwd, c)).find((f) => f !== null) ??
+      dataConfigNamingCode(ctx, cwd, bare) ??
+      undefined;
     // configuration is data and names no code: the closure IS bounded, and saying so here is the whole point of
     // the config shape — falling through to the default would gate the tool for not being in the other list
     if (present === undefined)
@@ -3984,7 +4001,6 @@ function analyzeSegments(
   // here is what made `./configure && make build` reuse the Makefile configure had just rewritten — the write
   // happened one level down and never came back out (challenge 6, findings 6, 13, 19).
   const written = state.env.written;
-  let treeFresh = state.env.treeFresh;
   const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
@@ -4052,12 +4068,15 @@ function analyzeSegments(
     // and every conclusion drawn from a relative path below is downgraded rather than guessed
     const env: ExecutionEnvironment = {
       ...state.env,
+      written,
       cwd: effectiveCwd,
       cwdVerified: cwd !== '\0dynamic',
       // ENVIRONMENT-INPUT CLOSURE: captured HERE, before normalizeSegment strips the assignments, so the producer
       // boundary sees what the command line did to the tool it is about to resolve
       envInputs: { ...state.env.envInputs, ...segmentEnvInputs(seg) },
-      treeFresh,
+      get treeFresh(): boolean {
+        return !written.has(TREE_DIRTY);
+      },
     };
     // `git -C dir …` genuinely runs in `dir`, and normalization strips the option before any producer sees it.
     // The directory a command runs in belongs to the ENVIRONMENT, so it is recorded here rather than rediscovered
@@ -4152,7 +4171,7 @@ function analyzeSegments(
     // itself stops being fresh and every later conclusion drawn from repository content is STALE.
     // tested against the NORMALIZED forms, not the raw text: `git -C dir checkout` and `git --git-dir=… checkout`
     // normalize to `git checkout`, and a regex over the raw segment missed every option that takes an argument
-    if (normalizeSegment(seg).some((n) => TREE_CHANGING.test(n.trim()))) treeFresh = false;
+    if (normalizeSegment(seg).some((n) => TREE_CHANGING.test(n.trim()))) written.add(TREE_DIRTY);
     // A4 — a segment whose own effect could not be determined may have written ANY file, so nothing resolved after
     // it in this unit is provably fresh. This is what makes freshness a property rather than a list of writers.
     if (

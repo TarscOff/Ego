@@ -537,6 +537,17 @@ matchers:
   - capability: command.build
     tool: Bash
     command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|(npx\s+)?(tsc|esbuild|eslint|prettier|biome|oxlint|dprint|lint-staged|vite|rollup|webpack|swc|turbo|nx|next|ng|tsup|parcel)\b|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
+  # Compilers and version probes whose semantics are fixed: they read source and write objects, and nothing else.
+  # Whole ecosystems had no matcher at all, so ordinary `javac`, `php -v` or `git lfs ls-files` reached
+  # command.unknown and asked (challenge 6, finding 36; challenge 8, finding 28). Deliberately EXCLUDES the project
+  # task runners — mvn, gradle, bazel, sbt, dotnet build, rake, bundle exec, composer — which execute
+  # repository-defined tasks and are producers EGO does not model.
+  - capability: command.build
+    tool: Bash
+    command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|cmake|ninja|rustc|tsc)\b|^swift\s+build\b|^dart\s+compile\b'
+  - capability: command.read-only
+    tool: Bash
+    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle)\s+(-v|-V|--version|-version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b'
   # Formatters, linters and type checkers with FIXED semantics: they read the workspace and rewrite source
   # files in it, and nothing else. Whole ecosystems had no path to ALLOW for ordinary `gofmt`/`ruff`/`black`/
   # `cargo fmt`, so a control plane that governs them all equally was unusable outside JavaScript (challenge 6,
