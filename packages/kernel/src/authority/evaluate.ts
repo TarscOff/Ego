@@ -1446,7 +1446,7 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
 /** Operations that replace repository content wholesale. Listed by what they DO, not by spelling: each one swaps
  *  an unenumerable set of tracked files, so a conclusion drawn from repository content before it is a pre-image. */
 const TREE_CHANGING =
-  /^git\s+(?:-[^\s]+\s+|--[^\s]+(?:=\S+)?\s+)*(checkout|switch|restore|reset|merge|rebase|cherry-pick|revert|stash|pull|am|apply|clean|worktree|submodule|sparse-checkout|read-tree|archive\s+--remote)\b/;
+  /^git\s+(checkout|switch|restore|reset|merge|rebase|cherry-pick|revert|stash|pull|am|apply|clean|worktree|submodule|sparse-checkout|read-tree|lfs|bisect|filter-branch)\b/;
 
 /** Leading `VAR=value` assignments of a segment. Only the names below are kept: the ones that decide WHICH FILE a
  *  tool reads or WHICH PROGRAM it runs. Everything else is ordinary parameterisation and is not execution input. */
@@ -4032,7 +4032,9 @@ function analyzeSegments(
     // TREE-STATE PROVENANCE: a checkout, reset, stash pop, merge, rebase or worktree switch replaces a
     // repository-determined, unenumerable set of files. The per-path ledger cannot express that, so the tree
     // itself stops being fresh and every later conclusion drawn from repository content is STALE.
-    if (TREE_CHANGING.test(seg.trim())) treeFresh = false;
+    // tested against the NORMALIZED forms, not the raw text: `git -C dir checkout` and `git --git-dir=… checkout`
+    // normalize to `git checkout`, and a regex over the raw segment missed every option that takes an argument
+    if (normalizeSegment(seg).some((n) => TREE_CHANGING.test(n.trim()))) treeFresh = false;
     // A4 — a segment whose own effect could not be determined may have written ANY file, so nothing resolved after
     // it in this unit is provably fresh. This is what makes freshness a property rather than a list of writers.
     if (

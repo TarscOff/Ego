@@ -138,6 +138,9 @@ test('provenance of TREE STATE: an operation that replaces repository content in
   ])
     assert.notEqual(run(`${op} && make build`, dir).verdict, 'ALLOW', `${op} replaces repository content`);
   assert.match(scopes('git checkout main && make build', dir), /tree-state/);
+  // and the check runs on the NORMALIZED forms: a regex over the raw text missed every option taking an argument
+  for (const op of ['git -C . checkout main', 'git --git-dir=.git checkout main', 'git -c core.x=1 reset --hard'])
+    assert.notEqual(run(`${op} && make build`, dir).verdict, 'ALLOW', `${op}: global options must not hide it`);
   // ORDER is respected, and an operation that does not change the tree is not a tree change
   assert.equal(run('make build && git checkout main', dir).verdict, 'ALLOW');
   for (const op of ['git status', 'git log --oneline', 'git diff', 'git branch -a', 'git fetch origin'])
