@@ -334,6 +334,19 @@ downgraded to opaque instead of being asserted.
 **Analysis truncation is also opaque.** Reaching the recursion depth limit returns an opacity hit; it never falls
 back to the enclosing declared class, which previously let a chain of indirection launder anything.
 
+## Residual reconciliation
+
+Every remaining HIGH/MEDIUM finding is classified in
+[`phase-1-residuals.md`](phase-1-residuals.md) as exactly one of MUST_FIX, ACCEPTED_PRODUCT_BEHAVIOR,
+UNKNOWN_PRODUCER/FAIL-SAFE or CONTAINMENT_DEPENDENCY. **Only a MUST_FIX counts as an unresolved Phase-1 defect.**
+Counting a recorded decision, a working fail-safe and a named requirement on issue #26 as defects is what made
+earlier rounds look like they were not converging while the contract was in fact holding.
+
+That document also states, for `docker compose up`, exactly what EGO still enforces around an accepted ALLOW —
+`exec` and the isolation-removing flags gate, a bind mount's source is classified as a real path — what the
+residual risk is in plain words, and the four guarantees issue #26 owes. EGO's honest claim about it today is
+written there as such: **permitted and uncontained.**
+
 ## Known limitations, stated plainly
 
 - The classifier does not understand arbitrary shell, and no amount of hardening will make it do so.
