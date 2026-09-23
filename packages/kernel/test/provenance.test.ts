@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { loadControlPlane } from '../src/control-plane/load.ts';
 import { compileAuthority } from '../src/authority/compile.ts';
@@ -463,4 +463,26 @@ test('doctor distinguishes what EGO verified from what EGO declared, everywhere'
   const shimBlock = src.slice(src.indexOf('const shim ='), src.indexOf('const hooks = gitHookStatus'));
   assert.match(shimBlock, /packageRoot\(\)/, 'presence is not identity: compare against what EGO installs');
   assert.match(shimBlock, /UNVERIFIED/, 'a present-but-different shim is UNVERIFIED, not satisfied');
+});
+
+test('a search tool is judged by the reach its PATTERN has, not only by its path operand', () => {
+  // `Glob {path: ~/.ssh}` was DENY and `Glob {pattern: "~/.ssh/*"}` — the byte-identical reach — was ALLOW,
+  // because the guard concatenated `base + '/' + pattern` and tested the raw string: an absolute, `../` or `~/`
+  // pattern could never match the home prefix, so the check was inert on the operand it was written for.
+  const d = workspace({});
+  const home = homedir();
+  const ev = (tool: string, input: Record<string, unknown>) =>
+    evaluate(table, ctx(d), { tool, input }).verdict;
+  // every spelling of the same reach agrees
+  assert.equal(ev('Glob', { path: join(home, '.ssh'), pattern: '*' }), 'DENY');
+  assert.equal(ev('Glob', { pattern: `${join(home, '.ssh')}/*` }), 'DENY');
+  assert.equal(ev('Glob', { pattern: '~/.ssh/*' }), 'DENY');
+  assert.equal(ev('Grep', { pattern: 'BEGIN', glob: `${join(home, '.ssh')}/*` }), 'DENY');
+  assert.equal(ev('Read', { file_path: join(home, '.ssh', 'id_rsa') }), 'DENY');
+  // a pattern that leaves the workspace without reaching a credential store is not the `fs.repo.read` the base
+  // claimed it was
+  assert.equal(ev('Glob', { pattern: '/etc/**' }), 'ASK');
+  // and searching the workspace is ordinary work
+  assert.equal(ev('Glob', { pattern: 'src/**/*.ts' }), 'ALLOW');
+  assert.equal(ev('Grep', { pattern: 'TODO', glob: '*.ts' }), 'ALLOW');
 });

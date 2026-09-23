@@ -4493,11 +4493,33 @@ export function evaluate(
       .join('/');
     const pattern = typeof req.input['pattern'] === 'string' ? req.input['pattern'] : '';
     const glob = typeof req.input['glob'] === 'string' ? req.input['glob'] : '';
+    // THE PATTERN DECIDES THE REACH, so the pattern is CANONICALISED and classified like any other path — the
+    // same thing `pathTokens` already does for the shell side. Concatenating `abs + '/' + pattern` and testing
+    // the raw string meant an absolute pattern (`/Users/me/.ssh/*`), a `../` pattern or a `~/` pattern could
+    // never match the home prefix, so the guard was inert on the one operand it was written for: `Glob` with
+    // `path: ~/.ssh` was DENY and `Glob` with `pattern: ~/.ssh/*` — the byte-identical reach — was ALLOW.
+    const reach = tool === 'Glob' ? pattern : glob;
+    if (reach) {
+      // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
+      // written as `~/.ssh/**` does not match a string that still ends in a slash
+      const cut = reach.search(/[*?[{]/);
+      const literal = (cut < 0 ? reach : reach.slice(0, cut)).replace(/\/+$/, '') || '.';
+      const home2 = expandHome(literal);
+      const resolvedReach = canonicalPath(
+        home2 !== null && isAbsolute(home2) ? home2 : resolve(abs, home2 ?? literal),
+      );
+      // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
+      // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
+      const r = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
+      // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
+      if (r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
+        hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
+    }
     if (
       abs === home ||
       home.startsWith(abs + '/') ||
       abs === '/' ||
-      globCouldReachCredentials(abs + '/' + (tool === 'Glob' ? pattern : glob))
+      globCouldReachCredentials(abs + '/' + reach)
     )
       hits.push({
         capability: 'fs.credential-store.read',
