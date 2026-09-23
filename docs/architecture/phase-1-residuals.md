@@ -122,8 +122,8 @@ edit, so the promise had nothing behind it.
 
 | Measured on | Ordinary commands | Gated | What gates |
 |---|---:|---:|---|
-| TypeScript monorepo, Go, Python/poetry, Rust, husky | 79 | 8 (10%) | test commands only |
-| Java/Maven, Ruby, PHP, LFS repository | 66 | 12 (9 non-test) | installs and project task runners |
+| TypeScript monorepo, Go, Python/poetry, Rust, husky | 79 | 8 (10%) | `npm test`, `make test`, `pytest`, `go test`, `cargo test` — every one a test command |
+| Java/Maven, Ruby, PHP, LFS repository | 66 | 12, of which 9 non-test | `mvn`/`gradle`/`rake` (task runners), `bundle`/`composer`/`gem` (installs), `composer dump-autoload`, `git lfs pull` |
 | **This repository (EGO itself)** | 44 | **7 (16%)** | see below |
 
 The third row is the honest one, and an earlier version of this document left it out. On EGO's own checkout the
