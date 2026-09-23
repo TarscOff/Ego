@@ -260,6 +260,12 @@ installs_dependencies:
   - 'dotnet restore'
   - 'swift package resolve'
   - 'brew install'
+  - 'docker plugin install'
+  - 'podman plugin install'
+  - 'helm plugin install'
+  - 'kubectl krew install'
+  - 'gh extension install'
+  - 'code --install-extension'
   - 'apt-get install'
   - 'apt install'
 discovers_content:

@@ -33,9 +33,17 @@ running container and the flags that remove isolation (`--privileged`, `--pid=ho
 `--userns=host`, `-v /:/host`) gate. Running a container is the ordinary way to work on a containerised project,
 and treating it as opaque execution made the control plane unusable for that whole class of repository.
 
+**The accepted ALLOW is for the LOCAL DEFAULT DAEMON ONLY.** The decision reversed a gate on running a container
+*here*; it said nothing about a remote engine, and the first version of this document stated the boundary entirely
+in terms of a local daemon without saying so. The container runtime is now enrolled in the same Q98 target model
+as Kubernetes and databases: an explicit `-H`/`--host`/`-c`/`--context`/`--url`, and `docker context use`, are
+classified, and a production engine is an absolute deny exactly as `kubectl --context production apply` already
+was. `docker plugin install` acquires and runs third-party code on the HOST, outside any container, and is an
+install like any other.
+
 **The exact boundary EGO enforces today**
 
-- The *semantic* action — start the services a compose file describes — is ALLOW.
+- The *semantic* action — start the services a compose file describes **on the local default daemon** — is ALLOW.
 - What that container may reach is **not** analysed. A compose file can name a repository `Dockerfile` whose `RUN`
   steps execute arbitrary code, mount host paths, publish ports and read the environment. EGO does not read the
   compose file, does not read the Dockerfile, and does not claim to.
@@ -43,7 +51,10 @@ and treating it as opaque execution made the control plane unusable for that who
   is classified as a real path, so `-v ~/.ssh:/x` is judged as a read of the credential store; writes to protected
   paths performed by the shell around the command are classified normally.
 
-**Residual risk, stated plainly.** An agent that can write a `Dockerfile` or a `docker-compose.yml` and then run
+**Residual risk, stated plainly.** A context selected AMBIENTLY — `docker context use` having been run in an
+earlier, separately governed session, or `DOCKER_HOST` exported in the shell profile — is not knowable to the
+kernel at the moment of the verdict; `docker context use` is itself classified now, so the escalation must happen
+outside a governed session. An agent that can write a `Dockerfile` or a `docker-compose.yml` and then run
 `docker compose up` obtains arbitrary code execution with no human gate. That is accepted because the alternative —
 gating every container run — was tried and rejected, and because the write itself is governed: the compose file and
 the Dockerfile are repository files, and a change to them is visible in the diff a human reviews.

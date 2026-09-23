@@ -34,6 +34,10 @@ production denies, not by these capabilities.
 - [x] `container.registry.push` — push an image to a registry (`docker push`, `buildx build --push`). Building locally is the agent's working material; publishing the result is an external effect.
 - [x] `k8s.local.delete` — delete local namespaces or clusters.
 
+- [x] `container.target.unclassified` — a container operation whose ENGINE was selected explicitly (`-H`,
+  `--host`, `-c`, `--context`, podman `--url`) and could not be classified local. Running a container against
+  the local default daemon is ALLOW by an explicit product decision; that decision was about the LOCAL engine,
+  and says nothing about a remote one.
 - [x] `k8s.target.unclassified` — a mutating Kubernetes or Helm operation whose target could not be resolved: no
   `--context` was given (the ambient kubeconfig context is not knowable to the kernel) or it is hidden behind a
   variable. Q98 forbids guessing that an unknown high-impact target is local, so it asks a human and says why.
@@ -42,4 +46,7 @@ production denies, not by these capabilities.
 ## Denied
 
 - [x] `db.nonlocal.mutate` — any mutation of a database whose connection is not classified local or development.
+- [x] `container.nonlocal.run` — running or orchestrating containers on an engine that is not the local
+  daemon: a remote `-H tcp://…`/`ssh://…`, a non-local `--context`, `docker stack deploy`, `docker service
+  update`. The same signal that makes `kubectl --context production apply` a production mutation.
 - [x] `k8s.nonlocal.mutate` — any mutation of a cluster or context not classified local.

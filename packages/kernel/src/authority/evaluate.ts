@@ -3001,7 +3001,14 @@ const K8S_MUTATING_VERBS = new Set([
 ]);
 const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test']);
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
-const TARGET_SENSITIVE: Record<string, 'k8s' | 'db'> = {
+const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container'> = {
+  // The container runtime was the one high-impact tool not enrolled in the Q98 target model, so
+  // `kubectl --context production apply` was DENY and `docker --context production stack deploy` was ALLOW on the
+  // identical signal. The accepted product decision was about running a container on the LOCAL daemon; it said
+  // nothing about a remote engine (decision challenge, finding 1).
+  'container.run': 'container',
+  'container.build': 'container',
+  'container.prune': 'container',
   'k8s.local.apply': 'k8s',
   'k8s.local.delete': 'k8s',
   'k8s.local.test': 'k8s',
@@ -3088,6 +3095,45 @@ function classifyTargetName(
 }
 
 /** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
+/**
+ * Which ENGINE a container command talks to. Only an EXPLICIT selection is classified: `-H`/`--host`,
+ * `-c`/`--context`, podman `--url`/`--connection`, and `docker context use <name>`, which changes the engine every
+ * later command will use. A command with no explicit selection keeps the accepted product decision — running a
+ * container on the local default daemon is ALLOW — and the residual risk of an ambient context is recorded in
+ * docs/architecture/phase-1-residuals.md rather than guessed at here.
+ */
+function resolveContainerTarget(
+  tokens: string[],
+  targets: LocalTargets,
+): { cls: TargetClass; target: string; mutating: boolean } {
+  const signals: Array<{ cls: TargetClass; target: string }> = [];
+  const add = (v: string, kind: string) => {
+    // the local daemon, however it is spelled, is local: a unix socket, a named pipe, or a loopback endpoint
+    if (/^(unix:|npipe:|fd:)/i.test(v) || targets.dbLocalHosts.some((h) => v.includes(h)))
+      signals.push({ cls: 'LOCAL', target: `${kind} ${v}` });
+    else if (isOpaqueTarget(v)) signals.push({ cls: 'UNCLASSIFIED', target: `${kind} ${v}` });
+    else signals.push({ cls: classifyTargetName(v, targets.k8sLocalContexts, targets), target: `${kind} ${v}` });
+  };
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const eq = /^(?:--host=|--context=|--url=|--connection=|-H|-c)(.+)$/.exec(t);
+    if ((t === '-H' || t === '--host' || t === '--url') && tokens[i + 1]) add(tokens[++i]!, 'engine');
+    else if ((t === '-c' || t === '--context' || t === '--connection') && tokens[i + 1]) add(tokens[++i]!, 'context');
+    else if (eq) add(eq[1]!, t.startsWith('-H') || t.startsWith('--host') || t.startsWith('--url') ? 'engine' : 'context');
+  }
+  // `docker context use <name>` re-points every later command at that engine
+  const useIdx = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'context');
+  if (useIdx > 0 && tokens[useIdx + 1]) add(tokens[useIdx + 1]!, 'context use');
+  if (!signals.length) return { cls: 'LOCAL', target: 'local daemon', mutating: false };
+  // a READ against another engine is not a mutation of it: `docker -H … ps` lists, it does not deploy
+  const reads = new Set(['ps', 'images', 'image', 'inspect', 'logs', 'version', 'info', 'top', 'port', 'stats', 'events', 'history', 'diff', 'search', 'context']);
+  const verb = tokens.slice(1).find((t) => !t.startsWith('-') && !signals.some((g) => g.target.endsWith(t)));
+  const isUse = tokens.some((t, i) => t === 'use' && tokens[i - 1] === 'context');
+  const mutating = isUse || verb === undefined || !reads.has(verb);
+  const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
+  return { ...worst, mutating };
+}
+
 function resolveK8sTarget(
   tokens: string[],
   targets: LocalTargets,
@@ -3228,21 +3274,23 @@ function retargetLocalCapability(
   if (!targets || targets.k8sLocalContexts.length === 0) return hit;
   const tokens = tokenize(norm);
   const resolved =
-    kind === 'k8s' ? resolveK8sTarget(tokens, targets) : resolveDbTarget(tokens, targets);
-  const acts = kind === 'k8s' ? (resolved as { mutating: boolean }).mutating : (resolved as { executes: boolean }).executes;
+    kind === 'k8s'
+      ? resolveK8sTarget(tokens, targets)
+      : kind === 'db'
+        ? resolveDbTarget(tokens, targets)
+        : resolveContainerTarget(tokens, targets);
+  const acts =
+    kind === 'db'
+      ? (resolved as { executes: boolean }).executes
+      : (resolved as { mutating: boolean }).mutating;
   if (!acts || resolved.cls === 'LOCAL') return hit; // reads and genuinely local work keep their verdict
+  const byKind = <T,>(k8s: T, db: T, container: T): T => (kind === 'k8s' ? k8s : kind === 'db' ? db : container);
   const capability =
     resolved.cls === 'PRODUCTION'
-      ? kind === 'k8s'
-        ? 'production.k8s.mutate'
-        : 'production.database.mutate'
+      ? byKind('production.k8s.mutate', 'production.database.mutate', 'production.deploy')
       : resolved.cls === 'EXTERNAL'
-        ? kind === 'k8s'
-          ? 'k8s.nonlocal.mutate'
-          : 'db.nonlocal.mutate'
-        : kind === 'k8s'
-          ? 'k8s.target.unclassified'
-          : 'db.target.unclassified';
+        ? byKind('k8s.nonlocal.mutate', 'db.nonlocal.mutate', 'container.nonlocal.run')
+        : byKind('k8s.target.unclassified', 'db.target.unclassified', 'container.target.unclassified');
   if (!(capability in table.capabilities)) return hit;
   return {
     capability,

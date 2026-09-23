@@ -296,3 +296,30 @@ test('the overlay policy layers may only narrow, whoever writes them', () => {
   assert.equal(write('.harness/harness.md'), 'DENY');
   assert.equal(write('src/a.ts'), 'ALLOW', 'and an ordinary repository file is ordinary work');
 });
+
+test('the container runtime is enrolled in the target model, like every other high-impact tool', () => {
+  // `kubectl --context production apply` was DENY and `docker --context production stack deploy` was ALLOW on the
+  // identical signal: the container runtime was the one high-impact tool not enrolled in Q98. The accepted
+  // product decision was about running a container on the LOCAL daemon (decision challenge, finding 1).
+  const d = workspace({});
+  for (const cmd of [
+    'docker -H tcp://prod.example.com:2375 run --rm alpine sh',
+    'docker --context=production stack deploy -c s.yml app',
+    'docker -c prod service update --image evil api',
+    'docker context use production',
+    'podman --url tcp://prod:2375 run alpine sh',
+  ])
+    assert.equal(run(cmd, d).verdict, 'DENY', `${cmd}: a production engine is a production mutation`);
+  assert.equal(run('docker --context staging compose up', d).verdict, 'DENY', 'as kubectl --context staging is');
+  // and the accepted decision is untouched: the local default daemon stays frictionless
+  for (const cmd of [
+    'docker compose up',
+    'docker compose up -d',
+    'docker build -t app .',
+    'docker context use kind-dev',
+    'docker -H unix:///var/run/docker.sock ps',
+  ])
+    assert.equal(run(cmd, d).verdict, 'ALLOW', `${cmd}: the local daemon is the accepted decision`);
+  // installing a plugin acquires and runs third-party code on the HOST, outside any container
+  assert.equal(run('docker plugin install evil/p --grant-all-permissions', d).verdict, 'ASK');
+});
