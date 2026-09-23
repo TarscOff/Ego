@@ -144,7 +144,7 @@ The semantic action is intentionally permitted. What it may reach is issue #26's
 |---|---|---|
 | `cargo build`, `cargo run` | compiling code already acquired is ordinary work. **Residual risk, stated:** a cold cache makes cargo acquire too, and every dependency's `build.rs` runs at compile time | build steps execute under the profile's filesystem and network boundary |
 | `docker compose up` | see above | the four guarantees listed above |
-| `go build`, `tsc`, `javac`, the C/C++ toolchain | compile source to objects and execute nothing else | writes confined to the checkout and the runtime root |
+| `go build`, `tsc`, `javac`, the C/C++ toolchain, **with their default flags** | compile source to objects and execute nothing else. The flags that make them run a program — `-B`, `-wrapper`, `-fplugin=`, `-specs=`, `-toolexec`, `-processor` — are classified as unbounded program operands and gate; the row was written before they were, and was false until then | writes confined to the checkout and the runtime root |
 | an approved ASK | a human approved a specific action, not an unbounded session | the approval's blast radius is bounded by the profile, not by the classifier |
 
 **The seam between an install and a build**, stated once: *acquiring* third-party code and running it is a human

@@ -61,10 +61,15 @@ such script, so `npm test` without a test script fails on its own — lets a dec
 that WILL execute and could not be read reaches the human gate **at every depth**, including through an enclosing
 declared class. That narrows September alignment item 5.
 
-Nothing falls through to `ALLOW` any more. A tool the evaluator does not model, a modelled tool with a missing or
-unexpected operand, an interpreter invocation that matched nothing else, an `exec` into an unknown container, a
-database client handed a program file or an in-band shell escape, and a `WebSearch` with no url are all resolved to
-a governed capability rather than to silence. On claude-code an `allow` is rendered as `permissionDecision: "allow"`,
+Nothing falls through to `ALLOW` *by silence* any more. A tool the evaluator does not model, a modelled tool with a
+missing or unexpected operand, an interpreter invocation that matched nothing else, an `exec` into an unknown
+container, a database client handed a program file or an in-band shell escape, and a `WebSearch` with no url are
+all resolved to a governed capability rather than to silence.
+
+The precision matters, because the stronger reading — *nothing reaches ALLOW that should not* — is a claim no
+classifier can keep and this document must not make. What EGO claims is narrower and testable: **an unmodelled
+thing is never mistaken for a permitted one.** Things that reach ALLOW because a decision put them there are
+listed, with their residual risk, in [`phase-1-residuals.md`](phase-1-residuals.md). On claude-code an `allow` is rendered as `permissionDecision: "allow"`,
 which *suppresses the host's own prompt* — so returning `ALLOW` for something unmodelled was strictly worse than
 saying nothing.
 
