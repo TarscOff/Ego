@@ -540,3 +540,23 @@ test('a program operand is found whether its value is glued, separated or behind
   for (const cmd of ['gcc -c a.c -o a.o', 'clang -O2 a.c', 'git clone https://x/y.git', 'git clone --config user.name=me https://x/y.git'])
     assert.equal(run(cmd, d).verdict, 'ALLOW', cmd);
 });
+
+test('a rebinding assignment and a plugin declaration are found in every shape their format allows', () => {
+  // a makefile rebind can be global, `override`-ed, `export`-ed or TARGET-SPECIFIC; anchoring at line start saw
+  // only the first shape
+  for (const mk of [
+    'SHELL := ./bin/x\nbuild:\n\ttsc -p .\n',
+    'override SHELL := ./bin/x\nbuild:\n\ttsc -p .\n',
+    'build: SHELL := ./bin/x\nbuild:\n\ttsc -p .\n',
+    'export SHELL := ./bin/x\nbuild:\n\ttsc -p .\n',
+  ])
+    assert.notEqual(run('make build', workspace({ Makefile: mk })).verdict, 'ALLOW', mk.split('\n')[0]);
+  assert.equal(run('make build', workspace({ Makefile: 'build:\n\ttsc -p .\n' })).verdict, 'ALLOW');
+
+  // a plugin declaration is `"plugins": [...]` in JSON, `plugins:` + a list in YAML, and `plugins = ...` in INI
+  // and TOML — and the tools read setup.cfg, pyproject.toml and their own .ini, not only a `.<tool>rc`
+  const py = (files: Record<string, string>) => workspace({ 'package.json': '{}', ...files });
+  assert.notEqual(run('mypy .', py({ 'mypy.ini': '[mypy]\nplugins = evil.py\n' })).verdict, 'ALLOW');
+  assert.notEqual(run('mypy .', py({ 'setup.cfg': '[mypy]\nplugins = evil.py\n' })).verdict, 'ALLOW');
+  assert.equal(run('mypy .', py({ 'mypy.ini': '[mypy]\nstrict = True\n' })).verdict, 'ALLOW');
+});

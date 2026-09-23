@@ -1461,13 +1461,26 @@ function commandLineConfig(tokens: string[], cwd: string): string | null {
  *  the tool import and run `eslint-plugin-x`. The file is data; what it points at is not. Returns the config that
  *  names code, or undefined when the tool's configuration names none. */
 function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string): string | null {
+  // the DATA configuration each tool really reads: its own dotfile, its own ini/toml, and the shared files its
+  // ecosystem puts tool sections in. Looking only for `.<tool>rc*` and `package.json` missed `mypy.ini`,
+  // `setup.cfg`, `pyproject.toml` and `.rubocop.yml` — the files those tools actually use.
   const names = [
     `.${tool}rc`,
     `.${tool}rc.json`,
     `.${tool}rc.yml`,
     `.${tool}rc.yaml`,
+    `.${tool}rc.toml`,
+    `.${tool}.yml`,
+    `.${tool}.yaml`,
     `${tool}.config.json`,
     `${tool}.json`,
+    `${tool}.ini`,
+    `${tool}.cfg`,
+    `${tool}.toml`,
+    'setup.cfg',
+    'pyproject.toml',
+    'tox.ini',
+    'Gemfile',
     'package.json',
   ];
   for (const n of names) {
@@ -1491,9 +1504,15 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
     // most ordinary configuration there is.
     // JSON writes `"plugins": ["x"]`, YAML writes `plugins:` then a list on the following lines. Requiring a
     // bracket on the same line saw only the JSON shape (decision challenge, finding 6).
-    if (/(^|["\s])(plugins|presets|preset|require|requires|loader|transform)["\s]*:\s*(\[|\{|["']|\r?\n\s*-)/m.test(scope))
+    // JSON writes `"plugins": [...]`, YAML writes `plugins:` then a list, INI and TOML write `plugins = ...`.
+    // Requiring a colon saw only the first two, so `mypy.ini` with `plugins = evil.py` read as plain data.
+    if (
+      /(^|["\s])(plugins|presets|preset|require|requires|loader|transform)["\s]*[:=]\s*(\[|\{|["']|\S|\r?\n\s*-)/m.test(
+        scope,
+      )
+    )
       return f;
-    const ext = /["\s]extends["\s]*:\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
+    const ext = /["\s]extends["\s]*[:=]\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
     if (ext) {
       const values = [...ext[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
       if (values.some((v) => !v.startsWith(`${tool}:`))) return f;
@@ -1935,7 +1954,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     if (/^(vpath|VPATH\s*[:+?]?=)/.test(trimmed)) model.unsupported.push(`VPATH: ${trimmed}`);
     // an assignment that redefines the interpreter or the lookup path for EVERY recipe line
-    if (/^(export\s+)?(SHELL|\.SHELLFLAGS|PATH)\s*[:+?]?=/.test(trimmed)) model.rebinds.push(trimmed);
+    // a rebinding assignment can be global, `override`-ed, `export`-ed, or TARGET-SPECIFIC (`build: SHELL := x`),
+    // and anchoring at line start saw only the first shape
+    if (/^(?:[^:=#]+:\s*)?(?:override\s+|export\s+)*(SHELL|\.SHELLFLAGS|PATH)\s*[:+?]?=/.test(trimmed))
+      model.rebinds.push(trimmed);
     if (/\$\(eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
     if (/^\.ONESHELL\s*:/.test(trimmed)) {
       // the WHOLE recipe goes to one shell, so a `cd` on one line leaks into the next
