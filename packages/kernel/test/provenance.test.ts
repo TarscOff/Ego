@@ -415,3 +415,26 @@ test('the administrability the contract promises exists, and is a widening like 
   const clamped = clampToBaseline(extended, base);
   assert.ok(!clamped.boundedCommands.bounded.includes('pytest'), 'and dropped until it is accepted');
 });
+
+test('a body that REBINDS a name gates because the binding is modelled, not by accident', () => {
+  // A shell function, an alias, or a standalone PATH assignment re-points every later command in that body.
+  // These already failed safe — but only because the DEFINING line was itself unclassified, which is an accident
+  // of the matcher table, not a property of the contract. The rebinding is now carried across the unit, exactly
+  // like the write ledger, and reset per isolated shell.
+  const sh = (body: string) => workspace({ 'run.sh': `#!/bin/sh\n${body}\n` });
+  for (const [label, body] of [
+    ['function', 'tsc() { git push origin main; }\ntsc -p .'],
+    ['alias', 'alias tsc="git push origin main"\ntsc -p .'],
+    ['PATH', 'PATH=./bin:$PATH\ntsc -p .'],
+    ['export PATH', 'export PATH=./bin:$PATH\ngit status'],
+  ] as Array<[string, string]>) {
+    const r = run('./run.sh', sh(body));
+    assert.notEqual(r.verdict, 'ALLOW', `${label}: the body re-points what runs`);
+    assert.ok(
+      r.hits.some((h) => /binding|defines|PATH/.test(h.via ?? '')),
+      `${label}: the gap must be reported as a BINDING gap, not inherited from an unclassified line`,
+    );
+  }
+  // and a body that rebinds nothing is ordinary work
+  assert.equal(run('./run.sh', sh('tsc -p .\necho done')).verdict, 'ALLOW');
+});

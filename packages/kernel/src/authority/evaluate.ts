@@ -1421,7 +1421,8 @@ const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   ],
   'shell-script': [PROGRAM_NAMING_ENV, /^(SHELL|BASH_ENV|ENV|PATH|CDPATH)$/],
   'git-ambient': [PROGRAM_NAMING_ENV, /^(GIT_[A-Z_]+|PATH)$/],
-  none: [PROGRAM_NAMING_ENV],
+  // PATH and CDPATH re-point ANY bare name, so they are relevant even where no producer ran
+  none: [PROGRAM_NAMING_ENV, /^(PATH|CDPATH)$/],
 };
 
 /** ENVIRONMENT-INPUT CLOSURE and TREE-STATE PROVENANCE, applied at the ONE place that knows which producer ran —
@@ -4189,12 +4190,22 @@ function analyzeSegments(
   // here is what made `./configure && make build` reuse the Makefile configure had just rewritten — the write
   // happened one level down and never came back out (challenge 6, findings 6, 13, 19).
   const written = state.env.written;
+  // A body can REDEFINE a name for everything after it: a shell function, an alias, or a standalone assignment of
+  // an execution input. These failed safe only because the defining line itself was unclassified — an accident,
+  // not a property. The redefinition accumulates across the unit exactly like the write ledger, and resets per
+  // isolated shell, because a make recipe line and an npm pre/post script are separate processes.
+  let carriedEnv: Record<string, string> = {};
+  let rebound: string | null = null;
   const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
   const units = segments.flatMap((u) => (isolatedShells ? [splitShellSegments(u)] : [[u]]));
   for (const unit of isolatedShells ? units : [segments]) {
-    if (isolatedShells) cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
+    if (isolatedShells) {
+      cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
+      carriedEnv = {};
+      rebound = null;
+    }
     for (const seg of unit) {
     const hitsBefore = hits.length;
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
@@ -4261,7 +4272,8 @@ function analyzeSegments(
       cwdVerified: cwd !== '\0dynamic',
       // ENVIRONMENT-INPUT CLOSURE: captured HERE, before normalizeSegment strips the assignments, so the producer
       // boundary sees what the command line did to the tool it is about to resolve
-      envInputs: { ...state.env.envInputs, ...segmentEnvInputs(seg) },
+      envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg) },
+      ...(rebound !== null ? { binding: { kind: 'redefined' as const, why: rebound } } : {}),
       get treeFresh(): boolean {
         return !written.has(TREE_DIRTY);
       },
@@ -4354,6 +4366,12 @@ function analyzeSegments(
     }
     // and the write-ish commands, whose destination is an operand rather than a redirection
     for (const abs of writtenPathOperands(seg, effectiveCwd)) written.add(canonicalPath(abs));
+    // a standalone assignment (`PATH=./bin:$PATH`, `export SHELL=…`) sets it for every LATER segment of this
+    // shell, and a function or alias definition rebinds the name it declares
+    const bare = seg.trim().replace(/^export\s+/, '');
+    if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
+    const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([A-Za-z_][\w.-]*)\s*\(\s*\)\s*\{)/.exec(seg.trim());
+    if (decl) rebound = `the body defines ${decl[1] ?? decl[2]} before using it`;
     // TREE-STATE PROVENANCE: a checkout, reset, stash pop, merge, rebase or worktree switch replaces a
     // repository-determined, unenumerable set of files. The per-path ledger cannot express that, so the tree
     // itself stops being fresh and every later conclusion drawn from repository content is STALE.
