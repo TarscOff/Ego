@@ -46,6 +46,8 @@ export interface Matcher {
   urlSource?: string;
   index: number;
   file: string;
+  /** contributes a hit but never wins the segment's semantic class (see load.ts) */
+  additive?: boolean;
 }
 
 export interface GrantRule {

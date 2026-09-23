@@ -349,6 +349,10 @@ function parseMatchers(file: string, problems: string[]): Matcher[] {
     if (!['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'any'].includes(tool))
       problems.push(`${file}: matcher #${index + 1} has invalid tool "${tool}"`);
     const matcher: Matcher = { capability, tool, index, file };
+    // An ADDITIVE matcher describes something a segment ALSO does — a write destination, an extra effect — not
+    // what the segment IS. It contributes a hit and never wins first-match for the segment's semantic class,
+    // because a class that describes only a destination cannot bound the rest of the command.
+    if (m['additive'] === true) matcher.additive = true;
     const cmd = m['command'];
     const path = m['path'];
     const url = m['url'];

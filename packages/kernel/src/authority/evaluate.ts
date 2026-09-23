@@ -3438,8 +3438,23 @@ function classifyNormalized(
   state: EffectState,
 ): CapabilityHit[] {
   let outer: CapabilityHit | null = null;
+  const additive: CapabilityHit[] = [];
   for (const { m, re } of compiled) {
     if (re.test(norm)) {
+      // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
+      // Letting one win first-match terminated classification of the rest: `git clone --template=evil -o up URL`
+      // matched the `--output|-o` write matcher, which sits above the `--template` hook-install deny, and a
+      // single `-o` turned DENY into ALLOW while the template's hook really executed (exit review 2).
+      if (m.additive) {
+        additive.push({
+          capability: m.capability,
+          verdict: verdictFor(table, ctx, m.capability),
+          via: `matcher /${m.command}/`,
+          segment: norm,
+          absolute: isAbsoluteCap(table, m.capability),
+        });
+        continue;
+      }
       outer = retargetLocalCapability(
         table,
         ctx,
@@ -3475,6 +3490,7 @@ function classifyNormalized(
       segment: norm,
       absolute: false,
     },
+    ...additive,
   ];
   if (state.depth >= MAX_EFFECT_DEPTH)
     // Analysis truncation is UNKNOWN, never "whatever the parent was". Returning the enclosing declared class let a

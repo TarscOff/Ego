@@ -30,6 +30,8 @@ export interface CompiledMatcher {
   command?: string;
   path?: string;
   url?: string;
+  /** contributes a hit but never wins the segment's semantic class */
+  additive?: boolean;
   layer: 'core' | 'overlay';
 }
 
@@ -217,6 +219,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
 
   const matchers: CompiledMatcher[] = cp.matchers.map((m) => {
     const out: CompiledMatcher = { capability: m.capability, tool: m.tool, layer: 'core' };
+    if (m.additive) out.additive = true;
     if (m.commandSource) out.command = m.commandSource;
     if (m.path) out.path = m.path;
     if (m.urlSource) out.url = m.urlSource;

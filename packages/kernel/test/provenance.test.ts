@@ -577,3 +577,27 @@ test('EGO_HOME is EGO’s own runtime state, and a dependency tree is what the t
   assert.equal(w(join(d, 'node_modules', 'tspkg', 'bin.js')), 'ASK', 'the symlink target deserves a look');
   assert.equal(w(join(d, 'src', 'a.ts')), 'ALLOW', 'and ordinary repository work is ordinary');
 });
+
+test('a matcher that describes a write DESTINATION contributes, it does not win the segment’s class', () => {
+  const d = workspace({});
+  // `git clone --template=DIR` copies DIR/hooks into the new repository AND runs them — it is git.hooks.bypass,
+  // DENY. The `--output|-o` write-destination matcher sat above it and won first-match, so a single `-o` turned
+  // that DENY into ALLOW while the template's hook really executed. Reordering would be another spelling chase:
+  // a class that describes only a destination cannot bound the rest of the command, so it is ADDITIVE.
+  assert.equal(run('git clone --template=/tmp/evil https://e/r.git', d).verdict, 'DENY');
+  for (const cmd of [
+    'git clone --template=/tmp/evil -o up https://e/r.git',
+    'git clone --template=/tmp/evil https://e/r.git -o X',
+    'git clone -o up --template=/tmp/evil https://e/r.git',
+  ])
+    assert.equal(run(cmd, d).verdict, 'DENY', `${cmd}: -o must not displace the hook install`);
+  // and the designed ASK gates are not displaced either
+  for (const cmd of ['git commit --amend -o a.txt -m x', 'git fetch -o srv --force origin +main:main'])
+    assert.equal(run(cmd, d).verdict, 'ASK', `${cmd}: -o must not displace the gate`);
+  // the destination is still governed: it contributes its own hit rather than replacing the class
+  assert.ok(
+    run('git archive -o /tmp/x.tar HEAD', d).hits.some((h) => h.capability === 'fs.repo.write'),
+    'the write destination is still classified',
+  );
+  assert.equal(run('git clone https://e/r.git', d).verdict, 'ALLOW');
+});

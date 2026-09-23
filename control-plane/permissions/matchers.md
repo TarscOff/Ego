@@ -425,9 +425,12 @@ matchers:
   - capability: git.alias.inline
     tool: Bash
     command: '^git\b[^|;&]*\s--(ext-diff|textconv)\b'
-  # `git <read verb> --output=PATH` writes PATH with no other governance on it
+  # `git <verb> --output=PATH` writes PATH with no other governance on it. ADDITIVE: this describes what the
+  # command also DOES, not what it IS — `git clone --template=evil -o up URL` must still be judged as a hook
+  # install, and letting a write-destination matcher win first-match turned that DENY into ALLOW (exit review 2).
   - capability: fs.repo.write
     tool: Bash
+    additive: true
     command: '^git\b[^|;&]*\s(--output|-o)(=|\s)\S'
   # a clone template directory is copied into .git, hooks included: it installs hooks that then run
   - capability: git.hooks.bypass
