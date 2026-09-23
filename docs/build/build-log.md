@@ -391,7 +391,18 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   MUST_FIX, ACCEPTED_PRODUCT_BEHAVIOR, UNKNOWN_PRODUCER/FAIL-SAFE or CONTAINMENT_DEPENDENCY, and only a MUST_FIX
   counts as an unresolved defect. The ARCHITECTURE has converged; the INSTANCES had not. This line is therefore
   **NOT PASSED**: a round that finds 25 unauthorized ALLOWs is not a round that found none, and closing them
-  afterwards does not turn it into one. The criterion needs a round that finds none. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  afterwards does not turn it into one. The criterion needs a round that finds none.
+  **Challenge 10 (the Phase-1 exit review, 2026-09-23) again found ZERO new architectural classes** — 28 confirmed
+  findings, all instances. The load-bearing one: a search tool's `pattern` operand reached the credential store at
+  ALLOW while its `path` operand was DENY, because the guard concatenated `base + '/' + pattern` and tested the raw
+  string, so an absolute, `../` or `~/` pattern could never match. Also closed: the container engine selected by
+  `DOCKER_CONTEXT`, glued program operands (`gcc -B/tmp/evil`), `git clone --config core.sshCommand=`, target-specific
+  and `override` makefile rebinds, plugin declarations in INI/TOML and in the config files those tools really read,
+  unenumerable writes (archive extraction, recursive copy) missing from the ledger, EGO_HOME protected only under
+  `trust/`, and a `node_modules/.bin` symlink whose TARGET was writable. Two were MY OWN regressions breaking
+  ordinary work — `docker run … sh -c "…"` denied as a remote engine and `git blame -C file` downgraded — both from
+  reading an option outside the position it occupies. Two documented promises the code never kept were corrected.
+  All fixed and pinned; the exit rule requires a further fresh round. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
