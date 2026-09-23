@@ -101,6 +101,14 @@ test('provenance of DISPATCH OWNERSHIP: the table not claiming a head is not pro
   const withJs = workspace({ 'package.json': '{}', 'eslint.config.js': 'module.exports = []' });
   assert.notEqual(run('eslint .', withJs).verdict, 'ALLOW', 'eslint imports and runs that file');
   assert.match(scopes('eslint .', withJs), /config/);
+  // THE MOST SPECIFIC ENTRY WINS, so a bounded invocation of a discovering tool stays frictionless without
+  // weakening that tool's default. `cmake` and `ninja` DRIVE a build — `cmake -P x.cmake` runs a CMake script,
+  // `ninja -f x.ninja` runs the edges a build file names — and were wrongly declared bounded.
+  for (const cmd of ['cmake -P x.cmake', 'cmake --build .', 'ninja -f x.ninja'])
+    assert.notEqual(run(cmd, dir).verdict, 'ALLOW', `${cmd}: runs what a repository build file names`);
+  for (const cmd of ['cmake --version', 'ninja -t targets', 'go build ./...'])
+    assert.equal(run(cmd, dir).verdict, 'ALLOW', `${cmd}: a bounded invocation of the same head`);
+
   // a DATA configuration that NAMES code is not a bounded closure either: the file is data, what it points at is
   // not. But a value in the tool's OWN namespace is built in and loads nothing, so the most ordinary
   // configuration there is stays out of the way.

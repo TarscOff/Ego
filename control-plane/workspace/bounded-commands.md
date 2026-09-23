@@ -124,8 +124,10 @@ bounded:
   - 'nm'
   - 'make'
   - 'gmake'
-  - 'cmake'
-  - 'ninja'
+  - 'cmake --version'
+  - 'cmake -E'
+  - 'ninja --version'
+  - 'ninja -t'
   - 'npm'
   - 'pnpm'
   - 'yarn'
@@ -261,6 +263,11 @@ installs_dependencies:
   - 'apt-get install'
   - 'apt install'
 discovers_content:
+  # build-system drivers: `cmake -P x.cmake` runs a CMake script (execute_process and all), `cmake --build` and
+  # `ninja` run the edges a generated build file names. They were in `bounded`, which claimed their closure was
+  # what their arguments name — it is whatever the repository's build files say.
+  - 'cmake'
+  - 'ninja'
   - 'node --test'
   - 'go test'
   - 'cargo test'

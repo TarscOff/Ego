@@ -2850,55 +2850,65 @@ function resolveScriptCommand(
   }
   if (head === 'git') return resolveGitAmbient(ctx, tokens, env);
   // NO REGISTERED PRODUCER CLAIMS THIS HEAD — which says nothing about whether anything else executes. The
-  // authored vocabulary decides: a BOUNDED head's closure is exactly what its arguments name, a DISCOVERING head
-  // finds and runs content EGO was never shown, and a head in neither list is simply unmodelled.
+  // AUTHORED vocabulary decides, and THE MOST SPECIFIC ENTRY WINS: an entry may name a head alone (`pytest`) or a
+  // head plus the arguments that decide its shape (`go test`, `cmake --version`), so a bounded invocation of a
+  // discovering tool stays frictionless without weakening that tool's default.
   const bare = head.replace(/\.(exe|cmd|bat)$/i, '');
-  // an entry may name a head alone (`pytest`) or a head plus the arguments that make it discover (`node --test`,
-  // `go test`), so `go build` stays bounded while `go test` does not
   const normTokens = tokens.join(' ');
+  const match = (list: readonly string[]): string | null => {
+    let best: string | null = null;
+    for (const e of list) {
+      const hit = e.includes(' ') ? normTokens === e || normTokens.startsWith(e + ' ') : e === bare;
+      if (hit && (best === null || e.length > best.length)) best = e;
+    }
+    return best;
+  };
+  const v = table.boundedCommands;
+  const winner = (
+    [
+      ['bounded', match(v.bounded)],
+      ['installs', match(v.installsDependencies)],
+      ['content', match(v.discoversContent)],
+    ] as Array<[string, string | null]>
+  ).reduce<[string, string | null]>((a, b) => ((b[1]?.length ?? -1) > (a[1]?.length ?? -1) ? b : a), ['none', null]);
   // ACQUIRES third-party code and runs it: the same surface as an npm install lifecycle script, which is already
   // a human gate. Leaving `pip install` and `poetry install` at ALLOW was an inconsistency, not a decision.
-  if (
-    table.boundedCommands.installsDependencies.some((e) =>
-      e.includes(' ') ? normTokens === e || normTokens.startsWith(e + ' ') : e === bare,
-    )
-  )
+  if (winner[0] === 'installs')
     return {
       kind: 'none',
-      key: `installs:${normTokens.slice(0, 40)}`,
+      key: `installs:${winner[1]}`,
       body: null,
       reason: `${bare} acquires third-party code and runs it, which this kernel cannot read`,
       resolution: 'AMBIENT_UNRESOLVED',
       unresolved: [{ what: 'ambient', where: bare, why: 'dependency build and install scripts' }],
     };
-  // shape 1 — runs repository code located by PATTERN. EGO will not emulate the tool, so the closure is unbounded.
-  if (
-    table.boundedCommands.discoversContent.some((e) =>
-      e.includes(' ') ? normTokens === e || normTokens.startsWith(e + ' ') : e === bare,
-    )
-  )
+  // runs code it locates by PATTERN or by a repository build file. EGO will not emulate the tool.
+  if (winner[0] === 'content')
     return {
       kind: 'none',
-      key: `discovers:${bare}`,
+      key: `discovers:${winner[1]}`,
       body: null,
-      reason: `${bare} runs repository code it locates by pattern, which this kernel does not model`,
+      reason: `${bare} runs code it locates by pattern or by a build file, which this kernel does not model`,
       resolution: 'UNKNOWN_PRODUCER',
-      unresolved: [{ what: 'body', where: bare, why: 'test files or a task graph EGO was never shown' }],
+      unresolved: [{ what: 'body', where: bare, why: 'content EGO was never shown' }],
     };
-  // shape 2 — runs whatever its CONFIGURATION names. Bounded while no executable config is present: the same
-  // configuration-closure rule EGO applies to git, make and lint-staged, applied to a tool.
-  for (const entry of table.boundedCommands.discoversConfig) {
+  if (winner[0] === 'bounded')
+    return {
+      kind: 'none',
+      key: `bounded:${winner[1]}`,
+      body: null,
+      reason: 'bounded command',
+      resolution: 'NOT_A_PRODUCER',
+    };
+  // runs whatever its CONFIGURATION names. Bounded while that configuration is data: the same
+  // configuration-closure rule EGO applies to git, make and lint-staged, applied to a tool. These tools search
+  // UPWARDS, so the lookup does too — anchoring it to `cwd` let one `cd` flip the verdict.
+  for (const entry of v.discoversConfig) {
     const [tool, ...configs] = entry.split(/\s+/);
     if (tool !== bare) continue;
-    // these tools search UPWARDS from the working directory, so anchoring the check to `cwd` let one `cd` flip
-    // the verdict on a repository whose configuration had not moved (challenge 8, findings 6 and 11)
     const present =
-      configs.map((c) => findUp(ctx, cwd, c)).find((f) => f !== null) ??
-      dataConfigNamingCode(ctx, cwd, bare) ??
-      undefined;
-    // configuration is data and names no code: the closure IS bounded, and saying so here is the whole point of
-    // the config shape — falling through to the default would gate the tool for not being in the other list
-    if (present === undefined)
+      configs.map((c) => findUp(ctx, cwd, c)).find((f) => f !== null) ?? dataConfigNamingCode(ctx, cwd, bare);
+    if (present === null || present === undefined)
       return {
         kind: 'none',
         key: `bounded-config:${bare}`,
@@ -2915,12 +2925,7 @@ function resolveScriptCommand(
       unresolved: [{ what: 'config', where: present, why: 'executable configuration' }],
     };
   }
-  // THE DEFAULT IS NOT A POSITIVE CLAIM. `ABSENT_VERIFIED` is the ladder's "proven that nothing will execute", and
-  // making it the fallback for every head the vocabulary never classified turned the authored list into a
-  // BLOCKLIST whose completeness was assumed rather than checked — "a producer table not claiming a head must not
-  // mean ABSENT_VERIFIED", applied to the two named lists but not to the silence between them (challenge 8).
-  if (table.boundedCommands.bounded.includes(bare))
-    return { kind: 'none', key: `bounded:${bare}`, body: null, reason: 'bounded command', resolution: 'NOT_A_PRODUCER' };
+  // THE DEFAULT IS NOT A POSITIVE CLAIM: a head the vocabulary never classified is unknown, not proven absent.
   return {
     kind: 'none',
     key: `unmodelled:${bare}`,
