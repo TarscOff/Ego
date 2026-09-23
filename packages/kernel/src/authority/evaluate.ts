@@ -1401,6 +1401,48 @@ function environmentGaps(kind: ProducerResult['kind'], env: ExecutionEnvironment
   return gaps;
 }
 
+/** A DATA configuration that NAMES code is not a bounded closure: `.eslintrc.json` with `"plugins": ["x"]` makes
+ *  the tool import and run `eslint-plugin-x`. The file is data; what it points at is not. Returns the config that
+ *  names code, or undefined when the tool's configuration names none. */
+function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string): string | undefined {
+  const names = [
+    `.${tool}rc`,
+    `.${tool}rc.json`,
+    `.${tool}rc.yml`,
+    `.${tool}rc.yaml`,
+    `${tool}.config.json`,
+    `${tool}.json`,
+    'package.json',
+  ];
+  for (const n of names) {
+    const f = join(cwd, n);
+    if (!fileExists(f)) continue;
+    const text = readInsideWorkspace(ctx, f);
+    if (text === null) return f; // a configuration EGO cannot read cannot be shown to name no code
+    const scope =
+      n === 'package.json'
+        ? (() => {
+            try {
+              const v = (JSON.parse(text) as Record<string, unknown>)[tool];
+              return v === undefined ? '' : JSON.stringify(v);
+            } catch {
+              return '';
+            }
+          })()
+        : text;
+    // `plugins` and the rest always name a package the tool imports. `extends` is the exception: a value in the
+    // tool's OWN namespace (`eslint:recommended`) is built in and loads nothing, so flagging it would gate the
+    // most ordinary configuration there is.
+    if (/["\s](plugins|presets|preset|require|requires|loader|transform)["\s]*:\s*[[{"']/.test(scope)) return f;
+    const ext = /["\s]extends["\s]*:\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
+    if (ext) {
+      const values = [...ext[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+      if (values.some((v) => !v.startsWith(`${tool}:`))) return f;
+    }
+  }
+  return undefined;
+}
+
 /** Operations that replace repository content wholesale. Listed by what they DO, not by spelling: each one swaps
  *  an unenumerable set of tracked files, so a conclusion drawn from repository content before it is a pre-image. */
 const TREE_CHANGING =
@@ -2677,8 +2719,9 @@ function resolveScriptCommand(
   for (const entry of table.boundedCommands.discoversConfig) {
     const [tool, ...configs] = entry.split(/\s+/);
     if (tool !== bare) continue;
-    const present = configs.map((c) => join(cwd, c)).find((f) => fileExists(f));
-    if (present === undefined) break; // configuration is data: the closure is bounded
+    const present =
+      configs.map((c) => join(cwd, c)).find((f) => fileExists(f)) ?? dataConfigNamingCode(ctx, cwd, bare);
+    if (present === undefined) break; // configuration is data and names no code: the closure is bounded
     return {
       kind: 'none',
       key: `discovers-config:${present}`,

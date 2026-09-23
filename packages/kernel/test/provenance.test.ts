@@ -79,6 +79,14 @@ test('provenance of DISPATCH OWNERSHIP: the table not claiming a head is not pro
   const withJs = workspace({ 'package.json': '{}', 'eslint.config.js': 'module.exports = []' });
   assert.notEqual(run('eslint .', withJs).verdict, 'ALLOW', 'eslint imports and runs that file');
   assert.match(scopes('eslint .', withJs), /config/);
+  // a DATA configuration that NAMES code is not a bounded closure either: the file is data, what it points at is
+  // not. But a value in the tool's OWN namespace is built in and loads nothing, so the most ordinary
+  // configuration there is stays out of the way.
+  const cfg = (json: string) => workspace({ 'package.json': '{}', '.eslintrc.json': json });
+  assert.notEqual(run('eslint .', cfg('{"plugins":["evil"]}')).verdict, 'ALLOW', 'plugins name a package');
+  assert.notEqual(run('eslint .', cfg('{"extends":["airbnb"]}')).verdict, 'ALLOW', 'a shareable config is code');
+  assert.equal(run('eslint .', cfg('{"extends":["eslint:recommended"]}')).verdict, 'ALLOW', 'built in');
+  assert.equal(run('eslint .', cfg('{"rules":{"eqeqeq":"error"}}')).verdict, 'ALLOW', 'rules are data');
   // the distinction is AUTHORED, so an organization can move a tool between the two lists
   const vocab = loadControlPlane(ROOT).boundedCommands;
   assert.ok(vocab.bounded.length > 10 && vocab.discoversContent.length > 5 && vocab.discoversConfig.length > 5);
