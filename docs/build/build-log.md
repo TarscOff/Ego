@@ -379,8 +379,19 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   identity (the git closure resolved against the workspace root rather than the repository the command targets),
   and non-canonical command identity (`npx` read by the matchers but not by the dispatch). All four instances were
   reproduced in session with real ground truth and closed, together with the instance findings. The trend across
-  four rounds of this architecture — 12, 11, 4, 4 claimed new classes — is falling but has not reached zero, which
-  is why this line stays IN PROGRESS. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  four rounds of this architecture — 12, 11, 4, 4 claimed new classes — was falling but had not reached zero.
+  **Challenge 9 (the decision round, 2026-09-23) is the first to find ZERO new architectural classes.** All 36 of
+  its findings were instances of classes already named, and 25 were real MUST_FIX or misclassification — chiefly
+  the container runtime never enrolled in the Q98 target model (`docker --context production stack deploy` was
+  ALLOW while `kubectl --context production apply` was DENY on the identical signal), the unbounded
+  program-operand rule not extended to the compiler heads added in the same pass, three spellings of the
+  configuration-closure gap, `.mcp.json` and `node_modules/.bin` not protected, shell reads answering differently
+  from the Read tool, and an administrability escape hatch the residuals document promised before it existed. All
+  25 are closed and pinned. Every remaining finding is classified in `docs/architecture/phase-1-residuals.md` as
+  MUST_FIX, ACCEPTED_PRODUCT_BEHAVIOR, UNKNOWN_PRODUCER/FAIL-SAFE or CONTAINMENT_DEPENDENCY, and only a MUST_FIX
+  counts as an unresolved defect. The ARCHITECTURE has converged; the INSTANCES had not. This line is therefore
+  **NOT PASSED**: a round that finds 25 unauthorized ALLOWs is not a round that found none, and closing them
+  afterwards does not turn it into one. The criterion needs a round that finds none. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
