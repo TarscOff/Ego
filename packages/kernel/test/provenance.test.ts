@@ -486,3 +486,23 @@ test('a search tool is judged by the reach its PATTERN has, not only by its path
   assert.equal(ev('Glob', { pattern: 'src/**/*.ts' }), 'ALLOW');
   assert.equal(ev('Grep', { pattern: 'TODO', glob: '*.ts' }), 'ALLOW');
 });
+
+test('an option is read where it actually is, and an engine is selected by env as well as by flag', () => {
+  const d = workspace({});
+  // MY OWN REGRESSIONS, caught by the exit review. `-c` is a docker GLOBAL option, before the subcommand; past it
+  // it belongs to the container's own command. `-C` is a git global option, before the verb; after it, it means
+  // "detect copies". Reading either one anywhere broke ordinary work.
+  assert.equal(run('docker run --rm alpine sh -c "echo hi"', d).verdict, 'ALLOW');
+  for (const cmd of ['git blame -C src/a.ts', 'git diff -C HEAD', 'git log -C --oneline'])
+    assert.equal(run(cmd, d).verdict, 'ALLOW', `${cmd}: -C after the verb is not a directory`);
+  // and the security cases they exist for still hold
+  assert.equal(run('docker -H tcp://prod.example.com:2375 run img', d).verdict, 'DENY');
+  assert.equal(run('docker --context production stack deploy', d).verdict, 'DENY');
+
+  // the engine is selected by ENVIRONMENT too: DOCKER_HOST and DOCKER_CONTEXT are the same two flags by another
+  // name, and docker's own help documents --context as overriding DOCKER_HOST
+  assert.equal(run('DOCKER_CONTEXT=production docker compose up', d).verdict, 'DENY');
+  assert.equal(run('DOCKER_HOST=tcp://prod:2375 docker run img', d).verdict, 'DENY');
+  assert.equal(run('DOCKER_CONTEXT=kind-dev docker compose up', d).verdict, 'ALLOW');
+  assert.equal(run('FOO=bar docker compose up', d).verdict, 'ALLOW');
+});

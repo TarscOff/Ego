@@ -1512,7 +1512,7 @@ const TREE_CHANGING =
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -3166,6 +3166,7 @@ function classifyTargetName(
 function resolveContainerTarget(
   tokens: string[],
   targets: LocalTargets,
+  envInputs: Record<string, string> = {},
 ): { cls: TargetClass; target: string; mutating: boolean } {
   const signals: Array<{ cls: TargetClass; target: string }> = [];
   const add = (v: string, kind: string) => {
@@ -3177,11 +3178,19 @@ function resolveContainerTarget(
   };
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
+    // these are GLOBAL options: they come before the subcommand. Past it, `-c` is the container's own flag —
+    // `docker run --rm alpine sh -c "echo hi"` is ordinary work and was being DENIED as a remote engine.
+    if (!t.startsWith('-')) break;
     const eq = /^(?:--host=|--context=|--url=|--connection=|-H|-c)(.+)$/.exec(t);
     if ((t === '-H' || t === '--host' || t === '--url') && tokens[i + 1]) add(tokens[++i]!, 'engine');
     else if ((t === '-c' || t === '--context' || t === '--connection') && tokens[i + 1]) add(tokens[++i]!, 'context');
     else if (eq) add(eq[1]!, t.startsWith('-H') || t.startsWith('--host') || t.startsWith('--url') ? 'engine' : 'context');
   }
+  // the engine is selected by ENVIRONMENT too — `DOCKER_HOST` and `DOCKER_CONTEXT` are the same two flags by
+  // another name, and docker's own help documents `--context` as overriding `DOCKER_HOST`
+  for (const [k, v] of Object.entries(envInputs))
+    if (/^(DOCKER_HOST|CONTAINER_HOST)$/.test(k)) add(v, 'engine');
+    else if (/^(DOCKER_CONTEXT)$/.test(k)) add(v, 'context');
   // `docker context use <name>` re-points every later command at that engine
   const useIdx = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'context');
   if (useIdx > 0 && tokens[useIdx + 1]) add(tokens[useIdx + 1]!, 'context use');
@@ -3328,6 +3337,7 @@ function retargetLocalCapability(
   ctx: EvaluationContext,
   hit: CapabilityHit,
   norm: string,
+  envInputs: Record<string, string> = {},
 ): CapabilityHit {
   const kind = TARGET_SENSITIVE[hit.capability];
   if (!kind) return hit;
@@ -3339,7 +3349,7 @@ function retargetLocalCapability(
       ? resolveK8sTarget(tokens, targets)
       : kind === 'db'
         ? resolveDbTarget(tokens, targets)
-        : resolveContainerTarget(tokens, targets);
+        : resolveContainerTarget(tokens, targets, envInputs);
   const acts =
     kind === 'db'
       ? (resolved as { executes: boolean }).executes
@@ -3386,6 +3396,7 @@ function classifyNormalized(
           absolute: isAbsoluteCap(table, m.capability),
         },
         norm,
+        state.env.envInputs,
       );
       break;
     }
@@ -4290,7 +4301,12 @@ function analyzeSegments(
     // `git -C dir …` genuinely runs in `dir`, and normalization strips the option before any producer sees it.
     // The directory a command runs in belongs to the ENVIRONMENT, so it is recorded here rather than rediscovered
     // downstream from a string the normalizer has already rewritten (challenge 8, producer subject identity).
-    const gitDir = /^git\s+(?:[^\s]+\s+)*?(?:-C\s*|--work-tree[= ])(\S+)/.exec(seg.trim());
+    // `-C` is a git GLOBAL option, which means before the verb. `git blame -C file` and `git diff -C` use the
+    // same letter for "detect copies", and matching it anywhere downgraded every one of them to an unverified
+    // context — ordinary review commands, asking for no reason.
+    const gitDir = /^git\s+(?:-[cC]\s+\S+\s+|--[a-z-]+(?:=\S+)?\s+|-[a-z]\s+\S+\s+)*?(?:-C\s+|--work-tree[= ])(\S+)/.exec(
+      seg.trim(),
+    );
     if (gitDir) {
       const target = expandHome(gitDir[1]!);
       if (target !== null && !/[$`*?]/.test(target)) {
