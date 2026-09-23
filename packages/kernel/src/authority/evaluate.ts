@@ -2205,8 +2205,17 @@ function gitLocalProgramValues(root: string): string[] {
  *  byte for byte from `<package>/runtime/posix/git-hook.sh`. Returns null when the chain is complete, or the reason
  *  it is not — a missing, unreadable, modified or stale delegate is an unanalysed body, not a trusted one. */
 function trustChainComplete(ctx: EvaluationContext, root: string, env: ExecutionEnvironment): string | null {
-  const delegate = join(root, '.harness', 'hooks', 'git-hook.sh');
-  if (!fileExists(delegate)) return `${delegate} is the shim's delegate and is missing`;
+  // The shim itself tries TWO bases: this worktree, and the MAIN worktree resolved from the shared git common
+  // dir — a linked worktree shares `.git/hooks` but keeps its own, untracked `.harness/`. Checking only the first
+  // made every commit in a linked worktree ask, which is EGO's own habitat (challenge 8, finding 22).
+  const bases = [root];
+  const common = gitCommonDir(root);
+  if (common !== null) bases.push(common);
+  const delegate = bases
+    .map((b) => join(b, '.harness', 'hooks', 'git-hook.sh'))
+    .find((f) => fileExists(f));
+  if (delegate === undefined)
+    return `${join(root, '.harness', 'hooks', 'git-hook.sh')} is the shim's delegate and is missing`;
   if (env.written.has('\0any') || env.written.has(canonicalPath(delegate)) || !env.treeFresh)
     return `${delegate} is the shim's delegate and this command may have replaced it`;
   const actual = readInsideWorkspace(ctx, delegate);
@@ -2234,6 +2243,18 @@ function chainedHookFiles(dir: string, name: string): string[] {
   for (const e of entries.sort())
     if (e === `${name}.pre-ego` || e.startsWith(`${name}.pre-ego.`)) out.push(join(dir, e));
   return out;
+}
+
+const gitCommonDirCache = new Map<string, string | null>();
+/** The MAIN worktree of a linked worktree: the parent of the shared git common dir. Memoised like the toplevel. */
+function gitCommonDir(dir: string): string | null {
+  const key = canonicalPath(dir);
+  const hit = gitCommonDirCache.get(key);
+  if (hit !== undefined) return hit;
+  const r = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir);
+  const main = r.ok && r.stdout ? canonicalPath(dirname(r.stdout.trim())) : null;
+  gitCommonDirCache.set(key, main === key ? null : main);
+  return gitCommonDirCache.get(key) ?? null;
 }
 
 const gitToplevelCache = new Map<string, string | null>();
