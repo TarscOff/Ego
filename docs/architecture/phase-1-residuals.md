@@ -117,6 +117,7 @@ edit, so the promise had nothing behind it.
 | `git lfs pull` | runs the LFS filter and replaces tracked content; the filter is a configured program | ASK |
 | `npm run x -w pkg`, `pnpm --filter`, `npm --prefix` | select a manifest through a workspace graph EGO does not model | ASK |
 | a makefile larger than the read ceiling, an unreadable `include`, a `$(VAR)`-headed recipe | the source could not be read, or is built at runtime | ASK |
+| `mvn -v`, `gradle --version` | **every invocation form of an unmodelled producer asks, including its version probe.** The opacity is a property of the HEAD — EGO cannot say what `mvn` executes — and the control plane's vocabulary names heads, not invocation forms. Carving out a flag would be a per-spelling exception to a by-construction rule, which is the defect this phase removed. Where the same head is NOT a producer (`yarn`, `pnpm`, `bun`, `deno`, `pip list`), the version probe is ALLOW | ASK |
 
 **Proportionality cost, measured rather than asserted — including where it is worst.**
 
@@ -126,6 +127,11 @@ edit, so the promise had nothing behind it.
 | C/C++ with CMake and a real Makefile | — | see note | `cmake`/`ninja` drive a build and gate; `--version` and `-t targets` do not |
 | Java/Maven, Ruby, PHP, LFS repository | 66 | 12, of which 9 non-test | `mvn`/`gradle`/`rake` (task runners), `bundle`/`composer`/`gem` (installs), `composer dump-autoload`, `git lfs pull` |
 | **This repository (EGO itself)** | 44 | **7 (16%)** | see below |
+| **Seven ecosystems, pinned as a test** (git, shell, node, python, go, rust, jvm) | 73 | **13 (18%)** | 8 test runners, 1 install (`pip install`), 4 unmodelled task runner (`mvn`, `gradle`) |
+
+The last row is the one that is now ENFORCED rather than measured once: `packages/kernel/test/corpus.test.ts`
+asserts the EXACT set of gated commands and fails if a command gates without an entry in `EXPECTED_GATES` naming
+the reason, or if one listed there quietly becomes ALLOW. A rising gate rate can no longer arrive unnoticed.
 
 The third row is the honest one, and an earlier version of this document left it out. On EGO's own checkout the
 gates are `npm test` and `node --test …` (test runners), `npm run lint` and `eslint packages` (this repository has

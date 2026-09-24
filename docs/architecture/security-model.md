@@ -315,6 +315,27 @@ classes stay closed. A finding from a future review becomes one of three things:
 3. a **containment requirement**, when interpreting it exhaustively would amount to reimplementing the shell or the
    tool. These are recorded against issue #26 rather than answered with another regex.
 
+### Organized by root semantic class, not by the order the defects arrived
+
+A corpus of literal spellings proves that a list of past bugs stays fixed. It cannot say whether a NEW spelling of
+an old effect is covered — which is exactly how `echo "$(git push origin main)"` reached ALLOW inside a class that
+had been closed for weeks, and how `( chmod 777 /etc/passwd )` did the same.
+
+`packages/kernel/test/support/corpus.ts` is therefore written the other way round: twenty ROOT SEMANTIC CLASSES,
+each with the canonical spellings of the effect and an authority **floor**; a set of TRANSFORMATIONS that carry an
+effect without changing it; a set of PRODUCERS that put it behind a file EGO must resolve. The variants are the
+cross-product — generated, not enumerated. A transformation added there is tested against every class at once, and
+a class added there is tested against every transformation at once.
+
+The invariant the cross-product asserts is **semantic authority monotonicity**: wrapping, quoting, embedding,
+transporting, configuring or indirectly invoking an effect never reduces its verdict
+(`monotonicity.test.ts`, `corpus.test.ts`). The frozen class list those classes map to is
+[`phase-1-taxonomy.md`](phase-1-taxonomy.md).
+
+The same file carries the other half of the contract: the ordinary-development corpus, which pins the **exact** set
+of commands that gate across seven ecosystems together with the reason each one is gated. A new gate on ordinary
+work has to be added there deliberately, rather than appearing as a slowly rising percentage.
+
 ## The fifth state: KNOWN-BUT-WRONG
 
 A second independent challenge found that the first three states were not exhaustive. A resolver can be

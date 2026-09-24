@@ -606,14 +606,20 @@ matchers:
   # command.unknown and asked (challenge 6, finding 36; challenge 8, finding 28). Deliberately EXCLUDES the project
   # task runners — mvn, gradle, bazel, sbt, dotnet build, rake, bundle exec, composer — which execute
   # repository-defined tasks and are producers EGO does not model.
+  # A VERSION PROBE IS NOT A TASK. `yarn|pnpm|bun|deno|npx|rake|sbt|bazel <version>` and `pip list|show|freeze`
+  # reached command.unknown while `npm --version` was ALLOW, which is an omission in this list rather than a
+  # judgement about those tools (corpus by semantic class, 2026-09-24). The form stays anchored with `\s*$`, so
+  # only the probe itself is named; the task-running forms of the same heads are untouched. Where such a head is
+  # ALSO an unmodelled producer — `mvn -v`, `gradle --version` — the opacity of the head still gates the
+  # invocation, and that fail-safe is deliberate: see docs/architecture/phase-1-residuals.md.
   - capability: command.build
     tool: Bash
     # `\b` cannot follow `+`: it is not a word character, so `g++ -c a.cpp` never matched and the most ordinary
     # C++ compile gated (exit review 2). A lookahead for whitespace-or-end works for every name in the list.
-    command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|c\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|rustc|tsc)(?=\s|$)|^swift\s+build\b|^dart\s+compile\b'
+    command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|c\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|rustc|tsc)(?=\s|$)|^swift\s+build\b|^dart\s+compile\b|^python3?\s+-m\s+venv\b'
   - capability: command.read-only
     tool: Bash
-    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs)\s+(-v|-V|--version|-version|version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b|^(cmake|ninja)\s+(--version|-t\s+\w+|--help)\b'
+    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs|yarn|pnpm|bun|deno|npx|rake|sbt|bazel)\s+(-v|-V|--version|-version|version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b|^(cmake|ninja)\s+(--version|-t\s+\w+|--help)\b|^pip3?\s+(list|show|freeze)\b'
   # Formatters, linters and type checkers with FIXED semantics: they read the workspace and rewrite source
   # files in it, and nothing else. Whole ecosystems had no path to ALLOW for ordinary `gofmt`/`ruff`/`black`/
   # `cargo fmt`, so a control plane that governs them all equally was unusable outside JavaScript (challenge 6,

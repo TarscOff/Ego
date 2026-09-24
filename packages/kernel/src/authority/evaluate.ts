@@ -152,17 +152,29 @@ const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [
 const ENV_INJECT_RE =
   /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
 
+/** A `cd` inside a subshell does NOT move the caller's directory, so the analyzer must stop claiming to know it
+ *  once the subshell closes. Emitting this marker is how a flat segment list says so: the target carries a `$`, and
+ *  a `cd` to a dynamic target is already the analyzer's "the working directory is no longer proven". */
+const SUBSHELL_CWD_RESTORE = 'cd $EGO_SUBSHELL_RESTORE';
+/** shell keywords that may precede a command WITHOUT being one: after them, the next word is still a command */
+const KEYWORD_PREFIX_RE = /^(if|then|else|elif|while|until|do|!)$/;
+
 export function splitShellSegments(command: string): string[] {
   const segments: string[] = [];
   let cur = '';
   let inSingle = false;
   let inDouble = false;
   let i = 0;
+  // depth of SUBSHELLS whose parentheses this splitter consumed, and where the outermost one started
+  let subshell = 0;
+  let subshellStart = 0;
   const push = () => {
     const t = cur.trim();
     if (t) segments.push(t);
     cur = '';
   };
+  /** true where a COMMAND may begin: nothing pending, or only a shell keyword */
+  const atCommandStart = (): boolean => cur.trim() === '' || KEYWORD_PREFIX_RE.test(cur.trim());
   while (i < command.length) {
     const ch = command[i]!;
     const next = command[i + 1];
@@ -190,6 +202,35 @@ export function splitShellSegments(command: string): string[] {
         i++;
         continue;
       }
+      // A SUBSHELL AND A BRACE GROUP ARE SHELL STRUCTURE, NOT COMMANDS. Their delimiters were kept inside the
+      // segment, so the head became `(` and every anchored matcher missed: `( chmod 777 /etc/passwd )` was
+      // command.unknown — an ASK — where the same line without the parentheses is DENY (corpus by semantic class,
+      // 2026-09-24). `((` is arithmetic, which runs no command, and is deliberately left alone; a `)` that closes
+      // nothing this splitter opened — a `case` pattern — stays literal.
+      if (ch === '(' && atCommandStart() && next !== '(') {
+        if (subshell === 0) subshellStart = segments.length;
+        subshell++;
+        push();
+        i++;
+        continue;
+      }
+      if (ch === ')' && subshell > 0) {
+        push();
+        subshell--;
+        if (subshell === 0 && segments.slice(subshellStart).some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg)))
+          segments.push(SUBSHELL_CWD_RESTORE);
+        i++;
+        continue;
+      }
+      if (ch === '{' && atCommandStart() && (next === ' ' || next === '\t' || next === '\n')) {
+        push();
+        i++;
+        continue;
+      }
+      if (ch === '}' && cur.trim() === '') {
+        i++;
+        continue;
+      }
     }
     // COMMAND SUBSTITUTION IS SUPPRESSED BY SINGLE QUOTES ONLY. Double quotes stop the shell from SPLITTING on
     // operators, and stop nothing else: `echo "$(git push origin main)"` runs the push. Guarding the extractor
@@ -197,6 +238,30 @@ export function splitShellSegments(command: string): string[] {
     // control plane was reachable through it in one Bash call, at ALLOW, which on claude-code suppresses the
     // host's own prompt (exit review 3).
     if (!inSingle) {
+      // ARITHMETIC EXPANSION RUNS NO COMMAND. `$((…))` was read as a command substitution of `(…)`, so ordinary
+      // `echo $((i+1))` produced a segment whose head was an expression and asked. POSIX resolves the ambiguity in
+      // favour of arithmetic, and a command substitution of a subshell is spelled `$( (`. Only a substitution
+      // NESTED inside the expression — `$(( $(cat n) + 1 ))` — is still a command, and it is still extracted.
+      if (ch === '$' && next === '(' && command[i + 2] === '(') {
+        let depth = 0;
+        let j = i + 1;
+        let inner = '';
+        while (j < command.length) {
+          const c = command[j]!;
+          if (c === '(') depth++;
+          else if (c === ')') depth--;
+          if (depth === 0) break;
+          if (!(depth === 1 && c === '(')) inner += c;
+          j++;
+        }
+        // the expression itself is never executed, so only the commands SUBSTITUTED INTO it are segments: the
+        // arithmetic remainder that carries their output (`$SUBST + 1`) is a number here, not a command
+        if (/\$\(|`/.test(inner))
+          for (const sg of splitShellSegments(inner)) if (!/^\$SUBST\b/.test(sg)) segments.push(sg);
+        cur += (cur.endsWith(' ') || cur === '' ? '' : ' ') + '$ARITH ';
+        i = j + 1;
+        continue;
+      }
       if ((ch === '$' || ch === '<' || ch === '>') && next === '(') {
         // command or process substitution: capture the inner command as its own segment and keep scanning
         let depth = 1;
@@ -4401,8 +4466,15 @@ function analyzeSegments(
   const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
-  const units = segments.flatMap((u) => (isolatedShells ? [splitShellSegments(u)] : [[u]]));
-  for (const unit of isolatedShells ? units : [segments]) {
+  // EVERY unit is split into the commands it runs, HERE, whatever the isolation. A producer's contract is to
+  // resolve WHICH lines execute and hand them over verbatim — `scriptSegments` emits whole lines — so turning a
+  // line into commands is the analyzer's job. Splitting only the isolated shells meant a script body's line was
+  // classified as its FIRST command alone: `echo "$(git push origin main)"` in a `.sh` was an `echo`, and so was
+  // `echo start; git push origin main`. Isolation decides whether shell state RESETS between units, nothing else.
+  const units = isolatedShells
+    ? segments.map((u) => splitShellSegments(u))
+    : [segments.flatMap((u) => splitShellSegments(u))];
+  for (const unit of units) {
     if (isolatedShells) {
       cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
       carriedEnv = {};

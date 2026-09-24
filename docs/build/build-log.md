@@ -348,6 +348,29 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 - IN-SESSION REVIEW: PASSED — smoke-tested init → hooks → status → check → doctor → delegation on temporary
   repositories; every round-1/2/3 finding reproduced before being fixed; the D1 policy-widening defect verified closed
   end to end against the built bundle.
+
+  **Corpus reorganized by root semantic class (2026-09-24), and it immediately found two floor crossings.** The
+  regression corpus was a list of literal spellings in the order the defects arrived: it proves past bugs stay
+  fixed and says nothing about a NEW spelling of an old effect. It is now twenty ROOT SEMANTIC CLASSES, each with
+  an authority FLOOR, crossed with 32 effect-preserving transformations and 14 producers — the variants are
+  generated, not enumerated (`packages/kernel/test/support/corpus.ts`, `corpus.test.ts`, `monotonicity.test.ts`).
+  Writing it surfaced two defects that twelve adversarial rounds had not:
+  1. **A shell script's body was classified as its first command only.** `analyzeSegments` split a unit into
+     segments only for ISOLATED shells (make recipe lines, npm pre/post). A script is ONE shell, so its lines were
+     passed through whole: `echo "$(git push origin main)"` in a `.sh` was an `echo` (ALLOW), and so was
+     `echo start; git push origin main`. Every producer that hands over whole lines was affected. Splitting now
+     happens for every unit; isolation decides only whether shell state RESETS between units.
+  2. **A subshell reduced DENY to ASK.** `( chmod 777 /etc/passwd )` kept its parentheses inside the segment, so
+     the head was `(` and every `^`-anchored matcher missed. Subshell and brace-group delimiters at a command
+     position are now consumed as the shell structure they are; `((` stays arithmetic, and a `)` closing nothing
+     — a `case` pattern — stays literal. A `cd` inside a subshell no longer leaks to the caller: the splitter
+     emits a restore marker, and the working directory stops being claimed after the subshell closes.
+  Two proportionality corrections came with it: arithmetic expansion `$((…))` was read as a command substitution,
+  so ordinary `echo $((i+1))` asked (only a substitution NESTED in the expression is a command); and
+  `yarn|pnpm|bun|deno|npx|rake|sbt|bazel --version`, `pip list|show|freeze` and `python3 -m venv` had no matcher at
+  all while `npm --version` was ALLOW. Ordinary development across seven ecosystems: 73 commands, 13 gated (18%),
+  every one of them named with its reason in `EXPECTED_GATES`. Attack corpora unchanged at 200,334 commands /
+  39 ALLOW. The frozen class list is `docs/architecture/phase-1-taxonomy.md`.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
