@@ -3,6 +3,15 @@ schema: ego.local-targets/1
 id: local-targets
 title: Local development targets
 k8s_local_contexts:
+  # the container runtime's own names for the LOCAL daemon. Naming the local engine explicitly — which is what
+  # `docker --context default` and `docker context use desktop-linux` do — was classified EXTERNAL and DENIED
+  # (exit review 3).
+  - 'default'
+  - 'desktop-linux'
+  - 'desktop-windows'
+  - 'unix'
+  - 'npipe'
+  - 'rootless'
   - 'kind-*'
   - 'k3d-*'
   - 'minikube'

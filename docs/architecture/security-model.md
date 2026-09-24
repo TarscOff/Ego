@@ -227,8 +227,10 @@ operation is the set of bodies EGO must account for before it may make a positiv
   so it is recognised by provenance rather than by a producer deciding something is safe — a repository governed by
   EGO keeps `git commit` at ALLOW, and any other hook body goes through the canonical analyzer.
 
-The closure is proportional: `make build`, `npm run build`, `npm test` and `git commit` in an ordinary repository
-are all still ALLOW.
+The closure is proportional: `make build`, `npm run build` and `git commit` in an ordinary repository are all
+still ALLOW. `npm test` is NOT — it gates, by the decision stated two paragraphs above, because a test runner
+executes repository code EGO was never shown. An earlier revision of this sentence listed it among the untouched
+commands, contradicting the same document and the code.
 
 ## Freshness
 

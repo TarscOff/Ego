@@ -123,6 +123,7 @@ edit, so the promise had nothing behind it.
 | Measured on | Ordinary commands | Gated | What gates |
 |---|---:|---:|---|
 | TypeScript monorepo, Go, Python/poetry, Rust, husky | 79 | 8 (10%) | `npm test`, `make test`, `pytest`, `go test`, `cargo test` — every one a test command |
+| C/C++ with CMake and a real Makefile | — | see note | `cmake`/`ninja` drive a build and gate; `--version` and `-t targets` do not |
 | Java/Maven, Ruby, PHP, LFS repository | 66 | 12, of which 9 non-test | `mvn`/`gradle`/`rake` (task runners), `bundle`/`composer`/`gem` (installs), `composer dump-autoload`, `git lfs pull` |
 | **This repository (EGO itself)** | 44 | **7 (16%)** | see below |
 
@@ -132,7 +133,13 @@ an executable `eslint.config.js`, so eslint imports and runs it), `npm run build
 build script is `node scripts/build.mjs`, an interpreter running a program file — a gate that predates all of this
 work), and `git rebase` (its own capability, also pre-existing).
 
-So the rate is **10% on a typical consumer repository and 16% here**, and the difference is entirely EGO's own
+These rows are the ecosystems that were measured, not every ecosystem. A repository whose loop is mostly test,
+lint and install commands gates more than one whose loop is mostly build, status and diff — the rate is a
+property of the LOOP, not of EGO, and quoting a single number for it would be the overstatement this document
+exists to avoid. What is invariant across all of them is WHICH KINDS of command gate: test runners, project task
+runners, dependency installs, and tools whose configuration is executable.
+
+So the measured rate is **10% on the five-ecosystem sample and 16% here**, and the difference is entirely EGO's own
 executable lint configuration and its `node`-driven build. Quoting only the lower number would have been true of
 the sample and misleading about the tool.
 
