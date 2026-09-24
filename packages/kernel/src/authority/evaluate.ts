@@ -103,6 +103,7 @@ const WRAPPERS = new Set([
 // `doas` is deliberately NOT a transparent wrapper: like `sudo`, it must keep its head so the command.privileged
 // matcher that names it can fire (its inner command is analysed separately in normalizeTail).
 /** wrapper options that consume the next token as their value (the command starts after it) */
+const EXEC_ARGV0_RE = /^exec\s+(-a|--argv0)\s+\S+\s+/;
 const WRAPPER_VALUE_OPTS: Record<string, RegExp> = {
   env: /^(-u|--unset|-C|--chdir|-S|--split-string)$/,
   nice: /^(-n|--adjustment)$/,
@@ -257,6 +258,20 @@ function operandWrapperBody(tokens: string[], from: number): string | null {
 
 export function normalizeSegment(segment: string): string[] {
   let s = segment.trim();
+  // `npx --package=<spec> -c "<benign>"` FETCHES and runs that package; the command after `-c` is a decoy, and
+  // every layer below treats `npx` as transparent and `-c` as a carrier, so the acquisition vanished entirely.
+  // A runner carrying `--package`/`-p` is NOT transparent: the head survives so the vocabulary can classify it.
+  // ... and only when the flag is NPX'S OWN, i.e. before the first non-flag token. In `npx tsc -p .` the `-p`
+  // is tsc's project flag, and treating it as npx's made every ordinary `npx tsc` opaque.
+  if (/^(npx|bunx)\s/.test(s)) {
+    const t = tokenize(s);
+    let k = 1;
+    while (k < t.length && t[k]!.startsWith('-')) {
+      if (/^(--package|-p)(=|$)/.test(t[k]!)) return [s];
+      if (t[k] === '--package' || t[k] === '-p' || t[k] === '-c' || t[k] === '--call') k++;
+      k++;
+    }
+  }
   const extra: string[] = [];
   // Assignments that SELECT THE TARGET of a database or Kubernetes client are not noise: stripping them made
   // `PGHOST=prod-db psql -c "DROP TABLE users"` read as the local socket (round 14). They are re-attached below so
@@ -1419,7 +1434,7 @@ function childEnvironment(
 /** Which process inputs materially change what each producer resolves. EGO does not model the environment: it
  *  captures only the inputs required to justify the semantic claim the producer is about to make. */
 const PROGRAM_NAMING_ENV =
-  /^(EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|LD_PRELOAD|DYLD_[A-Z_]+)$/;
+  /^(EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|LD_PRELOAD|DYLD_[A-Z_]+|GOFLAGS|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS)$/;
 
 const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   // A variable whose VALUE IS A PROGRAM re-points the tool itself, so it is relevant to EVERY producer and to no
@@ -1542,7 +1557,7 @@ const TREE_CHANGING =
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -1560,7 +1575,9 @@ export function segmentEnvInputs(segment: string): Record<string, string> {
       }
       const m = /^([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|\S*)\s+/.exec(s);
       if (m) {
-        if (EXECUTION_ENV_INPUTS.test(m[1]!)) out[m[1]!] = m[2]!.replace(/^['"]|['"]$/g, '');
+          // npm matches `npm_config_*` case-insensitively, so `npm_config_SCRIPT_SHELL` is the same setting
+      const name = /^npm_config_/i.test(m[1]!) ? m[1]!.toLowerCase() : m[1]!;
+      if (EXECUTION_ENV_INPUTS.test(name)) out[name] = m[2]!.replace(/^['"]|['"]$/g, '');
         s = s.slice(m[0].length);
         continue;
       }
@@ -3132,7 +3149,7 @@ const PROGRAM_OPERAND_LONG =
   // real tool, `-fplugin=` and `-specs=` load code into the compiler, `go build -toolexec` wraps every tool
   // invocation, `javac -processor` runs an annotation processor, and `sort --compress-program` runs a program
   // under a capability literally named command.read-only (decision challenge, findings 5, 25, 26, 30).
-  '|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-B|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
+  '|--post-renderer|--exec-path|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-B|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
   '|-e(?=\\s+\\S*(ssh|sh|bash|python|perl|ruby|node))';
 const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
 /** the short forms whose value is GLUED to the letter: `gcc -B/tmp/evil`, `clang -Xclangfoo`, `-loadplugin` */
@@ -4447,6 +4464,14 @@ function analyzeSegments(
     // `-C` is a git GLOBAL option, which means before the verb. `git blame -C file` and `git diff -C` use the
     // same letter for "detect copies", and matching it anywhere downgraded every one of them to an unverified
     // context — ordinary review commands, asking for no reason.
+    const envChdir = /(^|\s)env\s+(?:-\S+\s+)*?(?:-C\s+|--chdir[= ])(\S+)/.exec(seg.trim());
+    if (envChdir) {
+      const target = expandHome(envChdir[2]!);
+      if (target !== null && !/[$`*?]/.test(target)) {
+        env.cwd = isAbsolute(target) ? target : resolve(effectiveCwd, target);
+        env.cwdVerified = env.cwdVerified && directoryExists(env.cwd) && repoRootFor(ctx, env.cwd) !== null;
+      } else env.cwdVerified = false;
+    }
     const gitDir = /^git\s+(?:-[cC]\s+\S+\s+|--[a-z-]+(?:=\S+)?\s+|-[a-z]\s+\S+\s+)*?(?:-C\s+|--work-tree[= ])(\S+)/.exec(
       seg.trim(),
     );
