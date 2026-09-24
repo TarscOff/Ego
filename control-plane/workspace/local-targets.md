@@ -24,6 +24,10 @@ k8s_local_contexts:
   - 'k3s-local'
 db_local_hosts:
   - 'localhost'
+  # LocalStack's own documented endpoint host, which resolves to 127.0.0.1 and is how its docs tell you to
+  # reach it; denying it absolutely was the exact case the cloud de-escalation exists for (exit review 5)
+  - 'localhost.localstack.cloud'
+  - '*.localhost.localstack.cloud'
   - '127.0.0.1'
   - '::1'
   - '[::1]'

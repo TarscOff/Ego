@@ -197,7 +197,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
   let subshell = 0;
   let subshellStart = 0;
   // heredocs opened on the line being scanned; their BODIES are consumed when that line ends
-  const pendingHeredocs: Array<{ delim: string; quoted: boolean; strip: boolean }> = [];
+  const pendingHeredocs: Array<{ delim: string; quoted: boolean; strip: boolean; openerIndex?: number }> = [];
   const push = () => {
     const t = cur.trim();
     // A REDIRECTION IS NOT A COMMAND. Consuming a group's braces leaves `{ echo a; echo b; } > out.txt` with a
@@ -208,6 +208,12 @@ export function splitShellPipeline(command: string): ShellStage[] {
       else segments.push({ text: t, pipedFromPrevious: consumePipe() });
       if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
       else if (/^esac\b/.test(t)) caseDepth = Math.max(0, caseDepth - 1);
+      // WHICH STAGE OPENED THE HEREDOC. Attributing the body to the LAST stage on the line was wrong the moment
+      // anything followed the opener: in `bash <<EOF | cat` the body belongs to bash, and giving it to `cat` lost
+      // the script entirely (exit review 5).
+      for (const hd of pendingHeredocs)
+        if (hd.openerIndex === undefined && new RegExp(`<<-?\\s*['"\\\\]?${hd.delim}`).test(t))
+          hd.openerIndex = segments.length - 1;
     }
     cur = '';
   };
@@ -264,8 +270,8 @@ export function splitShellPipeline(command: string): ShellStage[] {
         push();
         if (ch === '\n' && pendingHeredocs.length) {
           let k = i + 1;
-          const opener = segments[segments.length - 1];
           for (const hd of pendingHeredocs) {
+            const opener = segments[hd.openerIndex ?? segments.length - 1];
             let body = '';
             let terminated = false;
             while (k < command.length) {
@@ -284,7 +290,9 @@ export function splitShellPipeline(command: string): ShellStage[] {
             //      quoting inside the body at all — `'` and `"` are ordinary characters there;
             //   3. inert DATA, when the delimiter is quoted.
             // Modelling only (3) made `bash <<EOF … git push … EOF` ask instead of denying (exit review 4).
-            if (opener && readsScriptFromStdin(opener.text))
+            // the opener's ROLE is read in canonical form: a keyword, a case pattern or a subshell in front of it
+            // made `then bash <<EOF` and `a) bash <<EOF` look like commands named `then` and `a)` (exit review 5)
+            if (opener && readsScriptFromStdin(emitterTail(opener.text)))
               for (const sg of splitShellPipeline(body)) segments.push(sg);
             else if (!hd.quoted)
               for (const innerCmd of substitutionsIn(body))
@@ -557,6 +565,13 @@ function substitutionsIn(text: string): string[] {
 
 /** Heads that take their SCRIPT from standard input when nothing else names one. */
 const STDIN_SCRIPT_HEAD_RE = /^((?:ba|z|da|k|a)?sh|fish|python|python2|python3|ruby|perl|node|nodejs|php|Rscript)$/;
+/** Stages that copy standard input to standard output unchanged. `tee` also writes files — those are classified
+ *  on the segment itself; what matters here is that what comes OUT is what went IN. `head`/`tail` truncate and are
+ *  deliberately absent: the literal that survives them is not the literal that went in. */
+const PASS_THROUGH_RE = /^(?:cat|tee(?:\s+(?:-[aip]+|[^-\s]\S*))*)\s*$/;
+/** the file names that mean "standard input" */
+const STDIN_FILE_RE = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/;
+/** heads whose operand is a script run in the CURRENT shell */
 /** options that name the script INLINE or as a module: stdin is then data, not the program */
 const INLINE_SCRIPT_FLAG_RE = /^(-c|-e|-E|--eval|--command|-m|--module|-p|--print|-r|--require|-i)$/;
 /** options of those heads that consume the next token, so their value is not mistaken for a script operand */
@@ -568,6 +583,9 @@ export function readsScriptFromStdin(segment: string): boolean {
   const tokens = tokenize(segment);
   const raw = tokens[0] ?? '';
   const head = raw.slice(raw.lastIndexOf('/') + 1);
+  // `source FILE` / `. FILE` runs FILE in the CURRENT shell, and /dev/stdin names the pipe: `echo CMD | . /dev/stdin`
+  // really executes CMD (exit review 5).
+  if (head === 'source' || head === '.') return tokens.slice(1).some((t) => STDIN_FILE_RE.test(t));
   if (!STDIN_SCRIPT_HEAD_RE.test(head)) return false;
   const shellFamily = /^(?:ba|z|da|k|a)?sh$/.test(head);
   const rest = tokens.slice(1);
@@ -584,10 +602,17 @@ export function readsScriptFromStdin(segment: string): boolean {
       if (/^(?:\d*(?:>>?|>&|>\|)|&>>?)$/.test(t)) i++; // a bare operator takes the next token as its target
       continue;
     }
-    if (t === '-' || t === '/dev/stdin') return true; // explicitly THE stdin script
+    if (t === '-' || STDIN_FILE_RE.test(t)) return true; // explicitly THE stdin script
     // `-s` means "the script is on stdin" for the sh family only; for python and perl it is a different flag
     if (shellFamily && /^-[a-zA-Z]*s$/.test(t)) return true;
-    if (INLINE_SCRIPT_FLAG_RE.test(t) || /^--(eval|command|module|print|require)=/.test(t)) return false;
+    // THE INLINE-SCRIPT FLAGS ARE NOT THE SAME FOR EVERY HEAD. For a shell only `-c` names a program; `-e`, `-E`,
+    // `-i`, `-p`, `-r` and `-m` are ordinary shell options, and reading them as "an inline script" meant
+    // `echo 'rm -rf /' | bash -e` lost the pipe edge entirely (exit review 5).
+    if (
+      (shellFamily ? /^-[a-zA-Z]*c$/.test(t) : INLINE_SCRIPT_FLAG_RE.test(t)) ||
+      /^--(eval|command|module|print|require)=/.test(t)
+    )
+      return false;
     if (STDIN_HEAD_VALUE_FLAG_RE.test(t) || /^[-+][a-zA-Z]*[oO]$/.test(t)) {
       i++; // its value, never a script — `bash -euo pipefail` is not a script named pipefail
       continue;
@@ -614,7 +639,7 @@ export function literalStdout(segment: string, heredoc?: { body: string; expande
     const format = literalWord(words[0] ?? '');
     if (format === null) return null;
     // with no arguments the FORMAT is the output, provided it carries no conversion and no escape but `\n`
-    if (words.length === 1) return /%/.test(format) || /\\(?!n)/.test(format) ? null : format;
+    if (words.length === 1) return /%/.test(format) ? null : decodeEscapes(format);
     if (!/^%[sb](\\n)?$/.test(format)) return null; // a multi-conversion format is not a literal
     const parts: string[] = [];
     for (const w of words.slice(1)) {
@@ -622,7 +647,8 @@ export function literalStdout(segment: string, heredoc?: { body: string; expande
       if (lit === null) return null;
       parts.push(lit);
     }
-    return parts.join(' ');
+    // the format's own escapes are real: `printf '%s\\n' a b` writes two LINES, not one word
+    return parts.map((v) => decodeEscapes(format.replace(/%[sb]/, () => v))).join('');
   }
   const echo = /^echo\b((?:\s+-[neE]+)*)\s+([\s\S]+)$/.exec(trimmed);
   if (!echo) return null;
@@ -632,7 +658,13 @@ export function literalStdout(segment: string, heredoc?: { body: string; expande
     if (lit === null) return null;
     parts.push(lit);
   }
-  return parts.length ? parts.join(' ') : null;
+  if (!parts.length) return null;
+  const joined = parts.join(' ');
+  // `-e` turns the backslash escapes ON, and `-E` off; without either, /bin/sh's echo interprets them and bash's
+  // does not. Decoding whenever a backslash is present is the FAIL-SAFE reading: it can only reveal more commands.
+  return /-[neE]*e/.test(echo[1] ?? '') || (!/-[neE]*E/.test(echo[1] ?? '') && /\\/.test(joined))
+    ? decodeEscapes(joined)
+    : joined;
 }
 
 /** The command inside a stage, with the shell keywords, leading assignments and transparent wrappers sliced off
@@ -647,6 +679,15 @@ export function emitterTail(text: string): string {
     out = out.replace(/^(?:command|builtin|exec|env|nohup|stdbuf\s+-\S+|nice(?:\s+-n\s+\S+)?|timeout\s+\S+)\s+/, '');
     if (out === before) return out;
   }
+}
+
+/** The bytes a backslash escape stands for. `echo -e 'a\\nrm -rf /'` writes TWO LINES, so reading the text back
+ *  with the backslash intact glued two commands into one word and produced a POSITIVE claim that was wrong —
+ *  worse than opacity, because it is asserted rather than admitted (exit review 5). */
+function decodeEscapes(text: string): string {
+  return text.replace(/\\(n|t|r|a|b|f|v|e|0|\\)/g, (_m, c: string) =>
+    c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '\r' : c === 'f' ? '\f' : c === 'v' ? '\v' : c === 'b' ? '\b' : c === '0' ? '\0' : c === '\\' ? '\\' : '\x1b',
+  );
 }
 
 /** A single word's literal value: single quotes are exact, double quotes and bare words only when inert. */
@@ -2204,7 +2245,10 @@ function scriptSegments(text: string): string[] | null {
       }
       // the body is over: hand over whatever the SHELL would run out of it — the whole body when the reader takes
       // its program from stdin, the substitutions when the delimiter was unquoted, nothing when it was quoted
-      if (readsScriptFromStdin(heredocOpener)) {
+      // a script is read LINE BY LINE here, so the splitter's `case` state does not persist across lines and a
+      // branch's `a)` is still glued to the opener; it is structure either way, and stripped before the role test
+      const openerCommand = (sg: string): string => emitterTail(sg.replace(/^\(?\s*[^\s()|;&]+\s*\)\s+(?=\S)/, ''));
+      if (splitShellSegments(heredocOpener).some((sg) => readsScriptFromStdin(openerCommand(sg)))) {
         const nested = scriptSegments(heredocBody);
         if (nested === null) return null; // the carried script is opaque, so this one is too
         out.push(...nested);
@@ -3978,7 +4022,14 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
 
 /** The host an endpoint names, with scheme, credentials, port, IPv6 brackets and path removed. */
 function endpointHost(v: string): string {
-  let h = v.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '').split('/')[0]!;
+  // THE AUTHORITY ENDS AT THE FIRST `/`, `?` OR `#`. Cutting only at `/` left a FRAGMENT in the string, and a
+  // fragment may contain an `@`: `https://s3.amazonaws.com#@localhost:4566` then read as the host `localhost`,
+  // which defeated the whole-host comparison the container resolver and the cloud de-escalation both rest on —
+  // a production engine reaching ALLOW and an absolute core deny reaching ASK (exit review 5). Every URL parser
+  // cuts the authority first and looks for userinfo INSIDE it; so does this one now.
+  let h = v.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '');
+  const cut = h.search(/[/?#]/);
+  if (cut >= 0) h = h.slice(0, cut);
   const at = h.lastIndexOf('@');
   if (at >= 0) h = h.slice(at + 1);
   const bracketed = /^\[([^\]]*)\]/.exec(h);
@@ -4087,6 +4138,7 @@ function resolveContainerTarget(
     // `tcp://[fd00:acme:prod::1]:2375` contains `::1` and `tcp://prod-localhost.acme.com:2375` contains
     // `localhost`, so a production engine was read as the local daemon (exit review 4).
     if (/^(unix:|npipe:|fd:)/i.test(v) || targets.dbLocalHosts.some((h) => endpointHost(v) === h || v === h))
+      // (endpointHost cuts the authority at the first `/`, `?` or `#`, so a fragment cannot fake the host)
       signals.push({ cls: 'LOCAL', target: `${kind} ${v}` });
     else if (isOpaqueTarget(v)) signals.push({ cls: 'UNCLASSIFIED', target: `${kind} ${v}` });
     else signals.push({ cls: classifyTargetName(v, targets.k8sLocalContexts, targets), target: `${kind} ${v}` });
@@ -4309,9 +4361,6 @@ const CLOUD_CLI_HEADS = new Set(['aws', 'gcloud', 'az']);
 /** endpoint options, in the spellings the three CLIs really accept */
 const CLOUD_ENDPOINT_OPT_RE =
   /^--(endpoint-url|endpoint|blob-endpoint|queue-endpoint|table-endpoint|file-endpoint|api-endpoint-overrides)$/;
-/** environment variables that point a cloud CLI at an emulator */
-const CLOUD_ENDPOINT_ENV_RE =
-  /^(AWS_ENDPOINT_URL(_[A-Z0-9_]+)?|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST)$/;
 
 /** Which system a cloud CLI acts on. THE DEFAULT IS PRODUCTION: with no endpoint a cloud CLI talks to the real
  *  provider, so the mirror of the k8s/db rule "never guess local" is "no evidence keeps the deny". The host is
@@ -4338,7 +4387,16 @@ function resolveCloudTarget(
     if (eq && CLOUD_ENDPOINT_OPT_RE.test(eq[1]!)) add(eq[2]!, 'endpoint');
     else if (CLOUD_ENDPOINT_OPT_RE.test(t) && tokens[i + 1]) add(tokens[++i]!, 'endpoint');
   }
-  for (const [k, v] of Object.entries(envInputs)) if (CLOUD_ENDPOINT_ENV_RE.test(k)) add(v, `${k}=`);
+  // AN ENDPOINT VARIABLE BELONGS TO ONE VENDOR. `AWS_ENDPOINT_URL` says nothing about what `gcloud` will talk to,
+  // and letting any of them de-escalate any cloud CLI would let an unrelated assignment lower an absolute deny.
+  const vendor = raw.slice(raw.lastIndexOf('/') + 1);
+  const vendorEnv =
+    vendor === 'aws'
+      ? /^(AWS_ENDPOINT_URL(_[A-Z0-9_]+)?|AWS_S3_ENDPOINT)$/
+      : vendor === 'gcloud'
+        ? /^(CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST)$/
+        : /^AZURE_[A-Z0-9_]*ENDPOINT[A-Z0-9_]*$/;
+  for (const [k, v] of Object.entries(envInputs)) if (vendorEnv.test(k)) add(v, `${k}=`);
   if (!signals.length) return { cls: 'PRODUCTION', target: 'the provider default endpoint' };
   return signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
 }
@@ -5587,8 +5645,13 @@ function analyzeSegments(
         )
     )
       written.add('\0any');
-    upstream = seg; // this stage's standard output is what a following piped stage would read
-    upstreamBody = stage.heredocBody === undefined ? null : { body: stage.heredocBody, expanded: stage.heredocExpanded === true };
+    // A PASS-THROUGH COPIES ITS INPUT TO ITS OUTPUT, so the literal survives it: `echo 'rm -rf /' | cat | bash`
+    // runs the rm, and one identity stage was enough to defeat the edge entirely (exit review 5).
+    if (!(stdinFrom !== null && PASS_THROUGH_RE.test(seg.trim()))) {
+      upstream = seg; // this stage's standard output is what a following piped stage would read
+      upstreamBody =
+        stage.heredocBody === undefined ? null : { body: stage.heredocBody, expanded: stage.heredocExpanded === true };
+    }
   }
     }
   return hits;
