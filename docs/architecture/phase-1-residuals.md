@@ -166,6 +166,32 @@ and found defective before they landed.
 | `aws --endpoint-url http://localhost:4566` | the cloud CLIs were never enrolled in the target model at all — `classifyTargetName` was dead code for `aws`, `gcloud` and `az`. The family is enrolled, and this is the kernel's ONE de-escalation: for k8s, databases and containers the default asserts LOCAL and the resolver raises it, while for a cloud CLI the default IS the real provider, so LOCAL must replace the hit. Three guards carry that weight: the default is PRODUCTION, the host is compared WHOLE, and only `aws`/`gcloud`/`az` may take the branch | 6 |
 | `/opt/x/kubectl get pods` | **ACCEPTED**, unchanged: a path inside the workspace is read, and outside it the system tool is trusted by name. Gating every absolute path would gate `/usr/bin/git status` | — |
 
+## Closed after exit review 6 (2026-09-24)
+
+Ten floor crossings — every one a DENY arriving as ASK, none an unauthorized ALLOW — closed as seven root causes
+plus three the generated cross-product found while proving the fixes. They are listed by CAUSE because that is how
+they were fixed; the spellings are in `packages/kernel/test/support/corpus.ts`, where each is now a transform or a
+class case tested against every other class.
+
+| Cause | The general statement | Class |
+|---|---|---|
+| `bash -o pipefail -c CMD` | an option's VALUE is not an operand, so the scan for the inline script must step over it | 2 |
+| `echo hi;# it's fine` | a `#` comment starts at a WORD boundary, which an unquoted operator makes as surely as a space | 1 |
+| `. <(echo CMD)` | `source` and `.` RUN the file they are handed: the gate listed only the interpreters | 1 |
+| `echo CMD \| bash <&0` | `<&N` DUPLICATES the descriptor the pipe installed; only a redirection from a FILE replaces it | 1 |
+| `DOCKER_HOST=… docker exec box sh` | target sensitivity belongs to the TOOL, not to the capability that won the first match — `docker exec` is script-opaque, and that capability was not enrolled | 6 |
+| `sudo bash -c 'CMD'` | a privilege wrapper's tail is a command, and `tokens.join(' ')` is not the inverse of `tokenize`: it erases the quoting that says where a word ends | 2 |
+| `echo -e 'a\x20b' \| sh` | `\xHH` and `\0NNN` are text; they are decoded and masked to a byte the way the shell masks them | 1 |
+| `if VAR=… docker exec …` | the normalizer stripped the environment prefix ONCE, *before* the shell keywords, so the assignment stayed at the head and no `^`-anchored matcher could match at all | 1 |
+| `trap 'DOCKER_HOST=… docker exec …'` | the container engine was enrolled in the target RESOLVER but not in the target-environment RE-ATTACHMENT | 6 |
+| the re-attached assignment itself | the resolver read it from `envInputs` only and never as a token: accepted, and unconsumed, one layer down | 6 |
+
+Two of the generated variants were corrected rather than the kernel, and that is recorded because the distinction
+matters: `nohup VAR=x cmd` is not a command any shell runs — the shell recognises an assignment only at the start
+of a simple command, so `nohup` is handed `VAR=x` as its program name — and `chmod\040777` is `\0407`, a BEL, not
+a space, because `\0ddd` takes up to three octal digits. Gating a command the shell would refuse to run is not a
+safety property, and asserting a literal the shell would not produce is not evidence.
+
 ## The parallel-test failure, and a diagnosis this document got wrong
 
 It was recorded here as "several test processes materialising the same content-derived source identity at once, on
