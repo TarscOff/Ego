@@ -601,3 +601,24 @@ test('a matcher that describes a write DESTINATION contributes, it does not win 
   );
   assert.equal(run('git clone https://e/r.git', d).verdict, 'ALLOW');
 });
+
+test('the ordinary spelling of an execution setting is ordinary, and a C++ compile is a compile', () => {
+  const d = (files: Record<string, string>) => workspace({ 'package.json': '{"scripts":{"build":"tsc -p ."}}', ...files });
+  // `SHELL := /bin/bash` is the single most common line in a real makefile and names a system shell. Treating
+  // every SHELL assignment as a rebinding made every target of every such makefile ask (exit review 2).
+  assert.equal(run('make build', d({ Makefile: 'SHELL := /bin/bash\nbuild:\n\ttsc -p .\n' })).verdict, 'ALLOW');
+  assert.equal(run('make build', d({ Makefile: 'SHELL := /bin/sh\nbuild:\n\ttsc -p .\n' })).verdict, 'ALLOW');
+  assert.equal(run('make build', d({ Makefile: 'PATH := $(PATH):/usr/local/bin\nbuild:\n\ttsc -p .\n' })).verdict, 'ALLOW');
+  // ... while something that re-points execution still gates
+  assert.notEqual(run('make build', d({ Makefile: 'SHELL := ./bin/x\nbuild:\n\ttsc -p .\n' })).verdict, 'ALLOW');
+  assert.notEqual(run('make build', d({ Makefile: 'PATH := ./bin:$(PATH)\nbuild:\n\ttsc -p .\n' })).verdict, 'ALLOW');
+
+  // `\b` cannot follow `+`, so `g++ -c a.cpp` never matched the build matcher and the most ordinary C++ compile
+  // gated. A lookahead works for every name in the list.
+  for (const cmd of ['g++ -c a.cpp', 'c++ -c a.cpp', 'clang++ -c a.cpp', 'gcc -c a.c'])
+    assert.equal(run(cmd, d({})).verdict, 'ALLOW', cmd);
+
+  // `nodeLinker` decides the node_modules LAYOUT, not which program runs; `yarnPath` decides the program
+  assert.equal(run('npm run build', d({ '.yarnrc.yml': 'nodeLinker: node-modules\n' })).verdict, 'ALLOW');
+  assert.notEqual(run('npm run build', d({ '.yarnrc.yml': 'yarnPath: ./.yarn/evil.cjs\n' })).verdict, 'ALLOW');
+});

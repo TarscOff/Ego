@@ -608,10 +608,12 @@ matchers:
   # repository-defined tasks and are producers EGO does not model.
   - capability: command.build
     tool: Bash
-    command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|cmake|ninja|rustc|tsc)\b|^swift\s+build\b|^dart\s+compile\b'
+    # `\b` cannot follow `+`: it is not a word character, so `g++ -c a.cpp` never matched and the most ordinary
+    # C++ compile gated (exit review 2). A lookahead for whitespace-or-end works for every name in the list.
+    command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|c\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|rustc|tsc)(?=\s|$)|^swift\s+build\b|^dart\s+compile\b'
   - capability: command.read-only
     tool: Bash
-    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs)\s+(-v|-V|--version|-version|version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b'
+    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs)\s+(-v|-V|--version|-version|version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b|^(cmake|ninja)\s+(--version|-t\s+\w+|--help)\b'
   # Formatters, linters and type checkers with FIXED semantics: they read the workspace and rewrite source
   # files in it, and nothing else. Whole ecosystems had no path to ALLOW for ordinary `gofmt`/`ruff`/`black`/
   # `cargo fmt`, so a control plane that governs them all equally was unusable outside JavaScript (challenge 6,

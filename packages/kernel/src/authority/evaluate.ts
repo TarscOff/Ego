@@ -1852,6 +1852,20 @@ interface MakeFileModel {
   text: string;
 }
 
+/** True when a SHELL / .SHELLFLAGS / PATH assignment names the ordinary thing rather than re-pointing execution:
+ *  a system shell at a standard absolute path, ordinary shell flags, or a PATH that only APPENDS system
+ *  directories. Anything relative, anything inside the repository, and anything built from a variable is a
+ *  rebinding. */
+function isOrdinaryShellAssignment(name: string, value: string): boolean {
+  const v = value.trim().replace(/\s*#.*$/, '');
+  if (name === 'SHELL')
+    return /^\/(bin|usr\/bin|usr\/local\/bin)\/(sh|bash|zsh|dash|ksh|ash)$/.test(v) || /^(sh|bash|zsh|dash|ksh)$/.test(v);
+  if (name === '.SHELLFLAGS') return /^-[a-zA-Z]+(\s+-[a-zA-Z]+)*$/.test(v);
+  // PATH: ordinary only when every NEW entry is an absolute system directory
+  const added = v.replace(/\$[({]?PATH[)}]?/g, '').split(':').filter((p) => p.trim().length > 0);
+  return added.every((p) => /^\/(usr|opt|bin|sbin|Library|System)\b/.test(p.trim()));
+}
+
 /** Joins backslash continuations OUTSIDE recipe lines; a recipe's continuation stays one logical shell line. */
 function makeLogicalLines(text: string): string[] {
   const raw = text.split(/\r?\n/);
@@ -1960,8 +1974,14 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // an assignment that redefines the interpreter or the lookup path for EVERY recipe line
     // a rebinding assignment can be global, `override`-ed, `export`-ed, or TARGET-SPECIFIC (`build: SHELL := x`),
     // and anchoring at line start saw only the first shape
-    if (/^(?:[^:=#]+:\s*)?(?:override\s+|export\s+)*(SHELL|\.SHELLFLAGS|PATH)\s*[:+?]?=/.test(trimmed))
-      model.rebinds.push(trimmed);
+    // `SHELL := /bin/bash` is the single most common line in a real makefile and names a system shell, not a
+    // rebinding. Only an assignment naming something ELSE — a relative path, a repository program, a variable —
+    // re-points what the recipe runs. Treating every SHELL assignment as a rebind made every target of every
+    // such makefile ask (exit review 2).
+    const assign = /^(?:[^:=#]+:\s*)?(?:override\s+|export\s+)*(SHELL|\.SHELLFLAGS|PATH)\s*[:+?]?=\s*(.*)$/.exec(
+      trimmed,
+    );
+    if (assign && !isOrdinaryShellAssignment(assign[1]!, assign[2]!)) model.rebinds.push(trimmed);
     if (/\$\(eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
     if (/^\.ONESHELL\s*:/.test(trimmed)) {
       // the WHOLE recipe goes to one shell, so a `cd` on one line leaks into the next
@@ -2619,7 +2639,7 @@ function resolveScriptCommand(
     const rcFile = ['.npmrc', '.yarnrc.yml', '.yarnrc'].map((n) => findUp(ctx, cwd, n)).find((f) => f !== null);
     const rcText = rcFile ? readInsideWorkspace(ctx, rcFile) : null;
     const rcRebinds =
-      rcFile !== null && rcFile !== undefined && (rcText === null || /^\s*(script-shell|node-options|shell|nodeLinker|scriptShell)\s*[:=]/m.test(rcText))
+      rcFile !== null && rcFile !== undefined && (rcText === null || /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText))
         ? [rcFile]
         : [];
     return {

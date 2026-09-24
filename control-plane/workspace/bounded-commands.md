@@ -114,6 +114,7 @@ bounded:
   - 'javac'
   - 'gcc'
   - 'g++'
+  - 'c++'
   - 'clang'
   - 'clang++'
   - 'cc'
