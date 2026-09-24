@@ -36,7 +36,9 @@ command is seen at all.
 swallowed every following line), `$((cmd) )` read as arithmetic when a shell reads it as a command substitution,
 `((cmd))`, a `case` branch's pattern list, a function definition's header, `2>&1` and `>&FILE` split on the `&`,
 a `<<` anywhere on a script line opening a phantom heredoc that hid the rest of the file, and a backslash
-continuation inside a script body.
+continuation inside a script body. In exit review 6: a `#` comment opening after an OPERATOR rather than a space
+(`echo hi;# it's fine`), `<&0` read as replacing stdin when it duplicates it, `source`/`.` absent from the set of
+heads that RUN the file they are handed, and `printf %b` numeric escapes left undecoded in an asserted literal.
 
 ### 2. Wrapper transparency
 
@@ -48,7 +50,9 @@ and must not be stripped as though it were.
 *Enforced in* `normalizeSegment`. *Asserted by* the transformation cross-product.
 *Instances that crossed a floor:* `exec -c -a NAME prog` (exec's own options before the alias), `/bin/sh -c '…'`
 (an interpreter named by its absolute path, read as a script path), a `-c` anywhere in `bash script.sh -c x`
-hijacking the interpreter, and `trap 'CMD' EXIT` and `sh <<< 'CMD'` as unmodelled carriers (exit review 4).
+hijacking the interpreter, and `trap 'CMD' EXIT` and `sh <<< 'CMD'` as unmodelled carriers (exit review 4). In
+exit review 6: an option's VALUE read as the program (`bash -o pipefail -c CMD`), and a privilege wrapper's tail
+re-joined from tokens so its quoting — which is what says where a word ends — was erased.
 
 ### 3. Producer resolution
 
@@ -91,7 +95,12 @@ databases (flag, URI and positional forms), and cloud CLIs. A bare positional th
 *Instances that crossed a floor:* docker's global options displacing the subcommand, so `docker --tls exec`
 reached ALLOW; `image` treated as a read verb although it is a management GROUP whose members mutate; and the
 engine's local test being a SUBSTRING match, so `tcp://[fd00:acme:prod::1]:2375` was the local daemon
-(exit review 4).
+(exit review 4). In exit review 6, three forms of the same statement — **the target is a property of the TOOL and
+of the position the command starts at**: a capability that is not enrolled cannot be re-targeted, so `docker exec`
+(classified script-opaque, because an interactive shell IS opaque) opened a shell on a production engine at ASK;
+the container engine was enrolled in the RESOLVER but not in the target-environment RE-ATTACHMENT, so an engine
+named by `DOCKER_HOST`/`DOCKER_CONTEXT` survived only while the assignment stayed leading; and the resolver
+consumed that re-attachment from `envInputs` only, never as a token — accepted and unconsumed, one layer down.
 
 ### 7. Complete provenance of a positive claim
 

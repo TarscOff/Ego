@@ -461,6 +461,48 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   After the fixes there is no ALLOW left in the review's reproduction set: what remains is ASK, which is the
   designed gate. This line stays IN PROGRESS: the criterion is a FRESH review finding none, and the review that
   found these is not that review.
+
+  **CLOSING EXIT REVIEW 6 (2026-09-24, commit d6375f8) — ten floor crossings, seven root causes, three more found
+  by the corpus itself.** The remaining eight constats were all DENY-arriving-as-ASK, none an unauthorized ALLOW.
+  They were fixed by CAUSE rather than by spelling, and the general statement in each case is the same shape:
+  *a positive conclusion was drawn at the wrong position in the command.*
+
+  - **An option's VALUE is not an operand.** The scan for `-c` stepped over `-o pipefail` and `-O extglob` as
+    though they were the program, so `bash -o pipefail -c 'git push origin main'` lost its inline script.
+  - **A `#` comment starts at a WORD boundary**, which an unquoted operator makes as surely as a space does:
+    `echo hi;# it's fine` put the scanner into a phantom quoted state through the apostrophe.
+  - **`source` and `.` RUN the file they are handed**, so `. <(echo CMD)` is the same execution edge as
+    `bash <(echo CMD)`; the gate listed only the interpreters.
+  - **`<&0` DUPLICATES the descriptor the pipe installed**; only a redirection from a FILE replaces it, and
+    reading the duplication as a replacement killed the pipe edge in `echo 'rm -rf /' | bash <&0`.
+  - **Target sensitivity belongs to the TOOL, not to the capability that won the first match.** `docker exec`
+    is classified script-opaque — an interactive shell IS opaque — and that capability is not enrolled in the
+    target model, so a shell on a production engine asked while `docker run` against the same engine was denied.
+  - **A privilege wrapper's tail is a command**, and re-joining its tokens erased the quoting that says where a
+    word ends: `sudo bash -c 'git push origin main'` became `bash -c git push origin main`, whose program is the
+    single token `git`.
+  - **`printf %b` numeric escapes are text.** `\xHH` and `\0NNN` are decoded and masked to a byte the way the
+    shell masks them, so a literal asserted from an emitter is the text that will actually run.
+
+  The generated cross-product then found three more while proving the fixes, which is what it is for:
+
+  - the container engine was enrolled in the target RESOLVER but not in the target-ENVIRONMENT re-attachment, so
+    an engine named by `DOCKER_HOST`/`DOCKER_CONTEXT` survived only while the assignment stayed leading;
+  - the resolver read that re-attachment from `envInputs` only and never as a token — the "accepted but
+    unconsumed" defect one layer down;
+  - the normalizer stripped the environment prefix ONCE, *before* the shell keywords, so `if VAR=… cmd` kept its
+    assignment at the head and matched no `^`-anchored matcher at all.
+
+  Each of the ten is now a permanent corpus transform or class case, so every one is tested against every class
+  and every class against every one. Two corpus transforms were themselves corrected rather than the kernel: a
+  `nohup VAR=x cmd` composition is not a command any shell runs (the wrapper is handed `VAR=x` as its program),
+  and `chmod\040777` is `\0407` — a BEL, not a space — because `\0ddd` takes up to three octal digits. Gating a
+  command the shell would refuse to run is not a safety property.
+
+  **Cold validation at d6375f8** (`~/.ego` removed first): typecheck PASSED, lint PASSED, **FIRST cold parallel
+  run 234/234**, serial run 234/234, metamorphic/property suite 8/8, attack corpora 200,334 commands → 40 ALLOW
+  (the identical known set: three `@HOME@` placeholders the fixtures never expand, and ordinary development
+  commands the attack files carry as decoys), proportionality 7/44 (16%) and 13/73 (18%) — both unchanged.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
