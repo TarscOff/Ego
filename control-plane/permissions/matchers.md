@@ -12,6 +12,28 @@ notes: >
   are regular expressions applied to the normalized segment; `path` patterns are glob-like prefixes applied to the
   resolved path relative to the workspace root or to the home directory (prefix `~/`); `url` patterns match hostnames.
 matchers:
+  # --- acts whose SPELLING differs from the one already named, placed first because matching is
+  # first-match-wins per segment and a friendlier rule for the same head sits below (exit review 6) ---
+  # `git stash --all` stashes UNTRACKED AND IGNORED files too, which is every generated artifact and the whole
+  # `.harness` governance tree; `--include-untracked` is the same act one step smaller (exit review 6).
+  - capability: ego.runtime.tamper
+    tool: Bash
+    command: '^git\s+stash\b[^|;&]*\s(--all|-a)\b'
+  # `less`/`more`/`view` take an INITIAL COMMAND, and `!` runs it through a shell. A pager is bounded only while
+  # it is paging (exit review 6).
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^(less|more|most|view|vim?|nvim)\b[^|;&]*?(\+\s*!|-c\s+!|--cmd\s+)'
+  # `git send-pack` and `git subtree push` write refs on a remote: the same act `git push` names, and the
+  # organization locks the act, not the spelling.
+  - capability: git.remote.push
+    tool: Bash
+    command: '^git\s+(send-pack|subtree\s+push)\b'
+  # A container CONTEXT is a name for an engine, and creating or updating one WRITES that binding — after which
+  # every later command that names it reaches whatever it points at (exit review 6).
+  - capability: container.nonlocal.run
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+context\s+(create|update|import|rm|remove)\b'
   # --- hook and gate self-protection (absolute) ---
   - capability: ego.gate.bypass
     tool: Bash
@@ -27,7 +49,7 @@ matchers:
     command: '(^|\s)(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
   - capability: command.env-inject
     tool: Bash
-    command: '^env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL$)'
+    command: '^env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL$)'
   - capability: command.env-override
     tool: Bash
     command: '^env-inject\s+'
@@ -688,6 +710,18 @@ matchers:
   - capability: command.interpreter-script
     tool: Bash
     command: '^(rg|ripgrep|grep|ag)\b[^|;&]*\s(--pre|--hostname-bin|--pre-glob)(=|\s)'
+  # …EXCEPT when the name IS execution. A standalone `export PATH=/tmp/evil` or `BASH_ENV=/tmp/x` redefines what
+  # every later command in that shell runs, and the `export` form reached the bounded builtin rather than the
+  # binding. Anchored to an assignment-ONLY line, so it can never shadow a command that follows one: those are
+  # stripped by the normalizer into an `env-inject` marker long before this.
+  # The two sets are exactly the ones the `env-inject` marker rules above distinguish, so a standalone binding and
+  # a binding in front of a command get the SAME verdict rather than two different ones.
+  - capability: command.env-inject
+    tool: Bash
+    command: '(?:^|\s)(?:LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]*|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_[A-Z_]*|EGO_[A-Z_]*|CLAUDE_[A-Z_]*|CODEX_[A-Z_]*|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL)\+?='
+  - capability: command.env-override
+    tool: Bash
+    command: '(?:^|\s)(?:KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]*|HOME|PATH)\+?='
   # Pure shell structure and no-op builtins. They were never classified, so they were command.unknown (ASK) at top
   # level; once a script body stopped being pre-filtered, every `set -e` and `done` line asked. A redirection or a
   # command substitution disqualifies the line — `: > ~/.ssh/known_hosts` and `trap "curl …"` must NOT land here.
@@ -702,18 +736,6 @@ matchers:
   - capability: command.read-only
     tool: Bash
     command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history|dirname|basename|sleep|seq|nproc|realpath|readlink|mktemp|tr|cmp|comm|expr|exit|test|sha1sum|sha256sum|shasum|md5sum|cksum|tput|hostname|getconf|locale|column|paste|join|fold|rev|nl|tac|numfmt|timeout\s+\d)\b|\[\s|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+--version\b)'
-  # …EXCEPT when the name IS execution. A standalone `export PATH=/tmp/evil` or `BASH_ENV=/tmp/x` redefines what
-  # every later command in that shell runs, and the `export` form reached the bounded builtin rather than the
-  # binding. Anchored to an assignment-ONLY line, so it can never shadow a command that follows one: those are
-  # stripped by the normalizer into an `env-inject` marker long before this.
-  # The two sets are exactly the ones the `env-inject` marker rules above distinguish, so a standalone binding and
-  # a binding in front of a command get the SAME verdict rather than two different ones.
-  - capability: command.env-inject
-    tool: Bash
-    command: '^(?:(?:export|declare|local|readonly|typeset)\s+)?(?:LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]*|BASH_ENV|ENV|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_[A-Z_]*|EGO_[A-Z_]*|CLAUDE_[A-Z_]*|CODEX_[A-Z_]*|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL)\+?=\S*\s*$'
-  - capability: command.env-override
-    tool: Bash
-    command: '^(?:(?:export|declare|local|readonly|typeset)\s+)?(?:KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]*|HOME|PATH)\+?=\S*\s*$'
   # A LINE THAT ONLY BINDS A NAME RUNS NOTHING. `TODAY=$(date +%F)`, `n=$((i+1))` and `export FOO=bar` reached
   # command.unknown and asked, and once a script body is split line by line that is most of a real script
   # (exit review 4). The substituted command is a segment of its own and is classified there; an assignment to a

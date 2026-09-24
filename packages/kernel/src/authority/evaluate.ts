@@ -146,7 +146,7 @@ const WRAPPERS_WITH_OPERAND = new Set(['flock', 'su', 'runuser']);
 const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'], ['yarn', 'exec']];
 /** environment assignments that change what a command executes or where governance looks: never silently stripped */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
 
 /** A `cd` inside a subshell does NOT move the caller's directory, so the analyzer must stop claiming to know it
  *  once the subshell closes. Emitting this marker is how a flat segment list says so: the target carries a `$`, and
@@ -1246,7 +1246,10 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
             extra.push(`git alias-override ${alias[1]}`);
           }
           if (
-            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)/i.test(
+            // the same SHAPE rule as CONFIG_PROGRAM_VERBS: a key that ends in one of git's program-valued words
+            // names a program git will run, and enumerating them left `trailer.<t>.command`, `gpg.program` and
+            // every other one off the list reaching ALLOW (exit review 6)
+            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir)=/i.test(
               value,
             )
           )
@@ -2138,7 +2141,7 @@ const TREE_CHANGING =
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -2814,7 +2817,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       if (/^endif\b/.test(trimmed)) openConditions.pop();
       else if (/^else\b/.test(trimmed)) openConditions[openConditions.length - 1] = `conditional: ${trimmed}`;
       else openConditions.push(`conditional: ${trimmed}`);
-      current = null;
+      // A CONDITIONAL DOES NOT END THE RULE IT SITS INSIDE. make allows `ifeq` at column 0 in the middle of a
+      // recipe, and the recipe lines under it still belong to that target — clearing `current` dropped every one
+      // of them, so the guarded branch of a real recipe simply disappeared (exit review 6). Both branches are
+      // kept, which is the same rule this resolver already applies to a conditional around whole rules.
       continue;
     }
     if (/^(vpath|VPATH\s*[:+?]?=)/.test(trimmed)) model.unsupported.push(`VPATH: ${trimmed}`);
@@ -2861,9 +2867,16 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       current = null;
       continue;
     }
-    if (trimmed.startsWith('.')) {
+    // NOT EVERY TARGET THAT BEGINS WITH A DOT IS SPECIAL. Skipping all of them dropped three real recipes:
+    // `.DEFAULT`, which make runs for ANY goal that has no rule of its own; an old-style SUFFIX rule like `.c.o:`,
+    // which builds a target no literal rule names; and an ordinary target a project simply chose to call
+    // `.deploy`, whose recipe then ran under ALLOW even as a prerequisite (exit review 6). Only the special
+    // targets that genuinely define no recipe are skipped, and they are named.
+    const MAKE_NO_RECIPE_SPECIALS =
+      /^\.(PHONY|SUFFIXES|PRECIOUS|INTERMEDIATE|SECONDARY|SECONDEXPANSION|DELETE_ON_ERROR|IGNORE|LOW_RESOLUTION_TIME|SILENT|EXPORT_ALL_VARIABLES|NOTPARALLEL|POSIX|ONESHELL|DEFAULT_GOAL|RECIPEPREFIX|MAKEFLAGS|NOTINTERMEDIATE)\b/;
+    if (MAKE_NO_RECIPE_SPECIALS.test(trimmed)) {
       current = null;
-      continue; // other special targets (.PHONY, .SUFFIXES, …) define no recipe EGO must run
+      continue;
     }
     // a rule: `targets [: | ::] prereqs [; recipe]`. A target or prerequisite list built from a variable is
     // recorded as unsupported rather than parsed as a literal name.
@@ -2871,7 +2884,12 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     if (rule && !/^\s/.test(line)) {
       const targets = rule[1]!.trim().split(/\s+/).filter(Boolean);
       const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
-      if (targets.some((t) => /[%$]/.test(t))) model.hasPatternRules = true;
+      // A target that can build something NO LITERAL RULE DEFINES makes "this goal has no rule, so nothing runs"
+      // false. A `%` pattern is one; so are `.DEFAULT`, which make runs for any goal with no rule of its own, and
+      // an old-style SUFFIX rule like `.c.o:` — both reached ALLOW by proving a target absent that make in fact
+      // builds (exit review 6).
+      if (targets.some((t) => /[%$]/.test(t) || /^\.DEFAULT$/i.test(t) || /^\.[A-Za-z0-9_+-]+\.[A-Za-z0-9_+-]+$/.test(t)))
+        model.hasPatternRules = true;
       const shared: MakeRule = { recipes: [], prereqs };
       if (rule[3] && rule[3].trim()) shared.recipes.push(rule[3].trim()); // `target: ; cmd` one-line form
       const localBlind = [...openConditions];
@@ -2961,6 +2979,26 @@ const GIT_VERB_EVENTS: Record<string, GitEvent[]> = {
   worktree: ['checkout', 'ref-update'],
   'filter-branch': ['rewrite', 'ref-update'],
   bisect: ['checkout', 'ref-update'],
+  // `post-index-change` fires whenever the index is REFRESHED, which `status`, `diff` and `stash list` all do —
+  // so a hook installed there ran on the most ordinary read commands while EGO resolved no hook at all and left
+  // `git status` at ALLOW (exit review 6).
+  status: ['index-change'],
+  diff: ['index-change'],
+  grep: ['index-change'],
+  'ls-files': ['index-change'],
+  describe: ['index-change'],
+  submodule: ['checkout', 'ref-update', 'index-change'],
+  'sparse-checkout': ['checkout', 'index-change'],
+  'read-tree': ['index-change'],
+  'update-index': ['index-change'],
+  'checkout-index': ['index-change'],
+  'symbolic-ref': ['ref-update'],
+  notes: ['ref-update'],
+  replace: ['ref-update'],
+  gc: ['ref-update'],
+  prune: ['ref-update'],
+  'send-pack': ['push', 'ref-update'],
+  subtree: ['push', 'ref-update', 'index-change'],
 };
 
 /** What each hook listens to. */
@@ -3148,7 +3186,21 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
   [/^core\.pager$/i, new Set(['log', 'show', 'diff', 'blame', 'branch', 'tag', 'shortlog', 'grep'])],
   [/^core\.(sshCommand|gitProxy)$/i, new Set(['fetch', 'push', 'pull', 'clone', 'ls-remote', 'submodule', 'remote'])],
   [/^core\.editor$/i, new Set(['commit', 'rebase', 'tag', 'merge', 'revert', 'cherry-pick', 'config'])],
+  // AN ENUMERATION OF PROGRAM-VALUED KEYS IS AN ALLOWLIST, AND EVERYTHING OFF IT REACHED ALLOW. `diff.external`,
+  // `merge.<d>.driver`, `gpg.program`, `trailer.<t>.command`, `credential.helper`, `sendemail.smtpPass`-style
+  // helpers and `*.tool`/`*.path` pairs all name a program git runs, and each one missing from the list was a
+  // silent ALLOW (exit review 6). The rule is now the SHAPE of the key: git's own naming convention is that a
+  // program-valued key ends in one of these words. A key whose last component is not one of them is data.
+  [
+    /\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir)$/i,
+    // the verb scope cannot be narrowed for a key this resolver does not otherwise model, so it applies to every
+    // verb: a program named in repository-local configuration is part of the closure of whatever runs next
+    new Set<string>(),
+  ],
 ];
+/** A verb set that is EMPTY means "every verb": the key names a program and this resolver cannot say which
+ *  commands git will run it for, so it never claims that a given verb is out of its scope. */
+const EVERY_VERB = (set: ReadonlySet<string>): boolean => set.size === 0;
 
 /** REPOSITORY-LOCAL git config whose VALUE is a command git will run: clean/smudge filters, textconv, fsmonitor
  *  and the like. Local scope only \u2014 these are the keys an agent or a dependency can write into the checkout. */
@@ -3186,6 +3238,10 @@ function gitLocalProgramValues(root: string, verb: string): string[] {
     // every verb made `git status` and `git log` ask in any repository using Git LFS, which configures
     // `filter.lfs.clean` as its ordinary installation.
     const scope = CONFIG_PROGRAM_VERBS.find(([re]) => re.test(key));
+    if (scope && EVERY_VERB(scope[1])) {
+      out.push(value);
+      continue;
+    }
     if (scope && scope[1].has(verb)) out.push(value);
   }
   return out;
@@ -3527,7 +3583,7 @@ function resolveScriptCommand(
     // npm accepts its configuration as flags anywhere on the line, including AFTER the script name, and
     // `--script-shell` re-points the interpreter of every script (challenge 8, finding 3)
     const npmFlags = tokens.filter((t) =>
-      /^--(script-shell|node-options|shell|ignore-scripts=false|foreground-scripts)(=|$)/.test(t),
+      /^--(script-shell|node-options|shell|ignore-scripts=false|foreground-scripts|userconfig|globalconfig|prefix)(=|$)/.test(t),
     );
     // the same settings live in `.npmrc` / `.yarnrc.yml`, which npm reads from the package directory upwards.
     // A flag on the command line was modelled and the FILE that sets the identical key was not (challenge 8).
@@ -4230,7 +4286,7 @@ function classifyTargetName(
 /** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
 /** docker/podman global options that consume the next token, so their value is not the subcommand. */
 const DOCKER_GLOBAL_VALUE_OPTS =
-  /^(--log-level|-l|--config|--tlscacert|--tlscert|--tlskey|--context|-c|--host|-H|--url|--connection|--builder|--identity|--runtime|--namespace)$/;
+  /^(--log-level|-l|--config|--tlscacert|--tlscert|--tlskey|--context|-c|--host|-H|--url|--connection|--builder|--identity|--runtime|--namespace|--remote|--storage-driver)$/;
 
 /**
  * Which ENGINE a container command talks to. Only an EXPLICIT selection is classified: `-H`/`--host`,
@@ -4266,6 +4322,12 @@ function resolveContainerTarget(
       if (i > 1 && DOCKER_GLOBAL_VALUE_OPTS.test(tokens[i - 1] ?? '')) continue;
       break;
     }
+    // THE CLIENT CONFIG DIRECTORY SELECTS THE ENGINE. `docker --config DIR` reads DIR/config.json for the current
+    // context, and `podman --remote` switches to a connection named in a file: both were skipped as opaque option
+    // noise, so a production daemon reached ALLOW (exit review 6). Neither file can be read from here, so the
+    // target is UNCLASSIFIED — never local.
+    if (t === '--config' || t === '--remote' || /^--config=/.test(t))
+      signals.push({ cls: 'UNCLASSIFIED', target: `client configuration ${t}` });
     const eq = /^(?:--host=|--context=|--url=|--connection=|--builder=|-H|-c)(.+)$/.exec(t);
     if ((t === '-H' || t === '--host' || t === '--url') && tokens[i + 1]) add(tokens[++i]!, 'engine');
     else if ((t === '-c' || t === '--context' || t === '--connection') && tokens[i + 1]) add(tokens[++i]!, 'context');
@@ -4321,6 +4383,11 @@ function resolveK8sTarget(
   // The verb is found BY NAME, not by skipping option values: any global option missing from a skip-list would
   // otherwise displace it and silently turn a mutation into a read (round 14).
   const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
+  // READING A PRODUCTION CLUSTER'S SECRETS IS NOT A READ THIS MODEL MAY WAVE THROUGH. The target model escalates
+  // only MUTATING verbs, so `kubectl --context production get secrets -o yaml` — a full credential dump — reached
+  // ALLOW under a capability named k8s.local.apply (exit review 6). A secret is the one resource whose READ is an
+  // effect on its own.
+  const touchesSecrets = head === 'kubectl' && tokens.some((t) => /^(secret|secrets|secret\/.+)$/i.test(t));
   const mutate = head === 'helm' ? HELM_MUTATING_VERBS : K8S_MUTATING_VERBS;
   let verb: string | undefined;
   for (let i = 1; i < tokens.length; i++) {
@@ -4337,7 +4404,11 @@ function resolveK8sTarget(
   // an unrecognised verb fails closed: the kernel cannot show it is a read. And `config use-context` is not a
   // read of anything — it re-points every LATER command at that cluster, which is the effect that matters.
   const switchesContext = tokens.some((t, i) => t === 'use-context' && tokens[i - 1] === 'config');
-  const mutating = switchesContext || verb === undefined ? true : mutate.has(verb);
+  // READING A CLUSTER'S SECRETS IS AN EFFECT ON ITS OWN. The target model escalates only MUTATING verbs, so
+  // `kubectl --context production get secrets -o yaml` — a full credential dump from a production cluster —
+  // reached ALLOW under a capability literally named k8s.local.apply (exit review 6). A secret is the one
+  // resource whose READ has to be treated as an act against the cluster it is read from.
+  const mutating = switchesContext || touchesSecrets || verb === undefined ? true : mutate.has(verb);
   // EVERY signal that can select the cluster is classified, and the MOST RESTRICTIVE one decides. kubectl resolves
   // them together — `--server` overrides the context's endpoint and `--kubeconfig` chooses the file the context is
   // looked up in — so a local-looking `--context` must never end the search (round 14).
@@ -4405,6 +4476,10 @@ function resolveDbTarget(
       if (isOpaqueTarget(m[0]!)) signals.push({ cls: 'UNCLASSIFIED', target: m[0]! });
       else push(m[1] ?? '', 'uri host');
     }
+    // A QUERY PARAMETER OVERRIDES THE URI HOST. libpq reads `postgres://localhost/app?host=prod-db.acme.com` and
+    // connects to prod-db: the authority is ignored when `host=` is given, so reading only the authority let a
+    // production database reach ALLOW (exit review 6).
+    for (const m of t.matchAll(/[?&](host|hostaddr|server)=([^&\s"']+)/gi)) push(m[2]!, 'uri parameter host');
     // an environment variable that selects the server, re-attached by normalizeSegment
     const env = /^(PGHOST|PGHOSTADDR|MYSQL_HOST|REDIS_HOST|CLICKHOUSE_HOST)=(.+)$/.exec(t);
     if (env) push(env[2]!, env[1]! + '=');

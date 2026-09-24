@@ -426,6 +426,41 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   than ENOTEMPTY, and `selfVersion()` is memoized instead of shelling out to git on each of its twelve call sites.
   Measured after the fix: the same deliberate provocation goes from 8 failures to 1, and the remaining one is a
   trust assertion reading an identity that genuinely moved. Full detail in docs/architecture/phase-1-residuals.md.
+  **EXIT REVIEW 6 (2026-09-24) — FAILED, with ZERO new architectural classes.** Eight independent high-risk
+  lenses against HEAD eab9a57, every claim reproduced through a shared probe and put to two skeptics instructed to
+  refute it. The taxonomy held completely: no lens produced a shape of execution closure the eleven frozen classes
+  cannot express, including the lens whose whole job was to try. What it did produce was a long list of
+  unauthorized ALLOWs inside those classes, and the most valuable of them are the ones nobody had thought to spell:
+
+  - **PS4 is an execution carrier.** bash RE-EXPANDS `PS4` before printing every traced command, so
+    `PS4='$(git push origin main)' bash -x script` runs the push once per traced line — at ALLOW, because the
+    normalizer strips a leading assignment and only re-surfaces names it recognises.
+  - **An enumeration of program-valued git config keys is an allowlist, and everything off it reached ALLOW.**
+    `diff.external`, `merge.<d>.driver`, `gpg.program`, `trailer.<t>.command`, `credential.helper`. The rule is now
+    the SHAPE of the key — git's own convention is that a program-valued key ends in `command`, `driver`,
+    `program`, `helper`, `textconv`, `clean`, `smudge`, `external` and their siblings.
+  - **`post-index-change` fires on `git status`.** The verb-to-event table had no entry for the read commands that
+    refresh the index, so a hook installed there was never resolved and `git status` stayed ALLOW.
+  - **make's own shapes.** A conditional at column 0 inside a recipe ended the rule, dropping every guarded line;
+    `.DEFAULT`, an old-style suffix rule and an ordinary target simply NAMED `.deploy` were all skipped as
+    "special", so EGO proved absent a target make runs a recipe for.
+  - **A client config directory selects the engine** (`docker --config DIR`, `podman --remote`), **a context
+    CREATE writes the name-to-engine binding**, and **a URI query parameter overrides the URI host**
+    (`postgres://localhost/app?host=prod-db`).
+  - **Reading a production cluster's secrets is an act against it**, not a read the target model may wave through:
+    `kubectl --context production get secrets -o yaml` was ALLOW under a capability named `k8s.local.apply`.
+  - Also closed: `export FOO=bar BASH_ENV=…` (a governed binding is recognised wherever it sits on the line),
+    `npm run X --userconfig=FILE`, `git stash --all` (which stashes the whole `.harness` tree), `git send-pack`
+    and `git subtree push` as spellings of a push, and `less +'!CMD'` as an initial-command carrier.
+
+  One of the review's own claims was REFUTED by the work: `mongosh --eval '<js>'` is not "a program EGO never
+  read" — the code is inline and visible — and the rule written for it was reverted because it hid the target
+  resolution and dropped a PRODUCTION mongo target from DENY to ASK. That is recorded because a review finding
+  that turns out to be wrong is as much a result as one that turns out to be right.
+
+  After the fixes there is no ALLOW left in the review's reproduction set: what remains is ASK, which is the
+  designed gate. This line stays IN PROGRESS: the criterion is a FRESH review finding none, and the review that
+  found these is not that review.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
