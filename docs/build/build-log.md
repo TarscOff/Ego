@@ -420,7 +420,22 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   not, and nothing in the data suggests it will reach zero: an adversarial fleet of this size finds a comparable
   number of new surfaces every time. An exit criterion expressed in INSTANCES may therefore never be met, while
   one expressed in CLASSES has been met three times running. That is a product decision, recorded here rather than
-  taken. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  taken.
+  **Challenge 12 (the third exit review, 2026-09-24): 26 confirmed, ZERO new architectural classes** — the two
+  entries the fleet labelled "new" were documentation defects, not execution-closure shapes. Its headline finding
+  is the most serious any round has produced: `splitShellSegments` guarded the command-substitution extractor with
+  `!inSingle && !inDouble`, the same condition as the operator branches. That is right for operators and wrong for
+  substitution, which only SINGLE quotes suppress — so `echo "$(git push origin main)"` was ALLOW and the push
+  ran, verified against a real shell. An entire execution channel, through which every DENY in the control plane
+  was reachable in one Bash call. Also closed: `npx --package` acquiring a package behind a decoy command,
+  `kubectl config use-context production`, a `kubectl exec -- CMD` body never analysed, `exec -a NAME prog`,
+  `helm --post-renderer`, `GOFLAGS=-toolexec`, `diff.external`, `env -C`, and case-insensitive `npm_config_*`. Two
+  more proportionality regressions of mine: `docker --context default` — the local daemon's own name — denied, and
+  a documentation sentence listing `npm test` among the commands that stay ALLOW.
+
+  **FOUR rounds now: 0, 0, 0, 0 new architectural classes; 25, 28, 29, 26 instances.** The instance count is flat.
+  The architecture has been stable for four consecutive adversarial passes of this size, and instance discovery
+  shows no sign of terminating. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
