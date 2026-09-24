@@ -1928,6 +1928,10 @@ export interface ExecutionEnvironment {
   config: { read: string[]; unresolved: Unresolved[] };
   /** BINDING RESOLUTION: see `Binding`. */
   binding: Binding;
+  /** Names DEFINED IN THIS UNIT whose body the analyzer already read — a shell function. A call to one of them
+   *  executes text that is already accounted for, so it is neither an unknown producer nor an unresolved binding:
+   *  EGO knows exactly what the name means. An ALIAS is not here, because its body is not handed over. */
+  definedNames?: ReadonlySet<string>;
   /** TRANSITIVE FRESHNESS: canonical paths that an earlier unit of THIS COMMAND writes. Shared and mutated in
    *  place across every depth, so a write inside a producer body invalidates a later conclusion outside it —
    *  `./configure && make` must not reuse the Makefile configure just rewrote. */
@@ -2560,17 +2564,35 @@ export function expandMakeText(
   vars: Map<string, string>,
   auto: Record<string, string> = {},
   depth = 0,
-): { text: string | null; ran: string[] } {
+): { text: string | null; prefix: string; ran: string[] } {
   const ran: string[] = [];
-  if (depth > 8) return { text: null, ran };
+  if (depth > 8) return { text: null, prefix: '', ran };
   let out = '';
+  let prefix = ''; // what was determined BEFORE the first unknown: the head and the arguments up to it
   let opaque = false;
+  // A REFERENCE INSIDE DOUBLE QUOTES CANNOT INTRODUCE OPERATORS. make splices the value in before the shell parses
+  // the line, which is why an UNQUOTED reference really can carry a `;` and become new commands — but inside
+  // quotes the same value is one word. Without this distinction the single most common release makefile,
+  // `VERSION := $(shell git describe)` with `echo "building $(VERSION)"`, was opaque and asked (exit review 5).
+  let inDouble = false;
+  const unknownHere = (): void => {
+    if (inDouble) out += '$MAKEVAR';
+    else opaque = true;
+  };
   const nameOnly = (v: string): string => v.slice(v.lastIndexOf('/') + 1);
   const dirOnly = (v: string): string => (v.includes('/') ? v.slice(0, v.lastIndexOf('/')) : '.');
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
+    if (ch === '\\' && text[i + 1] !== undefined) {
+      out += ch + text[i + 1]!;
+      if (!opaque) prefix = out;
+      i++;
+      continue;
+    }
+    if (ch === '"') inDouble = !inDouble;
     if (ch !== '$') {
       out += ch;
+      if (!opaque) prefix = out;
       continue;
     }
     const next = text[i + 1];
@@ -2587,15 +2609,16 @@ export function expandMakeText(
       const single = auto[next];
       if (single !== undefined) {
         out += single;
+        if (!opaque) prefix = out;
         i++;
         continue;
       }
       const v = vars.get(next);
-      if (v === undefined) opaque = true;
+      if (v === undefined) unknownHere();
       else {
         const inner = expandMakeText(v, vars, auto, depth + 1);
         ran.push(...inner.ran);
-        if (inner.text === null) opaque = true;
+        if (inner.text === null) unknownHere();
         else out += inner.text;
       }
       i++;
@@ -2616,19 +2639,19 @@ export function expandMakeText(
       const cmd = expandMakeText(fn[2]!, vars, auto, depth + 1);
       ran.push(...cmd.ran);
       if (cmd.text !== null && cmd.text.trim()) ran.push(cmd.text.trim());
-      opaque = true;
+      unknownHere(); // the command RAN; what it printed is not knowable
       continue;
     }
     if (fn && MAKE_TEXT_FUNCTIONS.has(fn[1]!)) {
       const arg = expandMakeText(fn[2]!, vars, auto, depth + 1); // a nested $(shell …) is still found
       ran.push(...arg.ran);
-      opaque = true; // the function's RESULT is not evaluated here
+      unknownHere(); // the function's RESULT is not evaluated here
       continue;
     }
     const autoRef = /^([@<^+*?%])([DF])?$/.exec(body.trim());
     if (autoRef) {
       const v = auto[autoRef[1]!];
-      if (v === undefined) opaque = true;
+      if (v === undefined) unknownHere();
       else out += autoRef[2] === 'D' ? dirOnly(v) : autoRef[2] === 'F' ? nameOnly(v) : v;
       continue;
     }
@@ -2637,17 +2660,20 @@ export function expandMakeText(
     if (value !== undefined) {
       const inner = expandMakeText(value, vars, auto, depth + 1);
       ran.push(...inner.ran);
-      if (inner.text === null) opaque = true;
-      else out += inner.text;
+      if (inner.text === null) unknownHere();
+      else {
+        out += inner.text;
+        if (!opaque) prefix = out;
+      }
       continue;
     }
     // A VARIABLE THIS RESOLVER NEVER SAW DEFINED IS NOT PROVABLY EMPTY. make imports the whole environment and
     // accepts `make VAR=…` on the command line, so an undefined-looking name can carry anything at run time —
     // expanding it to nothing would turn a dynamic recipe into a proven-harmless one, which is the unearned
     // positive claim this kernel exists to refuse.
-    opaque = true;
+    unknownHere();
   }
-  return { text: opaque ? null : out, ran };
+  return { text: opaque ? null : out, prefix, ran };
 }
 
 /** Joins backslash continuations OUTSIDE recipe lines; a recipe's continuation stays one logical shell line. */
@@ -2702,7 +2728,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   // sees an EMPTY recipe and reports the target fully resolved — its own gap becoming a positive claim.
   let prefix = '\t';
   for (const line of lines) {
-    const rp = /^\s*\.RECIPEPREFIX\s*[:+?]?=\s*(\S?)/.exec(line);
+    // a line that starts with the CURRENT recipe prefix is a recipe line, whatever it says: a tab-indented
+    // `.RECIPEPREFIX` is a command make hands to the shell, and reading it as a directive changed the prefix so
+    // every remaining recipe line of that target became invisible (exit review 5)
+    const rp = line.startsWith(prefix) ? null : /^\s*\.RECIPEPREFIX\s*[:+?]?=\s*(\S?)/.exec(line);
     if (rp) {
       prefix = rp[1] || '\t'; // an empty assignment restores the tab
       current = null;
@@ -2716,10 +2745,14 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     if (!trimmed || trimmed.startsWith('#')) continue;
 
     // `include a.mk b.mk` — the included rules really execute, so an unreadable one is not "no such target"
-    const inc = /^[-s]?include\s+(.+)$/.exec(trimmed);
+    const inc = /^([-s]?)include\s+(.+)$/.exec(trimmed);
     if (inc) {
       current = null;
-      if (/[$`]/.test(inc[1]!)) {
+      // `-include` and `sinclude` exist PRECISELY so that a missing file is not an error: make carries on. Marking
+      // an absent optional include unsupported gated every ordinary `make build` in a project that generates its
+      // dependency files (exit review 5). A file that IS there is still read and still counts.
+      const optional = inc[1] === '-' || inc[1] === 's';
+      if (/[$`]/.test(inc[2]!)) {
         model.unsupported.push(`include with a computed path: ${trimmed}`);
         continue;
       }
@@ -2727,7 +2760,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         model.unsupported.push('include nested deeper than this resolver follows');
         continue;
       }
-      for (const name of inc[1]!.split(/\s+/).filter(Boolean)) {
+      for (const name of inc[2]!.split(/\s+/).filter(Boolean)) {
+        if (optional && !fileExists(resolve(dir, name))) continue;
         const sub = parseMakefile(ctx, resolve(dir, name), dir, depth + 1);
         for (const [t, r] of sub.rules) {
           const existing = model.rules.get(t);
@@ -2736,6 +2770,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
             existing.prereqs.push(...r.prereqs);
           } else model.rules.set(t, { recipes: [...r.recipes], prereqs: [...r.prereqs] });
         }
+        for (const [k, v] of sub.vars) model.vars.set(k, v); // an included file's variables are this file's too
+        model.parseRan.push(...sub.parseRan);
         model.unsupported.push(...sub.unsupported);
         for (const [t, u] of sub.unsupportedFor)
           model.unsupportedFor.set(t, [...(model.unsupportedFor.get(t) ?? []), ...u]);
@@ -2750,6 +2786,9 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     // constructs whose effect this resolver cannot compute — recorded, never silently ignored
     if (/^(ifeq|ifneq|ifdef|ifndef|else|endif)\b/.test(trimmed)) {
+      // make expands the CONDITION while parsing, so a shell function in it runs for every target and for a dry
+      // run — and this branch returned before the parse-time collection below ever saw the line (exit review 5)
+      for (const c of expandMakeText(trimmed, model.vars).ran) model.parseRan.push(c);
       if (/^endif\b/.test(trimmed)) openConditions.pop();
       else if (/^else\b/.test(trimmed)) openConditions[openConditions.length - 1] = `conditional: ${trimmed}`;
       else openConditions.push(`conditional: ${trimmed}`);
@@ -2776,7 +2815,14 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     if (anyAssign) {
       const [, name, op, value] = anyAssign as unknown as [string, string, string, string];
       const prior = model.vars.get(name);
-      model.vars.set(name, op === '+=' && prior !== undefined ? `${prior} ${value}` : value);
+      // `:=` and `::=` are SIMPLY EXPANDED: the value is fixed HERE, so a later assignment to what it referenced
+      // does not change it. Storing the text and expanding it lazily gave every variable recursive flavour, and
+      // `B := $(A)` then read A's LAST value rather than its value at this line (exit review 5).
+      const simple = op === ':=' || op === '::=';
+      const text = simple ? (expandMakeText(value, model.vars).text ?? value) : value;
+      model.vars.set(name, op === '+=' && prior !== undefined ? `${prior} ${text}` : text);
+      // an assignment expands its right-hand side NOW when it is simply expanded, so a shell function there runs
+      if (simple) for (const c of expandMakeText(value, model.vars).ran) model.parseRan.push(c);
     }
     // `$(shell …)` ANYWHERE outside a recipe runs while make PARSES — for every target, and for `make -n`
     for (const c of expandMakeText(trimmed, model.vars).ran) model.parseRan.push(c);
@@ -3506,12 +3552,18 @@ function resolveScriptCommand(
   // make targets
   if (head === 'make' || head === 'gmake') {
     const MAKE_ARG_OPTS = new Set([
-      '-C', '--directory', '-f', '--file', '--makefile', '-j', '--jobs', '-l',
-      '--load-average', '-o', '--old-file', '-W', '--what-if', '-I', '--include-dir',
+      '-C', '--directory', '-f', '--file', '--makefile', '-o', '--old-file', '-W', '--what-if', '-I',
+      '--include-dir',
     ]);
+    // `-j`, `--jobs`, `-l` and `--load-average` take an OPTIONAL argument, and make decides by LOOKING at it:
+    // `make -j build` builds `build`, `make -j4 build` too. Treating the argument as mandatory swallowed the
+    // target name, so the analyzer resolved the DEFAULT goal and reported on a recipe nobody asked for
+    // (exit review 5).
+    const MAKE_OPTIONAL_NUMBER_OPTS = new Set(['-j', '--jobs', '-l', '--load-average']);
     const targets: string[] = [];
     const cliRebinds: string[] = [];
     const cliInputs: string[] = [];
+    const cliVars = new Map<string, string>();
     let makeDir = cwd;
     const makeFiles: string[] = []; // every -f/--file/--makefile: make reads them ALL, not just the last
     for (let i = 1; i < tokens.length; i++) {
@@ -3525,6 +3577,7 @@ function resolveScriptCommand(
         if ((t === '-f' || t === '--file' || t === '--makefile') && tokens[i + 1]) makeFiles.push(tokens[i + 1]!);
         else if (fileEq) makeFiles.push(fileEq[1]!);
         if (MAKE_ARG_OPTS.has(t)) i++;
+        else if (MAKE_OPTIONAL_NUMBER_OPTS.has(t) && /^\d+(\.\d+)?$/.test(tokens[i + 1] ?? '')) i++;
         continue;
       }
       if (t.includes('=')) {
@@ -3532,6 +3585,9 @@ function resolveScriptCommand(
         // too, and the leading-assignment capture cannot see them (challenge 8, finding 2)
         if (/^(SHELL|\.SHELLFLAGS|PATH)=/.test(t)) cliRebinds.push(t);
         else if (EXECUTION_ENV_INPUTS.test(t.slice(0, t.indexOf('=')))) cliInputs.push(t);
+        // a command-line assignment OVERRIDES every assignment of that name in the makefile, so the recipe does
+        // not expand to what the file says (exit review 5)
+        cliVars.set(t.slice(0, t.indexOf('=')), t.slice(t.indexOf('=') + 1));
         continue;
       }
       targets.push(t);
@@ -3612,6 +3668,7 @@ function resolveScriptCommand(
       if (m.hasPatternRules) merged.hasPatternRules = true;
       merged.rebinds.push(...m.rebinds);
       for (const [k, v] of m.vars) merged.vars.set(k, v);
+      for (const [k, v] of cliVars) merged.vars.set(k, v); // the command line wins over every file
       merged.parseRan.push(...m.parseRan);
       merged.sources.push(...m.sources);
       merged.text += m.text + '\n';
@@ -3651,6 +3708,11 @@ function resolveScriptCommand(
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
         const expanded = expandMakeText(cmd, merged.vars, { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') });
         for (const inner of expanded.ran) body.push(inner);
+        // WHAT IS KNOWN IS HANDED OVER EVEN WHEN THE LINE IS NOT FULLY KNOWN. The prefix up to the first unknown
+        // still carries the command, so `git push $(UNKNOWN)` keeps its locked deny instead of degrading to an
+        // opacity ASK, which is a weaker verdict for a command the resolver could read perfectly well
+        // (exit review 5).
+        if (expanded.text === null && expanded.prefix.trim()) body.push(expanded.prefix.trim());
         if (expanded.text === null) {
           // ONE unresolvable line no longer discards the rest: the resolved lines are still analysed and the
           // remainder is reported (challenge 5, finding 8 — "known but incomplete body")
@@ -3895,6 +3957,16 @@ function resolveScriptCommand(
   // assignment that redefines EXECUTION is still carried by the binding dimension, which this does not touch.
   // A name that redefines EXECUTION ITSELF — PATH, LD_PRELOAD, BASH_ENV, GIT_SSH_COMMAND — is excluded: binding
   // it changes what every later command in that shell runs, which is precisely an execution closure.
+  // a name this unit DEFINED as a function: its body was handed over at the definition, so calling it adds no
+  // closure and it is not an unmodelled program (exit review 5)
+  if (env.definedNames?.has(bare))
+    return {
+      kind: 'none',
+      key: `function:${bare}`,
+      body: null,
+      reason: `${bare} is a function defined and analysed in this unit`,
+      resolution: 'NOT_A_PRODUCER',
+    };
   const assigned = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(bare);
   if (assigned && !ENV_INJECT_RE.test(assigned[1]!))
     return {
@@ -5357,6 +5429,9 @@ function analyzeSegments(
   // for is `tsc() { git push …; }` FOLLOWED BY `tsc -p .`, where the name really is used (exit review 4). A
   // lookup-path rebind (`PATH=…`) stays global, because it re-points every later command.
   const definedNames = new Map<string, string>();
+  /** names DEFINED AS FUNCTIONS in this unit: their bodies are handed over at the definition, so a call to one
+   *  adds no closure. An `alias` body is NOT handed over and keeps its binding gap. */
+  const functionNames = new Set<string>();
   const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
@@ -5378,6 +5453,7 @@ function analyzeSegments(
       carriedEnv = {};
       rebound = null;
       definedNames.clear();
+      functionNames.clear();
     }
     // the stage whose standard output the NEXT piped stage will read
     let upstream: string | null = null;
@@ -5404,10 +5480,7 @@ function analyzeSegments(
     }
     // a consumed function header binds a name for everything after it, and is not a command
     if (cdTrimmed.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
-      definedNames.set(
-        cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1),
-        `the body defines ${cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1)} before using it`,
-      );
+      functionNames.add(cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1));
       continue;
     }
     const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
@@ -5464,6 +5537,10 @@ function analyzeSegments(
     const effectiveCwd = cwd === '\0dynamic' ? state.env.cwd : cwd;
     // a declared name matters exactly where it is USED
     const segHead = (tokenize(seg)[0] ?? '').replace(/^.*\//, '');
+    // A FUNCTION DEFINED HERE IS NOT AN UNRESOLVED BINDING. Its body was handed over at the definition, so EGO
+    // knows exactly what the name means — reporting a binding gap for it made every script that defines a helper
+    // and calls it ask, `usage` in a real hook among them (exit review 5). An alias keeps its gap: its body is
+    // not handed over, so the name really is bound to something the analyzer never read.
     const bindingWhy = rebound ?? definedNames.get(segHead) ?? null;
     // the tracked working directory IS the resolution context; when `cd` went somewhere dynamic it is not proven,
     // and every conclusion drawn from a relative path below is downgraded rather than guessed
@@ -5475,6 +5552,7 @@ function analyzeSegments(
       // ENVIRONMENT-INPUT CLOSURE: captured HERE, before normalizeSegment strips the assignments, so the producer
       // boundary sees what the command line did to the tool it is about to resolve
       envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg) },
+      definedNames: functionNames,
       ...(bindingWhy !== null ? { binding: { kind: 'redefined' as const, why: bindingWhy } } : {}),
       get treeFresh(): boolean {
         return !written.has(TREE_DIRTY);
@@ -5529,7 +5607,11 @@ function analyzeSegments(
           opaqueHit(table, ctx, seg, `runs the standard output of \`${stdinFrom}\`, which this kernel did not read`),
         );
     }
-    for (const norm of normalizeSegment(seg)) {
+    // A CALL TO A FUNCTION DEFINED HERE runs the body that was already handed over at the definition, so the call
+    // itself adds nothing — but its REDIRECTIONS and path operands are still its own, which is why the head is
+    // marked rather than the segment skipped (exit review 5).
+    const classifySeg = functionNames.has(segHead) ? `local-function ${seg}` : seg;
+    for (const norm of normalizeSegment(classifySeg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
       for (const h of normHits) hits.push(h);
       // a locked operation carried by any wrapper, launcher or placeholder the normalizer does not know is still found:

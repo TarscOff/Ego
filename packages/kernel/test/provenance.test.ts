@@ -422,16 +422,26 @@ test('a body that REBINDS a name gates because the binding is modelled, not by a
   // of the matcher table, not a property of the contract. The rebinding is now carried across the unit, exactly
   // like the write ledger, and reset per isolated shell.
   const sh = (body: string) => workspace({ 'run.sh': `#!/bin/sh\n${body}\n` });
+  // A FUNCTION IS RESOLVED, NOT MERELY REPORTED. Its body is handed to the analyzer at the definition, so the
+  // gate is the body's OWN verdict — a stronger answer than an opacity ASK, and the reason a script that defines
+  // an ordinary helper no longer asks. An ALIAS body is not handed over, so it keeps its binding gap, and so does
+  // a lookup-path rebind, which re-points every later command rather than one name.
+  const r = run('./run.sh', sh('tsc() { git push origin main; }\ntsc -p .'));
+  assert.equal(r.verdict, 'DENY', 'a function body is analysed, so its own effect decides');
+  assert.equal(
+    run('./run.sh', sh('log() { echo hi; }\nlog start\nmkdir -p dist')).verdict,
+    'ALLOW',
+    'and a helper that does nothing governed is ordinary work',
+  );
   for (const [label, body] of [
-    ['function', 'tsc() { git push origin main; }\ntsc -p .'],
     ['alias', 'alias tsc="git push origin main"\ntsc -p .'],
     ['PATH', 'PATH=./bin:$PATH\ntsc -p .'],
     ['export PATH', 'export PATH=./bin:$PATH\ngit status'],
   ] as Array<[string, string]>) {
-    const r = run('./run.sh', sh(body));
-    assert.notEqual(r.verdict, 'ALLOW', `${label}: the body re-points what runs`);
+    const rb = run('./run.sh', sh(body));
+    assert.notEqual(rb.verdict, 'ALLOW', `${label}: the body re-points what runs`);
     assert.ok(
-      r.hits.some((h) => /binding|defines|PATH/.test(h.via ?? '')),
+      rb.hits.some((h) => /binding|defines|PATH/.test(h.via ?? '')),
       `${label}: the gap must be reported as a BINDING gap, not inherited from an unclassified line`,
     );
   }

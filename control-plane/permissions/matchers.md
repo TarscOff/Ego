@@ -717,6 +717,13 @@ matchers:
   - capability: command.read-only
     tool: Bash
     command: '^(?:(?:export|declare|local|readonly|typeset)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=(?:\$ARITH|\$SUBST|"[^"`$]*"|''[^'']*''|[^\s;&|`$<>]*)\s*)+$'
+  # A call to a function DEFINED IN THE SAME UNIT runs a body the analyzer already read at the definition, so the
+  # call adds no closure of its own. The marker is put on the head by the analyzer, which is the only place that
+  # knows which names the unit defined; the rest of the segment — its redirections and path operands — is still
+  # matched normally after it (exit review 5).
+  - capability: command.read-only
+    tool: Bash
+    command: '^local-function\b'
   # `command -v NAME` and `command -V NAME` LOOK UP a program, they do not run it. `command` is stripped as a
   # transparent wrapper, so `command -v node` was classified as RUNNING node and asked — in the one idiom every
   # script uses to test whether a tool exists (exit review 4).
