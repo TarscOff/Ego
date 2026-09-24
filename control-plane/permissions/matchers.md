@@ -721,7 +721,7 @@ matchers:
   # the normalizer and matched by its own rule above, which is why this one can stay narrow rather than clever.
   - capability: command.read-only
     tool: Bash
-    command: '^(?:(?:export|declare|local|readonly|typeset)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=(?:\$ARITH|\$SUBST|"[^"`$]*"|''[^'']*''|[^\s;&|`$<>]*)\s*)+$'
+    command: '^(?:(?:export|declare|local|readonly|typeset)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=(?:\$ARITH|\$SUBST|\$\{[A-Za-z_][A-Za-z0-9_]*(?:[:#%/^,][^{}]*)?\}|\$[A-Za-z_][A-Za-z0-9_]*|"[^"`]*"|''[^'']*''|[^\s;&|`$<>]*)\s*)+$'
   # A call to a function DEFINED IN THE SAME UNIT runs a body the analyzer already read at the definition, so the
   # call adds no closure of its own. The marker is put on the head by the analyzer, which is the only place that
   # knows which names the unit defined; the rest of the segment — its redirections and path operands — is still
@@ -734,7 +734,7 @@ matchers:
   # script uses to test whether a tool exists (exit review 4).
   - capability: command.read-only
     tool: Bash
-    command: '^command\s+-[vV]\s+\S+\s*$'
+    command: '^command\s+-[vV]\s+\S+(?:\s+(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null))*\s*$'
   # interposed interpreter options (`python3 -u -c`, `node --no-warnings -e`) must not escape the ^-anchored match
   - capability: command.interpreter-inline
     tool: Bash
