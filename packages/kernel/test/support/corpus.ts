@@ -242,6 +242,8 @@ export interface Transform {
 
 const noDouble = (c: string): boolean => !c.includes('"');
 const noSingle = (c: string): boolean => !c.includes("'");
+/** a transformation that counts parentheses cannot carry a command that contains them */
+const noParens = (c: string): boolean => !/[()]/.test(c);
 
 export const TRANSFORMS: readonly Transform[] = [
   // command substitution — the class the double-quote defect belonged to
@@ -281,6 +283,26 @@ export const TRANSFORMS: readonly Transform[] = [
   // transported into a container or a cluster
   { name: 'kubectl exec', apply: (c) => `kubectl --context kind-dev exec pod -- ${c}` },
   { name: 'docker exec', apply: (c) => `docker exec box -- ${c}` },
+  // added by exit review 4 — each one reached a verdict below its floor before the round that found it
+  { name: 'in a case branch', apply: (c) => `case $x in a) ${c} ;; esac` },
+  { name: 'in a case branch, alternation', apply: (c) => `case $x in a|b) ${c} ;; esac` },
+  { name: 'in a multi-line case', apply: (c) => `case "$1" in\n  a) echo a ;;\n  *) ${c} ;;\nesac` },
+  { name: 'in a function body', apply: (c) => `f() { ${c}; }; f`, safe: (c) => !c.includes('}') },
+  { name: 'in a function body, subshell form', apply: (c) => `f() ( ${c} ); f`, safe: noParens },
+  { name: 'after a comment carrying an apostrophe', apply: (c) => `echo hi # this isn't ready\n${c}` },
+  { name: 'after a comment carrying a double quote', apply: (c) => `echo ok # say "hi\n${c}` },
+  { name: 'arithmetic-looking substitution', apply: (c) => `echo $((${c}) )`, safe: noParens },
+  { name: 'arithmetic-looking substitution, quoted', apply: (c) => `echo "$((${c}) )"`, safe: (c) => noParens(c) && noDouble(c) },
+  { name: 'arithmetic-looking substitution, sequenced', apply: (c) => `echo $((${c}); true)`, safe: noParens },
+  { name: 'double parentheses', apply: (c) => `((${c}))`, safe: noParens },
+  { name: 'time', apply: (c) => `time ${c}` },
+  { name: 'time, with a subshell', apply: (c) => `time ( ${c} )`, safe: noParens },
+  { name: 'with a merged redirect', apply: (c) => `${c} 2>&1` },
+  { name: 'trap', apply: (c) => `trap '${c}' EXIT`, safe: noSingle },
+  { name: 'herestring into an interpreter', apply: (c) => `sh <<< '${c}'`, safe: noSingle },
+  { name: 'interpreter named by its absolute path', apply: (c) => `/bin/sh -c '${c}'`, safe: noSingle },
+  { name: 'exec with an argv0 alias', apply: (c) => `exec -c -a ok ${c}` },
+  { name: 'in a subshell inside a case branch', apply: (c) => `case $x in a) ( ${c} ) ;; esac`, safe: noParens },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -332,6 +354,20 @@ export const PRODUCERS: readonly Producer[] = [
   {
     name: 'nested: npm -> shell script',
     build: (c) => [{ 'package.json': JSON.stringify({ scripts: { run: 'sh ./in.sh' } }), 'in.sh': `#!/bin/sh\n${c}\n` }, 'npm run run'],
+  },
+  // added by exit review 4 — a line ABOVE the effect used to make the rest of the file invisible
+  { name: 'shell script, below a herestring', build: (c) => [{ 'run.sh': `#!/bin/sh\ncat <<< ready\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, below a quoted <<', build: (c) => [{ 'run.sh': `#!/bin/sh\necho "shift << Bits"\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, below a left shift', build: (c) => [{ 'run.sh': `#!/bin/sh\necho $((1<<4))\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, below a conflict grep', build: (c) => [{ 'run.sh': `#!/bin/sh\ngrep -rn "<<<<<<< HEAD" . || true\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, in a case branch', build: (c) => [{ 'run.sh': `#!/bin/sh\ncase "$1" in\n  go) ${c} ;;\nesac\n` }, './run.sh'] },
+  { name: 'shell script, in a function body', build: (c) => [{ 'run.sh': `#!/bin/sh\nwrap() { ${c}; }\nwrap\n` }, './run.sh'], safe: (c) => !c.includes('}') },
+  {
+    name: 'shell script, on a continued line',
+    build: (c) => {
+      const cut = c.indexOf(' ');
+      return [{ 'run.sh': `#!/bin/sh\n${cut < 0 ? c : `${c.slice(0, cut)} \\\n  ${c.slice(cut + 1)}`}\n` }, './run.sh'];
+    },
   },
 ];
 

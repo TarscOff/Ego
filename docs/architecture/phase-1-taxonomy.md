@@ -32,7 +32,11 @@ command is seen at all.
 
 *Enforced in* `splitShellSegments`. *Asserted by* the transformation cross-product.
 *Instances that crossed a floor:* double-quoted command substitution (exit review 3); the subshell `( )`
-(corpus by semantic class, 2026-09-24).
+(corpus by semantic class, 2026-09-24); and, in exit review 4, a `#` comment carrying an apostrophe (which
+swallowed every following line), `$((cmd) )` read as arithmetic when a shell reads it as a command substitution,
+`((cmd))`, a `case` branch's pattern list, a function definition's header, `2>&1` and `>&FILE` split on the `&`,
+a `<<` anywhere on a script line opening a phantom heredoc that hid the rest of the file, and a backslash
+continuation inside a script body.
 
 ### 2. Wrapper transparency
 
@@ -42,6 +46,9 @@ A command reached through a runner is still that command: `env`, a leading assig
 and must not be stripped as though it were.
 
 *Enforced in* `normalizeSegment`. *Asserted by* the transformation cross-product.
+*Instances that crossed a floor:* `exec -c -a NAME prog` (exec's own options before the alias), `/bin/sh -c '…'`
+(an interpreter named by its absolute path, read as a script path), a `-c` anywhere in `bash script.sh -c x`
+hijacking the interpreter, and `trap 'CMD' EXIT` and `sh <<< 'CMD'` as unmodelled carriers (exit review 4).
 
 ### 3. Producer resolution
 
@@ -81,6 +88,10 @@ databases (flag, URI and positional forms), and cloud CLIs. A bare positional th
 
 *Enforced in* `classifyTargetName`, `resolveK8sTarget`, `resolveContainerTarget`, `control-plane/workspace/local-targets.md`.
 *Asserted by* the `production`, `db`, `container` and `k8s` corpus classes.
+*Instances that crossed a floor:* docker's global options displacing the subcommand, so `docker --tls exec`
+reached ALLOW; `image` treated as a read verb although it is a management GROUP whose members mutate; and the
+engine's local test being a SUBSTRING match, so `tcp://[fd00:acme:prod::1]:2375` was the local daemon
+(exit review 4).
 
 ### 7. Complete provenance of a positive claim
 

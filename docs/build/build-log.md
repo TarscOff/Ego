@@ -371,6 +371,56 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   all while `npm --version` was ALLOW. Ordinary development across seven ecosystems: 73 commands, 13 gated (18%),
   every one of them named with its reason in `EXPECTED_GATES`. Attack corpora unchanged at 200,334 commands /
   39 ALLOW. The frozen class list is `docs/architecture/phase-1-taxonomy.md`.
+  **EXIT REVIEW 4 (2026-09-24), the first run under the third exit model — FAILED its own criterion, and that is
+  the point.** Eight independent adversarial lenses, each reproducing every claim against the real evaluator through
+  a shared probe; every non-proportionality claim then put to two independent skeptics instructed to REFUTE it.
+  **59 of 60 refutation attempts failed** — the findings were real, and I reproduced each one cited below myself.
+  **ZERO new architectural classes**: every confirmed finding is an instance of a class already frozen in
+  `docs/architecture/phase-1-taxonomy.md` (segment structure, wrapper transparency, target classification,
+  proportionality). The taxonomy held; the implementation did not.
+
+  **Three of the severe findings were regressions introduced by commit c88902b, in this session.** The arithmetic
+  branch was the worst defect of the whole phase: `$((cmd) )` and `$((cmd); true)` are COMMAND SUBSTITUTIONS in
+  bash, zsh and dash — verified against real shells, they run the command — and reading every `$((` as arithmetic
+  erased the command from the segment list entirely, so EVERY deny in the control plane was reachable at ALLOW,
+  at any producer depth. A shell resolves the same ambiguity by requiring the span to close with `))`; the splitter
+  now does too. Also mine: `( cd docs && ls )` asked because the cwd-restore marker was classified as a command,
+  and a group's trailing redirection was orphaned into a headless segment.
+
+  **Pre-existing floor crossings closed in the same pass.** A `#` comment was not recognised by the splitter, so an
+  apostrophe in one — `echo hi  # isn't ready` — put the scanner into a phantom quoted state and swallowed every
+  following line of a multi-line command. In `scriptSegments`, a `<<` ANYWHERE on a line opened a heredoc, so
+  `cat <<< ready`, `grep -rn "<<<<<<< HEAD" .`, `echo "shift << Bits"` and `echo $((1<<BITS))` each made the whole
+  REST of a script, hook or recipe invisible; an unterminated heredoc now reports opacity instead of a short list.
+  A `case` branch kept its pattern glued to the command, a function definition kept its header glued to the body,
+  `2>&1` and `>&2` were split on the `&` (and `>&FILE` lost its target), a backslash continuation inside a script
+  body was cut in two, `exec -c -a NAME prog` hid the program behind the alias, `/bin/sh -c '…'` was read as a
+  script path instead of an interpreter, a `-c` anywhere in `bash script.sh -c x` hijacked the interpreter,
+  `trap 'CMD' EXIT` and `sh <<< 'CMD'` were unmodelled carriers, docker's global options displaced the subcommand
+  so `docker --tls exec` reached ALLOW, docker's `image` management group was treated as a read verb so
+  `docker --context production image rm|prune|load` reached ALLOW, and the engine's local test was a SUBSTRING
+  match so `tcp://[fd00:acme:prod::1]:2375` was the local daemon.
+
+  **Proportionality was the other half of the report, and it mattered more than usual**, because splitting script
+  bodies correctly means every line of every script is now classified: `dirname`, `basename`, `mktemp`, `nproc`,
+  `[`, `exit`, `sleep`, `seq`, `test`, `command -v NAME`, `popd >/dev/null`, `while … done < list.txt`, and every
+  `VAR=$(cmd)` or `n=$((i+1))` binding asked. A name binding is now proven to execute nothing — except when the
+  name IS execution, where a standalone `PATH=` or `LD_PRELOAD=` gets the same verdict as the same binding in
+  front of a command, which it did not before.
+
+  Measured before and after over a probe corpus: **18 verdicts moved, 4 stronger and 14 weaker, and every weaker
+  one is provably closure-free shell structure** (`echo $((1+2))`, `( ls )`, `{ ls; }`, `build() { ls; }`,
+  `while read … done < f`, `if [ -f x ]; then ls; fi`). Attack corpora unchanged at 200,334 commands / 39 ALLOW.
+  What the review did NOT close is recorded in `docs/architecture/phase-1-residuals.md`; this line therefore stays
+  IN PROGRESS, and Phase 1 is NOT closed.
+
+  **A test-harness race was found while validating this pass, and is reported rather than absorbed.** The FIRST
+  parallel `npm test` after any source change fails 8 of the 19 integration tests — `ego init` stops after the pin,
+  so the policy cache, the artifacts and the hook shim are missing. The same suite passes 234/234 serially
+  (`--test-concurrency=1`), `cli.test.ts` passes 19/19 alone, the three heaviest files pass together in parallel,
+  and an immediate second parallel run on unchanged sources passes 234/234. Several test processes materialise the
+  same content-derived source identity at once on a cold start. A green parallel run therefore only counts as the
+  SECOND run on unchanged sources; the deterministic check below is reported on that basis and on the serial run.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same

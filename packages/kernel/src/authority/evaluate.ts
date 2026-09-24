@@ -105,7 +105,9 @@ const WRAPPERS = new Set([
 /** wrapper options that consume the next token as their value (the command starts after it) */
 /** `exec -a NAME prog` sets argv[0] to NAME and runs `prog`. Classifying NAME let an arbitrary program run as
  *  whatever the agent felt like calling it (exit review 3). */
-const EXEC_ARGV0_RE = /^exec\s+(?:-a|--argv0)\s+\S+\s+/;
+// `exec`'s OWN options may precede the argv0 alias: `exec -c -a echo curl …` hid the real program behind the
+// alias and reached ALLOW (exit review 4).
+const EXEC_ARGV0_RE = /^exec\s+(?:-(?!a\b)[a-zA-Z-]+\s+)*(?:-a|--argv0)\s+\S+\s+/;
 const WRAPPER_VALUE_OPTS: Record<string, RegExp> = {
   env: /^(-u|--unset|-C|--chdir|-S|--split-string)$/,
   nice: /^(-n|--adjustment)$/,
@@ -156,8 +158,14 @@ const ENV_INJECT_RE =
  *  once the subshell closes. Emitting this marker is how a flat segment list says so: the target carries a `$`, and
  *  a `cd` to a dynamic target is already the analyzer's "the working directory is no longer proven". */
 const SUBSHELL_CWD_RESTORE = 'cd $EGO_SUBSHELL_RESTORE';
+/** marks a function definition whose header the splitter consumed: it binds a name and executes nothing */
+const FUNCTION_DEF_PREFIX = 'define-function';
+/** a segment that is only redirections — the tail of a group or subshell whose delimiters were consumed */
+const REDIRECT_ONLY_RE = /^(?:(?:\d*(?:>>?|<>?)\|?|&>>?)\s*(?:"[^"]*"|'[^']*'|\S+)\s*)+$/;
 /** shell keywords that may precede a command WITHOUT being one: after them, the next word is still a command */
-const KEYWORD_PREFIX_RE = /^(if|then|else|elif|while|until|do|!)$/;
+const KEYWORD_PREFIX_RE = /^(if|then|else|elif|while|until|do|!|time|coproc)$/;
+/** a function definition header: `f()`, `f ()`, `function f`, `function f ()` — structure, not a command */
+const FUNC_DEF_RE = /^(?:function\s+)?[A-Za-z_][A-Za-z0-9_:.-]*\s*\(\s*\)$|^function\s+[A-Za-z_][A-Za-z0-9_:.-]*$/;
 
 export function splitShellSegments(command: string): string[] {
   const segments: string[] = [];
@@ -170,11 +178,22 @@ export function splitShellSegments(command: string): string[] {
   let subshellStart = 0;
   const push = () => {
     const t = cur.trim();
-    if (t) segments.push(t);
+    // A REDIRECTION IS NOT A COMMAND. Consuming a group's braces leaves `{ echo a; echo b; } > out.txt` with a
+    // headless `> out.txt`, which was classified as an unknown command and asked for an ordinary workspace write
+    // (exit review 4). It belongs to the command it redirects, so it is re-attached to it.
+    if (t) {
+      if (segments.length && REDIRECT_ONLY_RE.test(t)) segments[segments.length - 1] += ' ' + t;
+      else segments.push(t);
+      if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
+      else if (/^esac\b/.test(t)) caseDepth = Math.max(0, caseDepth - 1);
+    }
     cur = '';
   };
+  let caseDepth = 0;
   /** true where a COMMAND may begin: nothing pending, or only a shell keyword */
   const atCommandStart = (): boolean => cur.trim() === '' || KEYWORD_PREFIX_RE.test(cur.trim());
+  /** true where a FUNCTION BODY may begin: the pending text is the definition header and nothing else */
+  const atFunctionBody = (): boolean => FUNC_DEF_RE.test(cur.trim());
   while (i < command.length) {
     const ch = command[i]!;
     const next = command[i + 1];
@@ -193,13 +212,31 @@ export function splitShellSegments(command: string): string[] {
       }
       // a `|` preceded by `>` is the `>|` noclobber-override redirect operator, not a pipe — do not split there
       if (ch === ';' || ch === '\n' || (ch === '|' && command[i - 1] !== '>')) {
+        const piped = ch === '|';
+        push();
+        // EACH STAGE OF A PIPELINE IS ITS OWN SUBSHELL: `cd sub | true ; make build` leaves the caller where it
+        // was, and the analyzer followed the `cd` out of it (exit review 4).
+        if (piped && /^(cd|pushd|popd)(\s|$)/.test(segments[segments.length - 1] ?? ''))
+          segments.push(SUBSHELL_CWD_RESTORE);
+        i++;
+        continue;
+      }
+      // `&` IN A REDIRECTION IS NOT THE BACKGROUND OPERATOR. `2>&1`, `>&2` and `&> log` were split there, which
+      // produced a phantom command named `1` and — worse — orphaned the target of `>&FILE`, so a write to a
+      // governed path asked instead of being denied (exit review 4).
+      if (ch === '&' && next !== '&' && next !== '>' && command[i - 1] !== '>' && command[i - 1] !== '<') {
         push();
         i++;
         continue;
       }
-      if (ch === '&' && next !== '&') {
-        push();
-        i++;
+      // A COMMENT IS NOT COMMAND TEXT, and it is where an unpaired quote hides. `echo hi  # isn't ready` put the
+      // scanner into a phantom single-quoted state, and every following LINE of a multi-line command was swallowed
+      // into it — `git push --force origin main` on the next line never became a segment and the whole call was
+      // ALLOW (exit review 4). A `#` starts a comment only at the start of a WORD, exactly as in the shell, so
+      // `http://x/#frag` and `--pretty=%h#` are untouched.
+      if (ch === '#' && (i === 0 || /\s/.test(command[i - 1]!))) {
+        const nl = command.indexOf('\n', i);
+        i = nl < 0 ? command.length : nl; // the newline itself still separates the commands
         continue;
       }
       // A SUBSHELL AND A BRACE GROUP ARE SHELL STRUCTURE, NOT COMMANDS. Their delimiters were kept inside the
@@ -207,10 +244,17 @@ export function splitShellSegments(command: string): string[] {
       // command.unknown — an ASK — where the same line without the parentheses is DENY (corpus by semantic class,
       // 2026-09-24). `((` is arithmetic, which runs no command, and is deliberately left alone; a `)` that closes
       // nothing this splitter opened — a `case` pattern — stays literal.
-      if (ch === '(' && atCommandStart() && next !== '(') {
+      // `((` AT A COMMAND POSITION IS TWO NESTED SUBSHELLS, not arithmetic. A POSIX shell has no `(( ))` command,
+      // so `((chmod 777 /etc/passwd))` runs the chmod under dash — and under bash it is a syntax error, which
+      // executes nothing. Reading it as subshells is therefore right where it runs and harmless where it does not;
+      // leaving it alone was a floor crossing (exit review 4). Standalone bash arithmetic `(( i++ ))` asked before
+      // this and asks after it.
+      if (ch === '(' && atCommandStart()) {
         if (subshell === 0) subshellStart = segments.length;
         subshell++;
-        push();
+        // a keyword that introduced the group is structure too: pushing `time` or `if` as its own segment made it
+        // an unknown command
+        if (cur.trim()) cur = '';
         i++;
         continue;
       }
@@ -222,14 +266,52 @@ export function splitShellSegments(command: string): string[] {
         i++;
         continue;
       }
+      // A FUNCTION DEFINITION IS STRUCTURE, AND ITS BODY IS COMMANDS. `f() { chmod 777 /etc/passwd; }; f` kept the
+      // header glued to the first command, so the head was `f()` and every head-anchored classification missed —
+      // an absolute core deny reached ASK, at any producer depth (exit review 4). The header is discarded; the
+      // body is split like any other group.
+      if ((ch === '{' || ch === '(') && atFunctionBody()) {
+        // The header is not a command — but it IS a BINDING: the name it declares re-points every later use in
+        // this unit. Discarding it outright lost that, so the marker carries the name to the binding dimension
+        // while nothing classifies it as a program.
+        const declared = /([A-Za-z_][A-Za-z0-9_:.-]*)\s*(?:\(\s*\))?$/.exec(cur.trim());
+        if (declared) segments.push(`${FUNCTION_DEF_PREFIX} ${declared[1]}`);
+        cur = '';
+        if (ch === '(') {
+          if (subshell === 0) subshellStart = segments.length;
+          subshell++;
+        }
+        i++;
+        continue;
+      }
       if (ch === '{' && atCommandStart() && (next === ' ' || next === '\t' || next === '\n')) {
-        push();
+        if (cur.trim()) cur = '';
         i++;
         continue;
       }
       if (ch === '}' && cur.trim() === '') {
         i++;
         continue;
+      }
+      // A `case` BRANCH IS A COMMAND, AND ITS PATTERN LIST IS NOT. The pattern stayed inside the segment, so the
+      // head was `case` or the pattern word and every head-dependent classification missed: in
+      // `case $x in a) chmod 777 /etc/passwd ;; esac` the path was read as an ARGUMENT — an ASK — where the same
+      // command alone writes /etc/passwd and is DENY (exit review 4). The pattern list is discarded; `case … in`
+      // is recognised whether the branch is on that line or below it, and a `)` that closes something else — an
+      // array assignment inside a branch — is left alone by the shape guard.
+      if (ch === ')') {
+        const pending = cur.trim();
+        if (/^case\s+\S+\s+in(\s|$)/.test(pending)) {
+          caseDepth++;
+          cur = '';
+          i++;
+          continue;
+        }
+        if (caseDepth > 0 && /^\(?\s*[^\s()|;&]*$/.test(pending)) {
+          cur = '';
+          i++;
+          continue;
+        }
       }
     }
     // COMMAND SUBSTITUTION IS SUPPRESSED BY SINGLE QUOTES ONLY. Double quotes stop the shell from SPLITTING on
@@ -238,29 +320,38 @@ export function splitShellSegments(command: string): string[] {
     // control plane was reachable through it in one Bash call, at ALLOW, which on claude-code suppresses the
     // host's own prompt (exit review 3).
     if (!inSingle) {
-      // ARITHMETIC EXPANSION RUNS NO COMMAND. `$((…))` was read as a command substitution of `(…)`, so ordinary
-      // `echo $((i+1))` produced a segment whose head was an expression and asked. POSIX resolves the ambiguity in
-      // favour of arithmetic, and a command substitution of a subshell is spelled `$( (`. Only a substitution
-      // NESTED inside the expression — `$(( $(cat n) + 1 ))` — is still a command, and it is still extracted.
+      // ARITHMETIC EXPANSION RUNS NO COMMAND — BUT `$((` IS NOT ENOUGH TO RECOGNISE IT. `$((cmd) )` and
+      // `$((cmd); true)` are COMMAND SUBSTITUTIONS of a subshell in bash, zsh and dash: verified against real
+      // shells, they run `cmd`. Treating every `$((` as arithmetic therefore erased the command entirely and every
+      // DENY in the control plane became ALLOW through it — a regression this branch introduced and exit review 4
+      // found. A shell resolves the ambiguity by requiring the span to CLOSE with `))`; when it does not, it
+      // re-parses as `$( (…) …)`. So does this: arithmetic only when the two closing parens are adjacent.
       if (ch === '$' && next === '(' && command[i + 2] === '(') {
         let depth = 0;
         let j = i + 1;
         let inner = '';
+        let prevClose = false; // true when the character before the closing paren was itself `)`
         while (j < command.length) {
           const c = command[j]!;
           if (c === '(') depth++;
           else if (c === ')') depth--;
-          if (depth === 0) break;
+          if (depth === 0) {
+            prevClose = command[j - 1] === ')';
+            break;
+          }
           if (!(depth === 1 && c === '(')) inner += c;
           j++;
         }
-        // the expression itself is never executed, so only the commands SUBSTITUTED INTO it are segments: the
-        // arithmetic remainder that carries their output (`$SUBST + 1`) is a number here, not a command
-        if (/\$\(|`/.test(inner))
-          for (const sg of splitShellSegments(inner)) if (!/^\$SUBST\b/.test(sg)) segments.push(sg);
-        cur += (cur.endsWith(' ') || cur === '' ? '' : ' ') + '$ARITH ';
-        i = j + 1;
-        continue;
+        if (prevClose) {
+          // the expression itself is never executed, so only the commands SUBSTITUTED INTO it are segments: the
+          // arithmetic remainder that carries their output (`$SUBST + 1`) is a number here, not a command
+          if (/\$\(|`/.test(inner))
+            for (const sg of splitShellSegments(inner)) if (!/^\$SUBST\b/.test(sg)) segments.push(sg);
+          cur += '$ARITH';
+          i = j + 1;
+          continue;
+        }
+        // not arithmetic: fall through to the command-substitution branch below, which reads `$( … )`
       }
       if ((ch === '$' || ch === '<' || ch === '>') && next === '(') {
         // command or process substitution: capture the inner command as its own segment and keep scanning
@@ -284,16 +375,26 @@ export function splitShellSegments(command: string): string[] {
           if (depth > 0) inner += c;
           j++;
         }
-        for (const s of splitShellSegments(inner)) segments.push(s);
-        cur += (cur.endsWith(' ') || cur === '' ? '' : ' ') + '$SUBST ';
+        const innerSegments = splitShellSegments(inner);
+        for (const s of innerSegments) segments.push(s);
+        // A COMMAND SUBSTITUTION RUNS IN A SUBSHELL, so a `cd` in it does not move the caller either — the same
+        // rule as `( )`, and without it `echo "$(cd sub && pwd)" && make build` resolved the CALLER's make against
+        // sub/ (exit review 4).
+        if (innerSegments.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg))) segments.push(SUBSHELL_CWD_RESTORE);
+        // the placeholder stands INSIDE the word the substitution was part of. Separating it with a space made
+        // `TODAY=$(date +%F)` read as the assignment `TODAY=` followed by a command whose head is a substitution,
+        // so the most ordinary line in any script was opaque (exit review 4).
+        cur += '$SUBST';
         i = j;
         continue;
       }
       if (ch === '`') {
         const end = command.indexOf('`', i + 1);
         if (end > i) {
-          for (const s of splitShellSegments(command.slice(i + 1, end))) segments.push(s);
-          cur += (cur.endsWith(' ') || cur === '' ? '' : ' ') + '$SUBST ';
+          const backticked = splitShellSegments(command.slice(i + 1, end));
+          for (const s of backticked) segments.push(s);
+          if (backticked.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg))) segments.push(SUBSHELL_CWD_RESTORE);
+          cur += '$SUBST';
           i = end + 1;
           continue;
         }
@@ -590,16 +691,42 @@ function findPayloads(rest: string[]): string[] {
   return out;
 }
 
+/** A system interpreter named by its absolute path is that interpreter. `/bin/sh -c 'git push origin main'` was
+ *  read as a SCRIPT PATH to open, found unreadable, and asked — while the same command spelled `sh -c` is denied
+ *  (exit review 4). Only the system directories count: a repository-local `./bin/sh` is a file EGO can read, and
+ *  reading it is strictly better than assuming what it is. */
+const SYSTEM_INTERPRETER_RE = /^\/(?:bin|sbin|usr\/bin|usr\/sbin|usr\/local\/bin)\/((?:ba|z|da|k|a)?sh|fish)$/;
+
 function normalizeTail(rest: string[]): string[] {
-  const head = rest[0]!;
+  let head = rest[0]!;
+  const systemInterpreter = SYSTEM_INTERPRETER_RE.exec(head);
+  if (systemInterpreter) {
+    head = systemInterpreter[1]!;
+    rest = [head, ...rest.slice(1)];
+  }
   if (head === 'bash' || head === 'sh' || head === 'zsh' || head === 'dash' || head === 'ksh' || head === 'fish') {
     // -c, or a combined short-flag cluster CONTAINING c (`-euc`, `-ec`, `-lc`, `-xc`, `-cx`) — `-c` takes the next
     // operand as the command string wherever it sits in the cluster. A `--` may separate it from that operand.
+    // It must come BEFORE the first operand: in `bash run.sh -c ls` the `-c` is the SCRIPT'S argument, and reading
+    // it as the shell's hijacked the interpreter so run.sh was never resolved at all (exit review 4).
+    const firstOperand = rest.findIndex((t, i) => i > 0 && !t.startsWith('-'));
     const cIdx = rest.findIndex((t) => t === '-c' || /^-[a-z]*c[a-z]*$/i.test(t));
-    if (cIdx >= 0) {
+    if (cIdx >= 0 && (firstOperand < 0 || cIdx < firstOperand)) {
       const inner = rest[cIdx + 1] === '--' ? rest[cIdx + 2] : rest[cIdx + 1];
       if (inner) return [`${head} -c`, ...splitShellSegments(inner).flatMap(normalizeSegment)];
     }
+    // `sh <<< "git push origin main"` feeds the interpreter a script on stdin: the herestring IS the command, and
+    // the same text after `-c` is denied (exit review 4).
+    const hereIdx = rest.findIndex((t) => t === '<<<');
+    if (hereIdx >= 0 && rest[hereIdx + 1])
+      return [`${head} <<<`, ...splitShellSegments(unquoteShellWord(rest[hereIdx + 1]!)).flatMap(normalizeSegment)];
+  }
+  // `trap 'CMD' EXIT` stores CMD and the shell runs it later: it is a carrier exactly like `sh -c`, and an
+  // absolute core deny inside its quoted argument reached ASK (exit review 4).
+  if (head === 'trap' && rest[1]) {
+    const body = unquoteShellWord(rest[1]!);
+    if (body && !/^-/.test(rest[1]!))
+      return ['trap', ...splitShellSegments(body).flatMap(normalizeSegment)];
   }
   if (head === 'eval')
     return [
@@ -802,6 +929,19 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
     }
     return { rest: [head, ...verbs, ...rest], extra };
   }
+  if (/^(docker|podman|nerdctl)$/.test(head)) {
+    // Docker's GLOBAL options sit between the program and the subcommand, and every docker matcher is anchored on
+    // `docker <verb>`: a single `--log-level debug` or `--tls` displaced the verb, so `docker exec` — entering a
+    // running container — reached ALLOW (exit review 4). The segment is left INTACT, because the engine is read
+    // from that same leading run of options; a canonical spelling is added ALONGSIDE it so the verb is classified
+    // as well as the engine, and the strongest of the two verdicts decides.
+    let i = 1;
+    while (i < tokens.length && tokens[i]!.startsWith('-')) {
+      if (DOCKER_GLOBAL_VALUE_OPTS.test(tokens[i]!)) i++;
+      i++;
+    }
+    if (i > 1 && i < tokens.length) extra.push([head, ...tokens.slice(i)].join(' '));
+  }
   return { rest: tokens, extra };
 }
 
@@ -814,10 +954,15 @@ export function redirectionTargets(segment: string): string[] {
   const joined = segment.replace(/\\\r?\n/g, '');
   const unglued = joined.replace(/([^\s&|<>])(<>|>{1,2})/g, '$1 $2');
   // a target is a run of quoted and unquoted chunks: `"control-plane"/permissions/x`, `control-plan\e/x`, 'a b'/c
-  const re = /(?:^|\s)(?:\d?<>|\d?>>?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
+  // `>&WORD` IS A FILE REDIRECT WHENEVER WORD IS NOT A FILE DESCRIPTOR. bash treats `>&log` exactly like `&>log`
+  // and sends BOTH streams to that file, so `echo x >& .git/hooks/pre-commit` writes the hook — and it was not
+  // read as a write at all, because the `&` was not part of the operator (exit review 4). The operator is now
+  // captured so that a numeric target — `2>&1`, `>&-` — can be told apart as the fd duplication it is.
+  const re = /(?:^|\s)(\d?<>|\d?>>?&?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(unglued))) {
-    const target = unquoteShellWord(m[1]!);
+    const target = unquoteShellWord(m[2]!);
+    if (m[1]!.endsWith('&') && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
     if (target.startsWith('&')) continue;
     // real device sinks are not writes to a governed path — but only after `..` is resolved away, so that
     // `/dev/../etc/x` is judged as `/etc/x` (round 13)
@@ -1688,6 +1833,52 @@ function stripComment(line: string): string {
   return out;
 }
 
+/** The heredoc delimiter a line opens, or null. A `<<` only opens one when it is UNQUOTED, is not the `<<<`
+ *  herestring, and is not the left-shift operator inside an arithmetic expansion. Matching `<<` anywhere on the
+ *  line made `grep -rn "<<<<<<< HEAD" .`, `echo "shift << Bits"`, `cat <<< ready` and `echo $((1<<BITS))` open a
+ *  heredoc whose delimiter never arrives — so every REMAINING line of the script, hook or recipe was skipped as
+ *  though it were data, and a `git push` or a `chmod 777 /etc/passwd` below it was never classified at all
+ *  (exit review 4). */
+function heredocDelimiter(line: string): string | null {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (quote) {
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      continue;
+    }
+    // an arithmetic expansion is where `<<` is a left shift, not a redirection
+    if (c === '$' && line[i + 1] === '(' && line[i + 2] === '(') {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < line.length; j++) {
+        if (line[j] === '(') depth++;
+        else if (line[j] === ')' && --depth === 0) break;
+      }
+      i = j;
+      continue;
+    }
+    if (c === '<' && line[i + 1] === '<') {
+      if (line[i + 2] === '<') {
+        i += 2; // `<<<` is a herestring: it carries DATA, and opens nothing
+        continue;
+      }
+      const m = /^<<-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_][A-Za-z0-9_]*))/.exec(line.slice(i));
+      if (m) return m[1] ?? m[2] ?? m[3] ?? null;
+      i++;
+    }
+  }
+  return null;
+}
+
 /** Splits shell script text into classifiable segments, returning null when the script is opaque (dynamic commands). */
 function scriptSegments(text: string): string[] | null {
   // PRODUCER CONTRACT: resolve WHICH lines execute, and hand every one of them over verbatim. Nothing is dropped
@@ -1696,15 +1887,17 @@ function scriptSegments(text: string): string[] | null {
   // executable text; `eval` and a `$`-headed command cannot be resolved at all and are reported as UNKNOWN.
   const out: string[] = [];
   let heredoc: string | null = null;
-  for (const raw of text.split(/\r?\n/)) {
+  // A BACKSLASH-NEWLINE IS ERASED BEFORE THE SHELL SEES THE COMMAND. Splitting on the raw newline first cut
+  // `git \` + newline + `push origin main` into two unclassifiable fragments, so an absolute core deny reached
+  // ASK from inside a script while the same continuation typed directly was denied (exit review 4).
+  for (const raw of text.replace(/\\\r?\n[ \t]*/g, ' ').split(/\r?\n/)) {
     if (heredoc !== null) {
       if (raw.trim() === heredoc) heredoc = null;
       continue;
     }
     const line = stripComment(raw).trim();
     if (!line || line.startsWith('#!')) continue;
-    const hd = /<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/.exec(line);
-    if (hd) heredoc = hd[1]!;
+    heredoc = heredocDelimiter(line);
     // an `eval` or a command built from a variable cannot be resolved: report UNKNOWN rather than guess
     for (const seg of splitShellSegments(line)) {
       for (const n of normalizeSegment(seg)) {
@@ -1714,6 +1907,9 @@ function scriptSegments(text: string): string[] | null {
     }
     out.push(line);
   }
+  // A HEREDOC THAT NEVER CLOSES MEANS THE SCRIPT WAS MISREAD: everything after it was skipped as data, so the set
+  // of commands resolved here is not the set that will run. Report opacity rather than a short list.
+  if (heredoc !== null) return null;
   return out;
 }
 
@@ -3168,6 +3364,22 @@ function resolveScriptCommand(
       unresolved: [{ what: 'config', where: present, why: 'executable configuration' }],
     };
   }
+  // AN ASSIGNMENT IS NOT A PROGRAM. `TODAY=$(date +%F)` and `n=$((i+1))` have no head at all — the name is bound
+  // and nothing is executed — but the whole token was read as a program name that the vocabulary had never heard
+  // of, so the most ordinary line in any script was opaque once script bodies started being classified line by
+  // line (exit review 4). The substituted command is a segment of its own and is classified there, and an
+  // assignment that redefines EXECUTION is still carried by the binding dimension, which this does not touch.
+  // A name that redefines EXECUTION ITSELF — PATH, LD_PRELOAD, BASH_ENV, GIT_SSH_COMMAND — is excluded: binding
+  // it changes what every later command in that shell runs, which is precisely an execution closure.
+  const assigned = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(bare);
+  if (assigned && !ENV_INJECT_RE.test(assigned[1]!))
+    return {
+      kind: 'none',
+      key: `assignment:${bare}`,
+      body: null,
+      reason: 'a name binding executes nothing',
+      resolution: 'NOT_A_PRODUCER',
+    };
   // THE DEFAULT IS NOT A POSITIVE CLAIM: a head the vocabulary never classified is unknown, not proven absent.
   return {
     kind: 'none',
@@ -3273,6 +3485,17 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container'> = {
   'db.local.start': 'db',
 };
 
+/** The host an endpoint names, with scheme, credentials, port, IPv6 brackets and path removed. */
+function endpointHost(v: string): string {
+  let h = v.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '').split('/')[0]!;
+  const at = h.lastIndexOf('@');
+  if (at >= 0) h = h.slice(at + 1);
+  const bracketed = /^\[([^\]]*)\]/.exec(h);
+  if (bracketed) return bracketed[1]!;
+  const colon = h.lastIndexOf(':');
+  return colon >= 0 && /^\d+$/.test(h.slice(colon + 1)) ? h.slice(0, colon) : h;
+}
+
 /** A token is unresolvable when it is a variable, a substitution marker or a glob: it could name anything. */
 const isOpaqueTarget = (v: string): boolean => /^\$|\$\{|\$SUBST|`|[*?]/.test(v);
 
@@ -3368,8 +3591,11 @@ function resolveContainerTarget(
 ): { cls: TargetClass; target: string; mutating: boolean } {
   const signals: Array<{ cls: TargetClass; target: string }> = [];
   const add = (v: string, kind: string) => {
-    // the local daemon, however it is spelled, is local: a unix socket, a named pipe, or a loopback endpoint
-    if (/^(unix:|npipe:|fd:)/i.test(v) || targets.dbLocalHosts.some((h) => v.includes(h)))
+    // the local daemon, however it is spelled, is local: a unix socket, a named pipe, or a loopback endpoint.
+    // THE HOST IS COMPARED WHOLE. A substring test made every endpoint that merely CONTAINS a local name local:
+    // `tcp://[fd00:acme:prod::1]:2375` contains `::1` and `tcp://prod-localhost.acme.com:2375` contains
+    // `localhost`, so a production engine was read as the local daemon (exit review 4).
+    if (/^(unix:|npipe:|fd:)/i.test(v) || targets.dbLocalHosts.some((h) => endpointHost(v) === h || v === h))
       signals.push({ cls: 'LOCAL', target: `${kind} ${v}` });
     else if (isOpaqueTarget(v)) signals.push({ cls: 'UNCLASSIFIED', target: `${kind} ${v}` });
     else signals.push({ cls: classifyTargetName(v, targets.k8sLocalContexts, targets), target: `${kind} ${v}` });
@@ -3406,11 +3632,26 @@ function resolveContainerTarget(
   const useIdx = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'context');
   if (useIdx > 0 && tokens[useIdx + 1]) add(tokens[useIdx + 1]!, 'context use');
   if (!signals.length) return { cls: 'LOCAL', target: 'local daemon', mutating: false };
-  // a READ against another engine is not a mutation of it: `docker -H … ps` lists, it does not deploy
-  const reads = new Set(['ps', 'images', 'image', 'inspect', 'logs', 'version', 'info', 'top', 'port', 'stats', 'events', 'history', 'diff', 'search', 'context']);
-  const verb = tokens.slice(1).find((t) => !t.startsWith('-') && !signals.some((g) => g.target.endsWith(t)));
+  // A READ against another engine is not a mutation of it: `docker -H … ps` lists, it does not deploy. But a
+  // MANAGEMENT GROUP is not a verb — `image` and `context` name a whole family whose members mutate, so treating
+  // the group as a read let `docker --context production image rm|prune|load` reach ALLOW against a production
+  // engine (exit review 4). When the first positional is a group, the verb is the pair.
+  const reads = new Set(['ps', 'images', 'inspect', 'logs', 'version', 'info', 'top', 'port', 'stats', 'events', 'history', 'diff', 'search']);
+  const groupReads = new Set([
+    ...['image ls', 'image inspect', 'image history', 'image save', 'image tree'],
+    ...['container ls', 'container inspect', 'container logs', 'container port', 'container stats', 'container top', 'container diff'],
+    ...['volume ls', 'volume inspect', 'network ls', 'network inspect', 'system info', 'system df', 'system events'],
+    ...['context ls', 'context inspect', 'context show', 'builder ls', 'buildx ls', 'buildx inspect'],
+    ...['node ls', 'node inspect', 'service ls', 'service inspect', 'service logs', 'service ps'],
+    ...['stack ls', 'stack ps', 'stack services', 'secret ls', 'secret inspect', 'config ls', 'config inspect'],
+    ...['plugin ls', 'plugin inspect', 'compose ls', 'compose ps', 'compose logs', 'compose config', 'compose images', 'compose top'],
+  ]);
+  const groups = new Set(['image', 'container', 'volume', 'network', 'system', 'context', 'builder', 'buildx', 'node', 'service', 'stack', 'secret', 'config', 'plugin', 'trust', 'swarm', 'compose', 'manifest', 'checkpoint']);
+  const positional = tokens.slice(1).filter((t) => !t.startsWith('-') && !signals.some((g) => g.target.endsWith(t)));
+  const first = positional[0];
+  const verb = first !== undefined && groups.has(first) && positional[1] !== undefined ? `${first} ${positional[1]}` : first;
   const isUse = tokens.some((t, i) => t === 'use' && tokens[i - 1] === 'context');
-  const mutating = isUse || verb === undefined || !reads.has(verb);
+  const mutating = isUse || verb === undefined || !(reads.has(verb) || groupReads.has(verb));
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { ...worst, mutating };
 }
@@ -4471,9 +4712,13 @@ function analyzeSegments(
   // line into commands is the analyzer's job. Splitting only the isolated shells meant a script body's line was
   // classified as its FIRST command alone: `echo "$(git push origin main)"` in a `.sh` was an `echo`, and so was
   // `echo start; git push origin main`. Isolation decides whether shell state RESETS between units, nothing else.
+  // A NON-ISOLATED UNIT IS ONE SHELL, SO IT IS SPLIT ONCE, WHOLE. Splitting a script body line by line reset the
+  // splitter's cross-line state, and a `case` construct whose branches sit below `case "$1" in` kept its pattern
+  // glued to the command — the multi-line spelling of the defect exit review 4 found on one line. Make recipe
+  // lines and npm pre/post scripts ARE separate shells, and keep their per-line split.
   const units = isolatedShells
     ? segments.map((u) => splitShellSegments(u))
-    : [segments.flatMap((u) => splitShellSegments(u))];
+    : [splitShellSegments(segments.join('\n'))];
   for (const unit of units) {
     if (isolatedShells) {
       cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
@@ -4485,6 +4730,17 @@ function analyzeSegments(
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
     const cdTrimmed = seg.trim();
+    // The subshell's working directory is RESTORED here, and a restore is state rather than a command: classifying
+    // the marker made every ordinary `( cd docs && ls )` ask as an unknown command (exit review 4).
+    if (cdTrimmed === SUBSHELL_CWD_RESTORE) {
+      cwd = '\0dynamic';
+      continue;
+    }
+    // a consumed function header binds a name for everything after it, and is not a command
+    if (cdTrimmed.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
+      rebound = `the body defines ${cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1)} before using it`;
+      continue;
+    }
     const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
     const cdArgs = cdTokens ? cdTokens.filter((a) => a !== '--' && !a.startsWith('-')) : null;
     if (cdArgs && cdArgs.length) {
@@ -4578,7 +4834,7 @@ function analyzeSegments(
     }
     const carried = execCarriedCommand(seg);
     if (carried !== null)
-      for (const h of analyzeSegments(table, ctx, compiled, splitShellSegments(carried), { ...state, env }, true))
+      for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
     for (const norm of normalizeSegment(seg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
@@ -4706,7 +4962,7 @@ export function classifyCommand(
   // every relative resolution below actually depends on.
   const cwd = ctx.cwd ?? process.cwd();
   const cwdVerified = directoryExists(cwd) && repoRootFor(ctx, cwd) !== null;
-  return analyzeSegments(table, ctx, compiled, splitShellSegments(command), {
+  return analyzeSegments(table, ctx, compiled, [command], {
     depth: 0,
     seen: new Set(),
     env: baseEnvironment(cwd, cwdVerified),

@@ -149,6 +149,36 @@ So the measured rate is **10% on the five-ecosystem sample and 16% here**, and t
 executable lint configuration and its `node`-driven build. Quoting only the lower number would have been true of
 the sample and misleading about the tool.
 
+## Open after exit review 4 (2026-09-24)
+
+The review confirmed a long list; most of it was closed in the same pass and is recorded in the build log. What is
+listed here was reproduced in session and is **not fixed**, with what it costs, so that nobody has to re-derive it
+and nobody can mistake the fixed list for the whole list.
+
+| Open finding | Verdict today | Deserved | Why it is still open |
+|---|---|---|---|
+| `echo 'rm -rf /' \| bash`, `printf '%s' 'cmd' \| sh` — a literal carried into an interpreter on stdin | ASK | DENY | the pipeline SEPARATOR is discarded by segment splitting, so the carrier relationship cannot be reconstructed downstream. Closing it means carrying the separator in the segment model — a change to the shape of the analyzer, not a spelling (class 1) |
+| `redis-cli --cluster call HOST:PORT FLUSHALL` | ALLOW | DENY | the node is a later positional that the bare-operand scan never reaches (class 6) |
+| a database host taken from `~/.pgpass` or a `my.cnf` | ALLOW | ASK | a target named in a client config file is guessed LOCAL rather than UNCLASSIFIED (class 6) |
+| `pnpm dlx`, `yarn dlx`, `bun x`, `npm exec` | stripped as transparent | ASK | `dlx` means download-and-execute: a registry fetch is an acquisition, like `npx --package` (class 2) |
+| `/opt/x/kubectl get pods` — an absolute path outside the workspace | ALLOW | — | **ACCEPTED**: a path inside the workspace is read, and outside it the system tool is trusted by name. Gating every absolute path would gate `/usr/bin/git status` |
+| `$(VAR)` in a make recipe | ASK | ALLOW | make expands its own `$(…)` before the shell sees it; EGO reads it as a command substitution (proportionality, class 11) |
+| a quoted heredoc body, or a comment, in a TOP-LEVEL command | matched as commands | data | `splitShellSegments` now understands comments but still has no heredoc tracking, so `cat > f <<'MD'` prose is classified (over-gating, class 11) |
+| `aws --endpoint-url http://localhost:4566 …` (LocalStack, MinIO) | DENY | ASK or ALLOW | an absolute deny with no human gate, on an endpoint that is local (class 11) |
+
+**A test-harness race, found while validating this pass and NOT a kernel defect.** The FIRST parallel `npm test`
+after any source change fails 8 of the 19 integration tests: `ego init` stops after writing the pin, so the policy
+cache, the generated artifacts and the hook shim are all missing. Measured, not guessed: the same suite passes
+234/234 with `--test-concurrency=1`, the same three files (`corpus`, `monotonicity`, `cli`) pass together in
+parallel, `cli.test.ts` passes 19/19 alone, and an immediate second parallel run on the unchanged source passes
+234/234. The trigger is therefore several test processes materialising the same content-derived source identity at
+once, on a cold start. Until it is fixed, a green parallel run is only meaningful as the SECOND run on unchanged
+sources, or from the serial run. This is recorded as an open harness defect, not as a passed check.
+
+Closed in the same pass, and listed here only so the record is not ambiguous: `kubectl config set-credentials
+--exec-command`, the missing database clients (`mariadb`, `pg_restore`, `mongodump`/`mongorestore` and the dump
+tools), and a `cd` inside a command substitution, a backtick substitution or a pipeline stage leaking to the caller.
+
 ## CONTAINMENT_DEPENDENCY
 
 The semantic action is intentionally permitted. What it may reach is issue #26's problem, and **#26 is not built**.
