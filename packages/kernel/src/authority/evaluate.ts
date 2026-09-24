@@ -669,7 +669,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
             extra.push(`git alias-override ${alias[1]}`);
           }
           if (
-            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)/i.test(
+            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)/i.test(
               value,
             )
           )
@@ -2589,8 +2589,21 @@ function resolveScriptCommand(
       !PACKAGE_MANAGER_BUILTINS.has(sub)
     )
       script = sub;
-    if (script === null)
+    if (script === null) {
+      // `npm init <initializer>` / `yarn create <pkg>` acquire and RUN a package; with no argument they only
+      // write a manifest. The npm producer claimed the head and answered "not a script", which never reached the
+      // vocabulary that classifies acquiring third-party code (exit review 2).
+      if (/^(init|create)$/.test(sub) && tokens.slice(2).some((t) => !t.startsWith('-')))
+        return {
+          kind: 'npm-script',
+          key: `npm:${sub}:${tokens[2]}`,
+          body: null,
+          reason: `${head} ${sub} downloads and runs an initializer package`,
+          resolution: 'AMBIENT_UNRESOLVED',
+          unresolved: [{ what: 'ambient', where: tokens[2] ?? sub, why: 'an initializer acquired at run time' }],
+        };
       return { kind: 'none', key: `npm:${sub}`, body: null, reason: 'not a script invocation', resolution: 'ABSENT_VERIFIED' };
+    }
     const pkgPath = findUp(ctx, cwd, 'package.json');
     if (pkgPath !== null && stale(pkgPath))
       return {
@@ -2709,6 +2722,18 @@ function resolveScriptCommand(
       }
       targets.push(t);
     }
+    // `make -f -` reads the makefile from STDIN and `-E`/`--eval` injects makefile text on the command line:
+    // neither is a file this resolver can read, and reporting "no Makefile" over them claimed proven absence of
+    // a recipe an attacker supplies (exit review 2).
+    if (makeFiles.includes('-') || tokens.some((t) => /^(-E|--eval)(=|$)/.test(t)))
+      return {
+        kind: 'make-target',
+        key: `make:injected:${norm}`,
+        body: null,
+        reason: 'the makefile is supplied on stdin or on the command line and cannot be read',
+        resolution: 'DYNAMIC',
+        unresolved: [{ what: 'body', where: 'makefile', why: 'supplied out of band' }],
+      };
     if (tokens.slice(1).some((t) => /[$`]/.test(t)))
       return {
         kind: 'make-target',
@@ -2827,27 +2852,17 @@ function resolveScriptCommand(
       sources: Object.fromEntries(merged.sources.map((f) => [f, fingerprint(merged.text)])),
     });
     const key = `make:${merged.sources.join(',') || makeDir}:${wanted.join(',')}`;
-    if (missing.length) {
-      // "my parser did not find the target" is NOT "the target does not exist". Only a makefile using nothing this
-      // resolver cannot model may claim proven absence (challenge 5, findings 5 and 12).
-      // absence is only PROVEN when nothing in this file could define the target invisibly: a pattern rule, a
-      // computed include or an $(eval) all could. A conditional around an UNRELATED target could not.
-      const blind = merged.unsupported.length > 0 || merged.hasPatternRules || merged.unsupportedFor.size > 0;
-      return {
-        kind: 'make-target',
-        key,
-        body: body.length ? body : null,
-        bodyEnv,
-        provenance,
-        reason: blind
-          ? `target "${missing.join(', ')}" is not visible to this resolver, which does not model: ${merged.unsupported.slice(0, 3).join('; ')}`
-          : `target "${missing.join(', ')}" not found`,
-        resolution: blind ? 'PARTIAL' : 'ABSENT_VERIFIED',
-      };
-    }
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
+    // A target this resolver could not find is PROVEN absent only when nothing in the makefile could define it
+    // invisibly. Returning early on the first missing target also discarded every gap found for the OTHER goals
+    // on the same command line, so `make nosuch deploy` claimed proven absence over an unresolved `deploy`
+    // (exit review 2).
+    const blind = merged.unsupported.length > 0 || merged.hasPatternRules || merged.unsupportedFor.size > 0;
+    if (blind)
+      for (const t of missing)
+        gaps.push({ what: 'body', where: t, why: `target "${t}" is not visible to this resolver` });
     if (partial) gaps.push({ what: 'body', where: wanted.join(','), why: partial });
     for (const u of merged.unsupported) gaps.push({ what: 'config', where: mkName, why: u });
     for (const u of touchedBlind) gaps.push({ what: 'body', where: wanted.join(','), why: u });
@@ -3119,7 +3134,7 @@ const DB_EXECUTES_UNREAD =
   // The family is "this client runs something it was handed": a program file, a shell escape, a loadable
   // extension, or a COPY in either direction. Enumerating only one direction of COPY and only sqlite's `.shell`
   // left the neighbours open (decision challenge, findings 12, 34).
-  /\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|(-c|--command|--eval)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
+  /\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
 
 const TARGET_ENV_RE =
   /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|CLICKHOUSE_HOST)$/;
@@ -3231,6 +3246,10 @@ function classifyTargetName(
 }
 
 /** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
+/** docker/podman global options that consume the next token, so their value is not the subcommand. */
+const DOCKER_GLOBAL_VALUE_OPTS =
+  /^(--log-level|-l|--config|--tlscacert|--tlscert|--tlskey|--context|-c|--host|-H|--url|--connection|--builder|--identity|--runtime|--namespace)$/;
+
 /**
  * Which ENGINE a container command talks to. Only an EXPLICIT selection is classified: `-H`/`--host`,
  * `-c`/`--context`, podman `--url`/`--connection`, and `docker context use <name>`, which changes the engine every
@@ -3254,9 +3273,14 @@ function resolveContainerTarget(
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
     // these are GLOBAL options: they come before the subcommand. Past it, `-c` is the container's own flag —
-    // `docker run --rm alpine sh -c "echo hi"` is ordinary work and was being DENIED as a remote engine.
-    if (!t.startsWith('-')) break;
-    const eq = /^(?:--host=|--context=|--url=|--connection=|-H|-c)(.+)$/.exec(t);
+    // `docker run --rm alpine sh -c "echo hi"` is ordinary work and was being DENIED as a remote engine. A
+    // global option that TAKES a value must have its value skipped, not treated as the subcommand, or
+    // `docker --log-level debug -H tcp://prod …` stopped the scan before the engine (exit review 2).
+    if (!t.startsWith('-')) {
+      if (i > 1 && DOCKER_GLOBAL_VALUE_OPTS.test(tokens[i - 1] ?? '')) continue;
+      break;
+    }
+    const eq = /^(?:--host=|--context=|--url=|--connection=|--builder=|-H|-c)(.+)$/.exec(t);
     if ((t === '-H' || t === '--host' || t === '--url') && tokens[i + 1]) add(tokens[++i]!, 'engine');
     else if ((t === '-c' || t === '--context' || t === '--connection') && tokens[i + 1]) add(tokens[++i]!, 'context');
     else if (eq) add(eq[1]!, t.startsWith('-H') || t.startsWith('--host') || t.startsWith('--url') ? 'engine' : 'context');
@@ -3266,6 +3290,14 @@ function resolveContainerTarget(
   for (const [k, v] of Object.entries(envInputs))
     if (/^(DOCKER_HOST|CONTAINER_HOST)$/.test(k)) add(v, 'engine');
     else if (/^(DOCKER_CONTEXT)$/.test(k)) add(v, 'context');
+  // `--builder` is unambiguous wherever it sits, and buildx puts it after the plugin subcommand, past the
+  // global-option scan above (exit review 2)
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const eq = /^--builder=(.+)$/.exec(t);
+    if (t === '--builder' && tokens[i + 1]) add(tokens[++i]!, 'builder');
+    else if (eq) add(eq[1]!, 'builder');
+  }
   // `docker context use <name>` re-points every later command at that engine
   const useIdx = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'context');
   if (useIdx > 0 && tokens[useIdx + 1]) add(tokens[useIdx + 1]!, 'context use');

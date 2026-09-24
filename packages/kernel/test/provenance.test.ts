@@ -622,3 +622,40 @@ test('the ordinary spelling of an execution setting is ordinary, and a C++ compi
   assert.equal(run('npm run build', d({ '.yarnrc.yml': 'nodeLinker: node-modules\n' })).verdict, 'ALLOW');
   assert.notEqual(run('npm run build', d({ '.yarnrc.yml': 'yarnPath: ./.yarn/evil.cjs\n' })).verdict, 'ALLOW');
 });
+
+test('proven absence is proven for THIS goal only, and an out-of-band makefile is not a missing one', () => {
+  const mk = (m: string) => workspace({ Makefile: m, 'package.json': '{}' });
+  const both = mk('build:\n\ttsc -p .\ndeploy:\n\t$(CMD)\n');
+  // returning early on the first missing target discarded every gap found for the OTHER goals on the line
+  assert.notEqual(run('make nosuch deploy', both).verdict, 'ALLOW', 'deploy is unresolved');
+  assert.equal(run('make nosuch', both).verdict, 'ALLOW', 'a fully-read makefile CAN prove a target absent');
+  assert.equal(run('make build', both).verdict, 'ALLOW');
+  // ... and a makefile that could define the target invisibly cannot prove anything
+  assert.notEqual(run('make deploy', mk('%.o: %.c\n\techo compile\n')).verdict, 'ALLOW');
+  // `make -f -` reads the makefile from STDIN and `-E` injects makefile text: neither is a file to read, and
+  // reporting "no Makefile" over them claimed proven absence of a recipe an attacker supplies
+  for (const cmd of ['make -f - build', 'make -E "x:" build', 'make --eval="x:" build'])
+    assert.notEqual(run(cmd, both).verdict, 'ALLOW', cmd);
+});
+
+test('a builtin that rebinds or loads, an initializer, and an engine named after a plugin subcommand', () => {
+  const d = workspace({ 'package.json': '{}' });
+  // `hash -p` rebinds a name and `enable -f` loads a shared object: neither is a no-op builtin
+  assert.notEqual(run('hash -p /tmp/evil ls; ls -la', d).verdict, 'ALLOW');
+  assert.notEqual(run('enable -f /tmp/e.so x', d).verdict, 'ALLOW');
+  // `npm init <initializer>` downloads and RUNS a package; with no argument it only writes a manifest
+  assert.notEqual(run('npm init evil-pkg', d).verdict, 'ALLOW');
+  assert.notEqual(run('yarn create evil-app', d).verdict, 'ALLOW');
+  for (const cmd of ['npm init', 'npm init -y']) assert.equal(run(cmd, d).verdict, 'ALLOW', cmd);
+  // a global option that TAKES a value must have its value skipped, not read as the subcommand
+  assert.equal(run('docker --log-level debug -H tcp://prod:2375 run img', d).verdict, 'DENY');
+  // `--builder` sits after the buildx plugin subcommand, past the global-option scan
+  assert.equal(run('docker buildx build --builder prod .', d).verdict, 'DENY');
+  assert.equal(run('docker buildx build --builder kind-dev .', d).verdict, 'ALLOW');
+  assert.equal(run('docker buildx build .', d).verdict, 'ALLOW');
+  // git config keys that name a program or a hook directory
+  assert.notEqual(run('git -c init.templateDir=/tmp/evil clone https://e/r.git', d).verdict, 'ALLOW');
+  // and a database client's shell escape in mysql's own command flag
+  assert.notEqual(run('mysql -e "\\! id"', d).verdict, 'ALLOW');
+  assert.equal(run('mysql -e "SELECT 1"', d).verdict, 'ALLOW');
+});
