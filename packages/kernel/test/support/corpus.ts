@@ -354,6 +354,12 @@ export const TRANSFORMS: readonly Transform[] = [
   // a pipeline inside a carrier is still a pipeline: the normalizer returns strings and projects the edge away
   { name: 'pipeline inside sh -c', apply: (c) => `sh -c "echo '${c}' | bash"`, safe: (c) => noSingle(c) && noDouble(c) },
   { name: 'pipeline inside trap', apply: (c) => `trap "echo '${c}' | sh" EXIT`, safe: (c) => noSingle(c) && noDouble(c) },
+  { name: 'piped through an identity stage', apply: (c) => `echo '${c}' | cat | sh`, safe: noSingle },
+  { name: 'piped into an interpreter named by a device', apply: (c) => `echo '${c}' | bash /dev/stdin`, safe: noSingle },
+  { name: 'sourced from standard input', apply: (c) => `echo '${c}' | . /dev/stdin`, safe: noSingle },
+  { name: 'process substitution as the script', apply: (c) => `bash <(echo '${c}')`, safe: (c) => noSingle(c) && noParens(c) },
+  { name: 'echo -e into an interpreter', apply: (c) => `echo -e '${c}' | sh`, safe: noSingle },
+  { name: 'shell options before the pipe', apply: (c) => `echo '${c}' | bash -euo pipefail`, safe: noSingle },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -420,6 +426,9 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'shell script, below a heredoc', build: (c) => [{ 'run.sh': `#!/bin/sh\ncat > n.md <<'MD'\nnotes\nMD\n${c}\n` }, './run.sh'] },
   { name: 'shell script, heredoc into an interpreter', build: (c) => [{ 'run.sh': `#!/bin/sh\nbash <<'EOF'\n${c}\nEOF\n` }, './run.sh'], safe: noSingle },
   { name: 'shell script, substitution in a heredoc body', build: (c) => [{ 'run.sh': `#!/bin/sh\ncat > n.md <<MD\n$(${c})\nMD\n` }, './run.sh'], safe: noParens },
+  { name: 'shell script read by an input redirection', build: (c) => [{ 'in.sh': `#!/bin/sh\n${c}\n` }, 'bash < in.sh'] },
+  { name: 'make variable inside double quotes', build: (c) => [{ Makefile: `V := ${c}\nrun:\n\t$(V)\n` }, 'make run'], safe: noDollar },
+  { name: 'make command-line override', build: (c) => [{ Makefile: 'V := echo ok\nrun:\n\t$(V)\n' }, `make V=${JSON.stringify(c)} run`], safe: (c) => noDollar(c) && noDouble(c) },
   { name: 'shell script, in a case branch', build: (c) => [{ 'run.sh': `#!/bin/sh\ncase "$1" in\n  go) ${c} ;;\nesac\n` }, './run.sh'] },
   { name: 'shell script, in a function body', build: (c) => [{ 'run.sh': `#!/bin/sh\nwrap() { ${c}; }\nwrap\n` }, './run.sh'], safe: (c) => !c.includes('}') },
   {

@@ -176,12 +176,21 @@ export interface ShellStage {
   readonly heredocBody?: string;
   /** true when the heredoc delimiter was UNQUOTED, so the shell expands substitutions in the body */
   readonly heredocExpanded?: boolean;
+  /** true when a PROCESS substitution was consumed into this stage: `bash <(echo CMD)` runs CMD, because the
+   *  substitution hands the interpreter a file containing that command's output (exit review 5) */
+  readonly fromProcessSubstitution?: boolean;
 }
 
 /** The segments of a command, with the pipeline edges between them. */
 export function splitShellPipeline(command: string): ShellStage[] {
-  const segments: Array<{ text: string; pipedFromPrevious: boolean; heredocBody?: string; heredocExpanded?: boolean }> =
-    [];
+  const segments: Array<{
+    text: string;
+    pipedFromPrevious: boolean;
+    heredocBody?: string;
+    heredocExpanded?: boolean;
+    fromProcessSubstitution?: boolean;
+  }> = [];
+  let sawProcessSubstitution = false;
   /** set by a `|` split and consumed by the NEXT stage, which is the one that reads the pipe */
   let pendingPipe = false;
   const consumePipe = (): boolean => {
@@ -205,7 +214,8 @@ export function splitShellPipeline(command: string): ShellStage[] {
     // (exit review 4). It belongs to the command it redirects, so it is re-attached to it.
     if (t) {
       if (segments.length && REDIRECT_ONLY_RE.test(t)) segments[segments.length - 1]!.text += ' ' + t;
-      else segments.push({ text: t, pipedFromPrevious: consumePipe() });
+      else segments.push({ text: t, pipedFromPrevious: consumePipe(), fromProcessSubstitution: sawProcessSubstitution });
+      sawProcessSubstitution = false;
       if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
       else if (/^esac\b/.test(t)) caseDepth = Math.max(0, caseDepth - 1);
       // WHICH STAGE OPENED THE HEREDOC. Attributing the body to the LAST stage on the line was wrong the moment
@@ -451,6 +461,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // not arithmetic: fall through to the command-substitution branch below, which reads `$( … )`
       }
       if ((ch === '$' || ch === '<' || ch === '>') && next === '(') {
+        if (ch === '<' || ch === '>') sawProcessSubstitution = true;
         // command or process substitution: capture the inner command as its own segment and keep scanning
         let depth = 1;
         let j = i + 2;
@@ -1064,6 +1075,10 @@ function normalizeTail(rest: string[]): string[] {
     const hereIdx = rest.findIndex((t) => t === '<<<');
     if (hereIdx >= 0 && rest[hereIdx + 1])
       return [`${head} <<<`, ...splitShellSegments(unquoteShellWord(rest[hereIdx + 1]!)).flatMap(normalizeSegment)];
+    // `bash < script.sh` RUNS script.sh — the redirection names the program exactly as an operand would, and
+    // reading it as an unclassified option left a workspace script unanalysed (exit review 5).
+    const fromFile = /(?:^|\s)<\s*([^\s<>|&;]+)/.exec(rest.join(' '));
+    if (fromFile && !STDIN_FILE_RE.test(fromFile[1]!) && fromFile[1] !== '-') return [`${head} ${fromFile[1]}`];
   }
   // `trap 'CMD' EXIT` stores CMD and the shell runs it later: it is a carrier exactly like `sh -c`, and an
   // absolute core deny inside its quoted argument reached ASK (exit review 4).
@@ -1928,6 +1943,10 @@ export interface ExecutionEnvironment {
   config: { read: string[]; unresolved: Unresolved[] };
   /** BINDING RESOLUTION: see `Binding`. */
   binding: Binding;
+  /** The segment EXACTLY as written, before normalization de-quoted it. A producer that reads its own command
+   *  line needs the quoting: `make V="git push origin main" run` normalizes to five bare words, and the override's
+   *  value then looked like four separate targets (exit review 5). */
+  rawSegment?: string;
   /** Names DEFINED IN THIS UNIT whose body the analyzer already read — a shell function. A call to one of them
    *  executes text that is already accounted for, so it is neither an unknown producer nor an unresolved binding:
    *  EGO knows exactly what the name means. An ALIAS is not here, because its body is not handed over. */
@@ -2310,7 +2329,10 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     if (dd >= 0) out.push(...tokens.slice(dd + 1).map(abs));
   } else if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2)
     out.push(abs(operands[operands.length - 1]!));
-  else if (/^(tee|truncate|touch)$/.test(head)) out.push(...operands.map(abs));
+  else if (/^(tee|truncate|touch)$/.test(head))
+    // a device sink is a DISCARD, exactly as it is for `> /dev/null`, which redirectionTargets already knows;
+    // `ls | tee /dev/null` was classified as an outside-workspace write (exit review 5)
+    out.push(...operands.filter((t) => !/^\/dev\//.test(t)).map(abs));
   else if (head === 'dd') {
     const of = tokens.find((t) => t.startsWith('of='));
     if (of) out.push(abs(of.slice(3)));
@@ -3564,10 +3586,23 @@ function resolveScriptCommand(
     const cliRebinds: string[] = [];
     const cliInputs: string[] = [];
     const cliVars = new Map<string, string>();
+    // THE QUOTING IS ONLY IN THE RAW SEGMENT. Normalization de-quotes, so `make V="docker --context production rm
+    // -f app" run` reaches the scan below as eight bare words: the override kept only `docker`, `--context` and
+    // `production` became goals, and `-f app` was read as make's own `--file` option — which made the resolver
+    // read a makefile that does not exist and PROVE the target absent, laundering the command (exit review 5).
+    const rawAssignedWords = new Set<string>();
+    for (const t of tokenizeMarked(env.rawSegment ?? norm)) {
+      if (t.text.startsWith('-') || !/^[A-Za-z_][A-Za-z0-9_.]*=/.test(t.text)) continue;
+      const value = t.text.slice(t.text.indexOf('=') + 1);
+      cliVars.set(t.text.slice(0, t.text.indexOf('=')), value);
+      if (/\s/.test(value)) for (const w of value.split(/\s+/).filter(Boolean)) rawAssignedWords.add(w);
+    }
+
     let makeDir = cwd;
     const makeFiles: string[] = []; // every -f/--file/--makefile: make reads them ALL, not just the last
     for (let i = 1; i < tokens.length; i++) {
       const t = tokens[i]!;
+      if (rawAssignedWords.has(t)) continue; // a word INSIDE a quoted assignment value is not make's own argument
       if (t.startsWith('-')) {
         const dirEq = /^(?:--directory=|-C)(.+)$/.exec(t);
         const fileEq = /^(?:--file=|--makefile=|-f)(.+)$/.exec(t);
@@ -3587,11 +3622,17 @@ function resolveScriptCommand(
         else if (EXECUTION_ENV_INPUTS.test(t.slice(0, t.indexOf('=')))) cliInputs.push(t);
         // a command-line assignment OVERRIDES every assignment of that name in the makefile, so the recipe does
         // not expand to what the file says (exit review 5)
-        cliVars.set(t.slice(0, t.indexOf('=')), t.slice(t.indexOf('=') + 1));
+        if (!cliVars.has(t.slice(0, t.indexOf('=')))) cliVars.set(t.slice(0, t.indexOf('=')), t.slice(t.indexOf('=') + 1));
         continue;
+
       }
       targets.push(t);
     }
+    // THE QUOTING IS ONLY IN THE RAW SEGMENT. Normalization de-quotes, so `make V="git push origin main" run`
+    // reaches the scan above as five bare words: the override kept only `git`, and `push origin main` became
+    // three TARGETS. That laundered a governed command through a makefile variable (exit review 5). The raw
+    // segment still has the quoting, so the assignments are re-read from it and the words they own stop being
+    // mistaken for goals.
     // `make -f -` reads the makefile from STDIN and `-E`/`--eval` injects makefile text on the command line:
     // neither is a file this resolver can read, and reporting "no Makefile" over them claimed proven absence of
     // a recipe an attacker supplies (exit review 2).
@@ -4684,6 +4725,9 @@ function classifyNormalized(
   return resolved.length ? resolved : [opaqueHit(table, ctx, norm, `${effect.reason}: empty`)];
 }
 
+/** Search tools take a PATTERN as their first operand. It is data, not the tool's own flags and paths. */
+const PATTERN_FIRST_HEADS = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'ripgrep']);
+
 /** Heads whose operands are read (or listed recursively); their path arguments are classified like Read tool calls. */
 const RECURSIVE_HEADS = new Set([
   'find',
@@ -4796,7 +4840,18 @@ function pathTokens(segment: string, cwd: string): Array<{ raw: string; abs: str
   const cwdIsSensitive =
     canonicalPath(cwd).split(sep).join('/') === home ||
     CREDENTIAL_DIRS.some((d) => canonicalPath(cwd).split(sep).join('/').startsWith(`${home}/${d}`));
-  for (const raw of tokenize(segment).slice(1)) {
+  const allTokens = tokenize(segment);
+  const head0 = (allTokens[0] ?? '').replace(/^.*\//, '');
+  // A SEARCH PATTERN IS DATA. `grep 'rm -rf /' notes.md` searches for that text; reading the pattern as the
+  // tool's own flags and paths denied an ordinary code search as a recursive read of `/` (exit review 5). Only
+  // the FIRST non-option operand is the pattern, and only when no `-e`/`-f` names it instead.
+  const patternIndex =
+    PATTERN_FIRST_HEADS.has(head0) &&
+    !allTokens.some((t) => /^-[a-zA-Z]*[ef]$/.test(t) || /^--(regexp|file)=/.test(t))
+      ? allTokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
+      : -1;
+  for (const [idx, raw] of allTokens.entries()) {
+    if (idx === 0 || idx === patternIndex) continue;
     const eq = raw.indexOf('=');
     const tok =
       raw.startsWith('-') && eq > 0
@@ -4842,6 +4897,7 @@ function classifyShellPaths(
   ctx: EvaluationContext,
   seg: string,
   cwd: string,
+  patternWords: string[] = [],
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   const tokens = tokenize(seg);
@@ -4852,7 +4908,7 @@ function classifyShellPaths(
   // operand as a filesystem read made `dirname -- "$0"` — the first line of a real husky hook — ask, and with it
   // every commit in that repository (exit review 4).
   if (STRING_OPERAND_HEADS.has(head)) return hits;
-  const paths = pathTokens(seg, cwd);
+  const paths = pathTokens(seg, cwd).filter((p) => !patternWords.includes(p.raw));
   // a container bind mount hands the host path to the container: the SOURCE is read and written, whatever the
   // command inside the container then does. Resolving it as a path beats guessing at its spelling with a regex.
   // A KNOWN, ALLOW-classed command whose OPERAND names a program the class does not bound is not really known:
@@ -5125,7 +5181,13 @@ function classifyShellPaths(
   // a recursive read names its roots as bare operands too (`cd / && grep -r KEY Users`): an operand that is HOME or one of
   // its ancestors reaches the credential stores
   if (recursive) {
-    for (const t of tokens.slice(1)) {
+    // the search PATTERN is data, not a root: `grep 'rm -rf /' notes.md` searches for that text (exit review 5)
+    const patternAt =
+      PATTERN_FIRST_HEADS.has(head) && !tokens.some((t) => /^-[a-zA-Z]*[ef]$/.test(t) || /^--(regexp|file)=/.test(t))
+        ? tokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
+        : -1;
+    for (const [ti, t] of tokens.entries()) {
+      if (ti === 0 || ti === patternAt || patternWords.includes(t)) continue;
       if (t.startsWith('-')) continue;
       const expanded = expandHome(t);
       if (expanded === null || /[$`*?[{]/.test(expanded)) continue;
@@ -5241,7 +5303,8 @@ function classifyShellPaths(
         });
         continue;
       }
-      const w = classifyPath(table, ctx, 'Write', p.abs);
+      // a device sink is a DISCARD, not a destination — the redirection form has always known this
+      const w = /^\/dev\//.test(p.raw) ? { verdict: 'ALLOW' as const, via: '', capability: '', absolute: false } : classifyPath(table, ctx, 'Write', p.abs);
       if (w.verdict !== 'ALLOW')
         hits.push({ ...w, via: `write destination ${p.raw} (${w.via})`, segment: seg });
       // a destination directory that contains a protected path (copying a tree over .harness/, extracting into it)
@@ -5553,6 +5616,7 @@ function analyzeSegments(
       // boundary sees what the command line did to the tool it is about to resolve
       envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg) },
       definedNames: functionNames,
+      rawSegment: seg,
       ...(bindingWhy !== null ? { binding: { kind: 'redefined' as const, why: bindingWhy } } : {}),
       get treeFresh(): boolean {
         return !written.has(TREE_DIRTY);
@@ -5597,14 +5661,24 @@ function analyzeSegments(
     // instead of being denied (exit review 4). When the upstream is a LITERAL, the text that will run is known and
     // is analysed as what it is; when it is not — `curl … | sh`, `cat f | sh` — something WILL run that was never
     // read, which is opacity and never ALLOW.
-    if (stdinFrom !== null && normalizeSegment(seg).some(readsScriptFromStdin)) {
-      const literal = literalStdout(stdinFrom, upstreamHeredoc ?? undefined);
+    // `bash <(echo 'rm -rf /')` hands the interpreter a FILE holding that command's output, and running it is the
+    // same execution edge a pipe is — the operand is just spelled differently (exit review 5).
+    const procSubScript =
+      stage.fromProcessSubstitution === true &&
+      /\$SUBST/.test(seg) &&
+      STDIN_SCRIPT_HEAD_RE.test((tokenize(seg)[0] ?? '').replace(/^.*\//, ''))
+        ? upstream
+        : null;
+    const stdinSource = stdinFrom ?? procSubScript;
+    if (stdinSource !== null && (procSubScript !== null || normalizeSegment(seg).some(readsScriptFromStdin))) {
+      const stdinFromResolved = stdinSource;
+      const literal = literalStdout(stdinFromResolved, upstreamHeredoc ?? undefined);
       if (literal !== null)
         for (const h of analyzeSegments(table, ctx, compiled, [literal], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried through a pipe)`.trim() });
       else
         hits.push(
-          opaqueHit(table, ctx, seg, `runs the standard output of \`${stdinFrom}\`, which this kernel did not read`),
+          opaqueHit(table, ctx, seg, `runs the standard output of \`${stdinFromResolved}\`, which this kernel did not read`),
         );
     }
     // A CALL TO A FUNCTION DEFINED HERE runs the body that was already handed over at the definition, so the call
@@ -5657,7 +5731,17 @@ function analyzeSegments(
         }
       }
       // path arguments of the normalized command (after wrappers and global flags are stripped)
-      for (const h of classifyShellPaths(table, ctx, norm, effectiveCwd)) hits.push(h);
+      // A SEARCH PATTERN IS DATA. Normalization de-quotes, so `grep 'rm -rf /' notes.md` reaches the path scan as
+      // three tokens and `/` was read as a search ROOT — an ordinary code search denied as a recursive read of the
+      // filesystem (exit review 5). The pattern's words are taken from the RAW segment, where it is still one word.
+      const rawMarked = tokenizeMarked(seg);
+      const rawHead = (rawMarked[0]?.text ?? '').replace(/^.*\//, '');
+      const patternWords =
+        PATTERN_FIRST_HEADS.has(rawHead) &&
+        !rawMarked.some((t) => /^-[a-zA-Z]*[ef]$/.test(t.text) || /^--(regexp|file)=/.test(t.text))
+          ? (rawMarked.find((t, i) => i > 0 && !t.text.startsWith('-'))?.text ?? '').split(/\s+/).filter(Boolean)
+          : [];
+      for (const h of classifyShellPaths(table, ctx, norm, effectiveCwd, patternWords)) hits.push(h);
     }
     // shell writes whose target token resolves under the EGO home trust stores are trust tampering wherever EGO_HOME is
     if (ctx.egoHome) {

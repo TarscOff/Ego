@@ -591,6 +591,11 @@ matchers:
   - capability: command.network-tool
     tool: Bash
     command: '^registry-fetch\s+(pnpm|yarn)\s+dlx\b'
+  # A version or help query touches no network at all, and the tools themselves say so. It sits BEFORE the network
+  # rule because matching is first-match-wins per segment (exit review 5).
+  - capability: command.read-only
+    tool: Bash
+    command: '^(curl|wget|scp|sftp|rsync|ssh|nc|ncat|telnet|git-lfs)\s+(--version|--help|-V|-h)\s*$'
   - capability: command.network-tool
     tool: Bash
     command: '^(curl|wget|scp|sftp|rsync\b.*:|ssh|nc|ncat|telnet)\b'
@@ -737,6 +742,11 @@ matchers:
   - capability: command.interpreter-script
     tool: Bash
     command: '^(node|python3?|tsx|ts-node|bun|deno\s+run|ruby|perl|php)\s+(?!-)[^\s]+\.(js|mjs|cjs|ts|mts|py|rb|pl|php)\b'
+  # `tee` copies standard input to standard output and writes the files it names; those files are classified as
+  # write destinations on their own, so the stage itself is the ordinary build idiom `cmd | tee build.log`
+  - capability: command.local-mutation
+    tool: Bash
+    command: '^tee\b'
   - capability: command.local-mutation
     tool: Bash
     command: '^(npm\s+(install|i|ci|uninstall|update|run\s+(format:fix|lint:fix|generate|codegen))|npx\s+(prettier|eslint)\b.*(--write|--fix)|pnpm\s+(install|add|remove)|yarn\s+(add|remove|install)|pip\s+install|poetry\s+(install|add)|go\s+(mod|get)|cargo\s+(add|update)|(mkdir|touch|cp|mv|ln|tar|zip|unzip)\b|chmod\s+[0-7+])'
