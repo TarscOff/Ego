@@ -250,6 +250,13 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     cases: [
       'docker --context production rm -f app',
       'docker -H tcp://prod.example.com:2375 rm -f app',
+      // A SHELL ON A PRODUCTION ENGINE. `exec`/`attach` is classified as script-opaque — an interactive shell IS
+      // opaque — and that capability is not enrolled in the target model, so the engine was never resolved
+      // (exit review 6). The target belongs to the TOOL, not to the capability that won the first match.
+      'DOCKER_HOST=tcp://prod.example.com:2375 docker exec box sh',
+      'DOCKER_CONTEXT=production docker exec -it box bash',
+      'docker --context production attach app',
+      'podman --url tcp://prod.example.com:2375 exec box sh',
       'docker --context production system prune -af',
       // creating or updating a context WRITES the name-to-engine binding every later command will follow
       'docker context create prod --docker host=tcp://prod.example.com:2375',
@@ -304,6 +311,11 @@ export interface Transform {
 }
 
 const noDouble = (c: string): boolean => !c.includes('"');
+/** A wrapper that does not PARSE assignments cannot carry a command that begins with one: `nohup VAR=x cmd` makes
+ *  the shell hand `VAR=x` to nohup as its program name, which fails. `env`, `sudo` and `doas` do parse them, and a
+ *  shell keyword, a carried body and a pipeline all start a fresh simple command, so those stay in. Gating a
+ *  command the shell would refuse to run is not a safety property. */
+const noLeadingAssignment = (c: string): boolean => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(c);
 const noSingle = (c: string): boolean => !c.includes("'");
 /** a transformation that counts parentheses cannot carry a command that contains them */
 const noParens = (c: string): boolean => !/[()]/.test(c);
@@ -320,16 +332,24 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'sh -c', apply: (c) => `sh -c '${c}'`, safe: noSingle },
   { name: 'bash -c, double-quoted', apply: (c) => `bash -c "${c}"`, safe: noDouble },
   { name: 'zsh -c', apply: (c) => `zsh -c '${c}'`, safe: noSingle },
+  // an OPTION'S VALUE is not the program: the scan for `-c` must step over `-o pipefail` / `-O extglob`
+  { name: 'sh -c behind a valued option', apply: (c) => `bash -o pipefail -c '${c}'`, safe: noSingle },
+  { name: 'sh -c behind a shopt option', apply: (c) => `bash -O extglob -c '${c}'`, safe: noSingle },
+  // a privilege wrapper keeps its own head AND carries a command
+  { name: 'sudo', apply: (c) => `sudo ${c}` },
+  { name: 'sudo with its own options', apply: (c) => `sudo -u root -H ${c}` },
+  { name: 'sudo carrying a shell', apply: (c) => `sudo bash -c '${c}'`, safe: noSingle },
+  { name: 'doas carrying a shell', apply: (c) => `doas sh -c '${c}'`, safe: noSingle },
   // transparent wrappers
   { name: 'env', apply: (c) => `env ${c}` },
   { name: 'env with an assignment', apply: (c) => `env FOO=bar ${c}` },
   { name: 'a leading assignment', apply: (c) => `FOO=bar ${c}` },
-  { name: 'command', apply: (c) => `command ${c}` },
-  { name: 'nohup', apply: (c) => `nohup ${c}` },
-  { name: 'timeout', apply: (c) => `timeout 60 ${c}` },
-  { name: 'nice', apply: (c) => `nice -n 5 ${c}` },
-  { name: 'stdbuf', apply: (c) => `stdbuf -o0 ${c}` },
-  { name: 'xargs', apply: (c) => `echo x | xargs -I{} ${c}` },
+  { name: 'command', apply: (c) => `command ${c}`, safe: noLeadingAssignment },
+  { name: 'nohup', apply: (c) => `nohup ${c}`, safe: noLeadingAssignment },
+  { name: 'timeout', apply: (c) => `timeout 60 ${c}`, safe: noLeadingAssignment },
+  { name: 'nice', apply: (c) => `nice -n 5 ${c}`, safe: noLeadingAssignment },
+  { name: 'stdbuf', apply: (c) => `stdbuf -o0 ${c}`, safe: noLeadingAssignment },
+  { name: 'xargs', apply: (c) => `echo x | xargs -I{} ${c}`, safe: noLeadingAssignment },
   // shell structure
   { name: 'after &&', apply: (c) => `true && ${c}` },
   { name: 'after ||', apply: (c) => `false || ${c}` },
@@ -362,6 +382,12 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'time, with a subshell', apply: (c) => `time ( ${c} )`, safe: noParens },
   { name: 'with a merged redirect', apply: (c) => `${c} 2>&1` },
   { name: 'trap', apply: (c) => `trap '${c}' EXIT`, safe: noSingle },
+  // `source`/`.` RUN the file they are handed, so a process substitution given to them is an execution edge
+  { name: 'source of a process substitution', apply: (c) => `source <(echo '${c}')`, safe: noSingle },
+  { name: 'dot of a process substitution', apply: (c) => `. <(echo '${c}')`, safe: noSingle },
+  // a comment starts at a WORD boundary, which an operator makes as surely as a space does
+  { name: 'after a comment carrying an apostrophe', apply: (c) => `echo hi;# it's fine\n${c}` },
+  { name: 'after a comment behind an operator', apply: (c) => `true &&# don't\n${c}` },
   { name: 'herestring into an interpreter', apply: (c) => `sh <<< '${c}'`, safe: noSingle },
   { name: 'interpreter named by its absolute path', apply: (c) => `/bin/sh -c '${c}'`, safe: noSingle },
   { name: 'exec with an argv0 alias', apply: (c) => `exec -c -a ok ${c}` },
@@ -373,6 +399,22 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'piped into a wrapped interpreter', apply: (c) => `echo '${c}' | env bash`, safe: noSingle },
   { name: 'piped into an interpreter with options', apply: (c) => `echo '${c}' | bash -euo pipefail`, safe: noSingle },
   { name: 'piped into an interpreter with a redirect', apply: (c) => `echo '${c}' | bash 2>&1`, safe: noSingle },
+  // `<&0` DUPLICATES the descriptor the pipe already installed; only a redirection from a FILE replaces it
+  { name: 'piped into an interpreter duplicating stdin', apply: (c) => `echo '${c}' | bash <&0`, safe: noSingle },
+  { name: 'piped into an interpreter duplicating fd 0 explicitly', apply: (c) => `echo '${c}' | sh 0<&0`, safe: noSingle },
+  // the emitter's own escapes are part of the text that will run
+  {
+    name: 'piped as hex escapes',
+    apply: (c) => `echo -e '${c.replace(/ /g, '\\x20')}' | sh`,
+    safe: (c) => noSingle(c) && !/\\/.test(c),
+  },
+  {
+    name: 'piped as octal escapes',
+    apply: (c) => `printf '%b' '${c.replace(/ /g, '\\040')}' | sh`,
+    // `\0ddd` takes up to THREE octal digits, so `chmod\040777` is `\0407` — BEL, not a space. A space followed
+    // by an octal digit cannot be written this way at all, which is the shell's rule, not a limitation here.
+    safe: (c) => noSingle(c) && !/\\|%/.test(c) && !/ [0-7]/.test(c),
+  },
   // a heredoc body is a SCRIPT when its reader takes its program from stdin, and an EXPANSION SITE when the
   // delimiter is unquoted — it is inert data only in the third case
   { name: 'heredoc into an interpreter', apply: (c) => `bash <<'EOF'\n${c}\nEOF`, safe: noSingle },

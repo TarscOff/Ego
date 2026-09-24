@@ -341,7 +341,10 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // into it — `git push --force origin main` on the next line never became a segment and the whole call was
       // ALLOW (exit review 4). A `#` starts a comment only at the start of a WORD, exactly as in the shell, so
       // `http://x/#frag` and `--pretty=%h#` are untouched.
-      if (ch === '#' && (i === 0 || /\s/.test(command[i - 1]!))) {
+      // a `#` starts a comment at the start of a WORD — which is after whitespace OR after any unquoted operator
+      // that ends one. `echo hi;# it's fine` put the scanner into a phantom quoted state through the apostrophe
+      // (exit review 6).
+      if (ch === '#' && (i === 0 || /[\s;&|()]/.test(command[i - 1]!))) {
         const nl = command.indexOf('\n', i);
         i = nl < 0 ? command.length : nl; // the newline itself still separates the commands
         continue;
@@ -580,13 +583,19 @@ const STDIN_SCRIPT_HEAD_RE = /^((?:ba|z|da|k|a)?sh|fish|python|python2|python3|r
  *  on the segment itself; what matters here is that what comes OUT is what went IN. `head`/`tail` truncate and are
  *  deliberately absent: the literal that survives them is not the literal that went in. */
 const PASS_THROUGH_RE = /^(?:cat|tee(?:\s+(?:-[aip]+|[^-\s]\S*))*)\s*$/;
+/** Heads that RUN a file they are given: the interpreters, plus `source` and `.`, which run it in the CURRENT
+ *  shell. `. <(echo CMD)` is the same execution edge as `bash <(echo CMD)` and was missed because the gate listed
+ *  only the interpreters (exit review 6). */
+const RUNS_A_FILE_RE = /^((?:ba|z|da|k|a)?sh|fish|python|python2|python3|ruby|perl|node|nodejs|php|Rscript|source|\.)$/;
 /** the file names that mean "standard input" */
 const STDIN_FILE_RE = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/;
 /** heads whose operand is a script run in the CURRENT shell */
 /** options that name the script INLINE or as a module: stdin is then data, not the program */
 const INLINE_SCRIPT_FLAG_RE = /^(-c|-e|-E|--eval|--command|-m|--module|-p|--print|-r|--require|-i)$/;
-/** options of those heads that consume the next token, so their value is not mistaken for a script operand */
-const STDIN_HEAD_VALUE_FLAG_RE = /^(-o|\+o|--rcfile|--init-file|-X|-W|-Q|--conf|--check-prefix)$/;
+/** options of those heads that consume the next token, so their value is not mistaken for a script operand.
+ *  `bash -o pipefail -c CMD` and `bash -O extglob -c CMD` read `pipefail`/`extglob` as the program and lost the
+ *  inline script entirely (exit review 6). */
+const STDIN_HEAD_VALUE_FLAG_RE = /^([-+][oO]|--rcfile|--init-file|-X|-W|-Q|--conf|--check-prefix)$/;
 
 /** True when this command runs whatever is fed to its standard input: `sh`, `bash -s`, `python3 -`, `node`.
  *  A script operand, or an inline `-c`/`-e`/`-m` program, means stdin is DATA and this is false. */
@@ -608,7 +617,10 @@ export function readsScriptFromStdin(segment: string): boolean {
     // A HEREDOC OR HERESTRING IS THE STDIN SCRIPT ITSELF — `bash <<EOF` runs the body. A redirection from a FILE
     // is the opposite: it replaces stdin, so a pipe into it carries nothing and the file is the program.
     if (/^\d*<<-?/.test(t) || /^\d*<<</.test(t)) return true;
-    if (/^\d*(?:<&|<)/.test(t)) return false;
+    // `<&0` DUPLICATES the descriptor stdin already has; only a redirection from a FILE replaces it, and reading
+    // the duplication as a replacement dropped the pipe edge (exit review 6).
+    if (/^\d*<&/.test(t)) continue;
+    if (/^\d*</.test(t)) return false;
     if (/^(?:\d*(?:>>?|>&|>\|)|&>>?)/.test(t)) {
       if (/^(?:\d*(?:>>?|>&|>\|)|&>>?)$/.test(t)) i++; // a bare operator takes the next token as its target
       continue;
@@ -696,8 +708,16 @@ export function emitterTail(text: string): string {
  *  with the backslash intact glued two commands into one word and produced a POSITIVE claim that was wrong —
  *  worse than opacity, because it is asserted rather than admitted (exit review 5). */
 function decodeEscapes(text: string): string {
-  return text.replace(/\\(n|t|r|a|b|f|v|e|0|\\)/g, (_m, c: string) =>
-    c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '\r' : c === 'f' ? '\f' : c === 'v' ? '\v' : c === 'b' ? '\b' : c === '0' ? '\0' : c === '\\' ? '\\' : '\x1b',
+  // the NUMERIC escapes too: `\x20`, `\0101` and `\u0041` are ordinary characters in `echo -e` and `printf %b`,
+  // and leaving them encoded asserted a literal that was not the text the shell would receive (exit review 6)
+  text = text
+    .replace(/\\x([0-9a-fA-F]{1,2})/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16) & 0xff))
+    // `\0440` is `\0` + three octal digits = 288, which `printf %b` masks to a byte (32, a space); leaving it at
+    // 288 produced a character no shell would see and split the word in the wrong place
+    .replace(/\\0([0-7]{1,3})/g, (_m, o: string) => String.fromCharCode(parseInt(o, 8) & 0xff))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16)));
+  return text.replace(/\\(n|t|r|a|b|f|v|e|\\)/g, (_m, c: string) =>
+    c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '\r' : c === 'f' ? '\f' : c === 'v' ? '\v' : c === 'b' ? '\b' : c === '\\' ? '\\' : '\x1b',
   );
 }
 
@@ -788,21 +808,34 @@ export function normalizeSegment(segment: string): string[] {
   // the target resolver sees them, and are judged nowhere else.
   const targetEnv: string[] = [];
   // leading VAR=value assignments: stripped, except the ones that change what runs (surfaced as `env-inject VAR`)
-  for (;;) {
-    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"[^"]*"|\S*)\s+/.exec(s);
-    if (!m) break;
-    if (ENV_INJECT_RE.test(m[1]!)) extra.push(`env-inject ${m[1]}`);
-    if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
-    s = s.slice(m[0].length);
-  }
+  const stripAssignments = (): boolean => {
+    let any = false;
+    for (;;) {
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"[^"]*"|\S*)\s+/.exec(s);
+      if (!m) return any;
+      if (ENV_INJECT_RE.test(m[1]!)) extra.push(`env-inject ${m[1]}`);
+      if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
+      s = s.slice(m[0].length);
+      any = true;
+    }
+  };
+  stripAssignments();
   // `exec -a NAME prog …` runs `prog` under the name NAME: strip the alias so the real head is classified
   s = s.replace(EXEC_ARGV0_RE, '');
   // shell prefix keywords (`if git push`, `do npm test`, `then rm -rf x`) are normalization, not a safety
   // judgement: stripping them in the analyzer gives every producer AND the top level the same treatment.
+  //
+  // EACH REMOVAL EXPOSES A NEW HEAD, so this alternates with the assignment strip instead of running once after
+  // it. `if DOCKER_CONTEXT=production docker exec …` had its assignment looked for while the head was still `if`,
+  // so the engine was never re-attached and no matcher could match a segment that began with an assignment —
+  // a shell on a production daemon at ASK (exit review 6, generated cross-product).
   for (;;) {
     const m = /^(\S+)\s+/.exec(s);
-    if (!m || !PREFIX_KEYWORDS.has(m[1]!)) break;
-    s = s.slice(m[0].length).trim();
+    if (m && PREFIX_KEYWORDS.has(m[1]!)) {
+      s = s.slice(m[0].length).trim();
+      continue;
+    }
+    if (!stripAssignments()) break;
   }
   // `dlx` MEANS DOWNLOAD AND EXECUTE. pnpm and yarn always fetch the package from the registry, so the code that
   // runs was never in the workspace and EGO never read a byte of it — stripping the runner made `pnpm dlx <x>`
@@ -1064,7 +1097,18 @@ function normalizeTail(rest: string[]): string[] {
     // operand as the command string wherever it sits in the cluster. A `--` may separate it from that operand.
     // It must come BEFORE the first operand: in `bash run.sh -c ls` the `-c` is the SCRIPT'S argument, and reading
     // it as the shell's hijacked the interpreter so run.sh was never resolved at all (exit review 4).
-    const firstOperand = rest.findIndex((t, i) => i > 0 && !t.startsWith('-'));
+    // AN OPTION'S VALUE IS NOT AN OPERAND. `bash -o pipefail -c CMD` has `pipefail` where the scan looked for the
+    // script, so the `-c` after it was read as the SCRIPT'S argument and the inline program was never analysed
+    // (exit review 6).
+    const operandAt: number[] = [];
+    for (let i = 1; i < rest.length; i++) {
+      if (STDIN_HEAD_VALUE_FLAG_RE.test(rest[i]!)) {
+        i++;
+        continue;
+      }
+      if (!rest[i]!.startsWith('-')) operandAt.push(i);
+    }
+    const firstOperand = operandAt.length ? operandAt[0]! : -1;
     const cIdx = rest.findIndex((t) => t === '-c' || /^-[a-z]*c[a-z]*$/i.test(t));
     if (cIdx >= 0 && (firstOperand < 0 || cIdx < firstOperand)) {
       const inner = rest[cIdx + 1] === '--' ? rest[cIdx + 2] : rest[cIdx + 1];
@@ -1113,8 +1157,12 @@ function normalizeTail(rest: string[]): string[] {
         ? 2
         : 1;
     }
+    // THE TAIL IS A COMMAND, so it is normalized like one — from the ORIGINAL TEXT. Handing the tail back as a
+    // re-joined token list erases the quoting, and a `-c` body is ONE WORD: `sudo bash -c 'git push origin main'`
+    // became `bash -c git push origin main`, whose inline program is the single token `git` (exit review 6). The
+    // privilege tool itself keeps its head, as it must, so `command.privileged` still asks.
     const after = rest.slice(i);
-    return [rest.join(' '), ...(after.length ? [after.join(' ')] : [])];
+    return [rest.join(' '), ...(after.length ? normalizeSegment(requote(after)) : [])];
   }
   return [rest.join(' ')];
 }
@@ -2153,7 +2201,11 @@ export function segmentEnvInputs(segment: string): Record<string, string> {
     for (;;) {
       // skip wrappers and their options so `timeout 60 env FOO=1 make` is reached
       const w = /^(\S+)\s+/.exec(s);
-      if (w && (WRAPPERS.has(w[1]!) || w[1] === 'timeout' || w[1] === '--')) {
+      // `sudo`, `doas` and `xargs` are NOT transparent for the verdict — sudo keeps `command.privileged` — but
+      // they are transparent for the ENVIRONMENT: `sudo DOCKER_HOST=tcp://prod… docker exec` really does set that
+      // variable for the command. Stopping at them left the normalized `docker exec` with no engine to resolve,
+      // so a shell on a production daemon asked instead of being denied (exit review 6, generated cross-product).
+      if (w && (WRAPPERS.has(w[1]!) || /^(timeout|sudo|doas|xargs|--)$/.test(w[1]!))) {
         s = s.slice(w[0].length);
         continue;
       }
@@ -2169,6 +2221,11 @@ export function segmentEnvInputs(segment: string): Record<string, string> {
       const opt = /^(-\S*|\d+\S*)\s+/.exec(s);
       if (opt && /^(-|\d)/.test(opt[1]!)) {
         s = s.slice(opt[0].length);
+        // an option's VALUE is not a command either: `sudo -u root -H VAR=x cmd` stopped the scan at `root`
+        if (/^(-u|-g|-p|-C|-U|-r|-t|-D|--user|--group|--prompt|--role|--type|--chdir)$/.test(opt[1]!)) {
+          const val = /^(\S+)\s+/.exec(s);
+          if (val && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(val[1]!)) s = s.slice(val[0].length);
+        }
         continue;
       }
       break;
@@ -4146,10 +4203,15 @@ const DB_EXECUTES_UNREAD =
   /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$)|\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
 
 const TARGET_ENV_RE =
-  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|CLICKHOUSE_HOST)$/;
+  // THE CONTAINER ENGINE IS SELECTED BY ENVIRONMENT TOO. `DOCKER_HOST` and `DOCKER_CONTEXT` were enrolled in the
+  // RESOLVER but not here, so the assignment was stripped as noise and never re-attached: the engine survived
+  // only while the assignment happened to stay leading in the raw segment. Inside an `if`, a loop body, a `trap`
+  // or a herestring it did not, and a shell on a production daemon asked (exit review 6, generated cross-product).
+  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST)$/;
 const TARGET_ENV_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
   'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
+  'docker', 'podman', 'nerdctl', 'docker-compose', 'podman-compose', 'lima', 'colima',
   // a runner does not change what the wrapped tool connects to
   'npx', 'pnpm', 'yarn', 'bunx', 'pnpx', 'bun', 'npm',
 ]);
@@ -4188,6 +4250,33 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
   'production.kms.mutate': 'cloud',
   'production.secrets.mutate': 'cloud',
 };
+
+/** THE TOOL DECIDES WHETHER A TARGET EXISTS, NOT THE CAPABILITY THAT HAPPENED TO WIN. Matchers are
+ *  first-match-wins, so a segment can be classified by a capability that says nothing about a target while still
+ *  naming a tool whose whole job is to act on one: `docker exec` matches the script-opaque matcher — an
+ *  interactive shell IS opaque — and `command.script-opaque` is not enrolled, so
+ *  `DOCKER_HOST=tcp://prod… docker exec box sh` opened a shell on a production engine at ASK, while the same
+ *  engine with `docker run` was DENY (exit review 6). Enrolling the HEAD closes the class rather than the verb:
+ *  every capability a container/k8s/db tool can be classified as is now re-targeted.
+ *
+ *  Deliberately NOT extended to `cloud`: that kind is the kernel's one DE-escalation (it REPLACES the hit with
+ *  `cloud.local.mutate`), so inferring it from a head could lower a verdict that was reached for another reason.
+ *  The three kinds here only ever raise. */
+/** The head of the COMMAND, not the first token of the segment: leading `NAME=VALUE` assignments are the
+ *  environment the command runs with, not the program it runs. `DOCKER_HOST=… docker exec` reads its head as the
+ *  assignment, which is no tool at all (exit review 6, generated cross-product). */
+function commandHead(norm: string): string {
+  const t = tokenize(norm);
+  let i = 0;
+  while (i < t.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[i]!)) i++;
+  return (t[i] ?? '').replace(/^.*\//, '');
+}
+
+const TARGET_SENSITIVE_HEAD: Array<[RegExp, 'k8s' | 'db' | 'container']> = [
+  [/^(docker|podman|nerdctl|docker-compose|podman-compose|lima|colima)$/, 'container'],
+  [/^(kubectl|oc|helm|kustomize)$/, 'k8s'],
+  [/^(psql|mysql|mariadb|mongosh|mongo|redis-cli|clickhouse-client|cqlsh|influx)$/, 'db'],
+];
 
 /** The host an endpoint names, with scheme, credentials, port, IPv6 brackets and path removed. */
 function endpointHost(v: string): string {
@@ -4335,9 +4424,18 @@ function resolveContainerTarget(
   }
   // the engine is selected by ENVIRONMENT too — `DOCKER_HOST` and `DOCKER_CONTEXT` are the same two flags by
   // another name, and docker's own help documents `--context` as overriding `DOCKER_HOST`
-  for (const [k, v] of Object.entries(envInputs))
+  const engineEnv = (k: string, v: string): void => {
     if (/^(DOCKER_HOST|CONTAINER_HOST)$/.test(k)) add(v, 'engine');
-    else if (/^(DOCKER_CONTEXT)$/.test(k)) add(v, 'context');
+    else if (k === 'DOCKER_CONTEXT') add(v, 'context');
+  };
+  for (const [k, v] of Object.entries(envInputs)) engineEnv(k, v);
+  // …and as a TOKEN, because that is how the normalizer re-attaches a target assignment it stripped from the
+  // head. Reading only `envInputs` meant the re-attachment reached the resolver and was ignored by it, which is
+  // the "accepted but unconsumed" defect one layer down (exit review 6, generated cross-product).
+  for (const t of tokens) {
+    const eq = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
+    if (eq) engineEnv(eq[1]!, eq[2]!.replace(/^['"]|['"]$/g, ''));
+  }
   // `--builder` is unambiguous wherever it sits, and buildx puts it after the plugin subcommand, past the
   // global-option scan above (exit review 2)
   for (let i = 1; i < tokens.length; i++) {
@@ -4596,7 +4694,9 @@ function retargetLocalCapability(
   norm: string,
   envInputs: Record<string, string> = {},
 ): CapabilityHit {
-  const kind = TARGET_SENSITIVE[hit.capability];
+  const kind =
+    TARGET_SENSITIVE[hit.capability] ??
+    TARGET_SENSITIVE_HEAD.find(([re]) => re.test(commandHead(norm)))?.[1];
   if (!kind) return hit;
   const targets = table.localTargets;
   if (!targets || targets.k8sLocalContexts.length === 0) return hit;
@@ -5741,7 +5841,7 @@ function analyzeSegments(
     const procSubScript =
       stage.fromProcessSubstitution === true &&
       /\$SUBST/.test(seg) &&
-      STDIN_SCRIPT_HEAD_RE.test((tokenize(seg)[0] ?? '').replace(/^.*\//, ''))
+      RUNS_A_FILE_RE.test((tokenize(seg)[0] ?? '').replace(/^.*\//, ''))
         ? upstream
         : null;
     const stdinSource = stdinFrom ?? procSubScript;
