@@ -178,7 +178,13 @@ test('producer contract: the source has no second path around the canonical anal
   // its only other caller. A new producer that tried to classify on its own would have to add a call here.
   const src = readFileSync(new URL('../src/authority/evaluate.ts', import.meta.url), 'utf8');
   const callers = [...src.matchAll(/analyzeSegments\(/g)].length;
-  assert.equal(callers, 3, 'expected exactly the definition plus two call sites (top level and effect recursion)');
+  // The invariant is that nothing analyses executable text EXCEPT this function — not that the count never
+  // grows. Each call site must FEED the canonical pipeline, never replace it. Today: the definition, the
+  // top-level entry, the effect recursion, and the command a `kubectl exec … -- CMD` carries, which is fed back
+  // in as its own segment rather than classified separately.
+  assert.equal(callers, 4, 'a new call site must feed the canonical pipeline, not go around it');
+  for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand'])
+    assert.ok(src.includes(site), `${site} is one of the accounted-for paths`);
   // and the producer return type still has nowhere to put a verdict
   const contract = src.slice(src.indexOf('function resolveScriptCommand('), src.indexOf('/** True when the path exists'));
   for (const forbidden of ['verdict', 'CapabilityHit', 'capability:']) {

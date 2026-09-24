@@ -103,7 +103,9 @@ const WRAPPERS = new Set([
 // `doas` is deliberately NOT a transparent wrapper: like `sudo`, it must keep its head so the command.privileged
 // matcher that names it can fire (its inner command is analysed separately in normalizeTail).
 /** wrapper options that consume the next token as their value (the command starts after it) */
-const EXEC_ARGV0_RE = /^exec\s+(-a|--argv0)\s+\S+\s+/;
+/** `exec -a NAME prog` sets argv[0] to NAME and runs `prog`. Classifying NAME let an arbitrary program run as
+ *  whatever the agent felt like calling it (exit review 3). */
+const EXEC_ARGV0_RE = /^exec\s+(?:-a|--argv0)\s+\S+\s+/;
 const WRAPPER_VALUE_OPTS: Record<string, RegExp> = {
   env: /^(-u|--unset|-C|--chdir|-S|--split-string)$/,
   nice: /^(-n|--adjustment)$/,
@@ -285,6 +287,8 @@ export function normalizeSegment(segment: string): string[] {
     if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
     s = s.slice(m[0].length);
   }
+  // `exec -a NAME prog …` runs `prog` under the name NAME: strip the alias so the real head is classified
+  s = s.replace(EXEC_ARGV0_RE, '');
   // shell prefix keywords (`if git push`, `do npm test`, `then rm -rf x`) are normalization, not a safety
   // judgement: stripping them in the analyzer gives every producer AND the top level the same treatment.
   for (;;) {
@@ -3368,8 +3372,10 @@ function resolveK8sTarget(
       break;
     }
   }
-  // an unrecognised verb fails closed: the kernel cannot show it is a read
-  const mutating = verb === undefined ? true : mutate.has(verb);
+  // an unrecognised verb fails closed: the kernel cannot show it is a read. And `config use-context` is not a
+  // read of anything — it re-points every LATER command at that cluster, which is the effect that matters.
+  const switchesContext = tokens.some((t, i) => t === 'use-context' && tokens[i - 1] === 'config');
+  const mutating = switchesContext || verb === undefined ? true : mutate.has(verb);
   // EVERY signal that can select the cluster is classified, and the MOST RESTRICTIVE one decides. kubectl resolves
   // them together — `--server` overrides the context's endpoint and `--kubeconfig` chooses the file the context is
   // looked up in — so a local-looking `--context` must never end the search (round 14).
@@ -3377,6 +3383,10 @@ function resolveK8sTarget(
   const add = (values: string[], patterns: string[], kind: string) => {
     for (const v of values) signals.push({ cls: classifyTargetName(v, patterns, targets), target: `${kind} ${v}` });
   };
+  // `kubectl config use-context X` re-points every later command at that cluster, exactly as `docker context
+  // use` does — and that one was already classified (exit review 3).
+  const useIdx = tokens.findIndex((t, i) => t === 'use-context' && tokens[i - 1] === 'config');
+  if (useIdx > 0 && tokens[useIdx + 1]) add([tokens[useIdx + 1]!], targets.k8sLocalContexts, 'context use');
   add(optionValues(tokens, '', ['--context', '--kube-context']), targets.k8sLocalContexts, 'context');
   add(optionValues(tokens, '', ['--kubeconfig']), [], 'kubeconfig');
   for (const t of tokens) {
@@ -4342,6 +4352,18 @@ function carrierCommandValues(seg: string): string[] {
   return out;
 }
 
+/** The command line `kubectl exec pod -- CMD …` and its neighbours carry after the separator. Against a LOCAL
+ *  cluster the verb kept its ALLOW while that command was never analysed at all (exit review 3), so it is fed
+ *  back into the canonical pipeline as its own segment. */
+function execCarriedCommand(seg: string): string | null {
+  const t = tokenize(seg);
+  const head = t[0] ?? '';
+  if (!/^(kubectl|oc|docker|podman|nerdctl)$/.test(head)) return null;
+  if (!t.some((x) => /^(exec|attach|debug)$/.test(x))) return null;
+  const dd = t.indexOf('--');
+  return dd >= 0 && dd + 1 < t.length ? t.slice(dd + 1).join(' ') : null;
+}
+
 /** THE canonical semantic-analysis pipeline.
  *
  *  Invariant (product decision, 2026-09-22): the same semantic action receives the same security analysis whether it
@@ -4482,6 +4504,10 @@ function analyzeSegments(
         env.cwdVerified = env.cwdVerified && directoryExists(env.cwd);
       } else env.cwdVerified = false;
     }
+    const carried = execCarriedCommand(seg);
+    if (carried !== null)
+      for (const h of analyzeSegments(table, ctx, compiled, splitShellSegments(carried), { ...state, env }, true))
+        hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
     for (const norm of normalizeSegment(seg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
       for (const h of normHits) hits.push(h);
