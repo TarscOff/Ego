@@ -2288,9 +2288,20 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
  *  and the like. Local scope only \u2014 these are the keys an agent or a dependency can write into the checkout. */
 function gitLocalProgramValues(root: string, verb: string): string[] {
   const out: string[] = [];
-  const dump = git(['config', '--local', '--list'], root);
+  // `--local` does NOT expand `include.path` in any spelling, so a filter reached through an include escaped the
+  // closure entirely. Reading the full config WITH includes and keeping only the entries whose ORIGIN file lies
+  // inside the repository gives both: the includes are expanded, and the operator's global settings stay out.
+  const dump = git(['config', '--list', '--includes', '--show-origin'], root);
   if (!dump.ok || !dump.stdout) return out;
-  for (const line of dump.stdout.split(/\r?\n/)) {
+  const repo = canonicalPath(root);
+  for (const raw of dump.stdout.split(/\r?\n/)) {
+    // `file:<path>\t<key>=<value>`
+    const tab = raw.indexOf('\t');
+    if (tab < 0) continue;
+    const origin = raw.slice(0, tab).replace(/^file:/, '');
+    const originAbs = canonicalPath(isAbsolute(origin) ? origin : join(root, origin));
+    if (originAbs !== repo && !originAbs.startsWith(repo + sep)) continue; // not this repository's config
+    const line = raw.slice(tab + 1);
     const eq = line.indexOf('=');
     if (eq < 0) continue;
     const key = line.slice(0, eq);
@@ -3134,7 +3145,7 @@ const DB_EXECUTES_UNREAD =
   // The family is "this client runs something it was handed": a program file, a shell escape, a loadable
   // extension, or a COPY in either direction. Enumerating only one direction of COPY and only sqlite's `.shell`
   // left the neighbours open (decision challenge, findings 12, 34).
-  /\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
+  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$)|\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
 
 const TARGET_ENV_RE =
   /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|CLICKHOUSE_HOST)$/;
@@ -4647,16 +4658,38 @@ export function evaluate(
       // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
       // written as `~/.ssh/**` does not match a string that still ends in a slash
       const cut = reach.search(/[*?[{]/);
-      const literal = (cut < 0 ? reach : reach.slice(0, cut)).replace(/\/+$/, '') || '.';
+      const rawLiteral = cut < 0 ? reach : reach.slice(0, cut);
+      // `/**/…` has the literal prefix `/`; stripping its trailing slash collapsed it to `.` — the working
+      // directory — so a pattern that reaches the whole filesystem read as an in-workspace search (exit review 2)
+      const literal = rawLiteral === '/' ? '/' : rawLiteral.replace(/\/+$/, '') || '.';
       const home2 = expandHome(literal);
       const resolvedReach = canonicalPath(
         home2 !== null && isAbsolute(home2) ? home2 : resolve(abs, home2 ?? literal),
       );
       // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
       // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
-      const r = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
+      // a pattern anchored at `/` or carrying a `..` segment is not bounded by its literal prefix: `/**/.ssh/*`
+      // has the prefix `/` and reaches everything under it (exit review 2)
+      // a `..` segment ANYWHERE in the pattern escapes the literal prefix wherever that prefix resolves, and a
+      // root anchor is unbounded when the prefix is outside every registered root
+      const unbounded =
+        /(^|\/)\.\.(\/|$)/.test(reach) || (reach.startsWith('/') && repoRootFor(ctx, resolvedReach) === null);
+      // classify what the prefix names FIRST: an unbounded reach must never REPLACE a stronger answer, and
+      // `<home>/.ssh/*` is both unbounded and a credential store
+      const byPath = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
+      const strongerThanOutside =
+        byPath.via.startsWith('matcher path') || !byPath.capability.startsWith('fs.repo');
+      const r =
+        unbounded && !strongerThanOutside
+          ? {
+              capability: 'fs.outside-workspace.read',
+              verdict: verdictFor(table, ctx, 'fs.outside-workspace.read'),
+              via: 'the pattern is not bounded by a directory inside the workspace',
+              absolute: false,
+            }
+          : byPath;
       // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
-      if (r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
+      if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
         hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
     }
     if (
