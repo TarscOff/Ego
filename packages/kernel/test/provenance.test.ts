@@ -683,3 +683,29 @@ test('a pattern is bounded by what it can reach, and a config include is part of
   assert.notEqual(run('psql db prog.sql', d).verdict, 'ALLOW');
   assert.equal(run('psql -c "SELECT 1"', d).verdict, 'ALLOW');
 });
+
+test('command substitution is suppressed by single quotes ONLY', () => {
+  // Double quotes stop the shell SPLITTING on operators; they stop nothing else. `echo "$(git push origin main)"`
+  // runs the push — verified against a real shell. Guarding the substitution extractor with `!inDouble` alongside
+  // the operator branches dropped an entire execution channel: every DENY in the control plane was reachable
+  // through it in one Bash call, at ALLOW, which on claude-code suppresses the host's own prompt.
+  const d = workspace({ 'package.json': '{}' });
+  assert.equal(run('git push origin main', d).verdict, 'DENY', 'the control');
+  for (const cmd of [
+    'echo "$(git push origin main)"',
+    'echo "`git push origin main`"',
+    'ls "$(kubectl --context production delete ns app)"',
+    'printf "%s" "prefix $(git push origin main) suffix"',
+  ])
+    assert.equal(run(cmd, d).verdict, 'DENY', `${cmd}: the inner command runs`);
+  // SINGLE quotes genuinely do suppress substitution, so that one is not an execution
+  assert.equal(run("echo '$(git push origin main)'", d).verdict, 'ALLOW');
+  // and ordinary quoted text is untouched
+  for (const cmd of ['echo "hello world"', 'echo "$(date)"', 'git status'])
+    assert.equal(run(cmd, d).verdict, 'ALLOW', cmd);
+  // the producer bodies go through the same splitter
+  const mk = workspace({ Makefile: 'build:\n\techo "$(shell git push origin main)"\n' });
+  assert.notEqual(run('make build', mk).verdict, 'ALLOW');
+  const np = workspace({ 'package.json': JSON.stringify({ scripts: { b: 'echo "`git push origin main`"' } }) });
+  assert.equal(run('npm run b', np).verdict, 'DENY');
+});

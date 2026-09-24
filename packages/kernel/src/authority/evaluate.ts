@@ -187,6 +187,13 @@ export function splitShellSegments(command: string): string[] {
         i++;
         continue;
       }
+    }
+    // COMMAND SUBSTITUTION IS SUPPRESSED BY SINGLE QUOTES ONLY. Double quotes stop the shell from SPLITTING on
+    // operators, and stop nothing else: `echo "$(git push origin main)"` runs the push. Guarding the extractor
+    // with `!inDouble` alongside the operator branches dropped an entire execution channel — every DENY in the
+    // control plane was reachable through it in one Bash call, at ALLOW, which on claude-code suppresses the
+    // host's own prompt (exit review 3).
+    if (!inSingle) {
       if ((ch === '$' || ch === '<' || ch === '>') && next === '(') {
         // command or process substitution: capture the inner command as its own segment and keep scanning
         let depth = 1;
