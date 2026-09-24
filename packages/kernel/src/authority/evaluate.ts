@@ -143,13 +143,7 @@ const WRAPPER_POSITIONALS: Record<string, RegExp> = {
 /** wrappers whose first argument is their own operand, not the command: the command starts after it */
 const WRAPPERS_WITH_OPERAND = new Set(['flock', 'su', 'runuser']);
 /** two-word runners: the pair is stripped so the real command is what everything downstream sees */
-const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [
-  ['pnpm', 'exec'],
-  ['pnpm', 'dlx'],
-  ['yarn', 'dlx'],
-  ['npm', 'exec'],
-  ['bun', 'x'],
-];
+const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'], ['yarn', 'exec']];
 /** environment assignments that change what a command executes or where governance looks: never silently stripped */
 const ENV_INJECT_RE =
   /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
@@ -158,6 +152,9 @@ const ENV_INJECT_RE =
  *  once the subshell closes. Emitting this marker is how a flat segment list says so: the target carries a `$`, and
  *  a `cd` to a dynamic target is already the analyzer's "the working directory is no longer proven". */
 const SUBSHELL_CWD_RESTORE = 'cd $EGO_SUBSHELL_RESTORE';
+/** marks a heredoc whose delimiter never arrived: the rest of the command was consumed as its body, so what this
+ *  splitter returned is NOT the set of commands that will run */
+const HEREDOC_UNTERMINATED = 'heredoc-unterminated';
 /** marks a function definition whose header the splitter consumed: it binds a name and executes nothing */
 const FUNCTION_DEF_PREFIX = 'define-function';
 /** a segment that is only redirections — the tail of a group or subshell whose delimiters were consumed */
@@ -167,8 +164,31 @@ const KEYWORD_PREFIX_RE = /^(if|then|else|elif|while|until|do|!|time|coproc)$/;
 /** a function definition header: `f()`, `f ()`, `function f`, `function f ()` — structure, not a command */
 const FUNC_DEF_RE = /^(?:function\s+)?[A-Za-z_][A-Za-z0-9_:.-]*\s*\(\s*\)$|^function\s+[A-Za-z_][A-Za-z0-9_:.-]*$/;
 
-export function splitShellSegments(command: string): string[] {
-  const segments: string[] = [];
+/** One stage of a shell unit. A PIPELINE IS AN EXECUTION EDGE, not merely a separator: `echo 'rm -rf /' | bash`
+ *  runs the first stage's standard output as the second stage's SCRIPT, and a model that discards the `|` cannot
+ *  see that at all — the two stages look unrelated, and the effect crosses its authority floor between them
+ *  (exit review 4). The edge is therefore part of the canonical analysis rather than a special case bolted on. */
+export interface ShellStage {
+  readonly text: string;
+  /** true when this stage reads the PREVIOUS stage's standard output */
+  readonly pipedFromPrevious: boolean;
+  /** the heredoc body this stage was fed, when it opened one: that body IS its standard output */
+  readonly heredocBody?: string;
+  /** true when the heredoc delimiter was UNQUOTED, so the shell expands substitutions in the body */
+  readonly heredocExpanded?: boolean;
+}
+
+/** The segments of a command, with the pipeline edges between them. */
+export function splitShellPipeline(command: string): ShellStage[] {
+  const segments: Array<{ text: string; pipedFromPrevious: boolean; heredocBody?: string; heredocExpanded?: boolean }> =
+    [];
+  /** set by a `|` split and consumed by the NEXT stage, which is the one that reads the pipe */
+  let pendingPipe = false;
+  const consumePipe = (): boolean => {
+    const p = pendingPipe;
+    pendingPipe = false;
+    return p;
+  };
   let cur = '';
   let inSingle = false;
   let inDouble = false;
@@ -176,14 +196,16 @@ export function splitShellSegments(command: string): string[] {
   // depth of SUBSHELLS whose parentheses this splitter consumed, and where the outermost one started
   let subshell = 0;
   let subshellStart = 0;
+  // heredocs opened on the line being scanned; their BODIES are consumed when that line ends
+  const pendingHeredocs: Array<{ delim: string; quoted: boolean; strip: boolean }> = [];
   const push = () => {
     const t = cur.trim();
     // A REDIRECTION IS NOT A COMMAND. Consuming a group's braces leaves `{ echo a; echo b; } > out.txt` with a
     // headless `> out.txt`, which was classified as an unknown command and asked for an ordinary workspace write
     // (exit review 4). It belongs to the command it redirects, so it is re-attached to it.
     if (t) {
-      if (segments.length && REDIRECT_ONLY_RE.test(t)) segments[segments.length - 1] += ' ' + t;
-      else segments.push(t);
+      if (segments.length && REDIRECT_ONLY_RE.test(t)) segments[segments.length - 1]!.text += ' ' + t;
+      else segments.push({ text: t, pipedFromPrevious: consumePipe() });
       if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
       else if (/^esac\b/.test(t)) caseDepth = Math.max(0, caseDepth - 1);
     }
@@ -210,14 +232,81 @@ export function splitShellSegments(command: string): string[] {
         i += 2;
         continue;
       }
+      // A HEREDOC BODY IS DATA, NOT COMMANDS. The top-level splitter had no heredoc tracking at all, so the prose
+      // of `cat > NOTES.md <<'MD' … MD` was classified: a release note containing `git push origin main --tags`
+      // was DENIED as a push (exit review 4). A QUOTED delimiter means no expansion, so the body is inert; an
+      // UNQUOTED one still expands `$( )` and backticks, and those substitutions really do run.
+      if (ch === '<' && next === '<') {
+        // `<<<` is a HERESTRING: it carries data and opens nothing. Consuming all three is what keeps the scanner
+        // from reading the SECOND `<` as the start of a heredoc whose delimiter never arrives — which swallowed
+        // the whole rest of a script body.
+        if (command[i + 2] === '<') {
+          cur += '<<<';
+          i += 3;
+          continue;
+        }
+        const opener = /^<<(-?)\s*(?:'([^']*)'|"([^"]*)"|(\\?)([A-Za-z_][A-Za-z0-9_]*))/.exec(command.slice(i));
+        if (opener) {
+          const delim = opener[2] ?? opener[3] ?? opener[5] ?? '';
+          pendingHeredocs.push({
+            delim,
+            quoted: opener[2] !== undefined || opener[3] !== undefined || opener[4] === '\\',
+            strip: opener[1] === '-',
+          });
+          cur += opener[0]; // the redirection stays part of the command that opens it
+          i += opener[0].length;
+          continue;
+        }
+      }
       // a `|` preceded by `>` is the `>|` noclobber-override redirect operator, not a pipe — do not split there
       if (ch === ';' || ch === '\n' || (ch === '|' && command[i - 1] !== '>')) {
         const piped = ch === '|';
         push();
+        if (ch === '\n' && pendingHeredocs.length) {
+          let k = i + 1;
+          const opener = segments[segments.length - 1];
+          for (const hd of pendingHeredocs) {
+            let body = '';
+            let terminated = false;
+            while (k < command.length) {
+              const nl = command.indexOf('\n', k);
+              const line = command.slice(k, nl < 0 ? command.length : nl);
+              k = nl < 0 ? command.length : nl + 1;
+              if ((hd.strip ? line.replace(/^\t+/, '') : line).trim() === hd.delim) {
+                terminated = true;
+                break;
+              }
+              body += line + '\n';
+            }
+            // A HEREDOC BODY IS ONE OF THREE THINGS, and the SHELL decides which — verified against bash and dash.
+            //   1. a SCRIPT, when the command reading it takes its program from stdin (`bash <<EOF`);
+            //   2. an EXPANSION SITE, when the delimiter is UNQUOTED: `$( )` and backticks run, and there is NO
+            //      quoting inside the body at all — `'` and `"` are ordinary characters there;
+            //   3. inert DATA, when the delimiter is quoted.
+            // Modelling only (3) made `bash <<EOF … git push … EOF` ask instead of denying (exit review 4).
+            if (opener && readsScriptFromStdin(opener.text))
+              for (const sg of splitShellPipeline(body)) segments.push(sg);
+            else if (!hd.quoted)
+              for (const innerCmd of substitutionsIn(body))
+                for (const sg of splitShellPipeline(innerCmd)) segments.push(sg);
+            if (opener) {
+              // the body is also this stage's STANDARD OUTPUT, which a following `| sh` would run
+              opener.heredocBody = (opener.heredocBody ?? '') + body;
+              opener.heredocExpanded = opener.heredocExpanded === true || !hd.quoted;
+            }
+            // A heredoc whose delimiter never arrives means the command was misread: everything after it was
+            // consumed as data, so say so rather than returning a short list that looks complete.
+            if (!terminated) segments.push({ text: HEREDOC_UNTERMINATED, pipedFromPrevious: false });
+          }
+          pendingHeredocs.length = 0;
+          i = k;
+          continue;
+        }
         // EACH STAGE OF A PIPELINE IS ITS OWN SUBSHELL: `cd sub | true ; make build` leaves the caller where it
         // was, and the analyzer followed the `cd` out of it (exit review 4).
-        if (piped && /^(cd|pushd|popd)(\s|$)/.test(segments[segments.length - 1] ?? ''))
-          segments.push(SUBSHELL_CWD_RESTORE);
+        if (piped) pendingPipe = true;
+        if (piped && /^(cd|pushd|popd)(\s|$)/.test(segments[segments.length - 1]?.text ?? ''))
+          segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         i++;
         continue;
       }
@@ -261,8 +350,8 @@ export function splitShellSegments(command: string): string[] {
       if (ch === ')' && subshell > 0) {
         push();
         subshell--;
-        if (subshell === 0 && segments.slice(subshellStart).some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg)))
-          segments.push(SUBSHELL_CWD_RESTORE);
+        if (subshell === 0 && segments.slice(subshellStart).some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
+          segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         i++;
         continue;
       }
@@ -275,7 +364,7 @@ export function splitShellSegments(command: string): string[] {
         // this unit. Discarding it outright lost that, so the marker carries the name to the binding dimension
         // while nothing classifies it as a program.
         const declared = /([A-Za-z_][A-Za-z0-9_:.-]*)\s*(?:\(\s*\))?$/.exec(cur.trim());
-        if (declared) segments.push(`${FUNCTION_DEF_PREFIX} ${declared[1]}`);
+        if (declared) segments.push({ text: `${FUNCTION_DEF_PREFIX} ${declared[1]}`, pipedFromPrevious: false });
         cur = '';
         if (ch === '(') {
           if (subshell === 0) subshellStart = segments.length;
@@ -346,7 +435,7 @@ export function splitShellSegments(command: string): string[] {
           // the expression itself is never executed, so only the commands SUBSTITUTED INTO it are segments: the
           // arithmetic remainder that carries their output (`$SUBST + 1`) is a number here, not a command
           if (/\$\(|`/.test(inner))
-            for (const sg of splitShellSegments(inner)) if (!/^\$SUBST\b/.test(sg)) segments.push(sg);
+            for (const sg of splitShellPipeline(inner)) if (!/^\$SUBST\b/.test(sg.text)) segments.push(sg);
           cur += '$ARITH';
           i = j + 1;
           continue;
@@ -375,12 +464,13 @@ export function splitShellSegments(command: string): string[] {
           if (depth > 0) inner += c;
           j++;
         }
-        const innerSegments = splitShellSegments(inner);
+        const innerSegments = splitShellPipeline(inner);
         for (const s of innerSegments) segments.push(s);
         // A COMMAND SUBSTITUTION RUNS IN A SUBSHELL, so a `cd` in it does not move the caller either — the same
         // rule as `( )`, and without it `echo "$(cd sub && pwd)" && make build` resolved the CALLER's make against
         // sub/ (exit review 4).
-        if (innerSegments.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg))) segments.push(SUBSHELL_CWD_RESTORE);
+        if (innerSegments.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
+          segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         // the placeholder stands INSIDE the word the substitution was part of. Separating it with a space made
         // `TODAY=$(date +%F)` read as the assignment `TODAY=` followed by a command whose head is a substitution,
         // so the most ordinary line in any script was opaque (exit review 4).
@@ -391,9 +481,10 @@ export function splitShellSegments(command: string): string[] {
       if (ch === '`') {
         const end = command.indexOf('`', i + 1);
         if (end > i) {
-          const backticked = splitShellSegments(command.slice(i + 1, end));
+          const backticked = splitShellPipeline(command.slice(i + 1, end));
           for (const s of backticked) segments.push(s);
-          if (backticked.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg))) segments.push(SUBSHELL_CWD_RESTORE);
+          if (backticked.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
+            segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
           cur += '$SUBST';
           i = end + 1;
           continue;
@@ -405,6 +496,201 @@ export function splitShellSegments(command: string): string[] {
   }
   push();
   return segments;
+}
+
+/** The commands SUBSTITUTED into a text: the inner command of every `$( )` and backtick span outside single
+ *  quotes. Used for an UNQUOTED heredoc body, where the shell expands substitutions but the prose around them is
+ *  data — `git push origin main` written in a release note is not a push. */
+function substitutionsIn(text: string): string[] {
+  const out: string[] = [];
+  // THERE IS NO QUOTING INSIDE A HEREDOC BODY. `'` and `"` are ordinary characters there, so a scanner that
+  // tracked them skipped the substitutions that the shell does expand (exit review 4). Only the backslash escape
+  // survives, and only before `$`, `` ` `` and `\`.
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '$' && text[i + 1] === '(' && text[i + 2] === '(') {
+      // `$((…))` closing with ADJACENT parens is arithmetic and runs nothing; anything else is `$( (…) …)`
+      let d = 0;
+      let j = i + 1;
+      let prevClose = false;
+      for (; j < text.length; j++) {
+        if (text[j] === '(') d++;
+        else if (text[j] === ')' && --d === 0) {
+          prevClose = text[j - 1] === ')';
+          break;
+        }
+      }
+      if (prevClose) {
+        for (const nested of substitutionsIn(text.slice(i + 3, j - 1))) out.push(nested);
+        i = j;
+        continue;
+      }
+      out.push(text.slice(i + 2, j));
+      i = j;
+      continue;
+    }
+    if (ch === '$' && text[i + 1] === '(') {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < text.length; j++) {
+        if (text[j] === '(') depth++;
+        else if (text[j] === ')' && --depth === 0) break;
+      }
+      out.push(text.slice(i + 2, j));
+      i = j;
+      continue;
+    }
+    if (ch === '`') {
+      const end = text.indexOf('`', i + 1);
+      if (end > i) {
+        out.push(text.slice(i + 1, end));
+        i = end;
+      }
+    }
+  }
+  return out;
+}
+
+/** Heads that take their SCRIPT from standard input when nothing else names one. */
+const STDIN_SCRIPT_HEAD_RE = /^((?:ba|z|da|k|a)?sh|fish|python|python2|python3|ruby|perl|node|nodejs|php|Rscript)$/;
+/** options that name the script INLINE or as a module: stdin is then data, not the program */
+const INLINE_SCRIPT_FLAG_RE = /^(-c|-e|-E|--eval|--command|-m|--module|-p|--print|-r|--require|-i)$/;
+/** options of those heads that consume the next token, so their value is not mistaken for a script operand */
+const STDIN_HEAD_VALUE_FLAG_RE = /^(-o|\+o|--rcfile|--init-file|-X|-W|-Q|--conf|--check-prefix)$/;
+
+/** True when this command runs whatever is fed to its standard input: `sh`, `bash -s`, `python3 -`, `node`.
+ *  A script operand, or an inline `-c`/`-e`/`-m` program, means stdin is DATA and this is false. */
+export function readsScriptFromStdin(segment: string): boolean {
+  const tokens = tokenize(segment);
+  const raw = tokens[0] ?? '';
+  const head = raw.slice(raw.lastIndexOf('/') + 1);
+  if (!STDIN_SCRIPT_HEAD_RE.test(head)) return false;
+  const shellFamily = /^(?:ba|z|da|k|a)?sh$/.test(head);
+  const rest = tokens.slice(1);
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i]!;
+    // A REDIRECTION IS NOT AN OPERAND. `bash 2>&1` and `bash > log` still read their program from stdin, and
+    // reading the redirection as the script name answered false for both (exit review 4). An INPUT redirection is
+    // the opposite: it REPLACES stdin, so the pipe edge is genuinely gone.
+    // A HEREDOC OR HERESTRING IS THE STDIN SCRIPT ITSELF — `bash <<EOF` runs the body. A redirection from a FILE
+    // is the opposite: it replaces stdin, so a pipe into it carries nothing and the file is the program.
+    if (/^\d*<<-?/.test(t) || /^\d*<<</.test(t)) return true;
+    if (/^\d*(?:<&|<)/.test(t)) return false;
+    if (/^(?:\d*(?:>>?|>&|>\|)|&>>?)/.test(t)) {
+      if (/^(?:\d*(?:>>?|>&|>\|)|&>>?)$/.test(t)) i++; // a bare operator takes the next token as its target
+      continue;
+    }
+    if (t === '-' || t === '/dev/stdin') return true; // explicitly THE stdin script
+    // `-s` means "the script is on stdin" for the sh family only; for python and perl it is a different flag
+    if (shellFamily && /^-[a-zA-Z]*s$/.test(t)) return true;
+    if (INLINE_SCRIPT_FLAG_RE.test(t) || /^--(eval|command|module|print|require)=/.test(t)) return false;
+    if (STDIN_HEAD_VALUE_FLAG_RE.test(t) || /^[-+][a-zA-Z]*[oO]$/.test(t)) {
+      i++; // its value, never a script — `bash -euo pipefail` is not a script named pipefail
+      continue;
+    }
+    if (t.startsWith('-') || t === '--') continue;
+    return false; // a positional operand: THAT is the script
+  }
+  return true;
+}
+
+/** The exact text a command writes to standard output, or null when EGO cannot know it. Only a literal counts:
+ *  an unquoted or double-quoted word carrying `$` or a backtick expands to something unknown, and guessing there
+ *  would be the unearned positive claim this kernel exists to refuse. */
+export function literalStdout(segment: string, heredoc?: { body: string; expanded: boolean }): string | null {
+  // a heredoc BODY is the opener's standard output: verbatim when the delimiter was quoted, and — by the same
+  // rule as any other word — only when nothing in it expands if the delimiter was not
+  if (heredoc) return heredoc.expanded && /[$`]/.test(heredoc.body) ? null : heredoc.body;
+  const trimmed = emitterTail(segment).replace(/^(?:\S*\/)(echo|printf|cat)(?=\s|$)/, '$1');
+  const here = /^cat\s+<<<\s*(.+)$/.exec(trimmed);
+  if (here) return literalWord(here[1]!.trim());
+  const printf = /^printf\s+(?:--\s+)?([\s\S]+)$/.exec(trimmed);
+  if (printf) {
+    const words = splitWords(printf[1]!);
+    const format = literalWord(words[0] ?? '');
+    if (format === null) return null;
+    // with no arguments the FORMAT is the output, provided it carries no conversion and no escape but `\n`
+    if (words.length === 1) return /%/.test(format) || /\\(?!n)/.test(format) ? null : format;
+    if (!/^%[sb](\\n)?$/.test(format)) return null; // a multi-conversion format is not a literal
+    const parts: string[] = [];
+    for (const w of words.slice(1)) {
+      const lit = literalWord(w);
+      if (lit === null) return null;
+      parts.push(lit);
+    }
+    return parts.join(' ');
+  }
+  const echo = /^echo\b((?:\s+-[neE]+)*)\s+([\s\S]+)$/.exec(trimmed);
+  if (!echo) return null;
+  const parts: string[] = [];
+  for (const word of splitWords(echo[2]!)) {
+    const lit = literalWord(word);
+    if (lit === null) return null;
+    parts.push(lit);
+  }
+  return parts.length ? parts.join(' ') : null;
+}
+
+/** The command inside a stage, with the shell keywords, leading assignments and transparent wrappers sliced off
+ *  VERBATIM. The normalizer would do more — but it also DE-QUOTES, and after that `'$X'` and `"$X"` read alike
+ *  although only the first is a literal, so the upstream of a pipe is trimmed rather than normalized. */
+export function emitterTail(text: string): string {
+  let out = text.trim();
+  for (;;) {
+    const before = out;
+    out = out.replace(/^(?:if|then|else|elif|while|until|do|!|time|coproc)\s+/, '');
+    out = out.replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+/, '');
+    out = out.replace(/^(?:command|builtin|exec|env|nohup|stdbuf\s+-\S+|nice(?:\s+-n\s+\S+)?|timeout\s+\S+)\s+/, '');
+    if (out === before) return out;
+  }
+}
+
+/** A single word's literal value: single quotes are exact, double quotes and bare words only when inert. */
+function literalWord(word: string): string | null {
+  const single = /^'([^']*)'$/.exec(word);
+  if (single) return single[1]!;
+  const double = /^"([^"]*)"$/.exec(word);
+  const body = double ? double[1]! : word;
+  if (/[$`]/.test(body)) return null; // it expands: the real output is not this text
+  return body;
+}
+
+/** Splits a word list on unquoted whitespace, keeping each word's quotes so `literalWord` can judge them. */
+function splitWords(s: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: string | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (cur) out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** The segment TEXTS of a command. Everything that only needs to know WHICH commands run keeps using this; the
+ *  pipeline edges are for the analyzer, which is the one place that has to model how they connect. */
+export function splitShellSegments(command: string): string[] {
+  return splitShellPipeline(command).map((stage) => stage.text);
 }
 
 /** Strips leading env assignments and transparent wrappers; expands `bash -c '...'` and `xargs` into inner commands. */
@@ -431,6 +717,10 @@ export function normalizeSegment(segment: string): string[] {
   // A runner carrying `--package`/`-p` is NOT transparent: the head survives so the vocabulary can classify it.
   // ... and only when the flag is NPX'S OWN, i.e. before the first non-flag token. In `npx tsc -p .` the `-p`
   // is tsc's project flag, and treating it as npx's made every ordinary `npx tsc` opaque.
+  // `npm exec` is `npx` and `bun x` is `bunx` — npm-exec(1) documents them as the SAME command. Stripping the
+  // two-word spelling as a transparent pair sent it down a different path from the one-word spelling, so the npx
+  // ACQUISITION guard below (a runner carrying its own `--package` fetches) never saw it (exit review 4).
+  s = s.replace(/^npm\s+(?:exec|x)\s+/, 'npx ').replace(/^bun\s+x\s+/, 'bunx ');
   if (/^(npx|bunx)\s/.test(s)) {
     const t = tokenize(s);
     let k = 1;
@@ -462,6 +752,15 @@ export function normalizeSegment(segment: string): string[] {
     if (!m || !PREFIX_KEYWORDS.has(m[1]!)) break;
     s = s.slice(m[0].length).trim();
   }
+  // `dlx` MEANS DOWNLOAD AND EXECUTE. pnpm and yarn always fetch the package from the registry, so the code that
+  // runs was never in the workspace and EGO never read a byte of it — stripping the runner made `pnpm dlx <x>`
+  // exactly as authorised as `<x>` itself, and an inner command that is ALLOW on its own reached ALLOW through a
+  // registry fetch (exit review 4). The acquisition is surfaced AND the inner command is still analysed, because
+  // both are true. `pnpm exec`/`yarn exec` run a locally installed binary and stay transparent; `npx`, `npm exec`
+  // and `bun x` PREFER a local binary, and gating them would gate `npx tsc`, which the npx `--package` guard
+  // already decided against.
+  const dlx = /^(pnpm|yarn)\s+dlx\s+([\s\S]+)$/.exec(s);
+  if (dlx) return [...extra, `registry-fetch ${dlx[1]} dlx`, ...splitShellSegments(dlx[2]!).flatMap(normalizeSegment)];
   // two-word runners, stripped before wrapper handling so `pnpm exec vitest run` is `vitest run` everywhere
   for (;;) {
     const pair = WRAPPER_PAIRS.find((p) => new RegExp(`^${p[0]}\\s+${p[1]}\\s+`).test(s));
@@ -470,6 +769,10 @@ export function normalizeSegment(segment: string): string[] {
   }
   const tokens = tokenize(s);
   if (tokens.length === 0) return extra;
+  // `command -v NAME` / `-V NAME` LOOKS THE NAME UP and prints where it is; it does not run it. Stripping
+  // `command` as a transparent wrapper classified the idiom every script uses to test whether a tool exists as
+  // RUNNING that tool, so `command -v node` asked (exit review 4).
+  if (tokens[0] === 'command' && /^-[vV]$/.test(tokens[1] ?? '')) return [...extra, s];
   let idx = 0;
   for (;;) {
     const t = tokens[idx];
@@ -1771,7 +2074,7 @@ const TREE_CHANGING =
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -1887,17 +2190,37 @@ function scriptSegments(text: string): string[] | null {
   // executable text; `eval` and a `$`-headed command cannot be resolved at all and are reported as UNKNOWN.
   const out: string[] = [];
   let heredoc: string | null = null;
+  let heredocQuoted = false;
+  let heredocOpener = '';
+  let heredocBody = '';
   // A BACKSLASH-NEWLINE IS ERASED BEFORE THE SHELL SEES THE COMMAND. Splitting on the raw newline first cut
   // `git \` + newline + `push origin main` into two unclassifiable fragments, so an absolute core deny reached
   // ASK from inside a script while the same continuation typed directly was denied (exit review 4).
   for (const raw of text.replace(/\\\r?\n[ \t]*/g, ' ').split(/\r?\n/)) {
     if (heredoc !== null) {
-      if (raw.trim() === heredoc) heredoc = null;
+      if (raw.trim() !== heredoc) {
+        heredocBody += raw + '\n';
+        continue;
+      }
+      // the body is over: hand over whatever the SHELL would run out of it — the whole body when the reader takes
+      // its program from stdin, the substitutions when the delimiter was unquoted, nothing when it was quoted
+      if (readsScriptFromStdin(heredocOpener)) {
+        const nested = scriptSegments(heredocBody);
+        if (nested === null) return null; // the carried script is opaque, so this one is too
+        out.push(...nested);
+      }
+      else if (!heredocQuoted) out.push(...substitutionsIn(heredocBody));
+      heredoc = null;
+      heredocBody = '';
       continue;
     }
     const line = stripComment(raw).trim();
     if (!line || line.startsWith('#!')) continue;
     heredoc = heredocDelimiter(line);
+    if (heredoc !== null) {
+      heredocOpener = line;
+      heredocQuoted = new RegExp(`<<-?\\s*(?:'${heredoc}'|"${heredoc}"|\\\\${heredoc})(?!\\w)`).test(line);
+    }
     // an `eval` or a command built from a variable cannot be resolved: report UNKNOWN rather than guess
     for (const seg of splitShellSegments(line)) {
       for (const n of normalizeSegment(seg)) {
@@ -1905,7 +2228,10 @@ function scriptSegments(text: string): string[] | null {
         if (head === 'eval' || /^["']?\$/.test(head)) return null;
       }
     }
-    out.push(line);
+    // THE BODY HAS ALREADY BEEN REMOVED HERE, so the opener's `<<DELIM` must go with it. Leaving it in handed the
+    // canonical splitter a heredoc whose delimiter can never arrive, and it consumed every remaining line of the
+    // script as that body — a script with any heredoc hid everything below it, at ALLOW (exit review 4).
+    out.push(heredoc === null ? line : line.replace(/<<-?\s*(?:'[^']*'|"[^"]*"|\\?[A-Za-z_][A-Za-z0-9_]*)/g, '').trim());
   }
   // A HEREDOC THAT NEVER CLOSES MEANS THE SCRIPT WAS MISREAD: everything after it was skipped as data, so the set
   // of commands resolved here is not the set that will run. Report opacity rather than a short list.
@@ -2137,6 +2463,13 @@ interface MakeFileModel {
    *  the line says. `SHELL := ./bin/badsh` and `export PATH := ./bin:$(PATH)` both make every command in every
    *  recipe mean something else, while the recipe text stays honest (challenge 6, findings 18, 24). */
   rebinds: string[];
+  /** every variable this resolver could read, so a recipe's `$(VAR)` is substituted with the VALUE make will
+   *  splice in rather than guessed at. A value carrying `;`, `&&` or `|` really does become new commands — the
+   *  shell's own `$VAR` is not re-parsed for operators, and importing that reasoning into make was false. */
+  vars: Map<string, string>;
+  /** commands make RUNS WHILE PARSING — every `$(shell …)` outside a recipe. They run for any target, and for
+   *  `make -n`, so they belong to the body of whatever was asked for (exit review 4). */
+  parseRan: string[];
   sources: string[];
   text: string;
 }
@@ -2153,6 +2486,124 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
   // PATH: ordinary only when every NEW entry is an absolute system directory
   const added = v.replace(/\$[({]?PATH[)}]?/g, '').split(':').filter((p) => p.trim().length > 0);
   return added.every((p) => /^\/(usr|opt|bin|sbin|Library|System)\b/.test(p.trim()));
+}
+
+/** make functions whose RESULT is text this resolver does not evaluate. Naming them is what makes an UNKNOWN
+ *  function name opaque rather than text: positive claims must be earned here too. */
+const MAKE_TEXT_FUNCTIONS = new Set([
+  ...['subst', 'patsubst', 'strip', 'findstring', 'filter', 'filter-out', 'sort', 'word', 'wordlist', 'words'],
+  ...['firstword', 'lastword', 'dir', 'notdir', 'suffix', 'basename', 'addsuffix', 'addprefix', 'join'],
+  ...['wildcard', 'realpath', 'abspath', 'if', 'or', 'and', 'foreach', 'call', 'value', 'origin', 'flavor'],
+  ...['error', 'warning', 'info', 'eval', 'file', 'let', 'intcmp'],
+]);
+
+/**
+ * THE TEXT MAKE HANDS TO THE SHELL, and the commands it RUNS to get there.
+ *
+ * GNU make owns the `$` in a makefile. It expands its OWN `$(…)`, `${…}` and `$@`-style references and gives the
+ * RESULT to `$(SHELL) -c`; `$$` is how a line writes one literal `$` FOR the shell. Handing the PRE-IMAGE to the
+ * shell analyzer was wrong in both directions at once (exit review 4):
+ *   - it OVER-gated, reading `echo $(VERSION)` as a command substitution of a command named VERSION;
+ *   - it UNDER-gated, and that is the serious half. A variable's value is spliced in BEFORE the shell parses the
+ *     line, so `EVIL := ; git push origin main` with a recipe `echo $(EVIL)` really does run the push. The shell's
+ *     own `$VAR` is NOT re-parsed for control operators, and importing that reasoning into make made this ALLOW.
+ *   - and `$(shell C)` RUNS C while make expands, for any target and even for `make -n`.
+ * A single left-to-right scanner is the only shape that gets `$$` right: a chain of replacements cannot consume it
+ * as a unit, so `$$$(shell …)` — which real make executes — slips through one of the passes.
+ */
+export function expandMakeText(
+  text: string,
+  vars: Map<string, string>,
+  auto: Record<string, string> = {},
+  depth = 0,
+): { text: string | null; ran: string[] } {
+  const ran: string[] = [];
+  if (depth > 8) return { text: null, ran };
+  let out = '';
+  let opaque = false;
+  const nameOnly = (v: string): string => v.slice(v.lastIndexOf('/') + 1);
+  const dirOnly = (v: string): string => (v.includes('/') ? v.slice(0, v.lastIndexOf('/')) : '.');
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch !== '$') {
+      out += ch;
+      continue;
+    }
+    const next = text[i + 1];
+    if (next === '$') {
+      out += '$'; // make emits ONE literal `$`: what follows is the SHELL's, so `$$(cmd)` is a substitution
+      i++;
+      continue;
+    }
+    if (next === undefined) {
+      out += ch;
+      continue;
+    }
+    if (next !== '(' && next !== '{') {
+      const single = auto[next];
+      if (single !== undefined) {
+        out += single;
+        i++;
+        continue;
+      }
+      const v = vars.get(next);
+      if (v === undefined) opaque = true;
+      else {
+        const inner = expandMakeText(v, vars, auto, depth + 1);
+        ran.push(...inner.ran);
+        if (inner.text === null) opaque = true;
+        else out += inner.text;
+      }
+      i++;
+      continue;
+    }
+    const close = next === '(' ? ')' : '}';
+    let d = 0;
+    let j = i + 1;
+    for (; j < text.length; j++) {
+      if (text[j] === next) d++;
+      else if (text[j] === close && --d === 0) break;
+    }
+    const body = text.slice(i + 2, j);
+    i = j;
+    const fn = /^([A-Za-z-]+)[ \t]+([\s\S]*)$/.exec(body);
+    if (fn && (fn[1] === 'shell' || fn[1] === 'guile')) {
+      // make RUNS this while expanding: the command is real execution, and the text it produces is not knowable
+      const cmd = expandMakeText(fn[2]!, vars, auto, depth + 1);
+      ran.push(...cmd.ran);
+      if (cmd.text !== null && cmd.text.trim()) ran.push(cmd.text.trim());
+      opaque = true;
+      continue;
+    }
+    if (fn && MAKE_TEXT_FUNCTIONS.has(fn[1]!)) {
+      const arg = expandMakeText(fn[2]!, vars, auto, depth + 1); // a nested $(shell …) is still found
+      ran.push(...arg.ran);
+      opaque = true; // the function's RESULT is not evaluated here
+      continue;
+    }
+    const autoRef = /^([@<^+*?%])([DF])?$/.exec(body.trim());
+    if (autoRef) {
+      const v = auto[autoRef[1]!];
+      if (v === undefined) opaque = true;
+      else out += autoRef[2] === 'D' ? dirOnly(v) : autoRef[2] === 'F' ? nameOnly(v) : v;
+      continue;
+    }
+    const name = body.trim();
+    const value = vars.get(name);
+    if (value !== undefined) {
+      const inner = expandMakeText(value, vars, auto, depth + 1);
+      ran.push(...inner.ran);
+      if (inner.text === null) opaque = true;
+      else out += inner.text;
+      continue;
+    }
+    // A VARIABLE THIS RESOLVER NEVER SAW DEFINED IS NOT PROVABLY EMPTY. make imports the whole environment and
+    // accepts `make VAR=…` on the command line, so an undefined-looking name can carry anything at run time —
+    // expanding it to nothing would turn a dynamic recipe into a proven-harmless one, which is the unearned
+    // positive claim this kernel exists to refuse.
+    opaque = true;
+  }
+  return { text: opaque ? null : out, ran };
 }
 
 /** Joins backslash continuations OUTSIDE recipe lines; a recipe's continuation stays one logical shell line. */
@@ -2188,6 +2639,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     unsupportedFor: new Map(),
     hasPatternRules: false,
     rebinds: [],
+    vars: new Map(),
+    parseRan: [],
     sources: [],
     text: '',
   };
@@ -2271,6 +2724,18 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       trimmed,
     );
     if (assign && !isOrdinaryShellAssignment(assign[1]!, assign[2]!)) model.rebinds.push(trimmed);
+    // EVERY variable, not only the ones that rebind execution: a recipe's `$(VAR)` is substituted with the value
+    // make will splice in, and a value carrying `;` or `&&` really does become new commands (exit review 4).
+    const anyAssign = /^(?:override\s+|export\s+|unexport\s+)*([A-Za-z_][A-Za-z0-9_.]*)\s*(::?=|[+?!]=|=)\s*([\s\S]*)$/.exec(
+      trimmed,
+    );
+    if (anyAssign) {
+      const [, name, op, value] = anyAssign as unknown as [string, string, string, string];
+      const prior = model.vars.get(name);
+      model.vars.set(name, op === '+=' && prior !== undefined ? `${prior} ${value}` : value);
+    }
+    // `$(shell …)` ANYWHERE outside a recipe runs while make PARSES — for every target, and for `make -n`
+    for (const c of expandMakeText(trimmed, model.vars).ran) model.parseRan.push(c);
     if (/\$\(eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
     if (/^\.ONESHELL\s*:/.test(trimmed)) {
       // the WHOLE recipe goes to one shell, so a `cd` on one line leaks into the next
@@ -3078,6 +3543,8 @@ function resolveScriptCommand(
       unsupportedFor: new Map(),
       hasPatternRules: false,
       rebinds: [],
+      vars: new Map(),
+      parseRan: [],
       sources: [],
       text: '',
     };
@@ -3095,6 +3562,8 @@ function resolveScriptCommand(
         merged.unsupportedFor.set(t, [...(merged.unsupportedFor.get(t) ?? []), ...u]);
       if (m.hasPatternRules) merged.hasPatternRules = true;
       merged.rebinds.push(...m.rebinds);
+      for (const [k, v] of m.vars) merged.vars.set(k, v);
+      merged.parseRan.push(...m.parseRan);
       merged.sources.push(...m.sources);
       merged.text += m.text + '\n';
       if (m.oneShell) merged.oneShell = true;
@@ -3129,15 +3598,21 @@ function resolveScriptCommand(
       for (const rl of rule.recipes) {
         const cmd = rl.replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
-        if (/^\$[({]/.test(cmd) || /\$\((shell|eval)\b/.test(cmd)) {
+        // make expands the line BEFORE the shell sees it: the variables it splices in can carry whole commands,
+        // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
+        const expanded = expandMakeText(cmd, merged.vars, { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') });
+        for (const inner of expanded.ran) body.push(inner);
+        if (expanded.text === null) {
           // ONE unresolvable line no longer discards the rest: the resolved lines are still analysed and the
           // remainder is reported (challenge 5, finding 8 — "known but incomplete body")
-          partial = `a recipe line of "${t}" is a variable command`;
+          partial = `a recipe line of "${t}" expands to text this resolver cannot determine`;
           continue;
         }
-        body.push(cmd);
+        if (expanded.text.trim()) body.push(expanded.text.trim());
       }
     };
+    // whatever make runs while PARSING runs whichever target was asked for
+    for (const c of merged.parseRan) body.push(c);
     for (const t of wanted) walk(t, 0);
     const provenance = { source: merged.sources.join(','), fingerprint: fingerprint(merged.text) };
     const mkName = merged.sources[0] ?? makeDir;
@@ -3468,7 +3943,7 @@ const K8S_MUTATING_VERBS = new Set([
 ]);
 const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test']);
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
-const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container'> = {
+const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
   // The container runtime was the one high-impact tool not enrolled in the Q98 target model, so
   // `kubectl --context production apply` was DENY and `docker --context production stack deploy` was ALLOW on the
   // identical signal. The accepted product decision was about running a container on the LOCAL daemon; it said
@@ -3483,6 +3958,17 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container'> = {
   'db.local.migrate': 'db',
   'db.local.drop': 'db',
   'db.local.start': 'db',
+  // The cloud CLIs were never enrolled at all: their verdict was decided by the matcher alone, which skips global
+  // options to reach the service and the verb and therefore discards `--endpoint-url` as noise. So an S3 emulator
+  // on the developer's own machine was an ABSOLUTE deny — one a human cannot approve — while the identical signal
+  // on a container engine or a database was resolved properly (exit review 4). The whole family is enrolled: a
+  // partial enrolment would leave `iam`, `kms`, `secretsmanager` and `route53` at :4566 denied, and LocalStack
+  // emulates all of them.
+  'production.cloud.mutate': 'cloud',
+  'production.dns.mutate': 'cloud',
+  'production.iam.mutate': 'cloud',
+  'production.kms.mutate': 'cloud',
+  'production.secrets.mutate': 'cloud',
 };
 
 /** The host an endpoint names, with scheme, credentials, port, IPv6 brackets and path removed. */
@@ -3759,8 +4245,30 @@ function resolveDbTarget(
     // a service name resolves through a file the kernel cannot read: unknowable, so never local
     if (/(?:^|[\s"'])service\s*=/i.test(t) || t === '--service' || t.startsWith('--service='))
       signals.push({ cls: 'UNCLASSIFIED', target: 'a connection service name' });
+    // A CONNECTION PROFILE named on the command line resolves through a client option file the kernel never reads
+    // — `~/.my.cnf`, the obfuscated `~/.mylogin.cnf`, a cqlshrc. Same rule as `service=`: an EXPLICIT reference to
+    // an unreadable profile is never local. The IMPLICIT default option file is deliberately NOT a signal, since
+    // no evidence is on the command line and gating a bare `psql` would gate the ordinary inner loop.
+    if (/^--(defaults-file|defaults-extra-file|login-path|defaults-group-suffix|cqlshrc|config-file)(=|$)/.test(t))
+      signals.push({ cls: 'UNCLASSIFIED', target: 'a client connection profile' });
   }
   for (const h of optionValues(tokens, 'h', ['--host'])) push(h, 'host');
+  // `redis-cli --cluster <subcommand> <host:port> …` names the node as a LATER positional — the bare-operand scan
+  // below stops at the subcommand and never reaches it, so `--cluster call prod-cache-01:6379 FLUSHALL` was the
+  // local socket (exit review 4). `--cluster` is matched EXACTLY, so `--cluster-mode` and the `--cluster-from`
+  // family are untouched, and only a real `host:port` counts, so a key that contains a colon is not a host.
+  if (/^(redis-cli|valkey-cli)$/.test(head.slice(head.lastIndexOf('/') + 1))) {
+    const clusterAt = tokens.indexOf('--cluster');
+    if (clusterAt >= 0)
+      for (let i = clusterAt + 2; i < tokens.length; i++) {
+        // The node list is CONTIGUOUS and ends at the first operand that is not a node; everything after it is
+        // the redis COMMAND and its KEYS. Scanning to the end of the line instead read a key shaped `prod:1` as a
+        // production node and turned an ordinary `--cluster call localhost:7000 SET prod:1 x` into an absolute
+        // deny nobody could approve.
+        if (!/^(\[[^\]\s]+\]|[A-Za-z0-9][A-Za-z0-9.-]*):\d+$/.test(tokens[i]!)) break;
+        push(endpointHost(tokens[i]!), 'cluster node');
+      }
+  }
   // the first operand that is not an option NOR an option's value
   let bare: string | undefined;
   for (let i = 1; i < tokens.length; i++) {
@@ -3790,6 +4298,46 @@ function resolveDbTarget(
 }
 
 /** Re-judges a capability that ASSERTS a local target against the target the command actually names (Q98). */
+/** CLIs whose verdict this resolver may lower. `terraform`, `pulumi` and `vault` share these capabilities through
+ *  the same matchers and have no endpoint flag, so an unknown-flag de-escalation there would be pure loss. */
+const CLOUD_CLI_HEADS = new Set(['aws', 'gcloud', 'az']);
+/** endpoint options, in the spellings the three CLIs really accept */
+const CLOUD_ENDPOINT_OPT_RE =
+  /^--(endpoint-url|endpoint|blob-endpoint|queue-endpoint|table-endpoint|file-endpoint|api-endpoint-overrides)$/;
+/** environment variables that point a cloud CLI at an emulator */
+const CLOUD_ENDPOINT_ENV_RE =
+  /^(AWS_ENDPOINT_URL(_[A-Z0-9_]+)?|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST)$/;
+
+/** Which system a cloud CLI acts on. THE DEFAULT IS PRODUCTION: with no endpoint a cloud CLI talks to the real
+ *  provider, so the mirror of the k8s/db rule "never guess local" is "no evidence keeps the deny". The host is
+ *  compared WHOLE through `endpointHost` + `classifyTargetName`, never as a substring — that is how
+ *  `prod-localhost.acme.com` and `[fd00:acme:prod::1]` defeated the container resolver in exit review 4. */
+function resolveCloudTarget(
+  tokens: string[],
+  targets: LocalTargets,
+  envInputs: Record<string, string> = {},
+): { cls: TargetClass; target: string } {
+  const raw = tokens[0] ?? '';
+  if (!CLOUD_CLI_HEADS.has(raw.slice(raw.lastIndexOf('/') + 1)))
+    return { cls: 'PRODUCTION', target: 'not a cloud CLI' };
+  const signals: Array<{ cls: TargetClass; target: string }> = [];
+  const add = (v: string, kind: string) =>
+    signals.push(
+      isOpaqueTarget(v)
+        ? { cls: 'UNCLASSIFIED', target: `${kind} ${v}` }
+        : { cls: classifyTargetName(endpointHost(v), targets.dbLocalHosts, targets), target: `${kind} ${v}` },
+    );
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const eq = /^(--[a-z-]+)=(.*)$/.exec(t);
+    if (eq && CLOUD_ENDPOINT_OPT_RE.test(eq[1]!)) add(eq[2]!, 'endpoint');
+    else if (CLOUD_ENDPOINT_OPT_RE.test(t) && tokens[i + 1]) add(tokens[++i]!, 'endpoint');
+  }
+  for (const [k, v] of Object.entries(envInputs)) if (CLOUD_ENDPOINT_ENV_RE.test(k)) add(v, `${k}=`);
+  if (!signals.length) return { cls: 'PRODUCTION', target: 'the provider default endpoint' };
+  return signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
+}
+
 function retargetLocalCapability(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -3802,6 +4350,22 @@ function retargetLocalCapability(
   const targets = table.localTargets;
   if (!targets || targets.k8sLocalContexts.length === 0) return hit;
   const tokens = tokenize(norm);
+  // THE ONE DE-ESCALATION IN THE KERNEL, and it is deliberately separate from the escalate-only tail below. For
+  // k8s, a database and a container the DEFAULT capability already asserts LOCAL and the resolver only ever raises
+  // it; for a cloud CLI the polarity is inverted — the default IS the real provider — so LOCAL must REPLACE the
+  // hit. Everything else about it stays conservative: an unparsed spelling, an opaque `$VAR`, a connection string
+  // or no endpoint at all returns the hit untouched.
+  if (kind === 'cloud') {
+    const cloud = resolveCloudTarget(tokens, targets, envInputs);
+    if (cloud.cls !== 'LOCAL' || !('cloud.local.mutate' in table.capabilities)) return hit;
+    return {
+      capability: 'cloud.local.mutate',
+      verdict: verdictFor(table, ctx, 'cloud.local.mutate'),
+      via: `target ${cloud.target} is LOCAL, a declared local development target (${targets.file})`,
+      segment: norm,
+      absolute: isAbsoluteCap(table, 'cloud.local.mutate'),
+    };
+  }
   const resolved =
     kind === 'k8s'
       ? resolveK8sTarget(tokens, targets)
@@ -4135,6 +4699,9 @@ function globCouldReachCredentials(abs: string): boolean {
 }
 
 /** Reads and writes implied by a shell segment's path arguments, classified like Read / Write tool calls. */
+/** Commands whose operands are STRINGS, not paths: they compute a name and never touch the filesystem. */
+const STRING_OPERAND_HEADS = new Set(['dirname', 'basename', 'echo', 'printf', 'expr', 'seq']);
+
 function classifyShellPaths(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -4146,6 +4713,10 @@ function classifyShellPaths(
   const head0 = tokens[0] ?? '';
   const head = head0.slice(head0.lastIndexOf('/') + 1);
   if (!head || head.startsWith('$')) return hits;
+  // `dirname` and `basename` MANIPULATE A STRING. They never open the path they are handed, so classifying their
+  // operand as a filesystem read made `dirname -- "$0"` — the first line of a real husky hook — ask, and with it
+  // every commit in that repository (exit review 4).
+  if (STRING_OPERAND_HEADS.has(head)) return hits;
   const paths = pathTokens(seg, cwd);
   // a container bind mount hands the host path to the container: the SOURCE is read and written, whatever the
   // command inside the container then does. Resolving it as a path beats guessing at its spelling with a regex.
@@ -4704,6 +5275,11 @@ function analyzeSegments(
   // isolated shell, because a make recipe line and an npm pre/post script are separate processes.
   let carriedEnv: Record<string, string> = {};
   let rebound: string | null = null;
+  // A FUNCTION OR ALIAS REBINDS THE NAME IT DECLARES, NOT EVERY NAME. Marking the whole unit redefined made an
+  // ordinary `build() { ls; }` — and every script that defines a helper — opaque, while the case the rule exists
+  // for is `tsc() { git push …; }` FOLLOWED BY `tsc -p .`, where the name really is used (exit review 4). A
+  // lookup-path rebind (`PATH=…`) stays global, because it re-points every later command.
+  const definedNames = new Map<string, string>();
   const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
   let cwd = startCwd;
   // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
@@ -4717,15 +5293,22 @@ function analyzeSegments(
   // glued to the command — the multi-line spelling of the defect exit review 4 found on one line. Make recipe
   // lines and npm pre/post scripts ARE separate shells, and keep their per-line split.
   const units = isolatedShells
-    ? segments.map((u) => splitShellSegments(u))
-    : [splitShellSegments(segments.join('\n'))];
+    ? segments.map((u) => splitShellPipeline(u))
+    : [splitShellPipeline(segments.join('\n'))];
   for (const unit of units) {
     if (isolatedShells) {
       cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
       carriedEnv = {};
       rebound = null;
+      definedNames.clear();
     }
-    for (const seg of unit) {
+    // the stage whose standard output the NEXT piped stage will read
+    let upstream: string | null = null;
+    let upstreamBody: { body: string; expanded: boolean } | null = null;
+    for (const stage of unit) {
+    const seg = stage.text;
+    const stdinFrom = stage.pipedFromPrevious ? upstream : null;
+    const upstreamHeredoc = stage.pipedFromPrevious ? upstreamBody : null;
     const hitsBefore = hits.length;
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
@@ -4736,9 +5319,18 @@ function analyzeSegments(
       cwd = '\0dynamic';
       continue;
     }
+    if (cdTrimmed === HEREDOC_UNTERMINATED) {
+      hits.push(
+        opaqueHit(table, ctx, seg, 'a heredoc delimiter never arrived, so the rest of this command was read as its body'),
+      );
+      continue;
+    }
     // a consumed function header binds a name for everything after it, and is not a command
     if (cdTrimmed.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
-      rebound = `the body defines ${cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1)} before using it`;
+      definedNames.set(
+        cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1),
+        `the body defines ${cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1)} before using it`,
+      );
       continue;
     }
     const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
@@ -4793,6 +5385,9 @@ function analyzeSegments(
         absolute: isAbsoluteCap(table, 'git.hooks.bypass'),
       });
     const effectiveCwd = cwd === '\0dynamic' ? state.env.cwd : cwd;
+    // a declared name matters exactly where it is USED
+    const segHead = (tokenize(seg)[0] ?? '').replace(/^.*\//, '');
+    const bindingWhy = rebound ?? definedNames.get(segHead) ?? null;
     // the tracked working directory IS the resolution context; when `cd` went somewhere dynamic it is not proven,
     // and every conclusion drawn from a relative path below is downgraded rather than guessed
     const env: ExecutionEnvironment = {
@@ -4803,7 +5398,7 @@ function analyzeSegments(
       // ENVIRONMENT-INPUT CLOSURE: captured HERE, before normalizeSegment strips the assignments, so the producer
       // boundary sees what the command line did to the tool it is about to resolve
       envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg) },
-      ...(rebound !== null ? { binding: { kind: 'redefined' as const, why: rebound } } : {}),
+      ...(bindingWhy !== null ? { binding: { kind: 'redefined' as const, why: bindingWhy } } : {}),
       get treeFresh(): boolean {
         return !written.has(TREE_DIRTY);
       },
@@ -4836,6 +5431,21 @@ function analyzeSegments(
     if (carried !== null)
       for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
+    // A PIPE INTO AN INTERPRETER IS AN EXECUTION EDGE. `echo 'rm -rf /' | bash` runs the first stage's output as
+    // the second stage's SCRIPT; with the `|` discarded the two looked unrelated and an absolute core deny asked
+    // instead of being denied (exit review 4). When the upstream is a LITERAL, the text that will run is known and
+    // is analysed as what it is; when it is not — `curl … | sh`, `cat f | sh` — something WILL run that was never
+    // read, which is opacity and never ALLOW.
+    if (stdinFrom !== null && normalizeSegment(seg).some(readsScriptFromStdin)) {
+      const literal = literalStdout(stdinFrom, upstreamHeredoc ?? undefined);
+      if (literal !== null)
+        for (const h of analyzeSegments(table, ctx, compiled, [literal], { ...state, env }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (carried through a pipe)`.trim() });
+      else
+        hits.push(
+          opaqueHit(table, ctx, seg, `runs the standard output of \`${stdinFrom}\`, which this kernel did not read`),
+        );
+    }
     for (const norm of normalizeSegment(seg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
       for (const h of normHits) hits.push(h);
@@ -4858,13 +5468,24 @@ function analyzeSegments(
                 m.capability === 'command.env-inject' ||
                 m.capability === 'ego.gate.bypass'
               )
-                hits.push({
-                  capability: m.capability,
-                  verdict: verdictFor(table, ctx, m.capability),
-                  via: `locked operation carried in argument position: ${sub}`,
-                  segment: norm,
-                  absolute: isAbsoluteCap(table, m.capability),
-                });
+                // the sweep rebuilds the suffix from the governed head, which DROPS a leading assignment — so
+                // `AWS_ENDPOINT_URL=… aws s3 rm …` lost its endpoint here and was re-denied behind the resolver's
+                // back. The rebuilt suffix is judged against the same environment the segment carries.
+                hits.push(
+                  retargetLocalCapability(
+                    table,
+                    ctx,
+                    {
+                      capability: m.capability,
+                      verdict: verdictFor(table, ctx, m.capability),
+                      via: `locked operation carried in argument position: ${sub}`,
+                      segment: norm,
+                      absolute: isAbsoluteCap(table, m.capability),
+                    },
+                    sub,
+                    env.envInputs,
+                  ),
+                );
               break;
             }
           }
@@ -4921,7 +5542,7 @@ function analyzeSegments(
     const bare = seg.trim().replace(/^export\s+/, '');
     if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
     const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([A-Za-z_][\w.-]*)\s*\(\s*\)\s*\{)/.exec(seg.trim());
-    if (decl) rebound = `the body defines ${decl[1] ?? decl[2]} before using it`;
+    if (decl) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
     // TREE-STATE PROVENANCE: a checkout, reset, stash pop, merge, rebase or worktree switch replaces a
     // repository-determined, unenumerable set of files. The per-path ledger cannot express that, so the tree
     // itself stops being fresh and every later conclusion drawn from repository content is STALE.
@@ -4941,6 +5562,8 @@ function analyzeSegments(
         )
     )
       written.add('\0any');
+    upstream = seg; // this stage's standard output is what a following piped stage would read
+    upstreamBody = stage.heredocBody === undefined ? null : { body: stage.heredocBody, expanded: stage.heredocExpanded === true };
   }
     }
   return hits;

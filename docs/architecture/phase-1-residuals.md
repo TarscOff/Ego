@@ -149,35 +149,28 @@ So the measured rate is **10% on the five-ecosystem sample and 16% here**, and t
 executable lint configuration and its `node`-driven build. Quoting only the lower number would have been true of
 the sample and misleading about the tool.
 
-## Open after exit review 4 (2026-09-24)
+## Closed after exit review 4 (2026-09-24)
 
-The review confirmed a long list; most of it was closed in the same pass and is recorded in the build log. What is
-listed here was reproduced in session and is **not fixed**, with what it costs, so that nobody has to re-derive it
-and nobody can mistake the fixed list for the whole list.
+All eight findings the review left open are resolved. Each is recorded with what the fix actually was, because
+several turned out to be deeper than the symptom that was filed, and three of the fixes were themselves reviewed
+and found defective before they landed.
 
-| Open finding | Verdict today | Deserved | Why it is still open |
-|---|---|---|---|
-| `echo 'rm -rf /' \| bash`, `printf '%s' 'cmd' \| sh` — a literal carried into an interpreter on stdin | ASK | DENY | the pipeline SEPARATOR is discarded by segment splitting, so the carrier relationship cannot be reconstructed downstream. Closing it means carrying the separator in the segment model — a change to the shape of the analyzer, not a spelling (class 1) |
-| `redis-cli --cluster call HOST:PORT FLUSHALL` | ALLOW | DENY | the node is a later positional that the bare-operand scan never reaches (class 6) |
-| a database host taken from `~/.pgpass` or a `my.cnf` | ALLOW | ASK | a target named in a client config file is guessed LOCAL rather than UNCLASSIFIED (class 6) |
-| `pnpm dlx`, `yarn dlx`, `bun x`, `npm exec` | stripped as transparent | ASK | `dlx` means download-and-execute: a registry fetch is an acquisition, like `npx --package` (class 2) |
-| `/opt/x/kubectl get pods` — an absolute path outside the workspace | ALLOW | — | **ACCEPTED**: a path inside the workspace is read, and outside it the system tool is trusted by name. Gating every absolute path would gate `/usr/bin/git status` |
-| `$(VAR)` in a make recipe | ASK | ALLOW | make expands its own `$(…)` before the shell sees it; EGO reads it as a command substitution (proportionality, class 11) |
-| a quoted heredoc body, or a comment, in a TOP-LEVEL command | matched as commands | data | `splitShellSegments` now understands comments but still has no heredoc tracking, so `cat > f <<'MD'` prose is classified (over-gating, class 11) |
-| `aws --endpoint-url http://localhost:4566 …` (LocalStack, MinIO) | DENY | ASK or ALLOW | an absolute deny with no human gate, on an endpoint that is local (class 11) |
+| Finding | What it really was | Class |
+|---|---|---|
+| `echo 'rm -rf /' \| bash` | **A PIPELINE IS AN EXECUTION EDGE.** The separator was discarded by segment splitting, so the two stages looked unrelated. The splitter now returns `ShellStage[]` carrying the edge, and the analyzer reads the upstream's LITERAL output as the downstream interpreter's script — or, when it is not readable (`curl … \| sh`), reports opacity. Both ends are read in canonical form, so `env bash`, `timeout 5 sh`, `sudo bash`, `bash -euo pipefail` and `bash 2>&1` are the same edge | 1 |
+| `redis-cli --cluster call HOST:PORT` | the node is a later positional the bare-operand scan never reached. The node list is CONTIGUOUS, so the scan breaks at the first operand that is not a node — scanning to the end read a key shaped `prod:1` as a production host and produced an unapprovable false deny | 6 |
+| a database host in a client config file | an EXPLICIT `--defaults-file`, `--login-path`, `--defaults-extra-file` or `cqlshrc` is UNCLASSIFIED, like `service=`. The IMPLICIT default option file is deliberately not a signal: no evidence is on the command line, and gating a bare `psql` would gate the ordinary inner loop | 6 |
+| `pnpm dlx`, `yarn dlx` | `dlx` means download-and-execute: the runner is no longer transparent, the acquisition is surfaced, and the inner command is still analysed. `npm exec` and `bun x` were found to be ALIASES of `npx`/`bunx` that took a different code path, so the acquisition guard never saw them; they are now rewritten to the one-word spelling | 2 |
+| `$(VAR)` in a make recipe | the resolver handed the shell make's PRE-IMAGE. It over-gated (`echo $(VERSION)` read as a substitution) and, far worse, UNDER-gated: a variable's value is spliced in before the shell parses, so `EVIL := ; git push origin main` with `echo $(EVIL)` really did run the push and was ALLOW. `$(shell …)` runs at PARSE time — for any target and for `make -n` — and was invisible everywhere outside a recipe line. There is now a make expansion model: variables, `$$`, automatic variables, the text functions, and `$(shell …)` handed over as the execution it is. An UNDEFINED variable is opaque, because make imports the environment and accepts `make VAR=…` | 3 |
+| a heredoc body at the top level | a body is one of THREE things and the shell decides which: a SCRIPT when its reader takes its program from stdin (`bash <<EOF`), an EXPANSION SITE when the delimiter is unquoted (and there is no quoting inside a body at all), or inert DATA. All three are modelled. The producer path had to be fixed with it: `scriptSegments` removed the body but left the opener's `<<DELIM`, which re-opened a heredoc whose delimiter could never arrive and hid every remaining line of the script | 1 |
+| `aws --endpoint-url http://localhost:4566` | the cloud CLIs were never enrolled in the target model at all — `classifyTargetName` was dead code for `aws`, `gcloud` and `az`. The family is enrolled, and this is the kernel's ONE de-escalation: for k8s, databases and containers the default asserts LOCAL and the resolver raises it, while for a cloud CLI the default IS the real provider, so LOCAL must replace the hit. Three guards carry that weight: the default is PRODUCTION, the host is compared WHOLE, and only `aws`/`gcloud`/`az` may take the branch | 6 |
+| `/opt/x/kubectl get pods` | **ACCEPTED**, unchanged: a path inside the workspace is read, and outside it the system tool is trusted by name. Gating every absolute path would gate `/usr/bin/git status` | — |
 
-**A test-harness race, found while validating this pass and NOT a kernel defect.** The FIRST parallel `npm test`
-after any source change fails 8 of the 19 integration tests: `ego init` stops after writing the pin, so the policy
-cache, the generated artifacts and the hook shim are all missing. Measured, not guessed: the same suite passes
-234/234 with `--test-concurrency=1`, the same three files (`corpus`, `monotonicity`, `cli`) pass together in
-parallel, `cli.test.ts` passes 19/19 alone, and an immediate second parallel run on the unchanged source passes
-234/234. The trigger is therefore several test processes materialising the same content-derived source identity at
-once, on a cold start. Until it is fixed, a green parallel run is only meaningful as the SECOND run on unchanged
-sources, or from the serial run. This is recorded as an open harness defect, not as a passed check.
-
-Closed in the same pass, and listed here only so the record is not ambiguous: `kubectl config set-credentials
---exec-command`, the missing database clients (`mariadb`, `pg_restore`, `mongodump`/`mongorestore` and the dump
-tools), and a `cd` inside a command substitution, a backtick substitution or a pipeline stage leaking to the caller.
+Three of these fixes were themselves found defective by review before they landed, and the record is kept because
+the pattern is the point: a first cut at the pipeline edge tested the RAW segment, so every wrapped interpreter
+escaped it; a first cut at the redis node scan ran to the end of the line and denied an ordinary key; a first cut
+at the heredoc modelled only the inert case and poisoned the producer path. None of them was a new architectural
+class, and each was caught by asking what the SHELL does rather than what the parser does.
 
 ## CONTAINMENT_DEPENDENCY
 

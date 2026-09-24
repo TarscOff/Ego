@@ -180,10 +180,11 @@ test('producer contract: the source has no second path around the canonical anal
   const callers = [...src.matchAll(/analyzeSegments\(/g)].length;
   // The invariant is that nothing analyses executable text EXCEPT this function — not that the count never
   // grows. Each call site must FEED the canonical pipeline, never replace it. Today: the definition, the
-  // top-level entry, the effect recursion, and the command a `kubectl exec … -- CMD` carries, which is fed back
-  // in as its own segment rather than classified separately.
-  assert.equal(callers, 4, 'a new call site must feed the canonical pipeline, not go around it');
-  for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand'])
+  // top-level entry, the effect recursion, the command a `kubectl exec … -- CMD` carries, and the literal a
+  // pipeline hands to an interpreter (`echo 'CMD' | sh`) — each fed back in as its own segment rather than
+  // classified separately.
+  assert.equal(callers, 5, 'a new call site must feed the canonical pipeline, not go around it');
+  for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand', 'readsScriptFromStdin'])
     assert.ok(src.includes(site), `${site} is one of the accounted-for paths`);
   // and the producer return type still has nowhere to put a verdict
   const contract = src.slice(src.indexOf('function resolveScriptCommand('), src.indexOf('/** True when the path exists'));

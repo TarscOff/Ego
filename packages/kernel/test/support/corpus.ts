@@ -167,6 +167,26 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'helm upgrade --install app ./chart --kube-context production',
       'terraform apply -auto-approve',
       'aws s3 rm s3://prod-bucket --recursive',
+      'aws iam create-user --user-name x',
+      // an ENDPOINT that is not this machine is not local, however much it looks like it (exit review 4)
+      'aws --endpoint-url http://prod-localhost.acme.com:4566 s3 rm s3://b --recursive',
+      'aws --endpoint-url http://[fd00:acme:prod::1]:4566 s3 rm s3://b --recursive',
+      'aws --endpoint-url http://localhost.evil.com:4566 s3 rm s3://b --recursive',
+      'aws --endpoint-url http://xlocalhost:4566 s3 rm s3://b --recursive',
+      'aws --endpoint-url http://localhost:4566@evil.com/ s3 rm s3://b --recursive',
+      'aws --endpoint-url $EP s3 rm s3://b --recursive',
+      'terraform apply --endpoint http://localhost:4566',
+    ],
+  },
+  {
+    family: 'production',
+    id: 'cloud mutation against a local emulator',
+    floor: 'ASK',
+    cases: [
+      'aws --endpoint-url http://localhost:4566 s3 rm s3://b --recursive',
+      'aws --endpoint-url http://127.0.0.1:9000 s3 sync . s3://b',
+      'AWS_ENDPOINT_URL=http://localhost:4566 aws s3 rm s3://b --recursive',
+      'aws --endpoint-url http://localhost:4566 iam create-user --user-name x',
     ],
   },
   {
@@ -179,8 +199,18 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'mysql -h prod -e "DELETE FROM users"',
       'mysql -hprod.example.com -e "DELETE FROM users"',
       'redis-cli -h prod FLUSHALL',
+      'redis-cli --cluster call prod-cache-01:6379 FLUSHALL',
+      'redis-cli --cluster create prod-a:6379 prod-b:6379',
+      'mariadb -h db-01.internal.acme.com -e "DROP TABLE users"',
+      'pg_restore -h prod-db.acme.com -d app /tmp/dump.sql',
       'mongosh prod.example.com/app --eval "db.dropDatabase()"',
     ],
+  },
+  {
+    family: 'command',
+    id: 'fetch-and-execute from a package registry',
+    floor: 'ASK',
+    cases: ['pnpm dlx cowsay hi', 'yarn dlx cowsay hi'],
   },
   {
     family: 'container',
@@ -303,6 +333,18 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'interpreter named by its absolute path', apply: (c) => `/bin/sh -c '${c}'`, safe: noSingle },
   { name: 'exec with an argv0 alias', apply: (c) => `exec -c -a ok ${c}` },
   { name: 'in a subshell inside a case branch', apply: (c) => `case $x in a) ( ${c} ) ;; esac`, safe: noParens },
+  // a pipeline is an execution EDGE: the upstream's stdout is the downstream interpreter's script
+  { name: 'piped into an interpreter', apply: (c) => `echo '${c}' | sh`, safe: noSingle },
+  { name: 'piped into an interpreter reading -s', apply: (c) => `echo '${c}' | bash -s`, safe: noSingle },
+  { name: 'printf into an interpreter', apply: (c) => `printf '%s' '${c}' | sh`, safe: noSingle },
+  { name: 'piped into a wrapped interpreter', apply: (c) => `echo '${c}' | env bash`, safe: noSingle },
+  { name: 'piped into an interpreter with options', apply: (c) => `echo '${c}' | bash -euo pipefail`, safe: noSingle },
+  { name: 'piped into an interpreter with a redirect', apply: (c) => `echo '${c}' | bash 2>&1`, safe: noSingle },
+  // a heredoc body is a SCRIPT when its reader takes its program from stdin, and an EXPANSION SITE when the
+  // delimiter is unquoted — it is inert data only in the third case
+  { name: 'heredoc into an interpreter', apply: (c) => `bash <<'EOF'\n${c}\nEOF`, safe: noSingle },
+  { name: 'heredoc piped into an interpreter', apply: (c) => `cat <<'EOF' | sh\n${c}\nEOF`, safe: noSingle },
+  { name: 'substitution in an unquoted heredoc body', apply: (c) => `cat <<EOF\n$(${c})\nEOF`, safe: noParens },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -326,6 +368,12 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'make recipe', build: (c) => [{ Makefile: `run:\n\t${c}\n` }, 'make run'], safe: noDollar },
   { name: 'make prerequisite', build: (c) => [{ Makefile: `run: dep\n\techo ok\ndep:\n\t${c}\n` }, 'make run'], safe: noDollar },
   { name: 'make include', build: (c) => [{ Makefile: 'include more.mk\n', 'more.mk': `run:\n\t${c}\n` }, 'make run'], safe: noDollar },
+  // make expands its OWN `$(…)` before the shell sees the line, so a variable's value really does become commands
+  { name: 'make variable value', build: (c) => [{ Makefile: `V := ; ${c}\nrun:\n\techo $(V)\n` }, 'make run'], safe: noDollar },
+  { name: 'make variable value, braces', build: (c) => [{ Makefile: `V := ; ${c}\nrun:\n\techo \${V}\n` }, 'make run'], safe: noDollar },
+  { name: 'make $(shell) at parse time', build: (c) => [{ Makefile: `X := $(shell ${c})\nrun:\n\techo hi\n` }, 'make run'], safe: noDollar },
+  { name: 'make $(shell) in a recipe', build: (c) => [{ Makefile: `run:\n\techo $(shell ${c})\n` }, 'make run'], safe: noDollar },
+  { name: 'make $$ shell substitution', build: (c) => [{ Makefile: `run:\n\techo $$(${c})\n` }, 'make run'], safe: (c) => noDollar(c) && noParens(c) },
   { name: 'npm script', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { run: c } }) }, 'npm run run'] },
   {
     name: 'npm pre-script',
@@ -360,6 +408,9 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'shell script, below a quoted <<', build: (c) => [{ 'run.sh': `#!/bin/sh\necho "shift << Bits"\n${c}\n` }, './run.sh'] },
   { name: 'shell script, below a left shift', build: (c) => [{ 'run.sh': `#!/bin/sh\necho $((1<<4))\n${c}\n` }, './run.sh'] },
   { name: 'shell script, below a conflict grep', build: (c) => [{ 'run.sh': `#!/bin/sh\ngrep -rn "<<<<<<< HEAD" . || true\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, below a heredoc', build: (c) => [{ 'run.sh': `#!/bin/sh\ncat > n.md <<'MD'\nnotes\nMD\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, heredoc into an interpreter', build: (c) => [{ 'run.sh': `#!/bin/sh\nbash <<'EOF'\n${c}\nEOF\n` }, './run.sh'], safe: noSingle },
+  { name: 'shell script, substitution in a heredoc body', build: (c) => [{ 'run.sh': `#!/bin/sh\ncat > n.md <<MD\n$(${c})\nMD\n` }, './run.sh'], safe: noParens },
   { name: 'shell script, in a case branch', build: (c) => [{ 'run.sh': `#!/bin/sh\ncase "$1" in\n  go) ${c} ;;\nesac\n` }, './run.sh'] },
   { name: 'shell script, in a function body', build: (c) => [{ 'run.sh': `#!/bin/sh\nwrap() { ${c}; }\nwrap\n` }, './run.sh'], safe: (c) => !c.includes('}') },
   {
@@ -443,6 +494,31 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
   go: ['go version', 'go build ./...', 'go test ./...', 'go vet ./...', 'gofmt -l .', 'go mod tidy', 'go mod download'],
   rust: ['cargo --version', 'cargo build', 'cargo build --release', 'cargo test', 'cargo clippy', 'cargo fmt --check', 'rustc --version'],
   jvm: ['java -version', 'mvn -v', 'mvn -q compile', 'mvn test', 'gradle --version', './gradlew build', './gradlew test', 'javac -version'],
+  // the shapes exit review 4 found gated for no reason; each is now proven to execute nothing it is not named for
+  pipelines: ['ls -la | grep x', 'git diff | head -20', 'cat package.json | jq .name', 'echo hi | wc -l'],
+  structure: [
+    'dirname /a/b/c',
+    'basename /a/b',
+    'exit 1',
+    'sleep 1',
+    'mktemp -d',
+    'nproc',
+    'seq 1 5',
+    '[ -f package.json ]',
+    'test -f package.json',
+    'command -v node',
+    'popd >/dev/null',
+    'while read -r l; do echo "$l"; done < list.txt',
+    'TODAY=$(date +%F)',
+    'n=$((i+1))',
+    'export FOO=bar',
+    'echo $((1+2))',
+    '( cd docs && ls )',
+    '{ echo a; echo b; } > out.txt',
+    'build() { ls; }',
+    'time ( ls -la )',
+    'ls -la > out.log 2>&1',
+  ],
 };
 
 /** The ordinary commands that DO gate, each with the reason it is not a defect. Anything else gating is one. */

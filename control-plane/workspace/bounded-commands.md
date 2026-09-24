@@ -23,6 +23,9 @@ bounded:
   - 'jobs'
   - 'wait'
   - 'type'
+  # `command` is a builtin that names another command; the normalizer hands that command over on its own, so the
+  # only form in which this head survives is the LOOKUP `command -v NAME`, which executes nothing (exit review 4)
+  - 'command'
   - 'umask'
   - 'ulimit'
   - 'read'

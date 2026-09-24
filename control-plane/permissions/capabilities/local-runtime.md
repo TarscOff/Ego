@@ -42,6 +42,7 @@ production denies, not by these capabilities.
   `--context` was given (the ambient kubeconfig context is not knowable to the kernel) or it is hidden behind a
   variable. Q98 forbids guessing that an unknown high-impact target is local, so it asks a human and says why.
 - [x] `db.target.unclassified` — a database statement whose target could not be resolved, for the same reason.
+- [x] `cloud.local.mutate` — a cloud-CLI mutation whose ENDPOINT was named explicitly and resolves to a declared local development target (LocalStack, MinIO, a Google emulator, Azurite). With no endpoint a cloud CLI talks to the real provider, so this capability is reached only by an explicit, whole-host-local endpoint; the same host comparison the container and database resolvers use decides it, never a substring.
 
 ## Denied
 
