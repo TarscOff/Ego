@@ -166,6 +166,51 @@ and found defective before they landed.
 | `aws --endpoint-url http://localhost:4566` | the cloud CLIs were never enrolled in the target model at all — `classifyTargetName` was dead code for `aws`, `gcloud` and `az`. The family is enrolled, and this is the kernel's ONE de-escalation: for k8s, databases and containers the default asserts LOCAL and the resolver raises it, while for a cloud CLI the default IS the real provider, so LOCAL must replace the hit. Three guards carry that weight: the default is PRODUCTION, the host is compared WHOLE, and only `aws`/`gcloud`/`az` may take the branch | 6 |
 | `/opt/x/kubectl get pods` | **ACCEPTED**, unchanged: a path inside the workspace is read, and outside it the system tool is trusted by name. Gating every absolute path would gate `/usr/bin/git status` | — |
 
+## The parallel-test failure, and a diagnosis this document got wrong
+
+It was recorded here as "several test processes materialising the same content-derived source identity at once, on
+a cold start". **That is not the mechanism, and it needs no concurrency at all** — it needs ONE long-lived process
+and ONE write to the distributed tree:
+
+- `selfIdentity()` computes the runtime identity ONCE per process and caches it. `node --test` runs each test FILE
+  in one process, so `cli.test.ts` caches it at its first `ego init` and keeps it for all nineteen tests.
+- The identity is a hash over the 56 files `package.json#files` distributes — `control-plane/**`, `docs/**`,
+  `dist/**`, `bin/`, `runtime/posix/`. `packages/**` and `tests/**` are NOT in it, so editing `evaluate.ts` never
+  moved it, and editing `docs/build/build-log.md` — which AGENTS.md REQUIRES every phase — always did.
+- `initProject` wrote the PIN and then called `materializeRuntime`, which re-reads the live tree and throws when
+  the second reading differs. The throw was unguarded, so every later `ego init` in that process left the project
+  PINNED AND UNGOVERNED: no policy cache, no generated artifacts, no hook shim. The failures are a SUFFIX of the
+  file, which is exactly the "8 of 19" shape.
+
+That explains every control — serial passes, the file alone passes, the second run passes — without appealing to
+CPU starvation, and it was reproduced in a SINGLE process with one write. Two further defects in the same function
+came with it, and all are closed:
+
+- **HASH-THEN-COPY.** `materializeRuntime` verified the live tree and copied it afterwards, so a write landing
+  between the two produced a cache directory named by one identity whose bytes hash to another — with no error at
+  all — which `verifyRuntimeDirectory` later called TAMPERED. EGO corrupting its own cache and then blaming
+  tampering. It now hashes the COPY, so the name is a fact about the bytes.
+- **TOCTOU ON PLACEMENT.** `existsSync(target)` followed by an unguarded `renameSync` made the loser of a race
+  throw ENOTEMPTY. Losing that race is SUCCESS: the winner's bytes hash to the same value by construction.
+- **A FAILED CACHE POPULATION MUST NOT LEAVE A PROJECT UNGOVERNED.** The runtime cache is a launcher optimisation;
+  the policy cache, the artifacts and the hooks are the governance.
+- `selfVersion()` shelled out to git on each of its twelve call sites and was not memoized, so one process could
+  have produced two versions if a git call ever failed. Nothing was observed going wrong; an identity must not
+  depend on a subprocess succeeding the same way twice.
+
+MEASURED AFTER THE FIX: the same deliberate provocation — editing `docs/build/build-log.md` AND
+`control-plane/permissions/matchers.md` while the parallel suite runs — goes from 8 failures to 1, and that one is
+a trust assertion reading an identity that genuinely moved, not a half-initialised project. With the tree settled,
+the first parallel run passes. Editing the distributed tree WHILE the suite runs is still not a supported
+condition: the identity really does change, and EGO is right to say so. What changed is that saying so no longer
+leaves a project pinned and enforcing nothing.
+
+REMAINING, recorded rather than fixed: `detectProject` lists a repository's SIBLINGS with
+`readdirSync(dirname(gitRoot))`. Every fixture is created in the system temp directory, so each `ego init` stats
+every temp entry on the machine and the cost grows with everything any run ever left behind. The corpus now keeps
+its own hundreds of fixtures under one parent, which removes the largest contributor; the O(n) scan itself is a
+performance defect, not a verdict defect, and is left for Phase 2.
+
 Three of these fixes were themselves found defective by review before they landed, and the record is kept because
 the pattern is the point: a first cut at the pipeline edge tested the RAW segment, so every wrapped interpreter
 escaped it; a first cut at the redis node scan ran to the end of the line and denied an ordinary key; a first cut
