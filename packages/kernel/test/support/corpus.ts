@@ -351,6 +351,9 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'heredoc into an interpreter', apply: (c) => `bash <<'EOF'\n${c}\nEOF`, safe: noSingle },
   { name: 'heredoc piped into an interpreter', apply: (c) => `cat <<'EOF' | sh\n${c}\nEOF`, safe: noSingle },
   { name: 'substitution in an unquoted heredoc body', apply: (c) => `cat <<EOF\n$(${c})\nEOF`, safe: noParens },
+  // a pipeline inside a carrier is still a pipeline: the normalizer returns strings and projects the edge away
+  { name: 'pipeline inside sh -c', apply: (c) => `sh -c "echo '${c}' | bash"`, safe: (c) => noSingle(c) && noDouble(c) },
+  { name: 'pipeline inside trap', apply: (c) => `trap "echo '${c}' | sh" EXIT`, safe: (c) => noSingle(c) && noDouble(c) },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *

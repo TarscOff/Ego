@@ -3406,7 +3406,12 @@ function resolveScriptCommand(
         resolution: 'ABSENT_VERIFIED',
       };
     }
-    const body = names.flatMap((n) => splitShellSegments(scripts[n] as string));
+    // ONE ENTRY PER SCRIPT, NOT PER SEGMENT. Pre-splitting here projected the model away twice over: a pipeline
+    // EDGE inside a script was lost, so `echo 'git push origin main' | sh` in a package script asked instead of
+    // being denied; and each segment became its own UNIT, i.e. its own shell, so a `cd` on the left of an `&&`
+    // did not reach the right of it. `pre`, the script and `post` ARE separate processes and stay separate
+    // entries; what happens inside one of them is one shell, and splitting it is the analyzer's job.
+    const body = names.map((n) => scripts[n] as string);
     // npm accepts its configuration as flags anywhere on the line, including AFTER the script name, and
     // `--script-shell` re-points the interpreter of every script (challenge 8, finding 3)
     const npmFlags = tokens.filter((t) =>
@@ -5229,6 +5234,20 @@ function carrierCommandValues(seg: string): string[] {
   return out;
 }
 
+/** Every command string this segment CARRIES: `sh -c BODY`, `env -S BODY`, `trap BODY SIG`, `sh <<< BODY`. The
+ *  normalizer already expands each of them — but it returns normalized STRINGS, which projects a pipeline EDGE
+ *  away, so `sh -c "echo 'rm -rf /' | bash"` lost the very relation that makes it an execution (exit review 4).
+ *  A body that contains an edge re-enters the canonical analyzer whole. */
+function carriedShellBodies(seg: string): string[] {
+  const out = [...carrierCommandValues(seg)];
+  const t = tokenize(seg);
+  const head = (t[0] ?? '').replace(/^.*\//, '');
+  if (head === 'trap' && t[1] !== undefined && !t[1].startsWith('-')) out.push(t[1]);
+  const here = t.indexOf('<<<');
+  if (here >= 0 && t[here + 1] !== undefined) out.push(t[here + 1]!);
+  return out;
+}
+
 /** The command line `kubectl exec pod -- CMD …` and its neighbours carry after the separator. Against a LOCAL
  *  cluster the verb kept its ALLOW while that command was never analysed at all (exit review 3), so it is fed
  *  back into the canonical pipeline as its own segment. */
@@ -5431,6 +5450,12 @@ function analyzeSegments(
     if (carried !== null)
       for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
+    // A PIPELINE INSIDE A CARRIER IS STILL A PIPELINE, and the normalizer cannot carry the edge across: it returns
+    // strings. The body re-enters the canonical analyzer whole, which is the only place the edge can be seen.
+    for (const body of carriedShellBodies(seg))
+      if (splitShellPipeline(body).some((st) => st.pipedFromPrevious))
+        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
     // A PIPE INTO AN INTERPRETER IS AN EXECUTION EDGE. `echo 'rm -rf /' | bash` runs the first stage's output as
     // the second stage's SCRIPT; with the `|` discarded the two looked unrelated and an absolute core deny asked
     // instead of being denied (exit review 4). When the upstream is a LITERAL, the text that will run is known and
