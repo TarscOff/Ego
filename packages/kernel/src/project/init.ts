@@ -193,8 +193,17 @@ export function initProject(opts: InitOptions): InitReport {
     );
     // materialize and index the launcher runtime (section J)
     if (!isRuntimeCached(home, self.runtimeSha256) && isFile(join(packageRoot(), 'dist', 'ego.js'))) {
-      materializeRuntime(home, packageRoot(), self.runtimeSha256);
-      notes.push(`materialized runtime ${self.runtimeSha256.slice(0, 12)} into ${home.runtimes}`);
+      // THE RUNTIME CACHE IS A LAUNCHER OPTIMISATION, AND FAILING TO POPULATE IT MUST NOT LEAVE THE PROJECT
+      // PINNED AND UNGOVERNED. The pin is written above; an unguarded throw here skipped the policy cache, the
+      // generated artifacts and the git hooks, so `ego check` reported a project that looked initialised and
+      // enforced nothing. One write to any distributed file while `ego init` ran produced exactly that, and this
+      // repository's own process edits `docs/build/build-log.md` — a distributed file — every phase.
+      try {
+        materializeRuntime(home, packageRoot(), self.runtimeSha256);
+        notes.push(`materialized runtime ${self.runtimeSha256.slice(0, 12)} into ${home.runtimes}`);
+      } catch (e) {
+        notes.push(`the runtime cache was NOT populated: ${(e as Error).message}`);
+      }
     } else if (!isFile(join(packageRoot(), 'dist', 'ego.js')))
       notes.push('executing from source (no dist/ego.js): the runtime was not materialized into the cache');
     if (!readIndex(home, self.name, version)) {

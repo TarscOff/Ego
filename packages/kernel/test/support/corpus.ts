@@ -26,9 +26,15 @@ const ROOT = new URL('../../../../control-plane/', import.meta.url).pathname;
 export const table = compileAuthority(loadControlPlane(ROOT));
 export const RANK: Record<string, number> = { ALLOW: 0, ASK: 1, DENY: 2 };
 
+// EVERY FIXTURE LIVES UNDER ONE PARENT, not directly in the system temp directory. `detectProject` lists the
+// SIBLINGS of a repository — `readdirSync(dirname(gitRoot))` — so a fixture created straight in $TMPDIR makes every
+// other test's `ego init` stat every temp entry on the machine. This corpus creates hundreds of repositories per
+// run; left in $TMPDIR they become an O(n) tax on every integration test that runs beside them.
+const CORPUS_TMP = mkdtempSync(join(tmpdir(), 'ego-corpus-root-'));
+
 /** A throwaway repository: a git directory, a manifest, and whatever files the case needs. */
 export function workspace(files: Record<string, string> = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), 'ego-corpus-'));
+  const dir = mkdtempSync(join(CORPUS_TMP, 'ws-'));
   mkdirSync(join(dir, '.git', 'hooks'), { recursive: true });
   writeFileSync(join(dir, 'package.json'), '{}');
   for (const [name, content] of Object.entries(files)) {

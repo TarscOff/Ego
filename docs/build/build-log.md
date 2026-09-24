@@ -414,13 +414,18 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   What the review did NOT close is recorded in `docs/architecture/phase-1-residuals.md`; this line therefore stays
   IN PROGRESS, and Phase 1 is NOT closed.
 
-  **A test-harness race was found while validating this pass, and is reported rather than absorbed.** The FIRST
-  parallel `npm test` after any source change fails 8 of the 19 integration tests — `ego init` stops after the pin,
-  so the policy cache, the artifacts and the hook shim are missing. The same suite passes 234/234 serially
-  (`--test-concurrency=1`), `cli.test.ts` passes 19/19 alone, the three heaviest files pass together in parallel,
-  and an immediate second parallel run on unchanged sources passes 234/234. Several test processes materialise the
-  same content-derived source identity at once on a cold start. A green parallel run therefore only counts as the
-  SECOND run on unchanged sources; the deterministic check below is reported on that basis and on the serial run.
+  **A parallel-test failure was found while validating this pass, FIRST DIAGNOSED WRONGLY HERE, and then closed.**
+  It was recorded as "several test processes materialising the same content-derived source identity at once". That
+  is not the mechanism and it needs no concurrency: `selfIdentity()` caches the identity for the life of a process,
+  the identity covers `docs/**` and `control-plane/**` — which this repository's own process edits every phase —
+  and `initProject` wrote the PIN and then called an unguarded `materializeRuntime` that throws when the tree has
+  moved. Every later `ego init` in that process left the project PINNED AND UNGOVERNED, which is the "8 of 19"
+  suffix. Reproduced in a single process with one write. Closed with it: `materializeRuntime` now hashes the COPY
+  rather than verifying the live tree and copying afterwards (which silently produced cache entries whose bytes
+  hash to something other than their name, later reported as TAMPERED), losing a placement race is success rather
+  than ENOTEMPTY, and `selfVersion()` is memoized instead of shelling out to git on each of its twelve call sites.
+  Measured after the fix: the same deliberate provocation goes from 8 failures to 1, and the remaining one is a
+  trust assertion reading an identity that genuinely moved. Full detail in docs/architecture/phase-1-residuals.md.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
