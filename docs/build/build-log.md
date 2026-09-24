@@ -402,7 +402,25 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   `trust/`, and a `node_modules/.bin` symlink whose TARGET was writable. Two were MY OWN regressions breaking
   ordinary work — `docker run … sh -c "…"` denied as a remote engine and `git blame -C file` downgraded — both from
   reading an option outside the position it occupies. Two documented promises the code never kept were corrected.
-  All fixed and pinned; the exit rule requires a further fresh round. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
+  All fixed and pinned; the exit rule requires a further fresh round.
+  **Challenge 11 (the second exit review, 2026-09-24) again found ZERO new architectural classes** — 29 confirmed,
+  all instances. The load-bearing one was structural: matchers are first-match-wins, and the `--output|-o`
+  write-destination matcher was authored above the `--template` hook-install deny, so `git clone --template=evil
+  -o up URL` turned a DENY into an ALLOW while real git executed the planted hook. Rather than reorder the table,
+  a matcher whose capability describes only a write DESTINATION is now declared `additive`: it contributes its hit
+  and can never win the segment's semantic class. Also closed: `make` proving absence for one goal over another's
+  unresolved closure, `make -f -` and `-E`, `hash -p`/`enable -f` declared bounded, `npm init <initializer>`, a
+  global option whose value was read as the subcommand, `--builder`, `init.templateDir`, mysql's `-e` escape, a
+  root-anchored or `..`-carrying glob pattern, a git `include.path` filter, and a positional db script file. Four
+  more were MY OWN proportionality regressions: `SHELL := /bin/bash`, `g++`, `nodeLinker` and an over-applied
+  config-program scope.
+
+  **THE TREND, stated because it is decision-relevant.** Three consecutive rounds — 9, 10, 11 — found **zero new
+  architectural classes** and **25, 28 and 29 instances**. The architecture has converged; instance discovery has
+  not, and nothing in the data suggests it will reach zero: an adversarial fleet of this size finds a comparable
+  number of new surfaces every time. An exit criterion expressed in INSTANCES may therefore never be met, while
+  one expressed in CLASSES has been met three times running. That is a product decision, recorded here rather than
+  taken. Challenge 5, run against the by-construction architecture on 2026-09-22, returned 24 confirmed findings
   and claimed 12 new architectural classes. One was reproduced in session and closed the same day (KNOWN HEAD +
   UNEXAMINED REMAINDER — a `cd`/`pushd` head exited the per-segment loop, so a redirection on that segment reached
   ALLOW past two absolute core denies). One claimed HIGH was REFUTED in session: `&&` and shell functions inside a
