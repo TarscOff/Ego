@@ -12,6 +12,9 @@
 // invariant itself, on the effects that are worst to get wrong, so a failure here reads as the property breaking
 // rather than as one more corpus entry going red.
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { RANK, TRANSFORMS, PRODUCERS, workspace, verdict } from './support/corpus.ts';
 
@@ -128,4 +131,29 @@ test('PROPERTY: every tool the target model knows reaches the target model', () 
     [],
     `a tool the target model knows is not classified by the control plane, so its target is never resolved:\n  ${unreachable.join('\n  ')}`,
   );
+});
+
+test('PROPERTY: a revert is judged by what the commit it names actually touched', () => {
+  // Neither blanket answer is right. DENY makes an everyday act an ABSOLUTE deny in any governed repository,
+  // because the path route reaches `.harness`; ALLOW lets `git revert <the commit that hardened the control
+  // plane>` undo a matcher with no human involved (exit review 7). Git knows which files the commit touched, so
+  // the write is judged as the write it is — and a commit-ish the kernel cannot resolve stays fail-safe.
+  const dir = workspace({ 'src/a.ts': 'x' });
+  const run = (args: string[]) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  run(['init', '-q']);
+  run(['config', 'user.email', 't@example.test']);
+  run(['config', 'user.name', 'T']);
+  run(['add', '-A']);
+  run(['commit', '-qm', 'source only']);
+  const ordinary = run(['rev-parse', 'HEAD']).stdout.trim();
+  mkdirSync(join(dir, 'control-plane', 'permissions'), { recursive: true });
+  writeFileSync(join(dir, 'control-plane', 'permissions', 'matchers.md'), '# policy\n');
+  run(['add', '-A']);
+  run(['commit', '-qm', 'harden the control plane']);
+  const governed = run(['rev-parse', 'HEAD']).stdout.trim();
+
+  assert.equal(verdict(`git revert --no-edit ${governed}`, dir), 'DENY', 'it would restore a governed file');
+  assert.notEqual(verdict(`git revert --no-edit ${ordinary}`, dir), 'DENY', 'an ordinary commit is not refused');
+  assert.notEqual(verdict('git revert --no-edit deadbeef', dir), 'ALLOW', 'an unresolvable commit-ish is fail-safe');
+  assert.equal(verdict('git revert --abort', dir), 'ALLOW', 'abandoning a revert touches nothing');
 });

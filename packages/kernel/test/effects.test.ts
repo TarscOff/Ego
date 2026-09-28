@@ -58,8 +58,13 @@ test('npm run scripts are classified by their effect (alignment item 5)', () => 
   assert.equal(bash('node scripts/build.mjs', c).verdict, 'ASK', 'identical at top level');
   // an undeclared script whose body is unknown stays ASK
   assert.equal(bash('npm run lint', c).verdict, 'ALLOW'); // lint is a declared build class
-  assert.equal(bash('npm run clean', c).verdict, 'ASK');
-  assert.equal(bash('npm run clean', c).decisive?.capability, 'command.destructive');
+  // `rm -rf dist` deletes a DERIVED directory, which a build puts back: it carries its ALLOW through the script
+  // exactly as it does at top level (exit review 7, proportionality). A recursive delete of anything else still
+  // asks, at either level.
+  assert.equal(bash('npm run clean', c).verdict, 'ALLOW');
+  assert.equal(bash('rm -rf dist', c).verdict, 'ALLOW', 'identical at top level');
+  assert.equal(bash('rm -rf src', c).verdict, 'ASK', 'a source directory is not derived');
+  assert.equal(bash('rm -rf src', c).decisive?.capability, 'command.destructive');
   // self-recursion terminates
   assert.notEqual(bash('npm run loop', c).verdict, 'DENY');
   // a script the manifest PROVABLY does not define executes nothing, so it is not "opaque script" — the command

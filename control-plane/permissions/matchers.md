@@ -694,6 +694,16 @@ matchers:
   - capability: command.network-tool
     tool: Bash
     command: '^(curl|wget|scp|sftp|rsync\b.*:|ssh|nc|ncat|telnet)\b'
+  # A RECURSIVE DELETE OF A DERIVED DIRECTORY DESTROYS NOTHING THAT CANNOT BE REGENERATED. `rm -rf node_modules`
+  # is the single most routine recovery command in JavaScript development, and `dist`, `target`, `__pycache__`
+  # and their siblings are build output by convention in their ecosystems — an install or a build puts every one
+  # of them back. Gating them made the control plane interrupt the ordinary inner loop, which is how a control
+  # plane gets switched off (exit review 7). The list is AUTHORED here rather than compiled into the kernel, so
+  # an organization can shorten it; every other recursive deletion keeps `command.destructive`, and a path that
+  # leaves the workspace or reaches a protected tree is still judged on the path and still denied.
+  - capability: fs.repo.delete
+    tool: Bash
+    command: '^rm\s+(-[a-zA-Z]+\s+)*((\./)?(node_modules|bower_components|dist|build|out|target|coverage|htmlcov|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.next|\.nuxt|\.turbo|\.parcel-cache|\.svelte-kit|\.angular|\.gradle|\.venv|venv|vendor|\.terraform|Pods|DerivedData)/?\s*)+$'
   - capability: command.destructive
     tool: Bash
     command: '^rm\s+-[a-zA-Z]*r'

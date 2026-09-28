@@ -5939,7 +5939,7 @@ function classifyShellPaths(
       : (rawOutput ?? (/(?:^|[\s,])dest=([^,\s]+)/.exec(seg)?.[1] ?? null));
   const write =
     WRITE_HEADS.has(head) ||
-    (head === 'git' && /^(checkout|restore|clone)$/.test(tokens[1] ?? '')) ||
+    (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick)$/.test(tokens[1] ?? '')) ||
     (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
@@ -6081,6 +6081,23 @@ function classifyShellPaths(
         // directory every locally installed binary is resolved from
         const rest = tokens.slice(2).filter((t) => !t.startsWith('-'));
         dest = rest.length > 1 ? (rest[rest.length - 1] ?? null) : null;
+      } else if (/^(revert|cherry-pick)$/.test(sub ?? '')) {
+        // A REVERT REWRITES WHATEVER THE NAMED COMMIT TOUCHED — a set the command line does not enumerate, but
+        // one git will tell us. Resolving it beats both blanket answers: DENY made an everyday act an absolute
+        // deny in any governed repository, and ALLOW let `git revert <the commit that hardened the control
+        // plane>` undo a matcher with no human involved (exit review 7). What the commit touched is judged as
+        // the write it is; a commit-ish this kernel cannot resolve stays the destructive class it already has.
+        const revs = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        const touched: string[] = [];
+        for (const rev of revs.slice(0, 4)) {
+          if (!/^[A-Za-z0-9_./^~@{}-]+$/.test(rev)) continue;
+          const show = git(['show', '--name-only', '--pretty=format:', rev], cwd);
+          if (show.ok) touched.push(...show.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+        }
+        if (touched.length) {
+          gitPathspecs = [...new Set(touched)];
+          dest = 'ALL_PATHSPECS';
+        } else dest = null;
       } else dest = null;
     } else if (head === 'patch') {
       // `patch -o FILE` / `patch -oFILE` / `patch --output=FILE` writes FILE instead of the patched originals
