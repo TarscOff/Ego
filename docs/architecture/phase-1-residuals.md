@@ -205,7 +205,39 @@ three of them were one cause and that one is now pinned by a property rather tha
 | `{ echo 'git push origin main'; echo ls; } \| sh` | **A GROUP WRITES THE CONCATENATION OF WHAT ITS COMMANDS WRITE,** so the upstream of a pipe fed by one is the whole group. Only the last stage was being read, so the first line of the script was invisible |
 | `flock /tmp/build.lock -c 'npm test'` | the CARRIER had no matcher, so the standard idiom for serializing a build reached `command.unknown` while its body was analysed correctly |
 
-Nothing from exit review 7 is left open. The next fresh review is the gate, not this list.
+### The second pass: the findings whose effect lives in a FILE
+
+Thirteen more were never verified in the first pass, because their effect is in a workspace file rather than on the
+command line. All reproduced; all closed. Eight were make shapes the parser could not see (`X != CMD` running while
+make parses, a rule line indented with SPACES, `.PHONY-thing` matching `.PHONY`, a WILDCARD include, an included
+makefile the same makefile REMAKES, a target-specific rebind on a `::` rule, a PATH entry judged before `/usr/..`
+was resolved away, and an IMPLICIT `%.o: %.c` rule that is now RESOLVED rather than merely reported blind). One was
+a whole producer: **a Dockerfile is a producer**, and `docker build .` executes every `RUN` line as root with the
+whole context copied in, while EGO resolved Makefiles, manifest scripts and shell scripts and treated this one as
+opaque. Two were git's content filters: a clean filter runs on `git status` and `git diff` as well, and the read
+verbs were excluded for a reason — Git LFS — that the exemption now NAMES; and the test for an included config file
+is WHO PULLS IT IN, not where it sits.
+
+### Closed as well, from the full sweep of all 157 findings
+
+Every self-contained finding was re-run against its expected floor. That sweep closed nine more by cause: an image
+that IS a CLI carries that CLI's command line (`docker run … amazon/aws-cli iam delete-user`), awk forks a shell
+whose command is a string expression that is often a LITERAL, a rendered production release is a credential read
+(`helm get manifest|values|all`), the variables that name a program (`SWIFT_EXEC`, `JAVA_TOOL_OPTIONS`, `LD_AUDIT`),
+`--cap-add=CAP_SYS_ADMIN` with the prefix docker also accepts, a marker the normalizer appended being hidden by an
+operator inside a REF NAME, `git checkout .` discarding the whole working tree, and — twice more — `join(' ')`
+used where `requote` was needed, because the quoting is what says where a word ends.
+
+### Three that stay as they are, deliberately
+
+| Command | Verdict | Why it is not raised |
+|---|---|---|
+| `podman login -u bot -p hunter2 …` | ASK | A password on a command line is a leak a human should SEE; refusing it outright would block a legitimate registry login that no human could then approve. `command.credential-exposure` exists for exactly this. |
+| `git revert <commit>` | ASK | DENY was tried and is disproportionate: the path route makes it an absolute core deny in any repository containing `.harness`, i.e. every governed repository. Reverting a commit is deliberate enough to ask and ordinary enough not to refuse. |
+| `rm -rf node_modules` | ASK | `command.destructive` asks for every recursive deletion, `rm -rf build` included. That is the standing policy, and the ordinary-development corpus accounts for it. |
+
+None of the three is an unauthorized ALLOW; each is the designed human gate. The next fresh review is the gate,
+not this list.
 
 ## A validation gate that lives in a temporary directory is not a gate
 

@@ -2867,6 +2867,22 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
   });
 }
 
+/** Images whose ENTRYPOINT is a tool this kernel models, so the container's argv IS that tool's command line.
+ *  Deliberately a short, named list: the argv of an arbitrary image is not a command line, and guessing would
+ *  gate every `docker run myapp --port 8080`. */
+const CLI_IMAGES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^(public\.ecr\.aws\/aws-cli\/)?amazon\/aws-cli(:|$)/i, 'aws'],
+  [/^(ghcr\.io\/)?hashicorp\/(vault|terraform)(:|$)/i, 'vault'],
+  [/^hashicorp\/terraform(:|$)/i, 'terraform'],
+  [/^(google\/cloud-sdk|gcr\.io\/google\.com\/cloudsdktool\/[a-z-]+)(:|$)/i, 'gcloud'],
+  [/^(mcr\.microsoft\.com\/azure-cli|azuresdk\/azure-cli-python)(:|$)/i, 'az'],
+  [/^(bitnami\/kubectl|rancher\/kubectl|lachlanevenson\/k8s-kubectl)(:|$)/i, 'kubectl'],
+  [/^(alpine\/helm|dtzar\/helm-kubectl)(:|$)/i, 'helm'],
+];
+/** docker/podman run options that consume the next token, so their value is not the image name. */
+const DOCKER_RUN_VALUE_OPTS =
+  /^(-e|--env|--env-file|-v|--volume|--mount|-p|--publish|--name|-w|--workdir|-u|--user|--entrypoint|--network|--net|--add-host|--label|-l|--log-driver|--log-opt|--restart|--memory|-m|--cpus|--cpu-shares|--device|--dns|--hostname|-h|--platform|--pull|--health-cmd|--security-opt|--cap-add|--cap-drop|--tmpfs|--ulimit|--sysctl|--shm-size|--pid|--ipc|--uts|--userns|--cgroupns|--runtime|--attach|-a|--detach-keys|--stop-signal|--stop-timeout|--storage-opt|--volumes-from|--link|--expose|--gpus)$/;
+
 /** docker/buildx build options that consume the next token, so their value is not the build context. */
 const DOCKER_BUILD_VALUE_OPTS =
   /^(-f|--file|-t|--tag|--build-arg|--label|--target|--platform|--cache-from|--cache-to|--output|-o|--secret|--ssh|--network|--add-host|--progress|--builder|--iidfile|--metadata-file|--attest|--provenance|--sbom|--allow|--ulimit|--shm-size|--cpu-shares|--memory|--isolation)$/;
@@ -3856,6 +3872,33 @@ function resolveScriptCommand(
       reason: 'the working directory this resolution depends on could not be verified',
       resolution: 'CONTEXT_UNVERIFIED',
     };
+  // AN IMAGE THAT IS A CLI CARRIES THAT CLI'S COMMAND LINE. `docker run --rm -e AWS_… amazon/aws-cli iam
+  // delete-user --user-name bob` runs the real AWS CLI against the real endpoint and deletes a production IAM
+  // user; the bare `aws iam delete-user` is an absolute core deny that no human may approve, and wrapped in the
+  // vendor's own image it ran under a container capability (exit review 7). Only the images whose ENTRYPOINT IS
+  // the tool are read this way — the argv of an arbitrary image is not a command line this kernel can parse —
+  // and the tool's own name is put back in front of it so the target model sees what it always sees.
+  if (/^(docker|podman|nerdctl)$/.test(head) && /^(run|create)$/.test(tokens[1] ?? '')) {
+    for (let i = 2; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t.startsWith('-')) {
+        if (DOCKER_RUN_VALUE_OPTS.test(t) && !t.includes('=')) i++;
+        continue;
+      }
+      const tool = CLI_IMAGES.find(([re]) => re.test(t));
+      if (tool) {
+        const argv = tokens.slice(i + 1);
+        return {
+          kind: 'shell-script',
+          key: `cli-image:${t}`,
+          body: argv.length ? [`${tool[1]} ${requote(argv)}`] : [],
+          reason: `the image ${t} IS the ${tool[1]} command line`,
+          resolution: 'RESOLVED_COMPLETE',
+        };
+      }
+      break; // the first bare operand is the image; an image this kernel does not know is opaque to it
+    }
+  }
   // A DOCKERFILE IS A PRODUCER. `docker build .` executes every `RUN` line in the build context's Dockerfile —
   // as root, with the whole context copied in — and EGO resolved Makefiles, manifest scripts and shell scripts
   // while treating this one as an opaque `container.build`. A Dockerfile whose `RUN` line POSTs `.env` to a
@@ -5073,7 +5116,13 @@ function resolveK8sTarget(
   // `secrets/db` is `TYPE/NAME` exactly as `secret/db` is, and only the singular slash form was listed, so
   // `kubectl --context production get secrets/db -o yaml` dumped a production Secret's data block at ALLOW
   // (exit review 7).
-  const touchesSecrets = head === 'kubectl' && tokens.some((t) => /^secrets?(\/.+)?$/i.test(t));
+  const touchesSecrets =
+    (head === 'kubectl' && tokens.some((t) => /^secrets?(\/.+)?$/i.test(t))) ||
+    // `helm get values|all|manifest|notes|hooks` PRINTS THE RENDERED RELEASE, which carries whatever the chart
+    // templated — database URLs, tokens, the contents of every Secret it defines. Against a production cluster
+    // that is a credential dump, exactly as `kubectl get secrets` is, and it was ALLOW because `get` is a read
+    // verb and the target model escalates only mutations (exit review 7).
+    (head === 'helm' && tokens.includes('get') && tokens.some((t) => /^(values|all|manifest|notes|hooks)$/.test(t)));
   const mutate = head === 'helm' ? HELM_MUTATING_VERBS : K8S_MUTATING_VERBS;
   let verb: string | undefined;
   for (let i = 1; i < tokens.length; i++) {
@@ -6412,6 +6461,54 @@ function carriedShellBodies(seg: string): string[] {
   return out;
 }
 
+/** AWK FORKS A SHELL, and the command it forks is a string EXPRESSION: `system("CMD")`, `print … | "CMD"` and
+ *  `"CMD" | getline`. When that expression is a LITERAL — written inline, or held in a variable the same program
+ *  assigns a literal to — the command is KNOWN, and reporting only opacity left a `git push origin main` at ASK
+ *  where the same text anywhere else is an organization-locked deny (exit review 7).
+ *
+ *  Separate from `carriedShellBodies` because these bodies have no other route into the analyzer: the normalizer
+ *  reaches a `trap` or a herestring body on its own, and it has no path for an awk program at all. */
+function awkShellCommands(seg: string): string[] {
+  const t = tokenize(seg);
+  // THE HEAD IS FOUND WHERE THE COMMAND STARTS, not at token 0: `FOO=bar awk …` and `command awk …` are the same
+  // awk invocation, and anchoring at position 0 missed both (exit review 7, cross-product).
+  let i = 0;
+  while (i < t.length) {
+    const w = t[i]!;
+    if (
+      /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) ||
+      WRAPPERS.has(w) ||
+      PREFIX_KEYWORDS.has(w) ||
+      /^(timeout|sudo|doas|xargs|--)$/.test(w)
+    ) {
+      i++;
+      // a wrapper's own operands: `nice -n 5`, `timeout 60`, `exec -c -a NAME`
+      while (i < t.length && /^(-|\d)/.test(t[i]!)) {
+        const opt = t[i]!;
+        i++;
+        if (/^(-n|-a|-C|-u|-g|-p|-t)$/.test(opt) && i < t.length && !t[i]!.startsWith('-')) i++;
+      }
+      continue;
+    }
+    break;
+  }
+  const head = (t[i] ?? '').replace(/^.*\//, '');
+  if (!/^(awk|gawk|mawk|nawk)$/.test(head)) return [];
+  const out: string[] = [];
+  const program = t.slice(i + 1).filter((x) => !x.startsWith('-')).join(' ');
+  const literals = new Map<string, string>();
+  for (const m of program.matchAll(/([A-Za-z_]\w*)\s*=\s*"((?:[^"\\]|\\.)*)"/g)) literals.set(m[1]!, m[2]!);
+  for (const m of program.matchAll(/\bsystem\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)/g)) out.push(m[1]!);
+  for (const m of program.matchAll(/\|\s*&?\s*"((?:[^"\\]|\\.)*)"/g)) out.push(m[1]!);
+  for (const m of program.matchAll(/"((?:[^"\\]|\\.)*)"\s*\|\s*&?\s*getline/g)) out.push(m[1]!);
+  // `print … | VAR` and `system(VAR)`: the variable's literal value is the command
+  for (const m of program.matchAll(/(?:\|\s*&?\s*|\bsystem\s*\(\s*)([A-Za-z_]\w*)\b/g)) {
+    const v = literals.get(m[1]!);
+    if (v !== undefined) out.push(v);
+  }
+  return out;
+}
+
 /** The command line `kubectl exec pod -- CMD …` and its neighbours carry after the separator. Against a LOCAL
  *  cluster the verb kept its ALLOW while that command was never analysed at all (exit review 3), so it is fed
  *  back into the canonical pipeline as its own segment. */
@@ -6421,7 +6518,10 @@ function execCarriedCommand(seg: string): string | null {
   if (!/^(kubectl|oc|docker|podman|nerdctl)$/.test(head)) return null;
   if (!t.some((x) => /^(exec|attach|debug)$/.test(x))) return null;
   const dd = t.indexOf('--');
-  return dd >= 0 && dd + 1 < t.length ? t.slice(dd + 1).join(' ') : null;
+  // RE-QUOTED, because the carried command is handed back as TEXT and `join(' ')` is not the inverse of
+  // `tokenize`: an awk program or a `-c` body carried after the separator is one word, and joining the tokens
+  // erased the quoting that said so (exit review 7, cross-product).
+  return dd >= 0 && dd + 1 < t.length ? requote(t.slice(dd + 1)) : null;
 }
 
 /** THE canonical semantic-analysis pipeline.
@@ -6634,12 +6734,18 @@ function analyzeSegments(
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
     // A PIPELINE INSIDE A CARRIER IS STILL A PIPELINE, and the normalizer cannot carry the edge across: it returns
     // strings. The body re-enters the canonical analyzer whole, which is the only place the edge can be seen.
+    // An awk program's shell commands have no other route in, so they are always handed over. Read from the RAW
+    // segment: the program is ONE quoted word, and the normalizer has already dropped the quotes that say so.
+    for (const body of awkShellCommands(seg))
+      for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
+        hits.push({ ...h, via: `${h.via ?? ''} (run by awk)`.trim() });
     for (const body of carriedShellBodies(seg))
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
       // sibling units of the OUTER segment, where the per-unit state — the working directory and the environment
       // — is the outer one. So `bash -c "export PGHOST=prod-db… && psql -c 'DROP TABLE users'"` lost the
       // assignment that the same text without the carrier carries perfectly well (exit review 7, cross-product).
+      // A SINGLE-command body needs no re-entry: the normalizer reaches it on its own.
       if (splitShellPipeline(body).length > 1)
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });

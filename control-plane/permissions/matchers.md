@@ -49,7 +49,7 @@ matchers:
     command: '(^|\s)(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
   - capability: command.env-inject
     tool: Bash
-    command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL$)'
+    command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$)'
   - capability: command.env-override
     tool: Bash
     command: '^\x00ego\x00env-inject\s+'
@@ -475,7 +475,10 @@ matchers:
     command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*f[a-zA-Z]*|--force)(\s|$)'
   - capability: git.local.reset
     tool: Bash
-    command: '^git\s+(checkout|switch|branch)\b[^|;&]*\s\x00ego\x00force-ref-reset(\s|$)'
+    # `[\s\S]*` rather than `[^|;&]*`: the marker is appended by the NORMALIZER to a segment the splitter has
+    # already decided is one command, so an operator inside a REF NAME — `git branch -M 'old;name' main` — must
+    # not hide it (exit review 7).
+    command: '^git\s+(checkout|switch|branch)\b[\s\S]*\s\x00ego\x00force-ref-reset(\s|$)'
   - capability: git.local.recovery.destroy
     tool: Bash
     command: '^git\s+(reflog\s+(expire|delete)|gc\b[^|;&]*--prune|stash\s+(clear|drop))\b'
@@ -485,6 +488,11 @@ matchers:
   - capability: git.remote.configure
     tool: Bash
     command: '^git\s+remote\s+(add|remove|rm|rename|set-url|set-branches|set-head|prune)\b'
+  # `git checkout .` and `git restore .` DISCARD every uncommitted change in the working tree — a repository-wide
+  # destruction the command line does not enumerate, and the narrow-path spellings are judged on their paths.
+  - capability: command.destructive
+    tool: Bash
+    command: '^git\s+(checkout|restore)\s+(--\s+)?(\.|\*|:/)\s*$'
   - capability: git.local.restore
     tool: Bash
     command: '^git\s+(checkout|switch)\b[^|;&]*\s(-[a-zA-Z]*f[a-zA-Z]*|--force|--discard-changes)(\s|$)'
@@ -579,7 +587,7 @@ matchers:
     # every flag that removes the isolation the accepted container decision relies on. `--device` hands the
     # container a host device and `--security-opt seccomp=unconfined` / `apparmor=unconfined` remove the syscall
     # filter; the residuals document claimed these gated before they did (decision challenge, finding 9).
-    command: '^(docker|podman)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--uts[= ]host|--cgroupns[= ]host|--device[= ]|--device-cgroup-rule|--security-opt[= ]?\S*(unconfined|seccomp=unconfined|apparmor=unconfined|no-new-privileges=false)|--cap-add[= ]?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH)|--pid[= ]container|--userns[= ]keep-id)'
+    command: '^(docker|podman)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--uts[= ]host|--cgroupns[= ]host|--device[= ]|--device-cgroup-rule|--security-opt[= ]?\S*(unconfined|seccomp=unconfined|apparmor=unconfined|no-new-privileges=false)|--cap-add[= ]?(CAP_)?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH|SYS_CHROOT|SYS_BOOT|SYS_RAWIO|MKNOD|NET_ADMIN|NET_RAW|SETUID|SETGID|AUDIT_CONTROL|BPF|PERFMON)|--pid[= ]container|--userns[= ]keep-id)'
   # `docker|podman exec` enters an ALREADY-RUNNING container whose isolation EGO never established, and runs an
   # unclassified command there. `run` is judged by its own flags and bind mounts above and below, so it is not
   # gated wholesale: that would make ordinary local development ask on every invocation. The unverified isolation

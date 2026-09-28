@@ -81,6 +81,48 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
    * cross-product tests every one of them against every transformation and every producer.
    * -------------------------------------------------------------------------------------------------------- */
   {
+    family: 'command',
+    id: 'a shell forked by an interpreter that is not a shell',
+    floor: 'DENY',
+    cases: [
+      `awk 'BEGIN{system("git push origin main")}'`,
+      `awk 'BEGIN{print 1 | "git push origin main"}'`,
+      `awk 'BEGIN{c="git push origin main"; print 1 | c}'`,
+      `gawk 'BEGIN{"git push origin main" | getline x}'`,
+    ],
+  },
+  {
+    family: 'production',
+    id: 'a cloud CLI run as a container image',
+    floor: 'DENY',
+    cases: [
+      'docker run --rm -e AWS_ACCESS_KEY_ID amazon/aws-cli iam delete-user --user-name bob',
+      'docker run --rm -e AWS_ACCESS_KEY_ID amazon/aws-cli s3 rm s3://prod-assets --recursive',
+      'docker run --rm -e VAULT_TOKEN ghcr.io/hashicorp/vault:latest kv delete secret/prod/db',
+    ],
+  },
+  {
+    family: 'k8s',
+    id: 'a rendered production release is a credential read',
+    floor: 'DENY',
+    cases: [
+      'helm --kube-context production get manifest myapp',
+      'helm --kube-context production get values myapp',
+      'helm --kube-context production get all myapp',
+    ],
+  },
+  {
+    family: 'command',
+    id: 'a variable whose value names a program EGO never read',
+    floor: 'DENY',
+    cases: [
+      'SWIFT_EXEC=/tmp/evil/swiftc swift build',
+      'JAVA_TOOL_OPTIONS=-javaagent:/tmp/evil.jar java -version',
+      'LD_AUDIT=/tmp/evil.so npm test',
+      'GIT_EXEC_PATH=/tmp/evil git lfs ls-files',
+    ],
+  },
+  {
     family: 'k8s',
     id: 'a non-local cluster reached through the OpenShift client',
     floor: 'DENY',
