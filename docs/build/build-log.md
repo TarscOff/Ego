@@ -595,6 +595,31 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   **12,887** combinations across **37** root semantic classes, 132 canonical spellings, 89 transformations, 1,333
   producer-carried variants and 98 ordinary commands.
 
+  **A SECOND PASS THEN SWEPT ALL 157 FINDINGS, and found that the first pass had verified only the ones whose
+  effect is on the COMMAND LINE.** Thirteen more — the ones whose effect lives in a workspace FILE — had never
+  been reproduced at all. Every one reproduced, and every one is now closed: eight make shapes the parser could
+  not see (`X != CMD` running while make parses; a rule line indented with SPACES, since only a TAB marks a
+  recipe; `.PHONY-thing` matching `.PHONY` through a `\b`; a WILDCARD include; an included makefile the same
+  makefile REMAKES, which makes what EGO read a pre-image; a target-specific rebind on a `::` rule; a PATH entry
+  judged before `/usr/..` was resolved away; and an IMPLICIT `%.o: %.c` rule, now RESOLVED rather than reported
+  blind), a whole producer (**a Dockerfile is a producer** — `docker build .` executes every `RUN` line as root
+  with the whole context copied in), and git's content filters (a clean filter runs on `git status` and
+  `git diff` too, and the test for an included config file is WHO PULLS IT IN rather than where it sits).
+
+  The sweep of the remaining self-contained findings closed nine more, including two instances of a lesson this
+  phase has now met four times: `join(' ')` used where `requote` was needed, because the quoting is what says
+  where a word ends.
+
+  **Three findings stay at ASK deliberately**, recorded with their reasons in `phase-1-residuals.md`: a password
+  handed on a command line, `git revert`, and `rm -rf node_modules`. None is an unauthorized ALLOW; each is the
+  designed human gate, and for `git revert` the stricter verdict was tried and was disproportionate.
+
+  **Final cold validation at HEAD 2fcd3bc**: typecheck PASSED, lint PASSED, FIRST cold parallel run 235/235,
+  serial run 235/235, proportionality 13/73 (18%, unchanged). The in-repo cross-product asserts **14,400**
+  combinations across **41** root semantic classes, 146 canonical spellings, 89 transformations, 1,793
+  producer-carried variants and 98 ordinary commands — more than three times the 4,395 it asserted when exit
+  review 7 began.
+
   **PHASE 1 IS STILL NOT CLOSED.** Nothing from this review is open, but the exit criterion is a FRESH review
   finding none — and the review that found these is not that review. `INDEPENDENT-AGENT REVIEW` stays IN
   PROGRESS.
