@@ -577,12 +577,27 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   gone. A validation gate that lives in `/tmp` is not a gate. The permanent replacement is the in-repo
   cross-product above, which is generated rather than accumulated and grows by one line per transformation.
 
-  **PHASE 1 IS NOT CLOSED.** Six floor crossings from this review remain open as ASK where DENY is deserved —
-  `oc --context <external> delete project`, `mysqladmin -h <prod>`, `clickhouse client --host <prod>`, a
-  service-scoped emulator endpoint that does not make another service local (`AWS_ENDPOINT_URL_S3=…localhost aws
-  iam delete-user`, `PUBSUB_EMULATOR_HOST=… gcloud compute instances delete`), and a brace group piped into a
-  shell. Each is contained by the human gate; none is an unauthorized ALLOW. They are recorded in
-  `docs/architecture/phase-1-residuals.md` and a further fresh review is required.
+  **EVERY FINDING OF EXIT REVIEW 7 IS NOW RESOLVED** (HEAD c1ba97d). The six floor crossings that outlived the
+  first pass were closed by cause, and three of them were ONE cause: the resolver keeps tool heads in code and
+  the control plane keeps head alternations in `matchers.md`, and the two lists drifted — `oc`, `mysqladmin` and
+  the two-word `clickhouse client` were in the resolver and in neither matcher, so no capability matched, the
+  re-targeting had nothing to act on, and the command fell through to `command.unknown`. That is fixed as a
+  PROPERTY rather than as three lines — *every tool the target model knows reaches the target model* — and the
+  property immediately found a seventh instance of itself, `nerdctl`. The other three: a SERVICE-SCOPED endpoint
+  variable is evidence about THAT service (`AWS_ENDPOINT_URL_S3` says nothing about IAM, and the unscoped
+  `AWS_ENDPOINT_URL` still covers everything, which is what LocalStack does); a GROUP writes the CONCATENATION of
+  what its commands write, so the upstream of a pipe fed by one is the whole group; and the `flock` carrier had
+  no matcher of its own.
+
+  **Final cold validation at HEAD c1ba97d** (`~/.ego` removed first): typecheck PASSED, lint PASSED, FIRST cold
+  parallel run 235/235, serial run 235/235, metamorphic/property suite 5/5 including the new tool-reachability
+  property, proportionality 13/73 (18%, unchanged), release build reproduced. The in-repo cross-product asserts
+  **12,887** combinations across **37** root semantic classes, 132 canonical spellings, 89 transformations, 1,333
+  producer-carried variants and 98 ordinary commands.
+
+  **PHASE 1 IS STILL NOT CLOSED.** Nothing from this review is open, but the exit criterion is a FRESH review
+  finding none — and the review that found these is not that review. `INDEPENDENT-AGENT REVIEW` stays IN
+  PROGRESS.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
