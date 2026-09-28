@@ -2829,6 +2829,10 @@ interface MakeFileModel {
   /** `target: VAR = value` — make's TARGET-SPECIFIC variable, which overrides the global one for that target's
    *  recipes and for everything it is a prerequisite of. */
   targetVars: Map<string, Map<string, string>>;
+  /** `%.o: %.c` — an IMPLICIT rule, which builds a target no literal rule names. Recording only the FLAG that
+   *  the file has some made every pattern-built prerequisite an opacity; keeping the rules lets the one that
+   *  matches be resolved like any other recipe (exit review 7). */
+  patternRules: Array<{ target: string; prereqs: string[]; recipes: string[] }>;
   /** CONFIGURATION CLOSURE + BINDING: assignments that change WHICH PROGRAM a recipe line runs, rather than what
    *  the line says. `SHELL := ./bin/badsh` and `export PATH := ./bin:$(PATH)` both make every command in every
    *  recipe mean something else, while the recipe text stays honest (challenge 6, findings 18, 24). */
@@ -2855,7 +2859,59 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
   if (name === '.SHELLFLAGS') return /^-[a-zA-Z]+(\s+-[a-zA-Z]+)*$/.test(v);
   // PATH: ordinary only when every NEW entry is an absolute system directory
   const added = v.replace(/\$[({]?PATH[)}]?/g, '').split(':').filter((p) => p.trim().length > 0);
-  return added.every((p) => /^\/(usr|opt|bin|sbin|Library|System)\b/.test(p.trim()));
+  // ...AND AN ENTRY IS JUDGED ON WHAT IT RESOLVES TO. `/usr/../tmp/evilbin` begins with `/usr` and IS `/tmp`,
+  // so a writable directory anyone can plant a `cc` in was read as a system directory (exit review 7).
+  return added.every((p) => {
+    const t = p.trim();
+    return /^\/(usr|opt|bin|sbin|Library|System)\b/.test(t) && /^\/(usr|opt|bin|sbin|Library|System)\b/.test(resolve(t));
+  });
+}
+
+/** docker/buildx build options that consume the next token, so their value is not the build context. */
+const DOCKER_BUILD_VALUE_OPTS =
+  /^(-f|--file|-t|--tag|--build-arg|--label|--target|--platform|--cache-from|--cache-to|--output|-o|--secret|--ssh|--network|--add-host|--progress|--builder|--iidfile|--metadata-file|--attest|--provenance|--sbom|--allow|--ulimit|--shm-size|--cpu-shares|--memory|--isolation)$/;
+
+/** The lines of a Dockerfile that `docker build` EXECUTES: every `RUN`, and nothing else. `CMD` and `ENTRYPOINT`
+ *  are metadata recorded in the image and run at `docker run`, not at build time — analysing them gated every
+ *  ordinary Node Dockerfile on its own `CMD ["node","dist/index.js"]`. A JSON-array form (`RUN ["a","b"]`) is an
+ *  exec without a shell, so its argv is joined into one command line rather than parsed as shell. Continuations
+ *  are joined first, because a `RUN` line may span many physical lines. */
+function dockerfileShellLines(text: string): string[] {
+  const joined = text.replace(/\\\r?\n\s*/g, ' ');
+  const out: string[] = [];
+  for (const raw of joined.split('\n')) {
+    const line = raw.replace(/^\s+/, '');
+    if (!line || line.startsWith('#')) continue;
+    const m = /^RUN\s+([\s\S]*)$/i.exec(line);
+    if (!m) continue;
+    let body = m[1]!.trim();
+    // `RUN --mount=… cmd` and friends: the flags are the builder's, not the command's
+    body = body.replace(/^(--[a-z-]+(=\S*)?\s+)*/i, '');
+    const json = /^\[([\s\S]*)\]$/.exec(body);
+    if (json) {
+      try {
+        const argv = JSON.parse(`[${json[1]!}]`) as unknown[];
+        if (Array.isArray(argv) && argv.every((a) => typeof a === 'string')) {
+          out.push(requote(argv as string[]));
+          continue;
+        }
+      } catch {
+        /* not JSON after all: fall through and treat it as shell */
+      }
+    }
+    if (body) out.push(body);
+  }
+  return out;
+}
+
+/** The entries of a directory, or null when it cannot be read. A pattern whose directory is unreadable is a gap,
+ *  not an empty set — the same rule the rest of this resolver follows for a positive claim. */
+function listDirectory(dir: string): string[] | null {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return null;
+  }
 }
 
 /** make functions whose RESULT is text this resolver does not evaluate. Naming them is what makes an UNKNOWN
@@ -3031,12 +3087,16 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     unsupportedFor: new Map(),
     hasPatternRules: false,
     targetVars: new Map(),
+    patternRules: [],
     rebinds: [],
     vars: new Map(),
     parseRan: [],
     sources: [],
     text: '',
   };
+  // every file this makefile includes, so a rule that REMAKES one — wherever that rule sits in the file — is
+  // caught after the parse rather than only when the directive is read
+  const included: string[] = [];
   const text = readInsideWorkspace(ctx, path);
   if (text === null) {
     model.unsupported.push(`${path} could not be read`);
@@ -3069,6 +3129,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
 
     // `include a.mk b.mk` — the included rules really execute, so an unreadable one is not "no such target"
     const inc = /^([-s]?)include\s+(.+)$/.exec(trimmed);
+    if (inc && !/[$`]/.test(inc[2]!)) included.push(...inc[2]!.split(/\s+/).filter(Boolean));
     if (inc) {
       current = null;
       // `-include` and `sinclude` exist PRECISELY so that a missing file is not an error: make carries on. Marking
@@ -3083,7 +3144,32 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         model.unsupported.push('include nested deeper than this resolver follows');
         continue;
       }
+      // A WILDCARD INCLUDE IS AN INCLUDE. `-include *.mk` is the idiom every dependency-generating project uses,
+      // and make expands the pattern itself; the resolver read `*.mk` as a literal file name, found nothing, and
+      // concluded the goal it did not see was proven absent. `evil.mk` holding `deploy: git push origin main`
+      // then ran under a proven-absent claim (exit review 7).
+      const names: string[] = [];
       for (const name of inc[2]!.split(/\s+/).filter(Boolean)) {
+        if (!/[*?[]/.test(name)) {
+          names.push(name);
+          continue;
+        }
+        const globDir = resolve(dir, name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '.');
+        const pattern = name.includes('/') ? name.slice(name.lastIndexOf('/') + 1) : name;
+        const prefix = name.includes('/') ? name.slice(0, name.lastIndexOf('/') + 1) : '';
+        const re = new RegExp('^' + pattern.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+        const listed = listDirectory(globDir);
+        if (listed === null) {
+          model.unsupported.push(`include with a pattern whose directory could not be read: ${trimmed}`);
+          continue;
+        }
+        for (const entry of listed) if (re.test(entry)) names.push(prefix + entry);
+      }
+      for (const name of names) {
+        // AN INCLUDED MAKEFILE THAT IS ITSELF A TARGET IS REMADE, and make then re-executes itself with the new
+        // file. What EGO read is a PRE-IMAGE of what will run, so the file it read cannot carry a positive claim
+        // (exit review 7).
+        if (model.rules.has(name)) model.unsupported.push(`an included makefile is remade by this makefile: ${name}`);
         if (optional && !fileExists(resolve(dir, name))) continue;
         const sub = parseMakefile(ctx, resolve(dir, name), dir, depth + 1);
         for (const [t, r] of sub.rules) {
@@ -3129,7 +3215,9 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // rebinding. Only an assignment naming something ELSE — a relative path, a repository program, a variable —
     // re-points what the recipe runs. Treating every SHELL assignment as a rebind made every target of every
     // such makefile ask (exit review 2).
-    const assign = /^(?:[^:=#]+:\s*)?(?:override\s+|export\s+)*(SHELL|\.SHELLFLAGS|PATH)\s*[:+?]?=\s*(.*)$/.exec(
+    // `build:: SHELL = …` is a target-specific rebind on a DOUBLE-COLON rule, and the optional target prefix
+    // matched only a single colon; `SHELL != …` and `SHELL ::= …` are the same rebind by another operator.
+    const assign = /^(?:[^:=#]+::?\s*)?(?:override\s+|export\s+)*(SHELL|\.SHELLFLAGS|PATH)\s*(?:::?|[+?!])?=\s*(.*)$/.exec(
       trimmed,
     );
     if (assign && !isOrdinaryShellAssignment(assign[1]!, assign[2]!)) model.rebinds.push(trimmed);
@@ -3149,6 +3237,15 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       model.vars.set(name, op === '+=' && prior !== undefined ? `${prior} ${text}` : text);
       // an assignment expands its right-hand side NOW when it is simply expanded, so a shell function there runs
       if (simple) for (const c of expandMakeText(value, model.vars).ran) model.parseRan.push(c);
+      // `X != CMD` IS `$(shell CMD)` BY ANOTHER NAME. GNU make's shell-assignment operator runs the right-hand
+      // side through the shell WHILE PARSING — for any goal, and under `make -n` — and the value was being
+      // stored as inert text, so `X != git push origin main` pushed and nothing recorded it (exit review 7).
+      if (op === '!=') {
+        const rhs = expandMakeText(value, model.vars);
+        model.parseRan.push(...rhs.ran);
+        if (rhs.text !== null && rhs.text.trim()) model.parseRan.push(rhs.text.trim());
+        else if (value.trim()) model.parseRan.push(value.trim());
+      }
     }
     // `$(shell …)` ANYWHERE outside a recipe runs while make PARSES — for every target, and for `make -n`
     for (const c of expandMakeText(trimmed, model.vars).ran) model.parseRan.push(c);
@@ -3171,7 +3268,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // `.deploy`, whose recipe then ran under ALLOW even as a prerequisite (exit review 6). Only the special
     // targets that genuinely define no recipe are skipped, and they are named.
     const MAKE_NO_RECIPE_SPECIALS =
-      /^\.(PHONY|SUFFIXES|PRECIOUS|INTERMEDIATE|SECONDARY|SECONDEXPANSION|DELETE_ON_ERROR|IGNORE|LOW_RESOLUTION_TIME|SILENT|EXPORT_ALL_VARIABLES|NOTPARALLEL|POSIX|ONESHELL|DEFAULT_GOAL|RECIPEPREFIX|MAKEFLAGS|NOTINTERMEDIATE)\b/;
+      /^\.(PHONY|SUFFIXES|PRECIOUS|INTERMEDIATE|SECONDARY|SECONDEXPANSION|DELETE_ON_ERROR|IGNORE|LOW_RESOLUTION_TIME|SILENT|EXPORT_ALL_VARIABLES|NOTPARALLEL|POSIX|ONESHELL|DEFAULT_GOAL|RECIPEPREFIX|MAKEFLAGS|NOTINTERMEDIATE)(?=\s*::?|\s*$)/;
     if (MAKE_NO_RECIPE_SPECIALS.test(trimmed)) {
       current = null;
       continue;
@@ -3179,7 +3276,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // a rule: `targets [: | ::] prereqs [; recipe]`. A target or prerequisite list built from a variable is
     // recorded as unsupported rather than parsed as a literal name.
     const rule = /^([^:=#]+?)\s*::?(?!=)\s*([^;]*)(?:;(.*))?$/.exec(line);
-    if (rule && !/^\s/.test(line)) {
+    // ONLY A TAB MARKS A RECIPE. GNU make accepts a rule line indented with SPACES, and rejecting every
+    // whitespace-led line made `  deploy:` invisible: `make deploy` force-pushed under a proven-absent claim
+    // (exit review 7).
+    if (rule && !/^\t/.test(line)) {
       const targets = rule[1]!.trim().split(/\s+/).filter(Boolean);
       // A TARGET-SPECIFIC VARIABLE IS NOT A PREREQUISITE LIST. `deploy: DOCKER = docker --context production rm
       // -f app` overrides DOCKER for that target's recipes, and it was parsed as a rule whose prerequisites are
@@ -3203,6 +3303,9 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         model.hasPatternRules = true;
       const shared: MakeRule = { recipes: [], prereqs };
       if (rule[3] && rule[3].trim()) shared.recipes.push(rule[3].trim()); // `target: ; cmd` one-line form
+      // the recipes array is the LIVE one: the recipe lines that follow this rule are appended to it
+      for (const t of targets)
+        if (t.includes('%') && !t.includes('$')) model.patternRules.push({ target: t, prereqs, recipes: shared.recipes });
       const localBlind = [...openConditions];
       if (prereqs.some((p) => /[$]/.test(p))) localBlind.push(`computed prerequisites: ${trimmed}`);
       for (const t of targets) {
@@ -3223,6 +3326,11 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     current = null;
   }
+  // AN INCLUDED MAKEFILE THAT THIS MAKEFILE REMAKES IS A PRE-IMAGE. make remakes it, then RE-EXECUTES itself
+  // with the new content, so what this parser read is not what will run — a `deploy:` that did not exist when
+  // EGO looked now pushes to the remote (exit review 7).
+  for (const name of included)
+    if (model.rules.has(name)) model.unsupported.push(`an included makefile is remade by this makefile: ${name}`);
   return model;
 }
 
@@ -3490,7 +3598,13 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
 const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]> = [
   [
     /^filter\.[^.]+\.(clean|smudge|process)$/i,
-    new Set(['add', 'checkout', 'switch', 'restore', 'commit', 'merge', 'stash', 'clone', 'pull', 'reset', 'rm', 'mv', 'apply', 'am', 'cherry-pick', 'rebase', 'revert', 'archive']),
+    // A CLEAN FILTER RUNS WHENEVER GIT COMPARES THE WORKING TREE TO THE INDEX, which is every verb that reads
+    // the tree — `status`, `diff`, `grep`, `ls-files`, `describe` — not only the ones that write it. Git runs
+    // the filter to decide whether a stat-dirty file really changed, so `git status` in a repository whose own
+    // config names a clean filter executes it (exit review 7).
+    // ...but NOT `log`, `show` or `blame`: those read COMMITTED objects, where the content is already clean and
+    // no filter runs. The line is the working tree, not "read versus write".
+    new Set(['add', 'status', 'diff', 'grep', 'ls-files', 'describe', 'checkout', 'switch', 'restore', 'commit', 'merge', 'stash', 'clone', 'pull', 'reset', 'rm', 'mv', 'apply', 'am', 'cherry-pick', 'rebase', 'revert', 'archive', 'update-index', 'read-tree', 'checkout-index', 'diff-files', 'diff-index', 'sparse-checkout']),
   ],
   [/^diff\.[^.]+\.(textconv|command)$/i, new Set(['diff', 'show', 'log', 'blame', 'difftool', 'range-diff'])],
   [/^core\.fsmonitor$/i, new Set(['status', 'add', 'diff', 'commit', 'checkout', 'switch', 'restore', 'stash'])],
@@ -3509,6 +3623,14 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
     new Set<string>(),
   ],
 ];
+/** The git verbs that only READ the working tree. A content filter runs for these too — git needs it to decide
+ *  whether a stat-dirty file really changed — but a DECLARED filter doing that is ordinary work. */
+const GIT_READ_VERBS = new Set(['status', 'diff', 'grep', 'ls-files', 'describe',
+  'diff-files', 'diff-index', 'update-index']);
+/** The content filters a repository installs as a matter of course, named by the program they run. Git LFS is the
+ *  reason the read verbs were exempted at all; naming it keeps that reason and drops the blanket. */
+const DECLARED_CONTENT_FILTERS = /^\s*(git-lfs\b|git\s+lfs\b|git-crypt\b|git-annex\b|git-fat\b|git-media\b)/i;
+
 /** A verb set that is EMPTY means "every verb": the key names a program and this resolver cannot say which
  *  commands git will run it for, so it never claims that a given verb is out of its scope. */
 const EVERY_VERB = (set: ReadonlySet<string>): boolean => set.size === 0;
@@ -3523,13 +3645,48 @@ function gitLocalProgramValues(root: string, verb: string): string[] {
   const dump = git(['config', '--list', '--includes', '--show-origin'], root);
   if (!dump.ok || !dump.stdout) return out;
   const repo = canonicalPath(root);
+  // every file the repository's OWN config pulls in with `include.path` / `includeIf.<cond>.path`, transitively
+  const pulledIn = new Set<string>();
+  {
+    const seen = new Set<string>();
+    const follow = (file: string, depth: number): void => {
+      const abs = canonicalPath(file);
+      if (depth > 4 || seen.has(abs)) return;
+      seen.add(abs);
+      let text: string;
+      try {
+        text = readFileSync(abs, 'utf8');
+      } catch {
+        return;
+      }
+      for (const m of text.matchAll(/^\s*path\s*=\s*(.+)$/gim)) {
+        const raw = m[1]!.trim().replace(/^["']|["']$/g, '');
+        const target = raw.startsWith('~/')
+          ? join(homedir(), raw.slice(2))
+          : isAbsolute(raw)
+            ? raw
+            : join(abs.slice(0, abs.lastIndexOf(sep)), raw);
+        pulledIn.add(canonicalPath(target));
+        follow(target, depth + 1);
+      }
+    };
+    // the repository's own config is `<worktree>/.git/config`; a worktree or submodule keeps a `.git` FILE that
+    // points at the real directory, which `git rev-parse --git-dir` resolves
+    const gitDir = git(['rev-parse', '--absolute-git-dir'], root);
+    const dir = gitDir.ok && gitDir.stdout.trim() ? gitDir.stdout.trim() : join(repo, '.git');
+    follow(join(dir, 'config'), 0);
+  }
   for (const raw of dump.stdout.split(/\r?\n/)) {
     // `file:<path>\t<key>=<value>`
     const tab = raw.indexOf('\t');
     if (tab < 0) continue;
     const origin = raw.slice(0, tab).replace(/^file:/, '');
     const originAbs = canonicalPath(isAbsolute(origin) ? origin : join(root, origin));
-    if (originAbs !== repo && !originAbs.startsWith(repo + sep)) continue; // not this repository's config
+    // THE TEST IS WHO PULLS THE FILE IN, NOT WHERE IT SITS. Dropping every origin outside the repository excludes
+    // the operator's own `~/.gitconfig`, which is right — and it also excluded a file the REPOSITORY'S OWN
+    // `.git/config` names with `include.path`, which is the repository configuring itself through an indirection.
+    // A clean filter reached that way ran on `git add .` at ALLOW (exit review 7).
+    if (originAbs !== repo && !originAbs.startsWith(repo + sep) && !pulledIn.has(originAbs)) continue;
     const line = raw.slice(tab + 1);
     const eq = line.indexOf('=');
     if (eq < 0) continue;
@@ -3548,7 +3705,15 @@ function gitLocalProgramValues(root: string, verb: string): string[] {
     // ... and each key is scoped to the verbs that actually invoke it. Applying every configured program to
     // every verb made `git status` and `git log` ask in any repository using Git LFS, which configures
     // `filter.lfs.clean` as its ordinary installation.
+    // A CONTENT FILTER RUNS ON A READ TOO — and the reason the read verbs were excluded is Git LFS, so that is
+    // what the exemption should name. Git runs `filter.<d>.clean` whenever it compares the working tree to the
+    // index, which includes `git status` and `git diff`; excluding those verbs for EVERY filter let a hostile
+    // `filter.evil.clean = curl …|sh` run under an ALLOW (exit review 7), while the decision that created the
+    // exclusion was about `filter.lfs.clean`, which every LFS repository installs as a matter of course. So the
+    // DECLARED content filters keep the exemption on the read verbs and an unknown program does not.
     const scope = CONFIG_PROGRAM_VERBS.find(([re]) => re.test(key));
+    const isContentFilter = /^filter\.[^.]+\.(clean|smudge|process)$/i.test(key);
+    if (isContentFilter && GIT_READ_VERBS.has(verb) && DECLARED_CONTENT_FILTERS.test(value)) continue;
     if (scope && EVERY_VERB(scope[1])) {
       out.push(value);
       continue;
@@ -3691,6 +3856,64 @@ function resolveScriptCommand(
       reason: 'the working directory this resolution depends on could not be verified',
       resolution: 'CONTEXT_UNVERIFIED',
     };
+  // A DOCKERFILE IS A PRODUCER. `docker build .` executes every `RUN` line in the build context's Dockerfile —
+  // as root, with the whole context copied in — and EGO resolved Makefiles, manifest scripts and shell scripts
+  // while treating this one as an opaque `container.build`. A Dockerfile whose `RUN` line POSTs `.env` to a
+  // remote host was ALLOW (exit review 7). It is read like any other producer: its shell lines are handed to the
+  // canonical analysis, and a Dockerfile that cannot be read is opacity rather than absence.
+  if (/^(docker|podman|nerdctl|buildah)$/.test(head) && /^(build|buildx)$/.test(tokens[1] ?? '')) {
+    const named = optionValue(tokens, 'f', ['--file']);
+    // the build CONTEXT is the last bare operand; `-` and a URL are contexts EGO cannot read
+    const operands = tokens.slice(2).filter((t, i) => (t === '-' || !t.startsWith('-')) && !DOCKER_BUILD_VALUE_OPTS.test(tokens[i + 1] ?? ''));
+    const context = operands[operands.length - 1] ?? '.';
+    // `docker build -` reads the Dockerfile from STANDARD INPUT, and a URL context is fetched: neither is a file
+    // this kernel can read, so neither can carry a positive claim
+    if (/^(-$|https?:|git@|ssh:|github\.com\/)/.test(context) && named === null)
+      return {
+        kind: 'shell-script',
+        key: `dockerfile:${context}`,
+        body: null,
+        reason: 'the build context is a stream or a remote URL, so its Dockerfile was never read',
+        resolution: 'UNREADABLE',
+      };
+    const dockerfile = named ?? `${context}/Dockerfile`;
+    const abs = isAbsolute(dockerfile) ? dockerfile : resolve(cwd, dockerfile);
+    if (stale(abs))
+      return { kind: 'shell-script', key: `dockerfile:${abs}`, body: null, reason: 'the Dockerfile is rewritten earlier in the same command', resolution: 'STALE' };
+    const text = readInsideWorkspace(ctx, abs);
+    if (text === null) {
+      // NO DOCKERFILE IS AN ABSENCE THAT WAS OBSERVED, not an opacity. `docker build .` in a directory that holds
+      // no Dockerfile fails and executes nothing, and treating it as opaque would gate every `docker build` in a
+      // repository that keeps its Dockerfile elsewhere — the proportionality half of the same contract.
+      const dir = abs.slice(0, abs.lastIndexOf('/'));
+      const listed = listDirectory(dir);
+      if (!fileExists(abs) && listed !== null)
+        return {
+          kind: 'shell-script',
+          key: `dockerfile:${abs}`,
+          body: null,
+          reason: `no Dockerfile in ${dockerfile.replace(/\/Dockerfile$/, '') || '.'}`,
+          resolution: 'ABSENT_VERIFIED',
+        };
+      return {
+        kind: 'shell-script',
+        key: `dockerfile:${abs}`,
+        body: null,
+        reason: fileExists(abs)
+          ? 'the Dockerfile is outside the workspace'
+          : 'the build context directory could not be read',
+        resolution: 'UNREADABLE',
+      };
+    }
+    return {
+      kind: 'shell-script',
+      key: `dockerfile:${abs}`,
+      body: dockerfileShellLines(text),
+      reason: `Dockerfile ${dockerfile}`,
+      resolution: 'RESOLVED_COMPLETE',
+      provenance: { source: abs, fingerprint: fingerprint(text) },
+    };
+  }
   // shell scripts: ./x.sh, bash x.sh, sh x.sh, source x.sh, . x.sh, /abs/x.sh
   let scriptPath: string | null = null;
   if (/^\.{0,2}\//.test(head) || isAbsolute(head)) scriptPath = head;
@@ -4065,6 +4288,7 @@ function resolveScriptCommand(
       unsupportedFor: new Map(),
       hasPatternRules: false,
       targetVars: new Map(),
+      patternRules: [],
       rebinds: [],
       vars: new Map(),
       parseRan: [],
@@ -4084,6 +4308,7 @@ function resolveScriptCommand(
       for (const [t, u] of m.unsupportedFor)
         merged.unsupportedFor.set(t, [...(merged.unsupportedFor.get(t) ?? []), ...u]);
       if (m.hasPatternRules) merged.hasPatternRules = true;
+      merged.patternRules.push(...m.patternRules);
       for (const [t, vars] of m.targetVars) {
         const into = merged.targetVars.get(t) ?? new Map<string, string>();
         for (const [k, v] of vars) into.set(k, v);
@@ -4100,6 +4325,15 @@ function resolveScriptCommand(
       if (!merged.firstTarget) merged.firstTarget = m.firstTarget;
     }
     // A bare `make` builds .DEFAULT_GOAL when set, not the first rule (challenge 5, finding 16).
+    // A VERSION OR HELP PROBE READS NO MAKEFILE. `make --version` prints the version and exits: it selects no
+    // goal, expands nothing and executes nothing. In any repository whose default goal happens to contain a
+    // locked command it was refused outright, and the reason named a target the probe never reaches
+    // (exit review 7).
+    // the LONG forms only: a `-v` or `-h` on this line may belong to a command spliced into a variable's value
+    // (`make CMD='docker run -v /:/host alpine sh' run`), and reading it as make's own probe flag would make the
+    // whole producer resolve to nothing — found immediately by the producer cross-product
+    if (tokens.some((t) => /^(--version|--help)$/.test(t)))
+      return { kind: 'make-target', key: `make:probe`, body: null, reason: 'a version or help probe selects no goal', resolution: 'NOT_A_PRODUCER' };
     const wanted = targets.length ? targets : [merged.defaultGoal ?? merged.firstTarget].filter((t): t is string => !!t);
     const body: string[] = [];
     const missing: string[] = [];
@@ -4112,7 +4346,23 @@ function resolveScriptCommand(
       if (visited.has(t)) return;
       visited.add(t);
       touchedBlind.push(...(merged.unsupportedFor.get(t) ?? []));
-      const rule = merged.rules.get(t);
+      let rule = merged.rules.get(t);
+      if (!rule) {
+        // AN IMPLICIT RULE BUILDS IT. `all: evil.o` with `%.o: %.c` runs that rule's recipe, and recording only
+        // the blindness made the effect an opacity where the recipe is right there to read (exit review 7).
+        // make picks the FIRST pattern whose target matches; the stem replaces `%` in the prerequisites and `$*`
+        // in the recipe.
+        for (const pr of merged.patternRules) {
+          const [pre, post] = pr.target.split('%') as [string, string];
+          if (!t.startsWith(pre) || !t.endsWith(post) || t.length < pre.length + post.length) continue;
+          const stem = t.slice(pre.length, t.length - post.length);
+          rule = {
+            prereqs: pr.prereqs.map((q) => q.replace(/%/g, stem)),
+            recipes: pr.recipes.map((r) => r.replace(/\$\*/g, stem)),
+          };
+          break;
+        }
+      }
       if (!rule) {
         // a prerequisite with no rule is usually a FILE, which executes nothing; a requested TARGET with no rule is
         // only PROVEN absent when this makefile uses nothing the parser cannot see

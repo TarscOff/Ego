@@ -616,6 +616,16 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'make variable value', build: (c) => [{ Makefile: `V := ; ${c}\nrun:\n\techo $(V)\n` }, 'make run'], safe: noDollar },
   { name: 'make variable value, braces', build: (c) => [{ Makefile: `V := ; ${c}\nrun:\n\techo \${V}\n` }, 'make run'], safe: noDollar },
   { name: 'make $(shell) at parse time', build: (c) => [{ Makefile: `X := $(shell ${c})\nrun:\n\techo hi\n` }, 'make run'], safe: noDollar },
+  // exit review 7: the make shapes whose effect the parser could not see at all
+  { name: 'make != shell assignment', build: (c) => [{ Makefile: `X != ${c}\nrun:\n\techo hi\n` }, 'make run'], safe: noDollar },
+  { name: 'make rule indented with spaces', build: (c) => [{ Makefile: `build:\n\t@echo b\n run:\n\t${c}\n` }, 'make run'], safe: noDollar },
+  { name: 'make include by wildcard', build: (c) => [{ Makefile: '-include *.mk\n', 'more.mk': `run:\n\t${c}\n` }, 'make run'], safe: noDollar },
+  { name: 'make prerequisite named like a special', build: (c) => [{ Makefile: `.PHONY-thing:\n\t${c}\nrun: .PHONY-thing\n\t@echo a\n` }, 'make run'], safe: noDollar },
+  { name: 'make pattern-rule prerequisite', build: (c) => [{ Makefile: `run: evil.o\n\t@echo linking\n\n%.o: %.c\n\t${c}\n`, 'evil.c': 'x' }, 'make run'], safe: noDollar },
+  // a Dockerfile's RUN lines execute during `docker build`
+  { name: 'Dockerfile RUN', build: (c) => [{ Dockerfile: `FROM alpine\nRUN ${c}\n` }, 'docker build .'] },
+  { name: 'Dockerfile RUN with a mount flag', build: (c) => [{ Dockerfile: `FROM alpine\nRUN --mount=type=cache,target=/c ${c}\n` }, 'docker build .'] },
+  { name: 'Dockerfile RUN by a named file', build: (c) => [{ 'docker/Dockerfile': `FROM alpine\nRUN ${c}\n` }, 'docker build -f docker/Dockerfile .'] },
   { name: 'make $(shell) in a recipe', build: (c) => [{ Makefile: `run:\n\techo $(shell ${c})\n` }, 'make run'], safe: noDollar },
   { name: 'make $$ shell substitution', build: (c) => [{ Makefile: `run:\n\techo $$(${c})\n` }, 'make run'], safe: (c) => noDollar(c) && noParens(c) },
   // make's own control flow and its non-obvious target shapes
