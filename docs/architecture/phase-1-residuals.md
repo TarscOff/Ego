@@ -228,16 +228,32 @@ whose command is a string expression that is often a LITERAL, a rendered product
 operator inside a REF NAME, `git checkout .` discarding the whole working tree, and — twice more — `join(' ')`
 used where `requote` was needed, because the quoting is what says where a word ends.
 
-### Three that stay as they are, deliberately
+### The last three, and what became of them
+
+Two of the three were closed by RESOLVING them rather than by declaring a verdict, which is the difference
+between an answer and an opinion.
+
+- **`git revert <commit>` is judged by what the commit it names actually touched.** Neither blanket answer was
+  right: DENY made an everyday act an absolute deny in any governed repository, because the path route reaches
+  `.harness`; ALLOW let `git revert <the commit that hardened the control plane>` undo a matcher unattended. Git
+  knows which files the commit touched, so the write is judged as the write it is, and a commit-ish the kernel
+  cannot resolve stays fail-safe. Pinned by *PROPERTY: a revert is judged by what the commit it names actually
+  touched*.
+- **A recursive delete of a DERIVED directory destroys nothing that cannot be regenerated.** `rm -rf
+  node_modules` is the most routine recovery command in JavaScript development, and `dist`, `target`,
+  `__pycache__`, `vendor`, `Pods` and their siblings are build output by convention in their ecosystems. The list
+  is AUTHORED in `control-plane/permissions/matchers.md` so an organization can shorten it; every other recursive
+  deletion keeps `command.destructive`, and a path that leaves the workspace or reaches a protected tree is still
+  judged on the path and still denied.
+
+One stays, as a decision:
 
 | Command | Verdict | Why it is not raised |
 |---|---|---|
-| `podman login -u bot -p hunter2 …` | ASK | A password on a command line is a leak a human should SEE; refusing it outright would block a legitimate registry login that no human could then approve. `command.credential-exposure` exists for exactly this. |
-| `git revert <commit>` | ASK | DENY was tried and is disproportionate: the path route makes it an absolute core deny in any repository containing `.harness`, i.e. every governed repository. Reverting a commit is deliberate enough to ask and ordinary enough not to refuse. |
-| `rm -rf node_modules` | ASK | `command.destructive` asks for every recursive deletion, `rm -rf build` included. That is the standing policy, and the ordinary-development corpus accounts for it. |
+| `podman login -u bot -p hunter2 …` | ASK | The review's expectation was DENY. A password on a command line is a leak a human should SEE, and the remedy (`--password-stdin`) exists — but docker itself only WARNS about the inline form, and a DENY would refuse a legitimate registry login that no human could then approve. `command.credential-exposure` puts it in front of a person, which is what the gate is for. |
 
-None of the three is an unauthorized ALLOW; each is the designed human gate. The next fresh review is the gate,
-not this list.
+That one is not an unauthorized ALLOW; it is the designed human gate. The next fresh review is the criterion, not
+this list.
 
 ## A validation gate that lives in a temporary directory is not a gate
 
