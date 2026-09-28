@@ -2873,14 +2873,20 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
  *  Deliberately a short, named list: the argv of an arbitrary image is not a command line, and guessing would
  *  gate every `docker run myapp --port 8080`. */
 const CLI_IMAGES: ReadonlyArray<readonly [RegExp, string]> = [
-  [/^(public\.ecr\.aws\/aws-cli\/)?amazon\/aws-cli(:|$)/i, 'aws'],
-  [/^(ghcr\.io\/)?hashicorp\/(vault|terraform)(:|$)/i, 'vault'],
-  [/^hashicorp\/terraform(:|$)/i, 'terraform'],
-  [/^(google\/cloud-sdk|gcr\.io\/google\.com\/cloudsdktool\/[a-z-]+)(:|$)/i, 'gcloud'],
-  [/^(mcr\.microsoft\.com\/azure-cli|azuresdk\/azure-cli-python)(:|$)/i, 'az'],
-  [/^(bitnami\/kubectl|rancher\/kubectl|lachlanevenson\/k8s-kubectl)(:|$)/i, 'kubectl'],
-  [/^(alpine\/helm|dtzar\/helm-kubectl)(:|$)/i, 'helm'],
+  [/(^|\/)amazon\/aws-cli$/i, 'aws'],
+  [/(^|\/)hashicorp\/vault$/i, 'vault'],
+  [/(^|\/)hashicorp\/terraform$/i, 'terraform'],
+  [/(^|\/)(google\/cloud-sdk|cloudsdktool\/[a-z-]+)$/i, 'gcloud'],
+  [/(^|\/)(azure-cli|azuresdk\/azure-cli-python)$/i, 'az'],
+  [/(^|\/)(bitnami\/kubectl|rancher\/kubectl|lachlanevenson\/k8s-kubectl)$/i, 'kubectl'],
+  [/(^|\/)(alpine\/helm|dtzar\/helm-kubectl)$/i, 'helm'],
 ];
+/** An image REFERENCE without its registry-agnostic decorations: the tag or digest is stripped, so
+ *  `docker.io/amazon/aws-cli@sha256:…` and `amazon/aws-cli:2.15` are the same image as `amazon/aws-cli`.
+ *  Anchoring the patterns to the bare name was a way to spell the image that the rule did not recognise. */
+function imageName(ref: string): string {
+  return ref.replace(/@sha256:[0-9a-f]+$/i, '').replace(/:[^/:]+$/, '');
+}
 /** docker/podman run options that consume the next token, so their value is not the image name. */
 const DOCKER_RUN_VALUE_OPTS =
   /^(-e|--env|--env-file|-v|--volume|--mount|-p|--publish|--name|-w|--workdir|-u|--user|--entrypoint|--network|--net|--add-host|--label|-l|--log-driver|--log-opt|--restart|--memory|-m|--cpus|--cpu-shares|--device|--dns|--hostname|-h|--platform|--pull|--health-cmd|--security-opt|--cap-add|--cap-drop|--tmpfs|--ulimit|--sysctl|--shm-size|--pid|--ipc|--uts|--userns|--cgroupns|--runtime|--attach|-a|--detach-keys|--stop-signal|--stop-timeout|--storage-opt|--volumes-from|--link|--expose|--gpus)$/;
@@ -2895,12 +2901,26 @@ const DOCKER_BUILD_VALUE_OPTS =
  *  exec without a shell, so its argv is joined into one command line rather than parsed as shell. Continuations
  *  are joined first, because a `RUN` line may span many physical lines. */
 function dockerfileShellLines(text: string): string[] {
+  // `RUN <<EOF … EOF` is BuildKit's heredoc form: the body is the script the shell runs, exactly as it is for
+  // `bash <<EOF` (exit review 8, self-attack).
+  text = text.replace(/^[ \t]*(?:ONBUILD[ \t]+)?RUN[ \t]+(?:--\S+[ \t]+)*<<-?["']?(\w+)["']?[^\n]*\n([\s\S]*?)\n[ \t]*\1[ \t]*$/gim,
+    (_m, _d: string, body: string) => body.split('\n').map((l) => `RUN ${l}`).join('\n'));
   const joined = text.replace(/\\\r?\n\s*/g, ' ');
   const out: string[] = [];
   for (const raw of joined.split('\n')) {
     const line = raw.replace(/^\s+/, '');
     if (!line || line.startsWith('#')) continue;
-    const m = /^RUN\s+([\s\S]*)$/i.exec(line);
+    // `SHELL ["/x","-c"]` RE-POINTS EVERY LATER `RUN` at that program, exactly as a makefile's `SHELL :=` does,
+    // so the recipe text below it is not what determines the effect. `ONBUILD RUN …` records a command the CHILD
+    // build runs; EGO can read it here and nowhere else, so it is classified here (exit review 8, self-attack).
+    const sh = /^SHELL\s+(.+)$/i.exec(line);
+    if (sh) {
+      const prog = /\[\s*"([^"]+)"/.exec(sh[1]!)?.[1] ?? sh[1]!.trim().split(/\s+/)[0]!;
+      if (!/^\/(bin|usr\/bin|usr\/local\/bin)\/(sh|bash|zsh|dash|ksh|ash)$/.test(prog) && !/^(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)$/.test(prog))
+        out.push(`${MARK}dockerfile-shell ${prog}`);
+      continue;
+    }
+    const m = /^(?:ONBUILD\s+)?RUN\s+([\s\S]*)$/i.exec(line);
     if (!m) continue;
     let body = m[1]!.trim();
     // `RUN --mount=… cmd` and friends: the flags are the builder's, not the command's
@@ -3893,7 +3913,7 @@ function resolveScriptCommand(
         if (DOCKER_RUN_VALUE_OPTS.test(t) && !t.includes('=')) i++;
         continue;
       }
-      const tool = CLI_IMAGES.find(([re]) => re.test(t));
+      const tool = CLI_IMAGES.find(([re]) => re.test(imageName(t)));
       if (tool) {
         const argv = tokens.slice(i + 1);
         return {
@@ -3927,7 +3947,11 @@ function resolveScriptCommand(
         reason: 'the build context is a stream or a remote URL, so its Dockerfile was never read',
         resolution: 'UNREADABLE',
       };
-    const dockerfile = named ?? `${context}/Dockerfile`;
+    // PODMAN'S DEFAULT BUILD FILE IS `Containerfile`, and it falls back to `Dockerfile`. Looking only for the
+    // latter made `podman build .` on an ordinary podman project a proven absence over a file full of RUN lines.
+    let dockerfile = named ?? `${context}/Dockerfile`;
+    if (named === null && !fileExists(resolve(cwd, dockerfile)) && fileExists(resolve(cwd, `${context}/Containerfile`)))
+      dockerfile = `${context}/Containerfile`;
     const abs = isAbsolute(dockerfile) ? dockerfile : resolve(cwd, dockerfile);
     if (stale(abs))
       return { kind: 'shell-script', key: `dockerfile:${abs}`, body: null, reason: 'the Dockerfile is rewritten earlier in the same command', resolution: 'STALE' };

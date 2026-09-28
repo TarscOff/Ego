@@ -99,6 +99,9 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'docker run --rm -e AWS_ACCESS_KEY_ID amazon/aws-cli iam delete-user --user-name bob',
       'docker run --rm -e AWS_ACCESS_KEY_ID amazon/aws-cli s3 rm s3://prod-assets --recursive',
       'docker run --rm -e VAULT_TOKEN ghcr.io/hashicorp/vault:latest kv delete secret/prod/db',
+      // a registry prefix and a digest are the same image
+      'docker run --rm docker.io/amazon/aws-cli iam delete-user --user-name bob',
+      'docker run --rm amazon/aws-cli@sha256:0123456789abcdef s3 rm s3://prod-assets --recursive',
     ],
   },
   {
@@ -673,6 +676,11 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'Dockerfile RUN', build: (c) => [{ Dockerfile: `FROM alpine\nRUN ${c}\n` }, 'docker build .'] },
   { name: 'Dockerfile RUN with a mount flag', build: (c) => [{ Dockerfile: `FROM alpine\nRUN --mount=type=cache,target=/c ${c}\n` }, 'docker build .'] },
   { name: 'Dockerfile RUN by a named file', build: (c) => [{ 'docker/Dockerfile': `FROM alpine\nRUN ${c}\n` }, 'docker build -f docker/Dockerfile .'] },
+  // exit review 8, self-attack: the Dockerfile shapes the first pass did not read
+  { name: 'Dockerfile heredoc RUN', build: (c) => [{ Dockerfile: `FROM alpine\nRUN <<EOF\n${c}\nEOF\n` }, 'docker build .'] },
+  { name: 'Dockerfile ONBUILD RUN', build: (c) => [{ Dockerfile: `FROM alpine\nONBUILD RUN ${c}\n` }, 'docker build .'] },
+  { name: 'Dockerfile lowercase directives', build: (c) => [{ Dockerfile: `from alpine\nrun ${c}\n` }, 'docker build .'] },
+  { name: 'podman Containerfile', build: (c) => [{ Containerfile: `FROM alpine\nRUN ${c}\n` }, 'podman build .'] },
   { name: 'make $(shell) in a recipe', build: (c) => [{ Makefile: `run:\n\techo $(shell ${c})\n` }, 'make run'], safe: noDollar },
   { name: 'make $$ shell substitution', build: (c) => [{ Makefile: `run:\n\techo $$(${c})\n` }, 'make run'], safe: (c) => noDollar(c) && noParens(c) },
   // make's own control flow and its non-obvious target shapes
