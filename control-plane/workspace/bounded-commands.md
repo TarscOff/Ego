@@ -25,7 +25,7 @@ bounded:
   - 'type'
   # `local-function` is the marker the analyzer puts on a call to a function DEFINED IN THE SAME UNIT: the body it
   # runs was handed to the analyzer at the definition, so the call introduces no closure of its own.
-  - 'local-function'
+  - "\u0000ego\u0000local-function"
   # `command` is a builtin that names another command; the normalizer hands that command over on its own, so the
   # only form in which this head survives is the LOOKUP `command -v NAME`, which executes nothing (exit review 4)
   - 'command'
