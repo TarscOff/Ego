@@ -1361,7 +1361,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
             // the same SHAPE rule as CONFIG_PROGRAM_VERBS: a key that ends in one of git's program-valued words
             // names a program git will run, and enumerating them left `trailer.<t>.command`, `gpg.program` and
             // every other one off the list reaching ALLOW (exit review 6)
-            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook|script|runner|launcher|tool|binary|path)=/i.test(
+            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
               value,
             )
           )
@@ -1383,7 +1383,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
         if (!m) continue;
         const value = m[2] ?? restGit[k + 1] ?? '';
         if (
-          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook|script|runner|launcher|tool|binary|path)=/i.test(
+          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
             value,
           )
         )
@@ -2765,6 +2765,9 @@ interface MakeFileModel {
   /** true when the file has pattern rules, which can build a target no literal rule defines: it bears only on
    *  whether ABSENCE can be proven, never on a target whose own recipe was read */
   hasPatternRules: boolean;
+  /** `target: VAR = value` — make's TARGET-SPECIFIC variable, which overrides the global one for that target's
+   *  recipes and for everything it is a prerequisite of. */
+  targetVars: Map<string, Map<string, string>>;
   /** CONFIGURATION CLOSURE + BINDING: assignments that change WHICH PROGRAM a recipe line runs, rather than what
    *  the line says. `SHELL := ./bin/badsh` and `export PATH := ./bin:$(PATH)` both make every command in every
    *  recipe mean something else, while the recipe text stays honest (challenge 6, findings 18, 24). */
@@ -2966,6 +2969,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     unsupported: [],
     unsupportedFor: new Map(),
     hasPatternRules: false,
+    targetVars: new Map(),
     rebinds: [],
     vars: new Map(),
     parseRan: [],
@@ -3116,6 +3120,19 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     const rule = /^([^:=#]+?)\s*::?(?!=)\s*([^;]*)(?:;(.*))?$/.exec(line);
     if (rule && !/^\s/.test(line)) {
       const targets = rule[1]!.trim().split(/\s+/).filter(Boolean);
+      // A TARGET-SPECIFIC VARIABLE IS NOT A PREREQUISITE LIST. `deploy: DOCKER = docker --context production rm
+      // -f app` overrides DOCKER for that target's recipes, and it was parsed as a rule whose prerequisites are
+      // the words of the assignment — so the recipe `$(DOCKER)` was expanded with the GLOBAL value and the
+      // production command it really runs was never seen (exit review 7).
+      const tsv = /^([A-Za-z_][A-Za-z0-9_.]*)\s*[:+?]?=\s*(.*)$/.exec(rule[2]!.trim());
+      if (tsv) {
+        for (const t of targets) {
+          const m = model.targetVars.get(t) ?? new Map<string, string>();
+          m.set(tsv[1]!, tsv[2]!);
+          model.targetVars.set(t, m);
+        }
+        continue;
+      }
       const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
       // A target that can build something NO LITERAL RULE DEFINES makes "this goal has no rule, so nothing runs"
       // false. A `%` pattern is one; so are `.DEFAULT`, which make runs for any goal with no rule of its own, and
@@ -3425,7 +3442,7 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
   // silent ALLOW (exit review 6). The rule is now the SHAPE of the key: git's own naming convention is that a
   // program-valued key ends in one of these words. A key whose last component is not one of them is data.
   [
-    /\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook|script|runner|launcher|tool|binary|path)$/i,
+    /\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)$/i,
     // the verb scope cannot be narrowed for a key this resolver does not otherwise model, so it applies to every
     // verb: a program named in repository-local configuration is part of the closure of whatever runs next
     new Set<string>(),
@@ -3812,7 +3829,16 @@ function resolveScriptCommand(
     // being denied; and each segment became its own UNIT, i.e. its own shell, so a `cd` on the left of an `&&`
     // did not reach the right of it. `pre`, the script and `post` ARE separate processes and stay separate
     // entries; what happens inside one of them is one shell, and splitting it is the analyzer's job.
-    const body = names.map((n) => scripts[n] as string);
+    // NPM APPENDS WHAT FOLLOWS `--` TO THE SCRIPT BODY. `npm run build -- deploy` runs `make build deploy`, so
+    // the process that actually runs carries a goal the manifest never mentions: `deploy` pushed to the remote,
+    // `prodk` deleted a production pod and `nuke` was `rm -rf /`, all at ALLOW, because only the manifest string
+    // was resolved and every remaining token was discarded (exit review 7). The forwarded words go to the MAIN
+    // script only — `pre` and `post` are separate processes and npm passes them nothing.
+    const dd = tokens.indexOf('--');
+    const forwarded = dd >= 0 ? tokens.slice(dd + 1) : [];
+    const body = names.map((n) =>
+      n === script && forwarded.length ? `${scripts[n] as string} ${requote(forwarded)}` : (scripts[n] as string),
+    );
     // npm accepts its configuration as flags anywhere on the line, including AFTER the script name, and
     // `--script-shell` re-points the interpreter of every script (challenge 8, finding 3)
     const npmFlags = tokens.filter((t) =>
@@ -3977,6 +4003,7 @@ function resolveScriptCommand(
       unsupported: [],
       unsupportedFor: new Map(),
       hasPatternRules: false,
+      targetVars: new Map(),
       rebinds: [],
       vars: new Map(),
       parseRan: [],
@@ -3996,6 +4023,11 @@ function resolveScriptCommand(
       for (const [t, u] of m.unsupportedFor)
         merged.unsupportedFor.set(t, [...(merged.unsupportedFor.get(t) ?? []), ...u]);
       if (m.hasPatternRules) merged.hasPatternRules = true;
+      for (const [t, vars] of m.targetVars) {
+        const into = merged.targetVars.get(t) ?? new Map<string, string>();
+        for (const [k, v] of vars) into.set(k, v);
+        merged.targetVars.set(t, into);
+      }
       merged.rebinds.push(...m.rebinds);
       for (const [k, v] of m.vars) merged.vars.set(k, v);
       for (const [k, v] of cliVars) merged.vars.set(k, v); // the command line wins over every file
@@ -4024,6 +4056,11 @@ function resolveScriptCommand(
         // a prerequisite with no rule is usually a FILE, which executes nothing; a requested TARGET with no rule is
         // only PROVEN absent when this makefile uses nothing the parser cannot see
         if (depth === 0) missing.push(t);
+        // ...AND A PREREQUISITE IS NOT A FILE WHEN A PATTERN RULE CAN BUILD IT. `all: evil.o` with `%.o: %.c`
+        // makes `evil.o`, running that rule's recipe — a `git push --force` in the reported case — and the walk
+        // returned here at depth 1, where the blindness gap below is only recorded for depth 0 (exit review 7).
+        else if (merged.hasPatternRules)
+          touchedBlind.push(`prerequisite "${t}" has no literal rule and a pattern rule may build it`);
         return;
       }
       if (depth >= 8) {
@@ -4036,7 +4073,10 @@ function resolveScriptCommand(
         if (!cmd) continue;
         // make expands the line BEFORE the shell sees it: the variables it splices in can carry whole commands,
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
-        const expanded = expandMakeText(cmd, merged.vars, { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') });
+        const tv = merged.targetVars.get(t);
+        // a target-specific value wins over the global one, and a command-line assignment still wins over both
+        const vars = tv ? new Map([...merged.vars, ...tv, ...cliVars]) : merged.vars;
+        const expanded = expandMakeText(cmd, vars, { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') });
         for (const inner of expanded.ran) body.push(inner);
         // WHAT IS KNOWN IS HANDED OVER EVEN WHEN THE LINE IS NOT FULLY KNOWN. The prefix up to the first unknown
         // still carries the command, so `git push $(UNKNOWN)` keeps its locked deny instead of degrading to an
@@ -4067,7 +4107,10 @@ function resolveScriptCommand(
       config: { read: merged.sources, unresolved: [] },
       sources: Object.fromEntries(merged.sources.map((f) => [f, fingerprint(merged.text)])),
     });
-    const key = `make:${merged.sources.join(',') || makeDir}:${wanted.join(',')}`;
+    // THE KEY'S SEPARATOR MUST NOT BE A LEGAL TARGET NAME CHARACTER. A comma is: `make build test` keyed as
+    // `build,test`, byte-identical to the key of `make build,test`, so a recipe that re-entered make with that
+    // literal goal hit the cycle guard and its `git push --force` was never analysed (exit review 7).
+    const key = `make:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}`;
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
@@ -6156,7 +6199,12 @@ function analyzeSegments(
     // A PIPELINE INSIDE A CARRIER IS STILL A PIPELINE, and the normalizer cannot carry the edge across: it returns
     // strings. The body re-enters the canonical analyzer whole, which is the only place the edge can be seen.
     for (const body of carriedShellBodies(seg))
-      if (splitShellPipeline(body).some((st) => st.pipedFromPrevious))
+      // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
+      // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
+      // sibling units of the OUTER segment, where the per-unit state — the working directory and the environment
+      // — is the outer one. So `bash -c "export PGHOST=prod-db… && psql -c 'DROP TABLE users'"` lost the
+      // assignment that the same text without the carrier carries perfectly well (exit review 7, cross-product).
+      if (splitShellPipeline(body).length > 1)
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
     // A PIPE INTO AN INTERPRETER IS AN EXECUTION EDGE. `echo 'rm -rf /' | bash` runs the first stage's output as
@@ -6291,7 +6339,19 @@ function analyzeSegments(
     if (writesUnenumerably(seg)) written.add('\0any');
     // a standalone assignment (`PATH=./bin:$PATH`, `export SHELL=…`) sets it for every LATER segment of this
     // shell, and a function or alias definition rebinds the name it declares
-    const bare = seg.trim().replace(/^export\s+/, '');
+    // THE ASSIGNMENT IS FOUND WHERE THE COMMAND STARTS, not where the segment does. A shell keyword in front of
+    // it — `if export PGHOST=prod-db… && psql …`, `do export …` — left the test looking at `if export PGHOST=…`,
+    // so the variable never carried to the next segment and a production database was read as the local socket
+    // (exit review 7, generated cross-product). Same statement as the normalizer's own prefix loop.
+    let bare = seg.trim();
+    for (;;) {
+      const kw = /^(\S+)\s+/.exec(bare);
+      if (kw && (PREFIX_KEYWORDS.has(kw[1]!) || kw[1] === 'export' || kw[1] === 'declare' || kw[1] === 'typeset')) {
+        bare = bare.slice(kw[0].length).trim();
+        continue;
+      }
+      break;
+    }
     if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
     const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([A-Za-z_][\w.-]*)\s*\(\s*\)\s*\{)/.exec(seg.trim());
     if (decl) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
