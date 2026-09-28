@@ -192,19 +192,20 @@ of a simple command, so `nohup` is handed `VAR=x` as its program name — and `c
 a space, because `\0ddd` takes up to three octal digits. Gating a command the shell would refuse to run is not a
 safety property, and asserting a literal the shell would not produce is not evidence.
 
-## Open after exit review 7 (2026-09-24)
+## Closed after exit review 7 (2026-09-24)
 
-Six floor crossings remain: each arrives at **ASK** where **DENY** is deserved. None is an unauthorized ALLOW, so
-each is contained by the human gate; they are open work, not accepted behaviour.
+Every finding the review produced is resolved. The six that outlived the first pass are recorded by CAUSE, because
+three of them were one cause and that one is now pinned by a property rather than by three lines.
 
-| Command | What it is |
+| Cause | The general statement |
 |---|---|
-| `oc --context acme-eu-1 delete project payments` | the OpenShift client's verbs are not all enrolled in the Kubernetes target model |
-| `mysqladmin -h prod-db.acme.com drop appdb` | the administration client is now a database client, but its verb vocabulary is not modelled |
-| `clickhouse client --host prod-ch.acme.com --query 'DROP TABLE events'` | the two-word spelling of `clickhouse-client` |
-| `AWS_ENDPOINT_URL_S3=http://localhost:4566 aws iam delete-user …` | a SERVICE-SCOPED emulator endpoint does not make ANOTHER service local; the de-escalation reads it as evidence of a local target |
-| `PUBSUB_EMULATOR_HOST=localhost:8085 gcloud compute instances delete vm-1` | the same statement for the Google emulator variables |
-| `{ echo 'git push origin main'; echo ls; } \| sh` | a BRACE GROUP piped into an interpreter: the literal the group emits is the script, and only a single command's output is read as one |
+| `oc`, `mysqladmin`, `clickhouse client` | **TWO LISTS OF THE SAME THING DRIFTED.** The resolver keeps tool heads in code; the control plane keeps head alternations in `matchers.md`. These three were in the resolver and in neither matcher, so no capability matched, `retargetLocalCapability` had nothing to re-target, and the command fell through to `command.unknown`. Pinned by *PROPERTY: every tool the target model knows reaches the target model* — which immediately found a seventh instance of itself, `nerdctl` |
+| `AWS_ENDPOINT_URL_S3=…localhost aws iam delete-user` | **A SERVICE-SCOPED ENDPOINT IS EVIDENCE ABOUT THAT SERVICE.** It points the S3 client at an emulator and says nothing about IAM. The unscoped `AWS_ENDPOINT_URL` still covers every service, which is what LocalStack really does |
+| `PUBSUB_EMULATOR_HOST=… gcloud compute instances delete` | the same statement for the Google emulator variables, against a product that has no emulator at all |
+| `{ echo 'git push origin main'; echo ls; } \| sh` | **A GROUP WRITES THE CONCATENATION OF WHAT ITS COMMANDS WRITE,** so the upstream of a pipe fed by one is the whole group. Only the last stage was being read, so the first line of the script was invisible |
+| `flock /tmp/build.lock -c 'npm test'` | the CARRIER had no matcher, so the standard idiom for serializing a build reached `command.unknown` while its body was analysed correctly |
+
+Nothing from exit review 7 is left open. The next fresh review is the gate, not this list.
 
 ## A validation gate that lives in a temporary directory is not a gate
 
