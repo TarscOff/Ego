@@ -2829,6 +2829,8 @@ interface MakeFileModel {
   /** `target: VAR = value` — make's TARGET-SPECIFIC variable, which overrides the global one for that target's
    *  recipes and for everything it is a prerequisite of. */
   targetVars: Map<string, Map<string, string>>;
+  /** the names assigned with `override`, whose makefile value WINS over a command-line assignment. */
+  overridden: Set<string>;
   /** `%.o: %.c` — an IMPLICIT rule, which builds a target no literal rule names. Recording only the FLAG that
    *  the file has some made every pattern-built prerequisite an opacity; keeping the rules lets the one that
    *  matches be resolved like any other recipe (exit review 7). */
@@ -3103,6 +3105,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     unsupportedFor: new Map(),
     hasPatternRules: false,
     targetVars: new Map(),
+    overridden: new Set(),
     patternRules: [],
     rebinds: [],
     vars: new Map(),
@@ -3244,6 +3247,11 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     );
     if (anyAssign) {
       const [, name, op, value] = anyAssign as unknown as [string, string, string, string];
+      // `override VAR = …` INVERTS make's precedence: the makefile's value wins over `make VAR=…`. Applying the
+      // command line last regardless let an attacker-written recipe be read with the operator's harmless value —
+      // `make KUBECTL=true ship` was analysed as `true …` while make really ran the makefile's `kubectl
+      // --context prod delete deploy api` (exit review 7).
+      if (/^override\s/.test(trimmed)) model.overridden.add(name);
       const prior = model.vars.get(name);
       // `:=` and `::=` are SIMPLY EXPANDED: the value is fixed HERE, so a later assignment to what it referenced
       // does not change it. Storing the text and expanding it lazily gave every variable recursive flavour, and
@@ -4331,6 +4339,7 @@ function resolveScriptCommand(
       unsupportedFor: new Map(),
       hasPatternRules: false,
       targetVars: new Map(),
+      overridden: new Set(),
       patternRules: [],
       rebinds: [],
       vars: new Map(),
@@ -4352,6 +4361,7 @@ function resolveScriptCommand(
         merged.unsupportedFor.set(t, [...(merged.unsupportedFor.get(t) ?? []), ...u]);
       if (m.hasPatternRules) merged.hasPatternRules = true;
       merged.patternRules.push(...m.patternRules);
+      for (const n of m.overridden) merged.overridden.add(n);
       for (const [t, vars] of m.targetVars) {
         const into = merged.targetVars.get(t) ?? new Map<string, string>();
         for (const [k, v] of vars) into.set(k, v);
@@ -4359,7 +4369,8 @@ function resolveScriptCommand(
       }
       merged.rebinds.push(...m.rebinds);
       for (const [k, v] of m.vars) merged.vars.set(k, v);
-      for (const [k, v] of cliVars) merged.vars.set(k, v); // the command line wins over every file
+      // the command line wins over every file — EXCEPT over a name the makefile assigned with `override`
+      for (const [k, v] of cliVars) if (!merged.overridden.has(k)) merged.vars.set(k, v);
       merged.parseRan.push(...m.parseRan);
       merged.sources.push(...m.sources);
       merged.text += m.text + '\n';
@@ -4429,7 +4440,8 @@ function resolveScriptCommand(
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
         const tv = merged.targetVars.get(t);
         // a target-specific value wins over the global one, and a command-line assignment still wins over both
-        const vars = tv ? new Map([...merged.vars, ...tv, ...cliVars]) : merged.vars;
+        const cliWins = new Map([...cliVars].filter(([k]) => !merged.overridden.has(k)));
+        const vars = tv ? new Map([...merged.vars, ...tv, ...cliWins]) : merged.vars;
         const expanded = expandMakeText(cmd, vars, { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') });
         for (const inner of expanded.ran) body.push(inner);
         // WHAT IS KNOWN IS HANDED OVER EVEN WHEN THE LINE IS NOT FULLY KNOWN. The prefix up to the first unknown

@@ -660,6 +660,11 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'make $(shell) at parse time', build: (c) => [{ Makefile: `X := $(shell ${c})\nrun:\n\techo hi\n` }, 'make run'], safe: noDollar },
   // exit review 7: the make shapes whose effect the parser could not see at all
   { name: 'make != shell assignment', build: (c) => [{ Makefile: `X != ${c}\nrun:\n\techo hi\n` }, 'make run'], safe: noDollar },
+  // `override` INVERTS make's precedence: the makefile's value wins over `make VAR=…`
+  { name: 'make override beats the command line', build: (c) => [{ Makefile: `override V = ${c}\nrun:\n\t$(V)\n` }, "make V=true run"], safe: noDollar },
+  // npm appends what follows `--` to the script body, so a forwarded goal, makefile or assignment all execute
+  { name: 'npm -- forwards a make goal', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { build: 'make build' } }), Makefile: `build:\n\t@echo b\nextra:\n\t${c}\n` }, 'npm run build -- extra'], safe: noDollar },
+  { name: 'npm -- forwards another makefile', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { ci: 'make' } }), Makefile: 'all:\n\t@echo a\n', 'prod.mk': `deploy:\n\t${c}\n` }, 'npm run ci -- -f prod.mk deploy'], safe: noDollar },
   { name: 'make rule indented with spaces', build: (c) => [{ Makefile: `build:\n\t@echo b\n run:\n\t${c}\n` }, 'make run'], safe: noDollar },
   { name: 'make include by wildcard', build: (c) => [{ Makefile: '-include *.mk\n', 'more.mk': `run:\n\t${c}\n` }, 'make run'], safe: noDollar },
   { name: 'make prerequisite named like a special', build: (c) => [{ Makefile: `.PHONY-thing:\n\t${c}\nrun: .PHONY-thing\n\t@echo a\n` }, 'make run'], safe: noDollar },
