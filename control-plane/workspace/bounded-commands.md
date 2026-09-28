@@ -45,6 +45,19 @@ bounded:
   - 'yamllint'
   - 'markdownlint'
   - 'staticcheck'
+  - 'mariadb'
+  - 'biome'
+  - 'oxlint'
+  - 'dprint'
+  # `kind`, `k3d` and `minikube` manage their OWN local clusters; `control-plane/workspace/local-targets.md`
+  # already says so, and a status read of one is the most ordinary local-development probe there is.
+  - 'kind'
+  - 'k3d'
+  - 'minikube'
+  - 'colima'
+  # `flock FILE -c CMD` takes a lock and runs CMD — the standard idiom for serializing a build. CMD is handed to
+  # the analyzer on its own by the normalizer; the carrier itself opens one file and executes nothing else.
+  - 'flock'
   - 'kustomize'
   - 'env'
   - 'umask'

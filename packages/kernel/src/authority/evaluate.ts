@@ -148,6 +148,20 @@ const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'
 const ENV_INJECT_RE =
   /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
 
+/** Options of a governed variable that actually LOAD CODE. `NODE_OPTIONS=--max-old-space-size=4096 npm test` is
+ *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
+ *  ALLOW is a gate on ordinary work (exit review 7). The variable stays governed — `--require`, `--import` and
+ *  the loaders are exactly why — but a value that cannot name a program is not an injection. */
+const NODE_OPTIONS_EXECUTES = /--(require|import|loader|experimental-loader|experimental-vm-modules|cpu-prof-dir|heap-prof-dir|diagnostic-dir|inspect-publish-uid|env-file|conditions)\b|-r\b/;
+/** True when this binding really changes what runs. */
+function envInjects(name: string, assignment: string): boolean {
+  if (name === 'NODE_OPTIONS') {
+    const value = assignment.slice(assignment.indexOf('=') + 1);
+    return NODE_OPTIONS_EXECUTES.test(value);
+  }
+  return true;
+}
+
 /** THE SENTINEL THAT MAKES A STATE MARKER UNFORGEABLE.
  *
  *  The analyzer injects markers into the segment stream — `define-function`, `env-inject NAME`, `local-function`,
@@ -838,12 +852,15 @@ export function normalizeSegment(segment: string): string[] {
   // `npm exec` is `npx` and `bun x` is `bunx` — npm-exec(1) documents them as the SAME command. Stripping the
   // two-word spelling as a transparent pair sent it down a different path from the one-word spelling, so the npx
   // ACQUISITION guard below (a runner carrying its own `--package` fetches) never saw it (exit review 4).
-  s = s.replace(/^npm\s+(?:exec|x)\s+/, 'npx ').replace(/^bun\s+x\s+/, 'bunx ');
+  const WRAP = String.raw`(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)|env|command|nohup|setsid|stdbuf|nice(?:\s+-n\s+\S+)?|ionice|timeout(?:\s+\S+)?|caffeinate|chronic|unbuffer|--)\s+)*`;
+  // the two-word spellings are the SAME command as the one-word ones, and the rewrite must find them behind a
+  // wrapper too — `env npm exec tsc` reached command.unknown while `npx tsc` was an ordinary build
+  s = s.replace(new RegExp(`^(${WRAP})npm\\s+(?:exec|x)\\s+`), '$1npx ').replace(new RegExp(`^(${WRAP})bun\\s+x\\s+`), '$1bunx ');
   // THE ACQUISITION GUARD MUST SEE THE HEAD WHEREVER THE HEAD IS. It tested only the RAW head, so one transparent
   // wrapper hid it: `env npx --package=evil-thing -c "tsc --version"` fetched and ran an arbitrary package while
   // the kernel classified the decoy `tsc --version` as an ordinary build (exit review 7). The same shape as the
   // environment-prefix defect — a guard anchored at position 0 in a string the normalizer is about to rewrite.
-  const acq = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)|env|command|nohup|setsid|stdbuf|nice(?:\s+-n\s+\S+)?|ionice|timeout(?:\s+\S+)?|caffeinate|chronic|unbuffer|--)\s+)*(npx|bunx)\s/.exec(s);
+  const acq = new RegExp(`^${WRAP}(npx|bunx)\\s`).exec(s);
   if (acq) {
     const t = tokenize(s.slice(s.indexOf(acq[1]!)));
     let k = 1;
@@ -869,7 +886,7 @@ export function normalizeSegment(segment: string): string[] {
     for (;;) {
       const m = /^([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"[^"]*"|\S*)\s+/.exec(s);
       if (!m) return any;
-      if (ENV_INJECT_RE.test(m[1]!)) extra.push(`${MARK}env-inject ${m[1]}`);
+      if (ENV_INJECT_RE.test(m[1]!) && envInjects(m[1]!, m[0]!)) extra.push(`${MARK}env-inject ${m[1]}`);
       if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
       s = s.slice(m[0].length);
       any = true;
@@ -914,6 +931,12 @@ export function normalizeSegment(segment: string): string[] {
   // `command` as a transparent wrapper classified the idiom every script uses to test whether a tool exists as
   // RUNNING that tool, so `command -v node` asked (exit review 4).
   if (tokens[0] === 'command' && /^-[vV]$/.test(tokens[1] ?? '')) return [...extra, s];
+  // ...and behind a wrapper too: `timeout 5 command -v node` is the same lookup, and it was classified as RUNNING
+  // node (exit review 7)
+  {
+    const cv = new RegExp(`^${WRAP}command\\s+-[vV]\\s`).exec(s);
+    if (cv) return [...extra, s.slice(cv[0].length - 'command -v '.length)];
+  }
   let idx = 0;
   for (;;) {
     const t = tokens[idx];
@@ -2193,7 +2216,10 @@ const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
 function environmentGaps(kind: ProducerResult['kind'], env: ExecutionEnvironment): Unresolved[] {
   const gaps: Unresolved[] = [];
   for (const [name, value] of Object.entries(env.envInputs))
-    if (RELEVANT_ENV_INPUTS[kind].some((re) => re.test(name)))
+    // ...but a VALUE that cannot name a program does not change what runs: `NODE_OPTIONS=--max-old-space-size`
+    // raises the V8 heap, which is the standard fix for an out-of-memory build, and reporting it as an
+    // unresolved context made `npm test` ask (exit review 7).
+    if (RELEVANT_ENV_INPUTS[kind].some((re) => re.test(name)) && envInjects(name, `${name}=${value}`))
       gaps.push({ what: 'context', where: name, why: `the environment sets ${name}=${value}, which changes what runs` });
   if (!env.treeFresh && kind !== 'none')
     gaps.push({
@@ -2298,6 +2324,11 @@ const EXECUTION_ENV_INPUTS =
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
+  // A CONTAINER'S `-e` SETS THE CONTAINER'S ENVIRONMENT, not this shell's. `docker run --rm -e SHELL=/bin/sh
+  // myapp` starts a throwaway local container with one variable set; reading it as a host binding classified an
+  // ordinary local run as an execution override (exit review 7). What the container does with it is the
+  // container's business, and the image is already an unmodelled producer.
+  if (/^(docker|podman|nerdctl)\b/.test(segment.trim())) return out;
   // `VAR=x cmd`, `env VAR=x cmd`, `env -- VAR=x cmd`, `env -S 'VAR=x cmd'`, and the same behind any wrapper
   // (`timeout 60 env VAR=x cmd`). Anchoring on the LEADING position only made the dimension blind to spellings
   // the normalizer already knew how to parse — two readers for one dimension (challenge 8, finding 1).
@@ -4400,7 +4431,12 @@ const PROGRAM_OPERAND_LONG =
   // invocation, `javac -processor` runs an annotation processor, and `sort --compress-program` runs a program
   // under a capability literally named command.read-only (decision challenge, findings 5, 25, 26, 30).
   '|--post-renderer|--exec-path|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-B|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
-  '|-e(?=\\s+\\S*(ssh|sh|bash|python|perl|ruby|node))';
+  // rsync's `-e ssh` names a remote SHELL. The lookahead matched those letters ANYWHERE in the value, so a
+  // database statement beginning `show …` contained `sh` and `mysql -e 'show tables'` — a read of the local
+  // socket — was classified as naming an unbounded program (exit review 7). The value must BE the program.
+  // ...and an ASSIGNMENT is not a program name: `docker run -e SHELL=/bin/sh myapp` sets a variable inside the
+  // container and was read as naming a remote shell (exit review 7)
+  '|-e(?=\\s+(?![A-Za-z_][A-Za-z0-9_]*=)(?:\\S*/)?(ssh|sh|bash|zsh|dash|python3?|perl|ruby|node)(\\s|$))';
 const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
 /** the short forms whose value is GLUED to the letter: `gcc -B/tmp/evil`, `clang -Xclangfoo`, `-loadplugin` */
 const PROGRAM_OPERAND_GLUED_RE = /\s(-B|-Xclang|-load|-fplugin|-specs|-wrapper)\S/;
@@ -4725,6 +4761,10 @@ function resolveK8sTarget(
 ): { cls: TargetClass; target: string; mutating: boolean } {
   const head = tokens[0] ?? '';
   if (/^(kind|k3d|minikube)$/.test(head)) return { cls: 'LOCAL', target: head, mutating: true };
+  // `kustomize build|cfg|fn` RENDERS: it reads kustomization.yaml and writes YAML to stdout, opening no
+  // kubeconfig and contacting no cluster, so there is no target to be unclassified about (exit review 7)
+  if (head === 'kustomize' && /^(build|cfg|fn|version|edit)$/.test(tokens[1] ?? ''))
+    return { cls: 'LOCAL', target: 'a local render', mutating: false };
   // The verb is found BY NAME, not by skipping option values: any global option missing from a skip-list would
   // otherwise displace it and silently turn a mutation into a read (round 14).
   const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
@@ -4769,12 +4809,36 @@ function resolveK8sTarget(
   const useIdx = tokens.findIndex((t, i) => t === 'use-context' && tokens[i - 1] === 'config');
   if (useIdx > 0 && tokens[useIdx + 1]) add([tokens[useIdx + 1]!], targets.k8sLocalContexts, 'context use');
   add(optionValues(tokens, '', ['--context', '--kube-context']), targets.k8sLocalContexts, 'context');
-  add(optionValues(tokens, '', ['--kubeconfig']), [], 'kubeconfig');
+  // A NAMED LOCAL CONTEXT IS DECISIVE. `kind get kubeconfig > ./kube.conf` then `kubectl --kubeconfig ./kube.conf
+  // --context kind-dev apply` is the documented kind workflow; the FILE is UNCLASSIFIED (the kernel cannot read
+  // it) and outranked the context, so the whole local loop was DENIED (exit review 7). A kubeconfig says where
+  // contexts are listed; the `--context` says which one is used, and when that one is local there is nothing
+  // left for the file to change.
+  const namedContext = optionValues(tokens, '', ['--context', '--kube-context']);
+  const contextIsLocal =
+    namedContext.length > 0 &&
+    namedContext.every((c) => classifyTargetName(c, targets.k8sLocalContexts, targets) === 'LOCAL') &&
+    // ...and only for a kubeconfig the WORKSPACE owns. `kind get kubeconfig > ./kube.conf` writes it into the
+    // checkout; a file somewhere else is one the kernel cannot read and did not see created, and a pinned
+    // bypass rests on exactly that (`--kubeconfig /tmp/remote.yaml --context kind-dev`, round 14).
+    optionValues(tokens, '', ['--kubeconfig']).every((f) => !isAbsolute(f) && !f.startsWith('~'));
+  // a kubeconfig FILE is unreadable to the kernel, so it is UNCLASSIFIED — unless the `--context` already names a
+  // local cluster, in which case the file only says where that name is listed
+  if (!contextIsLocal) add(optionValues(tokens, '', ['--kubeconfig']), [], 'kubeconfig');
   for (const t of tokens) {
     const env = /^(KUBECONFIG|KUBERNETES_MASTER)=(.+)$/.exec(t);
     if (env) signals.push({ cls: classifyTargetName(env[2]!, [], targets), target: env[1]! + '=' + env[2]! });
   }
-  add(optionValues(tokens, 's', ['--server', '--kube-apiserver']), [], 'server');
+  // THE API SERVER IS AN ENDPOINT, so its HOST is what decides — `--server https://127.0.0.1:6443` names the
+  // loopback cluster explicitly and was read as an opaque name, denying the very thing the local list exists to
+  // allow (exit review 7).
+  for (const v of optionValues(tokens, 's', ['--server', '--kube-apiserver'])) {
+    const host = endpointHost(v);
+    signals.push({
+      cls: classifyTargetName(host, targets.dbLocalHosts, targets),
+      target: `server ${v}`,
+    });
+  }
   for (const ns of optionValues(tokens, 'n', ['--namespace']))
     if (!isOpaqueTarget(ns) && hasProductionMarker(ns, targets.productionMarkers))
       signals.push({ cls: 'PRODUCTION', target: `namespace ${ns}` });
@@ -4894,7 +4958,16 @@ function resolveDbTarget(
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
     if (t.startsWith('-')) {
-      if (/^(-f|--file|-c|--command|-e|--execute|--eval|-U|--username|-p|--port|-d|--dbname|-o|--output)$/.test(t)) i++;
+      // THE STATEMENT IS ONE WORD, and the quoting that said so is gone by the time this scan runs. Skipping a
+      // single token after `-c` left the rest of the SQL to be read as operands, so `psql -c 'select * from
+      // users'` found the bare operand `*` and called the target unclassified — the most ordinary query there is,
+      // against the local socket, interrupting the agent for approval (exit review 7). Everything up to the next
+      // option belongs to the statement.
+      if (/^(-c|--command|-e|--execute|--eval|--query)$/.test(t)) {
+        while (i + 1 < tokens.length && !tokens[i + 1]!.startsWith('-')) i++;
+        continue;
+      }
+      if (/^(-f|--file|-U|--username|-p|--port|-d|--dbname|-o|--output)$/.test(t)) i++;
       continue;
     }
     bare = t;
@@ -5870,7 +5943,25 @@ function classifyShellPaths(
         }
         if (!contains && candidates.some((c) => c.startsWith(posix + '/'))) contains = pp;
       }
-      const pp = direct ?? contains;
+      // WRITING ONE NAMED FILE INTO THE REPOSITORY ROOT IS NOT A WRITE OF THE REPOSITORY'S PROTECTED SUBTREES.
+      // The `contains` rule is what catches a write into `.harness` itself — the protected paths name the files
+      // BELOW it, so there is no `direct` match for the directory — and it must keep doing that. What it must
+      // not do is fire for a destination that is the ROOT, where "contains a protected path" is true of every
+      // checkout: `cp /tmp/foo.txt .` was an ABSOLUTE core deny, the single most ordinary shell command there is
+      // (exit review 7). At the root the rule applies only to a write nobody can enumerate.
+      const atRoot = roots.includes(posix);
+      const unenumerable = isArchive || writesUnenumerably(seg) || recursive;
+      // A DELETE IS NOT A WRITE INTO. The `contains` rule exists to catch content PUT somewhere protected; a
+      // removal puts nothing there, and its own destructive class already asks. `rm -rf node_modules` — the most
+      // routine recovery command in JavaScript development — was refused outright because `node_modules/.bin`
+      // is a protected path below it (exit review 7). Removing the protected path ITSELF is still `direct`.
+      // A DELETE IS NOT A WRITE INTO — except of EGO's own governance tree, where removing the directory IS the
+      // tamper. `rm -rf node_modules` — the most routine recovery command in JavaScript development — was
+      // refused outright because `node_modules/.bin` is a protected WRITE path below it, while deleting `.bin`
+      // installs no program (exit review 7). `rm -rf .harness` destroys the governance tree and stays denied.
+      const removes = /^(rm|rmdir|unlink|shred)$/.test(head);
+      const keep = removes ? (contains?.capability.startsWith('ego.') ? contains : null) : contains;
+      const pp = direct ?? (atRoot && !unenumerable && !removes ? null : keep);
       if (pp) {
         if (isArchive && !direct) {
           // an archive whose contents the kernel cannot see, extracted into a directory that contains protected paths

@@ -766,12 +766,51 @@ matchers:
   # stripped by the normalizer into an `env-inject` marker long before this.
   # The two sets are exactly the ones the `env-inject` marker rules above distinguish, so a standalone binding and
   # a binding in front of a command get the SAME verdict rather than two different ones.
+  # A SEARCH PATTERN IS DATA. These two rules match a binding ANYWHERE on the line, which is right for a command
+  # they precede and wrong for a word a search tool was asked to look for: `grep -rn 'NODE_OPTIONS=' .` — reading
+  # your own repository for the name of a variable — was refused outright (exit review 7). The head is excluded,
+  # not the word, because the analyzer cannot tell a pattern from a binding once the quoting is gone, and the
+  # tools that take a pattern are exactly the ones where the distinction matters.
+  # `NODE_OPTIONS` is narrowed to the options that LOAD CODE: `--max-old-space-size=4096` raises the V8 heap and
+  # executes nothing, and denying it gated the standard fix for an out-of-memory build.
   - capability: command.env-inject
     tool: Bash
-    command: '(?:^|\s)(?:LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]*|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_[A-Z_]*|EGO_[A-Z_]*|CLAUDE_[A-Z_]*|CODEX_[A-Z_]*|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL)\+?='
+    command: '^(?!(?:grep|rg|ripgrep|egrep|fgrep|ag|ack|sed|gsed|awk|gawk|find|fd|xargs|comm|diff)\b)[\s\S]*(?:^|\s)(?:LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]*|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_[A-Z_]*|EGO_[A-Z_]*|CLAUDE_[A-Z_]*|CODEX_[A-Z_]*|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL)\+?='
+  - capability: command.env-inject
+    tool: Bash
+    command: '^(?!(?:grep|rg|ripgrep|egrep|fgrep|ag|ack|sed|gsed|awk|gawk|find|fd|xargs|comm|diff)\b)[\s\S]*(?:^|\s)NODE_OPTIONS\+?=\S*(--(require|import|loader|experimental-loader|env-file|conditions)\b|(^|\s)-r\b)'
   - capability: command.env-override
     tool: Bash
-    command: '(?:^|\s)(?:KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]*|HOME|PATH)\+?='
+    command: '^(?!(?:grep|rg|ripgrep|egrep|fgrep|ag|ack|sed|gsed|awk|gawk|find|fd|xargs|comm|diff)\b)[\s\S]*(?:^|\s)(?:KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]*|HOME|PATH)\+?='
+  # ORDINARY READ-ONLY GIT PLUMBING AND EVERYDAY VERBS. These fell through every matcher to command.unknown and
+  # asked: a search of tracked files, a read of an object, a read of configuration, and deleting one tracked file
+  # — which `rm src/a.ts` already does without asking (exit review 7). `git config` WITHOUT a value is a read;
+  # the program-valued write forms are matched far above this and win first.
+  - capability: command.read-only
+    tool: Bash
+    command: '^git\s+(grep|cat-file|ls-tree|ls-files|rev-list|show-ref|show-branch|shortlog|describe|merge-base|name-rev|var|count-objects|verify-pack|diff-tree|diff-index|for-each-ref|check-ignore|check-attr)\b'
+  - capability: command.read-only
+    tool: Bash
+    # A SCOPE IS NOT A READ. `--local` says WHERE, not WHAT: `git config --local alias.y '!git push …'` sets a
+    # shell alias and must never be ALLOW, so the read forms are named explicitly and a bare key is a read only
+    # when nothing follows it.
+    command: '^git\s+config\s+(--(global|local|system|worktree|file\s+\S+)\s+)?(--(get|get-all|get-regexp|get-urlmatch|list|name-only|show-origin|show-scope|null|type)\b|-l\s*$|[A-Za-z0-9._-]+\s*$)'
+  - capability: fs.repo.delete
+    tool: Bash
+    command: '^git\s+rm\b'
+  # `[[ … ]]` and `[ … ]` are the shell's own test constructs: a conditional expression opens no file and runs no
+  # program, and `[[ -n $CI ]] && npm test` — the standard guard in a CI script — asked (exit review 7).
+  - capability: command.read-only
+    tool: Bash
+    command: '^\[\[?\s'
+  # an IN-PLACE edit is an ordinary write, and the path rules judge the file it names
+  - capability: command.local-mutation
+    tool: Bash
+    command: '^(sed|gsed|perl|ruby)\s+(-[a-zA-Z]*i|--in-place)(\S*)?\s'
+  # `kustomize build` RENDERS to stdout: it reads kustomization.yaml and contacts no cluster at all.
+  - capability: command.read-only
+    tool: Bash
+    command: '^kustomize\s+(build|cfg|fn|version|edit\s+(list|set\s+image))\b'
   # Pure shell structure and no-op builtins. They were never classified, so they were command.unknown (ASK) at top
   # level; once a script body stopped being pre-filtered, every `set -e` and `done` line asked. A redirection or a
   # command substitution disqualifies the line — `: > ~/.ssh/known_hosts` and `trap "curl …"` must NOT land here.
