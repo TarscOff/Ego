@@ -839,8 +839,13 @@ export function normalizeSegment(segment: string): string[] {
   // two-word spelling as a transparent pair sent it down a different path from the one-word spelling, so the npx
   // ACQUISITION guard below (a runner carrying its own `--package` fetches) never saw it (exit review 4).
   s = s.replace(/^npm\s+(?:exec|x)\s+/, 'npx ').replace(/^bun\s+x\s+/, 'bunx ');
-  if (/^(npx|bunx)\s/.test(s)) {
-    const t = tokenize(s);
+  // THE ACQUISITION GUARD MUST SEE THE HEAD WHEREVER THE HEAD IS. It tested only the RAW head, so one transparent
+  // wrapper hid it: `env npx --package=evil-thing -c "tsc --version"` fetched and ran an arbitrary package while
+  // the kernel classified the decoy `tsc --version` as an ordinary build (exit review 7). The same shape as the
+  // environment-prefix defect — a guard anchored at position 0 in a string the normalizer is about to rewrite.
+  const acq = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)|env|command|nohup|setsid|stdbuf|nice(?:\s+-n\s+\S+)?|ionice|timeout(?:\s+\S+)?|caffeinate|chronic|unbuffer|--)\s+)*(npx|bunx)\s/.exec(s);
+  if (acq) {
+    const t = tokenize(s.slice(s.indexOf(acq[1]!)));
     let k = 1;
     while (k < t.length && t[k]!.startsWith('-')) {
       if (/^(--package|-p)(=|$)/.test(t[k]!)) return [s];
@@ -1047,7 +1052,7 @@ function expandGitAbbreviations(tokens: string[]): string[] {
     const m = /^(--[a-z][a-z-]*)(=.*)?$/s.exec(t);
     if (!m) return t;
     const [, name, value = ''] = m;
-    if (GIT_LONG_OPTS.includes(name!)) return t;
+    if (GIT_LONG_OPTS.includes(name!) || GIT_COMPLETE_LONG.has(name!)) return t;
     const hits = GIT_LONG_OPTS.filter((o) => o.startsWith(name!));
     // `--de` prefixes both --delete and --discard-changes: expanding to the FIRST governed match keeps the deny,
     // which is the safe direction. git itself would refuse the ambiguity, so nothing legitimate is lost.
@@ -1219,6 +1224,9 @@ function normalizeTail(rest: string[]): string[] {
 }
 
 /** git / gh / glab global options that may precede the subcommand; the option's argument is consumed with it. */
+/** Long options that are COMPLETE as written, so abbreviation expansion must leave them alone. `--config` is
+ *  clone's own option; expanding it to the unique longer match `--config-env` renamed a real flag (exit review 7). */
+const GIT_COMPLETE_LONG = new Set(['--config', '--output', '--file', '--template', '--depth', '--branch', '--origin']);
 const GIT_GLOBAL_WITH_ARG = new Set([
   '-C',
   '-c',
@@ -1228,6 +1236,7 @@ const GIT_GLOBAL_WITH_ARG = new Set([
   '--exec-path',
   '--super-prefix',
   '--config-env',
+  '--config',
   '--list-cmds',
   '--attr-source',
 ]);
@@ -1336,7 +1345,11 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
           extra.push(
             `${MARK}env-inject ${name === '--git-dir' ? 'GIT_DIR' : name === '--work-tree' ? 'GIT_WORK_TREE' : name === '--namespace' ? 'GIT_NAMESPACE' : 'GIT_EXEC_PATH'}`,
           );
-        if (name === '-c' || name === '--config-env') {
+        // `git clone --config k=v` IS the same setting by clone's own spelling, and it sits after the verb. It was
+        // stripped as an unknown global option before any matcher could see it, so `git clone --config
+        // interactive.diffFilter=/tmp/pwn.sh URL` installed a program git runs on every later `add -p` in that
+        // repository, at ALLOW (exit review 7).
+        if (name === '-c' || name === '--config-env' || name === '--config') {
           // an inline alias redefines a verb: `git -c alias.p=push p …` is `git push …`; an alias whose body is not a
           // literal (config-env) is an execution override the kernel cannot see
           const alias = /^alias\.([^=]+)=(.*)$/.exec(value);
@@ -1360,6 +1373,22 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
       break;
     }
     let restGit = tokens.slice(i);
+    // CLONE'S OWN `--config` SITS AFTER THE VERB, where the global-option scan above never looks — it stops at the
+    // first non-option token, which is the verb itself. So `git clone --config interactive.diffFilter=/tmp/pwn.sh
+    // URL` installed a program git runs on every later `add -p` in the new repository, at ALLOW (exit review 7).
+    if (restGit[0] === 'clone')
+      for (let k = 1; k < restGit.length; k++) {
+        const t = restGit[k]!;
+        const m = /^(--config|--config-env|-c)(?:=(.*))?$/.exec(t);
+        if (!m) continue;
+        const value = m[2] ?? restGit[k + 1] ?? '';
+        if (
+          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook|script|runner|launcher|tool|binary|path)=/i.test(
+            value,
+          )
+        )
+          extra.push(`git config ${value.replace('=', ' ')}`);
+      }
     const verb = restGit[0];
     if (verb && aliases.has(verb)) {
       const body = aliases.get(verb)!;
@@ -2490,11 +2519,32 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   const operands = tokens.slice(1).filter((t) => !t.startsWith('-') && !t.includes('='));
   const out: string[] = [];
   const abs = (t: string): string => (isAbsolute(t) ? t : resolve(cwd, t));
-  if (head === 'git' && /^(checkout|restore)$/.test(operands[0] ?? '')) {
+  if (head === 'git' && /^(checkout|restore|clone)$/.test(operands[0] ?? '')) {
+    // `--` IS OPTIONAL, AND GIT SAYS SO. `git checkout HEAD~1 control-plane/permissions/matchers.md` overwrites
+    // that file from an arbitrary tree-ish exactly as the `--` spelling does, and `git checkout origin/evil
+    // .harness` replaces the whole governance tree; only the dash-dash form was read, so the plain one was ALLOW
+    // while the identical act with two extra characters was an absolute deny (exit review 7). Without `--`, the
+    // first operand may be a tree-ish and everything after it is a pathspec; `git clone URL DIR` writes DIR.
     const dd = tokens.indexOf('--');
     if (dd >= 0) out.push(...tokens.slice(dd + 1).map(abs));
-  } else if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2)
+    else if (operands[0] === 'clone') {
+      const dir = operands.slice(1).filter((t) => !/^[a-z+]+:\/\/|@.*:|^git@/.test(t))[1];
+      if (dir) out.push(abs(dir));
+    } else {
+      // `git checkout .` and `git checkout src/` name a pathspec directly; with a tree-ish in front, the rest do
+      const rest = operands.slice(1);
+      const treeish = rest.length > 1 && !/[/.]/.test(rest[0]!) ? 1 : 0;
+      out.push(...rest.slice(treeish).map(abs));
+    }
+  } else if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2) {
     out.push(abs(operands[operands.length - 1]!));
+    // A HARD LINK IS A SECOND NAME FOR THE SAME INODE. `cp -l control-plane/permissions/absolute-denies.md
+    // /tmp/alias` makes the governed file writable through a path no rule covers, and the same is true of
+    // `ln` without `-s`. The SOURCE is therefore part of the act, which is why it is added to the ledger here
+    // (exit review 7).
+    if ((head === 'ln' && !tokens.includes('-s')) || (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))))
+      out.push(...operands.slice(0, -1).map(abs));
+  }
   else if (/^(tee|truncate|touch)$/.test(head))
     // a device sink is a DISCARD, exactly as it is for `> /dev/null`, which redirectionTargets already knows;
     // `ls | tee /dev/null` was classified as an outside-workspace write (exit review 5)
@@ -2504,8 +2554,28 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     if (of) out.push(abs(of.slice(3)));
   } else if (/^(sed|perl)$/.test(head) && tokens.some((t) => /^-[a-z]*i/.test(t)) && operands.length)
     out.push(...operands.slice(1).map(abs));
+  // A BUILD TOOL'S OUTPUT FLAG IS A WRITE DESTINATION. Every bundler, compiler and archiver names where it writes
+  // with a flag, and none of them were read: `esbuild src/a.ts --outfile=.git/hooks/pre-commit` installed a git
+  // hook, `--outfile=control-plane/permissions/matchers.md` rewrote the policy that decides every later verdict,
+  // and `--outfile=.harness/runtime/pin.json` wrote runtime state the kernel alone may write — all at ALLOW,
+  // while the same bytes through `cp` or `>` were absolute denies (exit review 7). The flag names the file
+  // whatever the tool is, so the rule is about the FLAG, not about an enumerated list of tools.
+  for (const [i, t] of tokens.entries()) {
+    const eq = OUTPUT_FLAG_RE.exec(t);
+    if (eq?.[2]) out.push(abs(eq[2]));
+    else if (eq && tokens[i + 1] && !tokens[i + 1]!.startsWith('-')) out.push(abs(tokens[i + 1]!));
+    // buildx writes to the host with `--output type=local,dest=PATH` (and `-o` with the same value shape)
+    const bx = /(?:^|,)dest=([^,\s]+)/.exec(t);
+    if (bx?.[1]) out.push(abs(bx[1]));
+  }
   return out;
 }
+
+/** The flags with which a tool names the file or directory it WRITES. `-o` is deliberately absent: it is `grep -o`,
+ *  `git blame -o` and `ps -o` far more often than it is an output file, and the tools where it means a destination
+ *  (`go build -o`, `curl -o`) are matched by their own rules. */
+const OUTPUT_FLAG_RE =
+  /^(?:--(?:outfile|out-file|out-dir|outdir|output-dir|output-directory|output-path|output-file|output|dist-dir|dest|destination|emit-to|out)|--file|-D|--directory)(?:=(.*))?$/;
 
 /** True when a segment writes an UNENUMERABLE set of files: an archive extraction, or a recursive copy whose
  *  destination is a directory. The per-path ledger cannot express either, and `tar -xf p.tar -C sub && make -C sub
@@ -5331,10 +5401,35 @@ function classifyShellPaths(
       'borg',
     ].includes(head) ||
       tokens.some((t) => RECURSIVE_FLAG_RE.test(t)));
-  const genericOutput = optionValue(tokenize(seg), 'o', ['--output', '--output-file', '--out-file']);
-  const write = WRITE_HEADS.has(head) || (genericOutput !== null && /[/.]/.test(genericOutput));
+  // A BUILD TOOL'S OUTPUT FLAG IS A DESTINATION, whatever the tool. Only `-o/--output/--output-file/--out-file`
+  // were read, so every bundler's own spelling wrote wherever it liked: `esbuild --outfile=.git/hooks/pre-commit`
+  // installed a hook, `rollup --file .mcp.json` rewrote the agent's own configuration, `vite --outDir
+  // .harness/runtime` wrote runtime state, `webpack --output-path control-plane/permissions` rewrote the policy,
+  // and `docker buildx build --output type=local,dest=…` wrote anywhere on the host — all at ALLOW, while the
+  // same bytes through `cp` or `>` were absolute denies (exit review 7).
+  const OUTPUT_FLAGS = [
+    '--output', '--output-file', '--out-file', '--outfile', '--out-dir', '--outdir', '--outDir', '--output-dir',
+    '--output-directory', '--output-path', '--dist-dir', '--file', '--dest', '--destination', '--emit-to', '--out',
+  ];
+  const rawOutput =
+    optionValue(tokenize(seg), 'o', OUTPUT_FLAGS) ??
+    optionValue(
+      tokenize(seg).map((t) => t.replace(/^(--[A-Za-z][A-Za-z-]*)(?==|$)/, (f) => f.toLowerCase())),
+      'o',
+      OUTPUT_FLAGS.map((f) => f.toLowerCase()),
+    );
+  // buildx spells its destination as a CSV of key=value inside the flag's own value: `--output type=local,dest=P`
+  const genericOutput =
+    rawOutput !== null && /(?:^|,)dest=/.test(rawOutput)
+      ? (/(?:^|,)dest=([^,\s]+)/.exec(rawOutput)?.[1] ?? null)
+      : (rawOutput ?? (/(?:^|[\s,])dest=([^,\s]+)/.exec(seg)?.[1] ?? null));
+  const write =
+    WRITE_HEADS.has(head) ||
+    (head === 'git' && /^(checkout|restore|clone)$/.test(tokens[1] ?? '')) ||
+    (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
+  let gitPathspecs: string[] = [];
   if (write) {
     const bareOperands = (valueOpts?: RegExp): string[] => {
       // ignore redirections (`< list`, `2> err`) and their targets, then keep the bare operands even when a
@@ -5356,7 +5451,11 @@ function classifyShellPaths(
       }
       return operands;
     };
-    if (head === 'tar' || head === 'bsdtar' || head === 'gtar') {
+    // `cp -l` MAKES A HARD LINK: a second name for the same inode, through which a governed file is writable by a
+    // path no rule covers. `cp -l control-plane/permissions/absolute-denies.md /tmp/alias` is the same act as
+    // `ln <same> /tmp/alias`, which is DENY, so both operands are judged (exit review 7).
+    if (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))) dest = 'ALL';
+    else if (head === 'tar' || head === 'bsdtar' || head === 'gtar') {
       // traditional tar also takes a DASH-LESS function-letter operand as its first argument: `tar xf a`, `tar cf a`,
       // `tar czf a` — recognise it alongside the dashed `-cf`/`-xf` forms
       const modeTok = tokens[1] && !tokens[1].startsWith('-') && /^[a-z]+$/i.test(tokens[1]) ? tokens[1] : '';
@@ -5447,10 +5546,28 @@ function classifyShellPaths(
             : operands[operands.length - 1]!
           : null;
     } else if (head === 'git') {
-      // `git checkout|restore <ref> -- <paths>` writes the paths
+      // `git checkout|restore <ref> -- <paths>` writes the paths — AND SO DOES THE SPELLING WITHOUT `--`, which
+      // git documents as optional. `git checkout HEAD~1 control-plane/permissions/matchers.md` rewrote the policy
+      // that decides every later verdict and `git checkout origin/evil .harness` replaced the whole governance
+      // tree, both at ALLOW, while adding two characters made each an absolute deny (exit review 7). Without the
+      // disambiguator the first operand may be a TREE-ISH; a bare name with no `/` or `.` is read as one, and
+      // everything after it is a pathspec.
       const sub = tokens[1];
       const dd = tokens.indexOf('--');
-      dest = (sub === 'checkout' || sub === 'restore') && dd > 0 ? 'AFTER_DASHDASH' : null;
+      if ((sub === 'checkout' || sub === 'restore') && dd > 0) dest = 'AFTER_DASHDASH';
+      else if (sub === 'checkout' || sub === 'restore') {
+        const rest = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        const specs = rest.length > 1 && !/[/.]/.test(rest[0] ?? '') ? rest.slice(1) : rest;
+        // `-b`/`-B`/`-t` name a BRANCH, not a path, and those spellings create nothing in the working tree
+        // every pathspec is a destination, so the whole list is judged rather than only the first
+        dest = specs.length && !tokens.some((t) => /^-[a-zA-Z]*[bB]$/.test(t)) ? 'ALL_PATHSPECS' : null;
+        if (dest) gitPathspecs = specs;
+      } else if (sub === 'clone') {
+        // `git clone URL DIR` creates DIR from a remote tree: `git clone … node_modules/.bin` replaces the
+        // directory every locally installed binary is resolved from
+        const rest = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        dest = rest.length > 1 ? (rest[rest.length - 1] ?? null) : null;
+      } else dest = null;
     } else if (head === 'patch') {
       // `patch -o FILE` / `patch -oFILE` / `patch --output=FILE` writes FILE instead of the patched originals
       dest = optionValue(tokens, 'o', ['--output']) ?? 'ALL';
@@ -5471,13 +5588,35 @@ function classifyShellPaths(
         'unlink',
         'rename',
         'patch',
-      ].includes(head)
+      ].includes(head) ||
+      // `cp -l` makes a HARD LINK: a second name for the same inode, through which a governed file is writable
+      // by a path no rule covers (exit review 7)
+      (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t)))
     )
-      dest = 'ALL'; // for ln every operand counts: a link TARGET inside a protected tree opens a route into it
+      // for ln (and `cp -l`, which makes the same second name for the same inode) EVERY operand counts: a link
+      // target inside a protected tree opens a route into it, and a link SOURCE inside one opens a route out
+      dest = 'ALL';
   }
   // a generic `-o FILE` / `--output FILE` names a write destination whatever the tool is called; enumerating every
   // "read-only" tool that happens to accept one is the losing game (round 15)
   if (!dest && genericOutput && /[/.]/.test(genericOutput)) dest = genericOutput;
+  if (dest === 'ALL_PATHSPECS') {
+    for (const sp of gitPathspecs) {
+      if (paths.some((q) => q.raw === sp)) continue;
+      const expanded = expandHome(sp);
+      if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: sp, abs: null, glob: false });
+      else {
+        const glob = /[*?[{]/.test(expanded);
+        const literal = glob ? expanded.slice(0, expanded.search(/[*?[{]/)) : expanded;
+        paths.push({
+          raw: sp,
+          abs: canonicalPath(isAbsolute(literal) ? literal : resolve(cwd, literal)),
+          glob,
+        });
+      }
+    }
+    dest = 'ALL';
+  }
   if (dest && dest !== 'ALL' && dest !== 'AFTER_DASHDASH' && !paths.some((p) => p.raw === dest)) {
     const expanded = expandHome(dest);
     if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: dest, abs: null, glob: false });

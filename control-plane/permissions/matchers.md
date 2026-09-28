@@ -434,6 +434,11 @@ matchers:
   # `git clone --config k=v` is clone's own spelling of the global `-c k=v`, and it sits AFTER the verb where the
   # global-option stripper never looks. The same keys, the same effect: core.sshCommand and its neighbours name a
   # program git runs during the clone.
+  # `interactive.diffFilter` runs a shell command over the diff before `add -p` prints it, so it is a
+  # program-valued key like the rest; the clone form sets it for every later command in the new repository.
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\b[^|;&]*\s(-c|--config)(=|\s+)[A-Za-z0-9.-]*\.(diffFilter|filter|command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshCommand|proxy|external|wrapper|exec|hooksPath|templateDir)='
   - capability: git.alias.inline
     tool: Bash
     command: '^git\b[^|;&]*\s--config(-env)?(=|\s+)(core\.(sshCommand|gitProxy|pager|editor|fsmonitor|hooksPath)|alias\.|filter\.|diff\.[^.]+\.(textconv|command)|credential\.|protocol\.|uploadpack\.|receive\.|include|includeIf)'
@@ -537,7 +542,14 @@ matchers:
   - capability: git.local.merge
     tool: Bash
     command: '^git\s+merge\b'
+  # A REVERT OR A CHERRY-PICK REWRITES WHATEVER THE NAMED COMMIT TOUCHED — a repository-determined set the command
+  # line does not enumerate, which may include the commit that hardened the control plane. It was ALLOW, while
+  # every other route to those same files is an absolute deny (exit review 7). It stays a normal, approvable act:
+  # the human is shown which commit, which is the one fact the analyzer cannot supply.
   - capability: git.local.cherry-pick
+    tool: Bash
+    command: '^git\s+(cherry-pick|revert)\s+(--(continue|abort|skip|quit)\b|\s*$)'
+  - capability: command.destructive
     tool: Bash
     command: '^git\s+(cherry-pick|revert)\b'
   - capability: git.worktree.remove
@@ -589,6 +601,17 @@ matchers:
   - capability: command.credential-exposure
     tool: Bash
     command: '^(docker|podman|nerdctl)\s+(container\s+)?(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s+)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
+  # `kubectl config view --raw` PRINTS THE KUBECONFIG UNREDACTED — client certificates, bearer tokens and the
+  # credentials of every cluster the developer can reach, production included. Without `--raw` the values are
+  # redacted, so the flag is the whole difference (exit review 7).
+  - capability: fs.credential-store.read
+    tool: Bash
+    command: '^(kubectl|oc)\s+config\s+view\b[^|;&]*--raw\b'
+  # awk RUNS A SHELL. `print … | "cmd"`, `"cmd" | getline` and `system("cmd")` all fork /bin/sh, and the command
+  # is an arbitrary string EXPRESSION, so holding it in a variable is the same act (exit review 7).
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^(awk|gawk|mawk|nawk|busybox\s+awk)\b[\s\S]*(\bsystem\s*\(|\bprint[^|]*\||\|\s*getline)'
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'
@@ -662,6 +685,11 @@ matchers:
   - capability: command.build
     tool: Bash
     command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|(npx\s+)?(tsc|esbuild|eslint|prettier|biome|oxlint|dprint|lint-staged|vite|rollup|webpack|swc|turbo|nx|next|ng|tsup|parcel)\b|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
+  # `kotlinc -script FILE` (and `scala FILE`, `jshell FILE`) RUNS the file rather than compiling it, so it is an
+  # interpreter invocation wearing a compiler's name (exit review 7).
+  - capability: command.interpreter-script
+    tool: Bash
+    command: '^(kotlinc?|scala|scalac|jshell|groovy|jbang)\b[^|;&]*(\s-script\b|\s\S+\.(kts|sc|groovy|jsh)(\s|$))'
   # Compilers and version probes whose semantics are fixed: they read source and write objects, and nothing else.
   # Whole ecosystems had no matcher at all, so ordinary `javac`, `php -v` or `git lfs ls-files` reached
   # command.unknown and asked (challenge 6, finding 36; challenge 8, finding 28). Deliberately EXCLUDES the project
@@ -757,7 +785,7 @@ matchers:
     command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|cd|pushd|popd|for|while|until|case|esac|done|fi|then|else|elif|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`]*(?:\s*(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null|<\s*(?![~/])(?!\S*\.\.)[\w.@/-]+))*\s*$'
   - capability: command.read-only
     tool: Bash
-    command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|env|printenv|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history|dirname|basename|sleep|seq|nproc|realpath|readlink|mktemp|tr|cmp|comm|expr|exit|test|sha1sum|sha256sum|shasum|md5sum|cksum|tput|hostname|getconf|locale|column|paste|join|fold|rev|nl|tac|numfmt|timeout\s+\d)\b|\[\s|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+--version\b)'
+    command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history|dirname|basename|sleep|seq|nproc|realpath|readlink|mktemp|tr|cmp|comm|expr|exit|test|gsed|gawk|gawk|shellcheck|printenv|sha1sum|sha256sum|shasum|md5sum|cksum|tput|hostname|getconf|locale|column|paste|join|fold|rev|nl|tac|numfmt|timeout\s+\d)\b|\[\s|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+(--version|version)\b|env(?:\s+(?:-[iu0]\S*|[A-Za-z_][A-Za-z0-9_]*=\S*))*\s*$)'
   # A LINE THAT ONLY BINDS A NAME RUNS NOTHING. `TODAY=$(date +%F)`, `n=$((i+1))` and `export FOO=bar` reached
   # command.unknown and asked, and once a script body is split line by line that is most of a real script
   # (exit review 4). The substituted command is a segment of its own and is classified there; an assignment to a

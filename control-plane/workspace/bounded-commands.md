@@ -29,6 +29,24 @@ bounded:
   # `command` is a builtin that names another command; the normalizer hands that command over on its own, so the
   # only form in which this head survives is the LOOKUP `command -v NAME`, which executes nothing (exit review 4)
   - 'command'
+  # READ-ONLY TOOLS NAMED BY THEIR REAL IMPLEMENTATION, and the pure readers the list simply never reached.
+  # `gawk`, `gsed` and `gtar` are what Homebrew installs on macOS — the platform this kernel runs on — and
+  # `awk '{print $1}'` being ALLOW while `gawk '{print $1}'` asked is a difference in spelling, not in effect.
+  # A linter that reads a file and prints diagnostics executes nothing of what it reads (exit review 7).
+  - 'gawk'
+  - 'mawk'
+  - 'nawk'
+  - 'gsed'
+  - 'ggrep'
+  - 'printenv'
+  - 'shellcheck'
+  - 'shfmt'
+  - 'hadolint'
+  - 'yamllint'
+  - 'markdownlint'
+  - 'staticcheck'
+  - 'kustomize'
+  - 'env'
   - 'umask'
   - 'ulimit'
   - 'read'
