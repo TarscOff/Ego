@@ -95,3 +95,37 @@ test('PROPERTY: a subshell does not carry its working directory back out', () =>
     'a relative path was resolved through a directory the subshell left behind',
   );
 });
+
+test('PROPERTY: every tool the target model knows reaches the target model', () => {
+  // THE DRIFT THIS PINS. The resolver keeps head lists in code (`DB_CLIENT_HEADS`, `TARGET_ENV_HEADS`,
+  // `TARGET_SENSITIVE_HEAD`) and the control plane keeps head alternations in `matchers.md`. They are two lists
+  // of the same thing, and they drifted: `oc`, `mysqladmin` and the two-word `clickhouse client` were enrolled
+  // in the resolver and absent from every matcher, so NO capability matched, `retargetLocalCapability` had
+  // nothing to re-target, and a delete against a named external cluster or a drop against a production database
+  // fell through to `command.unknown` (exit review 7).
+  //
+  // Stated as a property rather than as three lines: a tool the resolver can resolve a target for must be
+  // classified by the control plane, or the resolution is unreachable. The probe is the one that matters —
+  // a MUTATION against a PRODUCTION-marked target must be denied, whatever the head is called.
+  const dir = workspace();
+  const PRODUCTION_PROBES: ReadonlyArray<readonly [string, string]> = [
+    // database clients: every spelling the resolver accepts
+    ...['psql', 'mysql', 'mariadb', 'mysqladmin', 'mysqlsh', 'mysqldump', 'mongosh', 'mongo', 'redis-cli',
+      'valkey-cli', 'clickhouse-client', 'cqlsh', 'influx', 'pg_dump', 'pg_dumpall', 'pg_restore', 'pgbench',
+      'createdb', 'dropdb'].map((h) => [h, `${h} -h prod-db.acme.com`] as const),
+    ['clickhouse', 'clickhouse client --host prod-db.acme.com'],
+    // Kubernetes clients
+    ...['kubectl', 'oc'].map((h) => [h, `${h} --context production delete deployment api`] as const),
+    ['helm', 'helm --kube-context production upgrade app ./chart'],
+    // container runtimes
+    ...['docker', 'podman', 'nerdctl'].map((h) => [h, `${h} --context production rm -f app`] as const),
+  ];
+  const unreachable: string[] = [];
+  for (const [head, probe] of PRODUCTION_PROBES)
+    if (verdict(probe, dir) !== 'DENY') unreachable.push(`${head}: "${probe}" -> ${verdict(probe, dir)}`);
+  assert.deepEqual(
+    unreachable,
+    [],
+    `a tool the target model knows is not classified by the control plane, so its target is never resolved:\n  ${unreachable.join('\n  ')}`,
+  );
+});

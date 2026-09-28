@@ -81,6 +81,38 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
    * cross-product tests every one of them against every transformation and every producer.
    * -------------------------------------------------------------------------------------------------------- */
   {
+    family: 'k8s',
+    id: 'a non-local cluster reached through the OpenShift client',
+    floor: 'DENY',
+    cases: [
+      'oc --context acme-eu-1 delete project payments',
+      'oc --context production scale deployment api --replicas=0',
+      'oc --kubeconfig /tmp/remote.yaml delete pod api',
+    ],
+  },
+  {
+    family: 'db',
+    id: 'a production database reached through an administration or dump client',
+    floor: 'DENY',
+    cases: [
+      'mysqladmin -h prod-db.acme.com drop appdb',
+      'clickhouse client --host prod-ch.acme.com --query \'DROP TABLE events\'',
+      'dropdb -h prod-db.acme.com appdb',
+      'pg_dumpall -h prod-db.acme.com',
+    ],
+  },
+  {
+    family: 'production',
+    id: 'a cloud service that no emulator endpoint covers',
+    floor: 'DENY',
+    cases: [
+      'AWS_ENDPOINT_URL_S3=http://localhost:4566 aws iam delete-user --user-name bob',
+      'AWS_S3_ENDPOINT=http://localhost:4566 aws kms schedule-key-deletion --key-id k',
+      'PUBSUB_EMULATOR_HOST=localhost:8085 gcloud compute instances delete vm-1',
+      'STORAGE_EMULATOR_HOST=localhost:9000 gcloud compute instances delete vm-1',
+    ],
+  },
+  {
     family: 'command',
     id: 'egress through a bash network redirection — no network binary on the line',
     floor: 'ASK',
@@ -522,6 +554,13 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'piped into an interpreter with a redirect', apply: (c) => `echo '${c}' | bash 2>&1`, safe: noSingle },
   // `<&0` DUPLICATES the descriptor the pipe already installed; only a redirection from a FILE replaces it
   { name: 'piped into an interpreter duplicating stdin', apply: (c) => `echo '${c}' | bash <&0`, safe: noSingle },
+  // a GROUP writes the concatenation of what its commands write, so the whole group is the downstream script
+  { name: 'a brace group piped into an interpreter', apply: (c) => `{ echo '${c}'; echo ls; } | sh`, safe: noSingle },
+  {
+    name: 'a subshell group piped into an interpreter',
+    apply: (c) => `( echo ls; echo '${c}' ) | bash`,
+    safe: (c) => noSingle(c) && noParens(c),
+  },
   { name: 'piped into an interpreter duplicating fd 0 explicitly', apply: (c) => `echo '${c}' | sh 0<&0`, safe: noSingle },
   // the emitter's own escapes are part of the text that will run
   {

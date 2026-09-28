@@ -216,6 +216,11 @@ export interface ShellStage {
   /** true when a PROCESS substitution was consumed into this stage: `bash <(echo CMD)` runs CMD, because the
    *  substitution hands the interpreter a file containing that command's output (exit review 5) */
   readonly fromProcessSubstitution?: boolean;
+  /** The GROUP this stage belongs to, when the splitter consumed a `{ … }` or `( … )` around it. A group's
+   *  standard output is the CONCATENATION of what its commands write, so the upstream of a pipe fed by one is
+   *  the whole group: `{ echo 'git push origin main'; echo ls; } | sh` runs BOTH lines as the shell's script,
+   *  and reading only the last stage lost the first (exit review 7). */
+  readonly groupId?: number;
 }
 
 /** The segments of a command, with the pipeline edges between them. */
@@ -242,6 +247,10 @@ export function splitShellPipeline(command: string): ShellStage[] {
   // depth of SUBSHELLS whose parentheses this splitter consumed, and where the outermost one started
   let subshell = 0;
   let subshellStart = 0;
+  // the stack of groups whose delimiters this splitter consumed, innermost last; every stage pushed while one is
+  // open carries its id, which is what lets a piped stage read the WHOLE group's output
+  let groupSeq = 0;
+  const groupStack: number[] = [];
   // heredocs opened on the line being scanned; their BODIES are consumed when that line ends
   const pendingHeredocs: Array<{ delim: string; quoted: boolean; strip: boolean; openerIndex?: number }> = [];
   const push = () => {
@@ -251,7 +260,13 @@ export function splitShellPipeline(command: string): ShellStage[] {
     // (exit review 4). It belongs to the command it redirects, so it is re-attached to it.
     if (t) {
       if (segments.length && REDIRECT_ONLY_RE.test(t)) segments[segments.length - 1]!.text += ' ' + t;
-      else segments.push({ text: t, pipedFromPrevious: consumePipe(), fromProcessSubstitution: sawProcessSubstitution });
+      else
+        segments.push({
+          text: t,
+          pipedFromPrevious: consumePipe(),
+          fromProcessSubstitution: sawProcessSubstitution,
+          ...(groupStack.length ? { groupId: groupStack[groupStack.length - 1]! } : {}),
+        });
       sawProcessSubstitution = false;
       if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
       else if (/^esac\b/.test(t)) caseDepth = Math.max(0, caseDepth - 1);
@@ -422,6 +437,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       if (ch === '(' && atCommandStart()) {
         if (subshell === 0) subshellStart = segments.length;
         subshell++;
+        groupStack.push(++groupSeq);
         // a keyword that introduced the group is structure too: pushing `time` or `if` as its own segment made it
         // an unknown command
         if (cur.trim()) cur = '';
@@ -431,6 +447,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       if (ch === ')' && subshell > 0) {
         push();
         subshell--;
+        groupStack.pop();
         if (subshell === 0 && segments.slice(subshellStart).some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
           segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         i++;
@@ -447,6 +464,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         const declared = /([A-Za-z_][A-Za-z0-9_:.-]*)\s*(?:\(\s*\))?$/.exec(cur.trim());
         if (declared) segments.push({ text: `${FUNCTION_DEF_PREFIX} ${declared[1]}`, pipedFromPrevious: false });
         cur = '';
+        groupStack.push(++groupSeq);
         if (ch === '(') {
           if (subshell === 0) subshellStart = segments.length;
           subshell++;
@@ -456,10 +474,12 @@ export function splitShellPipeline(command: string): ShellStage[] {
       }
       if (ch === '{' && atCommandStart() && (next === ' ' || next === '\t' || next === '\n')) {
         if (cur.trim()) cur = '';
+        groupStack.push(++groupSeq);
         i++;
         continue;
       }
       if (ch === '}' && cur.trim() === '') {
+        groupStack.pop();
         i++;
         continue;
       }
@@ -5068,7 +5088,38 @@ function resolveCloudTarget(
       : vendor === 'gcloud'
         ? /^(CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST)$/
         : /^AZURE_[A-Z0-9_]*ENDPOINT[A-Z0-9_]*$/;
-  for (const [k, v] of Object.entries(envInputs)) if (vendorEnv.test(k)) add(v, `${k}=`);
+  // ...AND A SERVICE-SCOPED ONE BELONGS TO ONE SERVICE. `AWS_ENDPOINT_URL_S3` points the S3 client at an
+  // emulator and says NOTHING about IAM, yet `AWS_ENDPOINT_URL_S3=http://localhost:4566 aws iam delete-user`
+  // took the de-escalation and an absolute core deny arrived as ASK; `PUBSUB_EMULATOR_HOST=localhost:8085
+  // gcloud compute instances delete` did the same with a product that has no emulator at all (exit review 7).
+  // The unscoped `AWS_ENDPOINT_URL` still covers every service, which is what LocalStack really does and what
+  // the de-escalation exists for.
+  const service = tokens.slice(1).find((t) => !t.startsWith('-'))?.toLowerCase() ?? '';
+  const scopeOf = (name: string): string | null => {
+    const aws = /^AWS_ENDPOINT_URL_([A-Z0-9_]+)$/.exec(name);
+    if (aws) return aws[1]!.toLowerCase().replace(/_/g, '-');
+    if (name === 'AWS_S3_ENDPOINT') return 's3';
+    const emu = /^(STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST$/.exec(name);
+    if (emu) return emu[1]!.toLowerCase();
+    const sdk = /^CLOUDSDK_API_ENDPOINT_OVERRIDES_([A-Z0-9_]+)$/.exec(name);
+    if (sdk) return sdk[1]!.toLowerCase().replace(/_/g, '-');
+    return null;
+  };
+  for (const [k, v] of Object.entries(envInputs)) {
+    if (!vendorEnv.test(k)) continue;
+    const scope = scopeOf(k);
+    // the service names differ between the variable and the command line in a few places gcloud spells out
+    const aliases: Record<string, string[]> = {
+      storage: ['storage', 'gcs', 'gsutil'],
+      pubsub: ['pubsub'],
+      firestore: ['firestore'],
+      datastore: ['datastore'],
+      bigtable: ['bigtable'],
+      spanner: ['spanner'],
+    };
+    if (scope !== null && service !== '' && !(aliases[scope] ?? [scope]).includes(service)) continue;
+    add(v, `${k}=`);
+  }
   if (!signals.length) return { cls: 'PRODUCTION', target: 'the provider default endpoint' };
   return signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
 }
@@ -6194,12 +6245,17 @@ function analyzeSegments(
       definedNames.clear();
       functionNames.clear();
     }
-    // the stage whose standard output the NEXT piped stage will read
+    // the stage whose standard output the NEXT piped stage will read. A GROUP writes the CONCATENATION of what
+    // its commands write, so this is a LIST: `{ echo 'git push origin main'; echo ls; } | sh` feeds the shell
+    // both lines, and keeping only the last stage lost the first (exit review 7).
     let upstream: string | null = null;
+    let upstreamParts: string[] = [];
+    let upstreamGroup: number | undefined;
     let upstreamBody: { body: string; expanded: boolean } | null = null;
     for (const stage of unit) {
     const seg = stage.text;
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
+    const stdinParts = stage.pipedFromPrevious ? upstreamParts : [];
     const upstreamHeredoc = stage.pipedFromPrevious ? upstreamBody : null;
     const hitsBefore = hits.length;
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
@@ -6353,7 +6409,13 @@ function analyzeSegments(
     const stdinSource = stdinFrom ?? procSubScript;
     if (stdinSource !== null && (procSubScript !== null || normalizeSegment(seg).some(readsScriptFromStdin))) {
       const stdinFromResolved = stdinSource;
-      const literal = literalStdout(stdinFromResolved, upstreamHeredoc ?? undefined);
+      // every command of the upstream group contributes its own literal line; if any of them is not readable the
+      // whole standard output is not known, which is opacity rather than a partial script
+      const parts = stdinParts.length > 1 && stdinFrom !== null ? stdinParts : [stdinFromResolved];
+      const outs = parts.map((pt, k) =>
+        literalStdout(pt, k === parts.length - 1 ? (upstreamHeredoc ?? undefined) : undefined),
+      );
+      const literal = outs.some((o) => o === null) ? null : outs.join('\n');
       if (literal !== null)
         for (const h of analyzeSegments(table, ctx, compiled, [literal], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried through a pipe)`.trim() });
@@ -6507,7 +6569,14 @@ function analyzeSegments(
     // A PASS-THROUGH COPIES ITS INPUT TO ITS OUTPUT, so the literal survives it: `echo 'rm -rf /' | cat | bash`
     // runs the rm, and one identity stage was enough to defeat the edge entirely (exit review 5).
     if (!(stdinFrom !== null && PASS_THROUGH_RE.test(seg.trim()))) {
-      upstream = seg; // this stage's standard output is what a following piped stage would read
+      // this stage's standard output is what a following piped stage would read — and when this stage is part of
+      // a GROUP, so is every earlier stage of the same group
+      if (stage.groupId !== undefined && stage.groupId === upstreamGroup) upstreamParts.push(seg);
+      else {
+        upstreamParts = [seg];
+        upstreamGroup = stage.groupId;
+      }
+      upstream = upstreamParts.join('\n');
       upstreamBody =
         stage.heredocBody === undefined ? null : { body: stage.heredocBody, expanded: stage.heredocExpanded === true };
     }

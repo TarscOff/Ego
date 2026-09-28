@@ -217,7 +217,7 @@ matchers:
   # (The general local-vs-remote target resolution lives in the evaluator; this catches the explicitly named case.)
   - capability: production.database.mutate
     tool: Bash
-    command: '^(psql|mysql|mariadb|mongosh|mongo|redis-cli|clickhouse-client|cqlsh)\b(?=[^|;&]*(-h\s*\S*(prod|production)\S*|--host[= ]\S*(prod|production)\S*|://[^\s/]*(prod|production)[^\s/]*))'
+    command: '^(psql|mysql|mariadb|mysqladmin|mysqlsh|mongosh|mongo|redis-cli|valkey-cli|clickhouse(-client|\s+client)|cqlsh|influx|pg_dump|pg_dumpall|pg_restore|pgbench|createdb|dropdb|mysqldump|mysqlpump|mongodump|mongorestore)\b(?=[^|;&]*(-h\s*\S*(prod|production)\S*|--host[= ]\S*(prod|production)\S*|://[^\s/]*(prod|production)[^\s/]*))'
   # --- destructive roots (absolute) ---
   - capability: fs.destructive-root
     tool: Bash
@@ -564,7 +564,11 @@ matchers:
     command: '^(npx\s+)?(typeorm|prisma\s+migrate|alembic|flyway|liquibase|knex\s+migrate|sequelize\s+db:migrate|dbmate)\b'
   - capability: db.local.query
     tool: Bash
-    command: '^(psql|mysql|mariadb|sqlite3|redis-cli|valkey-cli|mongosh|mongo|clickhouse-client|cqlsh|pg_dump|pg_dumpall|pg_restore|mysqldump|mysqlpump|mongodump|mongorestore|mongoexport|mongoimport)\b'
+    # `mysqladmin` drops databases, `clickhouse client` is the two-word spelling of `clickhouse-client`, and the
+    # createdb/dropdb/pgbench family talks to the same server with the same flags. Each was enrolled in the
+    # target RESOLVER and missing from the matcher, so no capability matched and the resolver was never
+    # consulted — the same drift between two lists of the same thing (exit review 7).
+    command: '^(psql|mysql|mariadb|mysqladmin|mysqlsh|sqlite3|redis-cli|valkey-cli|mongosh|mongo|clickhouse(-client|\s+(client|local))|cqlsh|influx|pg_dump|pg_dumpall|pg_restore|pgbench|createdb|dropdb|createuser|dropuser|mysqldump|mysqlpump|mongodump|mongorestore|mongoexport|mongoimport)\b'
   - capability: db.local.start
     tool: Bash
     command: '^(pg_ctl|postgres|mysqld|redis-server|mongod)\b'
@@ -635,9 +639,12 @@ matchers:
   - capability: fs.credential-store.read
     tool: Bash
     command: '^(docker|podman)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|[^:\s]*\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
+  # `nerdctl` is containerd's docker-compatible client: the same flags, the same `--context`, the same effects.
+  # It is enrolled in the target RESOLVER and was missing here, so nothing classified it and its target was never
+  # resolved — found by the property that pins these two lists together (exit review 7).
   - capability: container.run
     tool: Bash
-    command: '^(docker|podman)(-compose)?\b'
+    command: '^(docker|podman|nerdctl|lima|colima)(-compose)?\b'
   - capability: k8s.local.delete
     tool: Bash
     command: '^(kind\s+delete|k3d\s+cluster\s+delete|minikube\s+delete|kubectl\b[^|;&]*\sdelete\s+(ns|namespace))\b'
@@ -647,9 +654,13 @@ matchers:
   - capability: fs.credential-store.write
     tool: Bash
     command: '^kubectl\s+config\s+(set-credentials|set-cluster|set-context|rename-context|delete-context|delete-cluster|delete-user|unset|set)\b'
+  # `oc` is the OpenShift client: the same API, the same verbs, the same `--context`. It appears in the
+  # production-marker rule above and in the kubeconfig rule, but NOT here — the rule that gives a cluster command
+  # a capability at all. Without one, `retargetLocalCapability` has nothing to re-target and
+  # `oc --context acme-eu-1 delete project payments` fell through to command.unknown (exit review 7).
   - capability: k8s.local.apply
     tool: Bash
-    command: '^(kubectl|helm|kind|k3d|minikube|kustomize)\b'
+    command: '^(kubectl|oc|helm|kind|k3d|minikube|kustomize)\b'
   # --- command classes ---
   - capability: command.privileged
     tool: Bash
@@ -807,6 +818,12 @@ matchers:
   - capability: fs.repo.delete
     tool: Bash
     command: '^git\s+rm\b'
+  # `flock FILE -c CMD` takes a lock and runs CMD — the standard idiom for serializing a build. The normalizer
+  # hands CMD to the analyzer on its own, so what is left here is the CARRIER, which opens one file and executes
+  # nothing else; with no matcher for it the whole line reached command.unknown (exit review 7).
+  - capability: command.read-only
+    tool: Bash
+    command: '^flock\b'
   # `[[ … ]]` and `[ … ]` are the shell's own test constructs: a conditional expression opens no file and runs no
   # program, and `[[ -n $CI ]] && npm test` — the standard guard in a CI script — asked (exit review 7).
   - capability: command.read-only
