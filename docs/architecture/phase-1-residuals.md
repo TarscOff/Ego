@@ -192,6 +192,31 @@ of a simple command, so `nohup` is handed `VAR=x` as its program name — and `c
 a space, because `\0ddd` takes up to three octal digits. Gating a command the shell would refuse to run is not a
 safety property, and asserting a literal the shell would not produce is not evidence.
 
+## Open after exit review 7 (2026-09-24)
+
+Six floor crossings remain: each arrives at **ASK** where **DENY** is deserved. None is an unauthorized ALLOW, so
+each is contained by the human gate; they are open work, not accepted behaviour.
+
+| Command | What it is |
+|---|---|
+| `oc --context acme-eu-1 delete project payments` | the OpenShift client's verbs are not all enrolled in the Kubernetes target model |
+| `mysqladmin -h prod-db.acme.com drop appdb` | the administration client is now a database client, but its verb vocabulary is not modelled |
+| `clickhouse client --host prod-ch.acme.com --query 'DROP TABLE events'` | the two-word spelling of `clickhouse-client` |
+| `AWS_ENDPOINT_URL_S3=http://localhost:4566 aws iam delete-user …` | a SERVICE-SCOPED emulator endpoint does not make ANOTHER service local; the de-escalation reads it as evidence of a local target |
+| `PUBSUB_EMULATOR_HOST=localhost:8085 gcloud compute instances delete vm-1` | the same statement for the Google emulator variables |
+| `{ echo 'git push origin main'; echo ls; } \| sh` | a BRACE GROUP piped into an interpreter: the literal the group emits is the script, and only a single command's output is read as one |
+
+## A validation gate that lives in a temporary directory is not a gate
+
+The 200,334-command attack corpora that earlier rounds reported were ad-hoc text files in a session temporary
+directory. That directory has since been cleaned, so the figure cannot be reproduced at any later commit, and the
+gate it represented no longer exists. Recorded because the lesson generalises: evidence that cannot be re-run is
+not evidence.
+
+The permanent replacement is `packages/kernel/test/support/corpus.ts`, which is IN THE REPOSITORY and GENERATED
+rather than accumulated — 34 root semantic classes × 87 transformations × 35 producers, asserting 11,645
+combinations, and growing by one line per new transformation.
+
 ## The parallel-test failure, and a diagnosis this document got wrong
 
 It was recorded here as "several test processes materialising the same content-derived source identity at once, on
