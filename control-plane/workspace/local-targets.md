@@ -6,6 +6,10 @@ k8s_local_contexts:
   # the container runtime's own names for the LOCAL daemon. Naming the local engine explicitly — which is what
   # `docker --context default` and `docker context use desktop-linux` do — was classified EXTERNAL and DENIED
   # (exit review 3).
+  # NOTE: `default`, `desktop-linux`, `unix`, `npipe` and `rootless` are the CONTAINER runtime's own names for the
+  # local daemon. Kubernetes has no such convention — a kubeconfig context called `default` is whatever the
+  # operator's file says, which may be a shared cluster — so those five are recognised for container tools only
+  # (exit review 7). The kind/k3d/minikube/desktop names below are local for both.
   - 'default'
   - 'desktop-linux'
   - 'desktop-windows'

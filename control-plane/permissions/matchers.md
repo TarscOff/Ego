@@ -611,7 +611,16 @@ matchers:
   # is an arbitrary string EXPRESSION, so holding it in a variable is the same act (exit review 7).
   - capability: command.script-opaque
     tool: Bash
-    command: '^(awk|gawk|mawk|nawk|busybox\s+awk)\b[\s\S]*(\bsystem\s*\(|\bprint[^|]*\||\|\s*getline)'
+    command: '^(awk|gawk|mawk|nawk|busybox\s+awk)\b[\s\S]*(\bsystem\s*\(|\bprint[^|]*\||\|\s*getline|@(include|load)\b)'
+  # Joining a SWARM binds this engine to a remote manager, which then schedules work on it: the same kind of
+  # name-to-engine binding as `context create` (exit review 7).
+  - capability: container.nonlocal.run
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+swarm\s+(join|join-token|init\b[^|;&]*--advertise-addr)'
+  # destroying a local volume, network or builder cache is destructive local work, which the human approves
+  - capability: container.prune
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+(volume|network|secret|config|builder|buildx|system|image|container)\s+(rm|remove|prune)\b'
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'
