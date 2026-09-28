@@ -33,7 +33,11 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
 - [x] `command.unknown` — a command the matchers cannot classify; the host's own permission prompt decides.
 - [x] `command.destructive` — destructive but non-root deletions and history rewrites inside the checkout.
 - [x] `command.privileged` — commands requiring elevated privileges.
-- [x] `command.network-tool` — commands that themselves perform network transfers (curl, wget, scp, rsync to remote).
+- [x] `command.network-tool` — commands that themselves perform network transfers (curl, wget, scp, rsync to remote),
+  including a bash `/dev/tcp` or `/dev/udp` redirection, which opens a socket with no network binary on the line.
+- [x] `command.credential-exposure` — a secret handed on the command line, where the shell history and the process
+  table both keep it (`docker login -p`, `npm publish --//registry:_authToken=…`). The act may be intended; the
+  human decides, because the analyzer cannot un-leak it afterwards.
 - [x] `command.script-opaque` — a shell script or Makefile target whose effect cannot be classified statically (missing, outside the workspace, too large, or using `eval`, variable commands or dynamic sourcing).
 - [x] `command.unmodelled-closure` — a command that DISCOVERS and executes content EGO was never shown: test
   files matched by a pattern, a configuration file and the plugins it loads, or another package's scripts.

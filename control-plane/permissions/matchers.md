@@ -571,6 +571,24 @@ matchers:
   - capability: command.script-opaque
     tool: Bash
     command: '^(docker|docker-compose|podman|podman-compose|nerdctl|lima|colima)(\s+(compose|container|service|stack))?\s+(exec|attach)\b'
+  # A PUSH IS A PUSH IN EVERY SPELLING. The management-group form (`docker image push`), the compose form
+  # (`docker compose push`) and buildx's `--push` were not all covered, so the same upload to a shared registry
+  # was DENY as `docker push` and ALLOW as `docker image push` (exit review 7).
+  - capability: container.registry.push
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?(push\b|build\b[^|;&]*--push)'
+  # Handing a registry password on the command line writes it into the shell history and the process table.
+  - capability: command.credential-exposure
+    tool: Bash
+    command: '^(docker|podman|nerdctl|helm|npm|gh|glab)\s+[^|;&]*\s(-p|--password)(=|\s)(?!-)'
+  # FORWARDING A CREDENTIAL INTO A CONTAINER IS AN ACT OF ITS OWN. `docker run -e AWS_SECRET_ACCESS_KEY <image>`
+  # hands the host's production credentials to a program EGO never read, and the official CLI images turn that
+  # into the CLI itself: `docker run -e AWS_… amazon/aws-cli iam delete-user` performed an absolute core deny
+  # unattended, because no cloud capability was ever hit (exit review 7). The container is not re-targeted here —
+  # the credential is what makes this reviewable, whatever the image then does with it.
+  - capability: command.credential-exposure
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+(container\s+)?(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s+)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'
@@ -585,9 +603,6 @@ matchers:
   - capability: fs.credential-store.read
     tool: Bash
     command: '^(docker|podman)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|[^:\s]*\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
-  - capability: container.registry.push
-    tool: Bash
-    command: '^(docker|podman)\s+(push\b|buildx\s+build\b[^|;&]*--push)'
   - capability: container.run
     tool: Bash
     command: '^(docker|podman)(-compose)?\b'

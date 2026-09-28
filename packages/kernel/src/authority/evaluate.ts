@@ -146,7 +146,7 @@ const WRAPPERS_WITH_OPERAND = new Set(['flock', 'su', 'runuser']);
 const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'], ['yarn', 'exec']];
 /** environment assignments that change what a command executes or where governance looks: never silently stripped */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
 
 /** THE SENTINEL THAT MAKES A STATE MARKER UNFORGEABLE.
  *
@@ -1348,7 +1348,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
             // the same SHAPE rule as CONFIG_PROGRAM_VERBS: a key that ends in one of git's program-valued words
             // names a program git will run, and enumerating them left `trailer.<t>.command`, `gpg.program` and
             // every other one off the list reaching ALLOW (exit review 6)
-            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir)=/i.test(
+            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook|script|runner|launcher|tool|binary|path)=/i.test(
               value,
             )
           )
@@ -2265,7 +2265,7 @@ const TREE_CHANGING =
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -2289,7 +2289,13 @@ export function segmentEnvInputs(segment: string): Record<string, string> {
       if (m) {
           // npm matches `npm_config_*` case-insensitively, so `npm_config_SCRIPT_SHELL` is the same setting
       const name = /^npm_config_/i.test(m[1]!) ? m[1]!.toLowerCase() : m[1]!;
-      if (EXECUTION_ENV_INPUTS.test(name)) out[name] = m[2]!.replace(/^['"]|['"]$/g, '');
+      // THE TARGET-SELECTING NAMES ARE ENVIRONMENT INPUTS TOO. `PGHOST`, `MYSQL_HOST`, `KUBECONFIG` and their
+      // siblings live in TARGET_ENV_RE, which the NORMALIZER consults to re-attach an assignment to the segment
+      // it configures. They were absent from this set, so a standalone `export PGHOST=prod-db.acme.com` carried
+      // nothing to the next segment and `export PGHOST=… && psql -c 'DROP TABLE users'` was ALLOW, while the
+      // one-segment spelling was an absolute deny (exit review 7).
+      if (EXECUTION_ENV_INPUTS.test(name) || TARGET_ENV_RE.test(name))
+        out[name] = m[2]!.replace(/^['"]|['"]$/g, '');
         s = s.slice(m[0].length);
         continue;
       }
@@ -3349,7 +3355,7 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
   // silent ALLOW (exit review 6). The rule is now the SHAPE of the key: git's own naming convention is that a
   // program-valued key ends in one of these words. A key whose last component is not one of them is data.
   [
-    /\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir)$/i,
+    /\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook|script|runner|launcher|tool|binary|path)$/i,
     // the verb scope cannot be narrowed for a key this resolver does not otherwise model, so it applies to every
     // verb: a program named in repository-local configuration is part of the closure of whatever runs next
     new Set<string>(),
@@ -4307,7 +4313,7 @@ const TARGET_ENV_RE =
   // RESOLVER but not here, so the assignment was stripped as noise and never re-attached: the engine survived
   // only while the assignment happened to stay leading in the raw segment. Inside an `if`, a loop body, a `trap`
   // or a herestring it did not, and a shell on a production daemon asked (exit review 6, generated cross-product).
-  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST)$/;
+  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER)$/;
 const TARGET_ENV_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
   'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
@@ -4414,7 +4420,7 @@ const KUBECTL_VERBS = new Set([
 ]);
 /** kubectl/helm options that consume the NEXT token; their value must never be mistaken for the verb. */
 const K8S_VALUE_OPTS =
-  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v)$/;
+  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--log-flush-frequency|--warnings-as-errors|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
 
 const HELM_VERBS = new Set([
   ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency'],
@@ -4515,7 +4521,7 @@ function resolveContainerTarget(
     // context, and `podman --remote` switches to a connection named in a file: both were skipped as opaque option
     // noise, so a production daemon reached ALLOW (exit review 6). Neither file can be read from here, so the
     // target is UNCLASSIFIED — never local.
-    if (t === '--config' || t === '--remote' || /^--config=/.test(t))
+    if (t === '--config' || t === '--remote' || t === '-r' || /^--config=/.test(t))
       signals.push({ cls: 'UNCLASSIFIED', target: `client configuration ${t}` });
     const eq = /^(?:--host=|--context=|--url=|--connection=|--builder=|-H|-c)(.+)$/.exec(t);
     if ((t === '-H' || t === '--host' || t === '--url') && tokens[i + 1]) add(tokens[++i]!, 'engine');
@@ -4527,6 +4533,8 @@ function resolveContainerTarget(
   const engineEnv = (k: string, v: string): void => {
     if (/^(DOCKER_HOST|CONTAINER_HOST)$/.test(k)) add(v, 'engine');
     else if (k === 'DOCKER_CONTEXT') add(v, 'context');
+    // `BUILDX_BUILDER` selects the builder exactly as `--builder` does, and buildx ships the build context to it
+    else if (k === 'BUILDX_BUILDER') add(v, 'builder');
   };
   for (const [k, v] of Object.entries(envInputs)) engineEnv(k, v);
   // …and as a TOKEN, because that is how the normalizer re-attaches a target assignment it stripped from the
@@ -4547,6 +4555,28 @@ function resolveContainerTarget(
   // `docker context use <name>` re-points every later command at that engine
   const useIdx = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'context');
   if (useIdx > 0 && tokens[useIdx + 1]) add(tokens[useIdx + 1]!, 'context use');
+  // ...AND SO DO ITS THREE SIBLINGS, which were not modelled at all (exit review 7):
+  //   `podman system connection add|default NAME [URI]` writes containers.conf — the same name-to-engine binding
+  //     `docker context create` writes, and `add` makes the first connection the default;
+  //   `docker buildx create --driver remote <endpoint> --use` binds a remote BuildKit daemon and selects it, with
+  //     the endpoint as a POSITIONAL that the dedicated `--builder` scan cannot see;
+  //   `docker buildx use NAME` selects an already-bound builder.
+  // Every later build or run then goes there with no flag naming it, so nothing downstream can be re-targeted.
+  const sysConn = tokens.findIndex((t, i) => /^(add|default)$/.test(t) && tokens[i - 1] === 'connection');
+  if (sysConn > 0) for (const t of tokens.slice(sysConn + 1)) if (!t.startsWith('-')) add(t, 'podman connection');
+  const bxCreate = tokens.findIndex((t, i) => t === 'create' && tokens[i - 1] === 'buildx');
+  if (bxCreate > 0) {
+    const driver = tokens.findIndex((t, i) => t === '--driver' && i > bxCreate);
+    if (driver > 0 && /^(remote|kubernetes)$/.test(tokens[driver + 1] ?? '')) {
+      const endpoint = tokens.slice(driver + 2).find((t) => !t.startsWith('-'));
+      add(endpoint ?? 'an unnamed remote endpoint', 'buildx driver');
+    }
+  }
+  const bxUse = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'buildx');
+  if (bxUse > 0) {
+    const name = tokens.slice(bxUse + 1).find((t) => !t.startsWith('-'));
+    if (name) add(name, 'buildx use');
+  }
   if (!signals.length) return { cls: 'LOCAL', target: 'local daemon', mutating: false };
   // A READ against another engine is not a mutation of it: `docker -H … ps` lists, it does not deploy. But a
   // MANAGEMENT GROUP is not a verb — `image` and `context` name a whole family whose members mutate, so treating
@@ -4566,7 +4596,11 @@ function resolveContainerTarget(
   const positional = tokens.slice(1).filter((t) => !t.startsWith('-') && !signals.some((g) => g.target.endsWith(t)));
   const first = positional[0];
   const verb = first !== undefined && groups.has(first) && positional[1] !== undefined ? `${first} ${positional[1]}` : first;
-  const isUse = tokens.some((t, i) => t === 'use' && tokens[i - 1] === 'context');
+  const isUse =
+    tokens.some((t, i) => t === 'use' && tokens[i - 1] === 'context') ||
+    bxUse > 0 ||
+    bxCreate > 0 ||
+    sysConn > 0;
   const mutating = isUse || verb === undefined || !(reads.has(verb) || groupReads.has(verb));
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { ...worst, mutating };
@@ -4585,7 +4619,10 @@ function resolveK8sTarget(
   // only MUTATING verbs, so `kubectl --context production get secrets -o yaml` — a full credential dump — reached
   // ALLOW under a capability named k8s.local.apply (exit review 6). A secret is the one resource whose READ is an
   // effect on its own.
-  const touchesSecrets = head === 'kubectl' && tokens.some((t) => /^(secret|secrets|secret\/.+)$/i.test(t));
+  // `secrets/db` is `TYPE/NAME` exactly as `secret/db` is, and only the singular slash form was listed, so
+  // `kubectl --context production get secrets/db -o yaml` dumped a production Secret's data block at ALLOW
+  // (exit review 7).
+  const touchesSecrets = head === 'kubectl' && tokens.some((t) => /^secrets?(\/.+)?$/i.test(t));
   const mutate = head === 'helm' ? HELM_MUTATING_VERBS : K8S_MUTATING_VERBS;
   let verb: string | undefined;
   for (let i = 1; i < tokens.length; i++) {
@@ -4656,6 +4693,7 @@ export function containerMountSources(tokens: string[]): string[] {
 function resolveDbTarget(
   tokens: string[],
   targets: LocalTargets,
+  envInputs: Record<string, string> = {},
 ): { cls: TargetClass; target: string; executes: boolean } {
   const head = tokens[0] ?? '';
   // Whether a statement is "executed" is not guessed any more. A client pointed at a non-local database is an
@@ -4667,6 +4705,32 @@ function resolveDbTarget(
   const signals: Array<{ cls: TargetClass; target: string }> = [];
   const push = (v: string, kind: string) =>
     signals.push({ cls: classifyTargetName(v, targets.dbLocalHosts, targets), target: `${kind} ${v}` });
+
+  // THE CLIENT READS THE ENVIRONMENT WHEN NO HOST IS ON THE LINE. libpq reads `PGHOST`, mysql reads `MYSQL_HOST`,
+  // redis-cli reads `REDIS_HOST`; with none of them the client uses the local socket, which is why "no host
+  // token" returned LOCAL. `resolveContainerTarget` and `resolveCloudTarget` both take `envInputs` for exactly
+  // this reason and this one did not, so a production host named only in the environment was read as the local
+  // socket (exit review 7).
+  for (const [k, v] of Object.entries(envInputs))
+    if (/^(PGHOST|PGHOSTADDR|MYSQL_HOST|REDIS_HOST|CLICKHOUSE_HOST|KUBERNETES_MASTER)$/.test(k)) push(v, `${k}=`);
+    else if (/^(PGURI|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL)$/.test(k))
+      push(endpointHost(v.replace(/^jdbc:/, '')), `${k}=`);
+    else if (k === 'PGSERVICE') signals.push({ cls: 'UNCLASSIFIED', target: `PGSERVICE=${v}` });
+
+  // `\c [DBNAME [USER [HOST [PORT]]]]` RECONNECTS THE SESSION, so everything after it runs on that host. The
+  // host is a WORD INSIDE a `-c` value, not a token of the command line, and only the short `\c - - HOST` form
+  // happened to work — because there the host is also the value's last word, which the bare-token scan below
+  // reaches. The fully spelled form put a database and a user in front of it and escaped (exit review 7).
+  // the backslash is consumed by tokenization (it is an escape wherever the shell did not keep it), so the
+  // meta-command survives as the bare word `c`/`connect` immediately after psql's `-c`
+  const connAt = tokens.findIndex(
+    (t, i) => /^\\?c(onnect)?$/.test(t) && /^(-c|--command|-f|--file)$/.test(tokens[i - 1] ?? ''),
+  );
+  if (connAt >= 0) {
+    const words = tokens.slice(connAt + 1, connAt + 5);
+    // `\c DBNAME USER HOST PORT`: the third word is the host, and `-` means "keep the current one"
+    if (words[2] !== undefined && words[2] !== '-') push(words[2], '\\connect host');
+  }
 
   for (const t of tokens) {
     // a URI anywhere in the token, not only at its start: `-url=jdbc:postgresql://prod-db/app` hid the host
@@ -4821,7 +4885,7 @@ function retargetLocalCapability(
     kind === 'k8s'
       ? resolveK8sTarget(tokens, targets)
       : kind === 'db'
-        ? resolveDbTarget(tokens, targets)
+        ? resolveDbTarget(tokens, targets, envInputs)
         : resolveContainerTarget(tokens, targets, envInputs);
   const acts =
     kind === 'db'
