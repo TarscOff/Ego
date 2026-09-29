@@ -4600,11 +4600,33 @@ function resolveScriptCommand(
   if (head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') {
     // A workspace/prefix/filter selector changes WHICH manifest the script comes from. EGO does not model the
     // workspace graph, so reading the root manifest would be a confident wrong answer.
+    // `--ws` IS `--workspaces`, `-ws` is the single-dash spelling npm accepts for it, and `--workspaces=true`
+    // is the explicit form — none of which the exact-match list held, so `npm run build --ws` ran the script in
+    // EVERY workspace package while EGO resolved only the root manifest (exit review 9). The `=false` forms are
+    // the opposite instruction and must NOT select anything.
     const selector = tokens.find(
       (t) =>
-        /^(-w|--workspace|--workspaces|--filter|-F|--prefix|-C|--dir|--cwd|--scope|--recursive|-r)$/.test(t) ||
-        /^(--workspace|--filter|--prefix|--dir|--cwd|--scope)=/.test(t),
+        /^(-w|--workspace|--workspaces|--ws|-ws|--include-workspace-root|--filter|-F|--prefix|-C|--dir|--cwd|--scope|--recursive|-r)$/.test(t) ||
+        /^(--workspace|--filter|--prefix|--dir|--cwd|--scope)=/.test(t) ||
+        (/^(--workspaces|--ws|--include-workspace-root)=/.test(t) && !/=(false|0|no)$/i.test(t)),
     );
+    // ...and the same instruction lives in `.npmrc`, which npm reads from the package directory upwards. A flag
+    // on the command line was modelled and the FILE that sets the identical key was not — the same gap this
+    // producer already closed once for `script-shell`.
+    const wsRc = ['.npmrc', '.yarnrc.yml', '.yarnrc']
+      .map((n) => findUp(ctx, cwd, n))
+      .find((f) => f !== null && f !== SEARCH_EXHAUSTED);
+    const wsRcText = wsRc ? readInsideWorkspace(ctx, wsRc) : null;
+    const rcSelectsWorkspaces =
+      wsRcText !== null && /^\s*workspaces\s*[:=]\s*(true|1|yes)\s*$/im.test(wsRcText) ? wsRc! : null;
+    if (rcSelectsWorkspaces && !selector)
+      return {
+        kind: 'npm-script',
+        key: `npm:selector:${rcSelectsWorkspaces}`,
+        body: null,
+        reason: `${rcSelectsWorkspaces} sets workspaces=true, so the script runs in every workspace package`,
+        resolution: 'UNSUPPORTED',
+      };
     if (selector)
       return {
         kind: 'npm-script',
@@ -5496,6 +5518,11 @@ const DB_CLIENT_HEADS = new Set([
   // (exit review 7).
   'mysqladmin', 'mysqldump', 'mysqlsh', 'pg_dump', 'pg_restore', 'pg_dumpall', 'pgbench', 'createdb', 'dropdb',
   'valkey-cli', 'influx', 'clickhouse',
+  // MIGRATION RUNNERS ARE CLIENTS TOO, and the most consequential ones: they connect to a database named in a
+  // CONFIG FILE and then apply arbitrary DDL to it. Neither the target nor the statements are on the command
+  // line, so `flyway -configFiles=/tmp/flyway.conf migrate` and `liquibase --defaultsFile=… update` were
+  // ordinary unknown commands (exit review 9).
+  'flyway', 'liquibase', 'sqitch', 'alembic', 'dbmate', 'goose', 'atlas',
 ]);
 const DB_EXECUTES_UNREAD =
   // `\!` is psql's shell escape. Inside DOUBLE quotes the backslash is consumed before this test ever sees it,
@@ -5505,7 +5532,10 @@ const DB_EXECUTES_UNREAD =
   // The family is "this client runs something it was handed": a program file, a shell escape, a loadable
   // extension, or a COPY in either direction. Enumerating only one direction of COPY and only sqlite's `.shell`
   // left the neighbours open (decision challenge, findings 12, 34).
-  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$)|\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
+  // `\i FILE` (psql) and `\. FILE` (mysql) READ AND RUN A SCRIPT, exactly as `-f` does — the meta-command form
+  // just puts it inside the statement, where the `-f` test never looks. `psql -c "\i /tmp/payload"` executed a
+  // file the kernel has not read, at ALLOW (exit review 9). `\ir` is psql's relative-include twin.
+  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$)|\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|\\ir?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?[i.](\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
 
 const TARGET_ENV_RE =
   // THE CONTAINER ENGINE IS SELECTED BY ENVIRONMENT TOO. `DOCKER_HOST` and `DOCKER_CONTEXT` were enrolled in the
@@ -5967,6 +5997,11 @@ export function containerMountSources(tokens: string[]): string[] {
  *  and table names never look like this, which is what lets the statement scan stop at one. */
 function looksLikeDbTarget(t: string): boolean {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return true;
+  // A HOST AND A PORT IS A CONNECTION TARGET EVEN WITH NO DOT IN IT. `mongosh prod-mongo:27017 --eval …` names
+  // a server by its bare service name, which is how every container network and every Kubernetes service is
+  // addressed; requiring a dot or a slash made it an ordinary word and the production database was ALLOW
+  // (exit review 9). A PORT is what distinguishes it from a database name or a SQL word.
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]*:\d{1,5}(\/[A-Za-z0-9._-]*)?$/.test(t)) return true;
   // `prod-mongo/admin` is `host/database` with no dot in it at all, which is how mongosh is normally invoked
   if (/^[A-Za-z0-9][A-Za-z0-9._-]*(:\d+)?\/[A-Za-z0-9._-]+$/.test(t) && !/\.(sql|js|py|rb|json|txt|sh)$/i.test(t))
     return true;
@@ -6065,7 +6100,9 @@ function resolveDbTarget(
     // — `~/.my.cnf`, the obfuscated `~/.mylogin.cnf`, a cqlshrc. Same rule as `service=`: an EXPLICIT reference to
     // an unreadable profile is never local. The IMPLICIT default option file is deliberately NOT a signal, since
     // no evidence is on the command line and gating a bare `psql` would gate the ordinary inner loop.
-    if (/^--(defaults-file|defaults-extra-file|login-path|defaults-group-suffix|cqlshrc|config-file)(=|$)/.test(t))
+    // ...in EVERY spelling a client uses for it: a migration runner writes it `-configFiles=`, `--defaultsFile=`
+    // or `--url=@file`, and a single dash in front of a whole word is a long option (exit review 9)
+    if (/^-{1,2}(defaults-file|defaults-extra-file|defaultsFile|login-path|defaults-group-suffix|cqlshrc|config-file|configFiles|config|conf|properties|env-file)(=|$)/i.test(t))
       signals.push({ cls: 'UNCLASSIFIED', target: 'a client connection profile' });
   }
   for (const h of optionValues(tokens, 'h', ['--host'])) push(h, 'host');
