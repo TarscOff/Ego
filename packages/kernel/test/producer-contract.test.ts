@@ -184,9 +184,11 @@ test('producer contract: the source has no second path around the canonical anal
   // hands to an interpreter (`echo 'CMD' | sh`), the body of a shell carrier that contains a pipeline of its
   // own, and the shell command an AWK PROGRAM forks (`awk 'BEGIN{system("CMD")}'`, `print … | "CMD"`), which has
   // no other route into the analyzer because the normalizer has no path for an awk program — each fed back in as
-  // its own segment rather than classified separately.
-  assert.equal(callers, 7, 'a new call site must feed the canonical pipeline, not go around it');
-  for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand', 'readsScriptFromStdin', 'carriedShellBodies', 'awkShellCommands'])
+  // its own segment rather than classified separately — and the script a DATABASE CLIENT reads from standard
+  // input, which is re-classified WITH the client, because a `\c` in that script re-targets the session and the
+  // literal on its own is only text.
+  assert.equal(callers, 8, 'a new call site must feed the canonical pipeline, not go around it');
+  for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand', 'readsScriptFromStdin', 'carriedShellBodies', 'awkShellCommands', 'DB_CLIENT_HEADS'])
     assert.ok(src.includes(site), `${site} is one of the accounted-for paths`);
   // and the producer return type still has nowhere to put a verdict
   const contract = src.slice(src.indexOf('function resolveScriptCommand('), src.indexOf('/** True when the path exists'));

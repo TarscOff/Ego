@@ -928,6 +928,10 @@ matchers:
   - capability: command.interpreter-script
     tool: Bash
     command: '^(gawk|awk|mawk|nawk)\b[^|;&]*\s(-i|--include|-l|--load|--exec|--source)(=|\s)'
+  # gawk's `-E FILE`, surfaced by the normalizer because a case-insensitive matcher cannot tell it from `-e`.
+  - capability: command.interpreter-script
+    tool: Bash
+    command: '^\x00ego\x00awk-program-file\b'
   # read-only search tools that can hand a file to an arbitrary program
   - capability: command.interpreter-script
     tool: Bash
