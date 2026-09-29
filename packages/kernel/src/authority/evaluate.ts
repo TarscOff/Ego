@@ -287,6 +287,17 @@ export function splitShellPipeline(command: string): ShellStage[] {
   while (i < command.length) {
     const ch = command[i]!;
     const next = command[i + 1];
+    // A BACKSLASH-NEWLINE IS REMOVED BEFORE TOKENIZATION, INCLUDING IN THE MIDDLE OF A WORD. The shell deletes
+    // the pair before it parses anything, so `do\<newline>cker run …` IS `docker run …` — verified against
+    // bash, zsh and dash, which all execute the joined program name. Keeping the pair left the head reading as
+    // `do`, which is in the shell-keyword read-only matcher, and the whole line was classified read-only: a
+    // recursive delete of a production S3 bucket reached ALLOW, and so did writes to `.gi\<newline>t/hooks/`,
+    // `.harn\<newline>ess/runtime/` and `.hus\<newline>ky/` (exit review 8). Inside SINGLE quotes there is no
+    // escape at all, so the pair stays literal there.
+    if (ch === '\\' && next === '\n' && !inSingle) {
+      i += 2;
+      continue;
+    }
     if (ch === '\\' && !inSingle) {
       cur += ch + (next ?? '');
       i += 2;
@@ -462,7 +473,11 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // this unit. Discarding it outright lost that, so the marker carries the name to the binding dimension
         // while nothing classifies it as a program.
         const declared = /([A-Za-z_][A-Za-z0-9_:.-]*)\s*(?:\(\s*\))?$/.exec(cur.trim());
-        if (declared) segments.push({ text: `${FUNCTION_DEF_PREFIX} ${declared[1]}`, pipedFromPrevious: false });
+        // ...and NOT inside a `case` branch, where the splitter has already swallowed the pattern list so no
+        // segment says `case` any more. A definition there binds nothing unless that branch is the one taken
+        // (exit review 8).
+        if (declared && caseDepth === 0)
+          segments.push({ text: `${FUNCTION_DEF_PREFIX} ${declared[1]}`, pipedFromPrevious: false });
         cur = '';
         groupStack.push(++groupSeq);
         if (ch === '(') {
@@ -1709,6 +1724,21 @@ function tokenize(s: string): string[] {
   return out;
 }
 
+/** THE NAME THE FILESYSTEM WILL RESOLVE, not the bytes that were typed.
+ *
+ *  macOS and Windows compare filenames with full Unicode case folding, which maps more than upper to lower:
+ *  `ſ` (U+017F LATIN SMALL LETTER LONG S) folds to `s`, so `.harnesſ/runtime/pin.json` IS `.harness/runtime/`
+ *  on the disk this kernel runs on — verified on this machine. Comparing the typed bytes let a write to EGO's
+ *  own runtime, to `.claude/ſettings.json`, to `.huſky/pre-commit` and to `policieſ/organization/` reach ALLOW,
+ *  and the plain case variant `.harness/hooKs/` did the same (exit review 8).
+ *
+ *  `toUpperCase().toLowerCase()` performs that fold in JavaScript: `'ſ'.toUpperCase()` is `'S'`. NFC first, so a
+ *  decomposed name compares equal to its composed twin. On a case-SENSITIVE filesystem this over-matches a name
+ *  that really is distinct; that direction only ever adds protection, and it is the direction to be wrong in. */
+function foldName(p: string): string {
+  return p.normalize('NFC').toUpperCase().toLowerCase();
+}
+
 export function matchPathPattern(pattern: string, absPath: string, ctx: EvaluationContext): boolean {
   const tryMatch = (posix: string, homeBase: string, roots: string[]): boolean => {
     let pat = pattern;
@@ -1736,9 +1766,13 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
   );
   const canonPosix = canonicalPath(absPath).split(sep).join('/');
   const lexPosix = (isAbsolute(absPath) ? absPath : resolve(absPath)).split(sep).join('/');
+  // ...and once more on the FOLDED name, which is what the filesystem will actually resolve
+  const foldRoots = canonRoots.map(foldName);
   return (
     tryMatch(canonPosix, canonicalPath(homedir()).split(sep).join('/'), canonRoots) ||
-    (lexPosix !== canonPosix && tryMatch(lexPosix, homedir().split(sep).join('/'), lexRoots))
+    (lexPosix !== canonPosix && tryMatch(lexPosix, homedir().split(sep).join('/'), lexRoots)) ||
+    (foldName(canonPosix) !== canonPosix &&
+      tryMatch(foldName(canonPosix), foldName(canonicalPath(homedir()).split(sep).join('/')), foldRoots))
   );
 }
 
@@ -2010,7 +2044,11 @@ const MAX_SCRIPT_BYTES = 64 * 1024;
 /** classes that only say "the kernel cannot see inside"; they never escalate a command whose class the matchers declared */
 const OPACITY_CLASSES = new Set(['command.unknown', 'command.interpreter-script', 'command.script-opaque']);
 /** keywords that prefix a command on the same line: strip and classify the remainder (`if git push`, `do npm test`) */
-const PREFIX_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', '!', '{', '}', 'time']);
+// `while` and `until` are followed by a COMMAND — the loop's condition, which runs at least once — and both were
+// missing, so `while psql -h prod-db… -c 'DROP TABLE users'; do break; done` kept the keyword in the segment and
+// no target-aware rule could match it (exit review 8). `for` and `case` are deliberately absent: what follows
+// them is a variable name and a word to match, not a command.
+const PREFIX_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'time']);
 /** statements that are shell structure, never an external effect: the whole segment is skipped */
 const PACKAGE_MANAGER_BUILTINS = new Set([
   'install',
@@ -6384,12 +6422,16 @@ function classifyShellPaths(
           .replace(/^~\//, home + '/')
           .split(/[*?[{]/)[0]!
           .replace(/\/$/, '');
-        const candidates = isAbsolute(prefix) ? [prefix] : roots.map((r) => `${r}/${prefix}`);
-        if (candidates.some((c) => c === posix)) {
+        // compared on the FOLDED name, because that is what the filesystem resolves: `mv .harnesſ /tmp/gone`
+        // relocates the governance tree on macOS, and a raw string compare read it as a different directory
+        // (exit review 8)
+        const candidates = (isAbsolute(prefix) ? [prefix] : roots.map((r) => `${r}/${prefix}`)).map(foldName);
+        const here = foldName(posix);
+        if (candidates.some((c) => c === here)) {
           direct = pp;
           break;
         }
-        if (!contains && candidates.some((c) => c.startsWith(posix + '/'))) contains = pp;
+        if (!contains && candidates.some((c) => c.startsWith(here + '/'))) contains = pp;
       }
       // WRITING ONE NAMED FILE INTO THE REPOSITORY ROOT IS NOT A WRITE OF THE REPOSITORY'S PROTECTED SUBTREES.
       // The `contains` rule is what catches a write into `.harness` itself — the protected paths name the files
@@ -6654,6 +6696,14 @@ function analyzeSegments(
       definedNames.clear();
       functionNames.clear();
     }
+    // A DEFINITION THE SHELL MAY NEVER EXECUTE BINDS NOTHING. `if false; then git() { echo hi; }; fi` does not
+    // define `git`, and neither does a definition inside a `while`/`until`/`for`/`case` branch or one that is a
+    // PIPELINE stage, since every stage runs in its own subshell. The analyzer recorded the name anyway, and the
+    // real `git push origin main` that followed was classified as a call to a known local function — read-only,
+    // ALLOW, through an organization-locked deny and through absolute core denies for psql and the cloud CLIs
+    // (exit review 8). A binding is trusted only where it is UNCONDITIONAL.
+    let condDepth = 0;
+    const stages = unit;
     // the stage whose standard output the NEXT piped stage will read. A GROUP writes the CONCATENATION of what
     // its commands write, so this is a LIST: `{ echo 'git push origin main'; echo ls; } | sh` feeds the shell
     // both lines, and keeping only the last stage lost the first (exit review 7).
@@ -6661,8 +6711,20 @@ function analyzeSegments(
     let upstreamParts: string[] = [];
     let upstreamGroup: number | undefined;
     let upstreamBody: { body: string; expanded: boolean } | null = null;
-    for (const stage of unit) {
+    for (const [stageIndex, stage] of stages.entries()) {
     const seg = stage.text;
+    // `if`/`while`/`until`/`for`/`case` open a branch whose body may not run; `fi`/`done`/`esac` close it
+    const kw = /^(if|while|until|for|case|select)\b/.exec(seg.trim());
+    const kwEnd = /^(fi|done|esac)\b/.test(seg.trim());
+    // A stage that FEEDS a pipe, or is fed by one, runs in its own subshell. For a function DEFINITION the pipe
+    // is attached to the stage after the whole BODY — `git() { echo hi; } | cat` puts it on `cat` — so the look
+    // ahead skips the body's group before asking.
+    let after = stageIndex + 1;
+    while (stages[after]?.groupId !== undefined) after++;
+    const inPipeline = stage.pipedFromPrevious === true || stages[after]?.pipedFromPrevious === true;
+    const bindingIsProven = condDepth === 0 && !inPipeline;
+    if (kw) condDepth++;
+    else if (kwEnd) condDepth = Math.max(0, condDepth - 1);
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
     const stdinParts = stage.pipedFromPrevious ? upstreamParts : [];
     const upstreamHeredoc = stage.pipedFromPrevious ? upstreamBody : null;
@@ -6684,7 +6746,7 @@ function analyzeSegments(
     }
     // a consumed function header binds a name for everything after it, and is not a command
     if (cdTrimmed.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
-      functionNames.add(cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1));
+      if (bindingIsProven) functionNames.add(cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1));
       continue;
     }
     const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
@@ -6961,7 +7023,7 @@ function analyzeSegments(
     }
     if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
     const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([A-Za-z_][\w.-]*)\s*\(\s*\)\s*\{)/.exec(seg.trim());
-    if (decl) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
+    if (decl && bindingIsProven) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
     // TREE-STATE PROVENANCE: a checkout, reset, stash pop, merge, rebase or worktree switch replaces a
     // repository-determined, unenumerable set of files. The per-path ledger cannot express that, so the tree
     // itself stops being fresh and every later conclusion drawn from repository content is STALE.

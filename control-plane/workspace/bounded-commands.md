@@ -60,6 +60,10 @@ bounded:
   - 'flock'
   - 'kustomize'
   - 'env'
+  # `read` is the shell's own line reader: it assigns a variable and executes nothing. It became visible once
+  # `while` was stripped as the prefix keyword it is, and `while read -r l; do …; done < list.txt` — the standard
+  # line loop — asked (exit review 8).
+  - 'read'
   - 'umask'
   - 'ulimit'
   - 'read'
