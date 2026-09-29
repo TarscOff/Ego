@@ -623,6 +623,64 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   **PHASE 1 IS STILL NOT CLOSED.** Nothing from this review is open, but the exit criterion is a FRESH review
   finding none — and the review that found these is not that review. `INDEPENDENT-AGENT REVIEW` stays IN
   PROGRESS.
+
+  **EXIT REVIEW 8 (2026-09-28, HEAD 2fcd3bc) — FAILED. 28 adversarial lenses, 830 agents, 60M subagent tokens,
+  ZERO agent errors.** 187 findings, 186 unique; 60 CRITICAL and 54 HIGH by the reviewer's own severity;
+  **newClasses: 0 — the ninth consecutive review to add no architectural class, and the first with COMPLETE
+  classification** (review 7 lost 100 agents to a weekly account limit, which was recorded at the time).
+
+  The headline finding is a shell fact, not a policy one: **the shell deletes a backslash-newline before it
+  parses anything.** `do\<newline>cker run … amazon/aws-cli s3 rm s3://prod-assets --recursive` runs docker;
+  EGO read the head as `do`, a shell keyword its read-only matcher allows, and the line was ALLOW. Verified
+  against bash, zsh and dash. The same pass established on this machine that macOS folds `ſ` to `s`, so
+  `.harnesſ/runtime/pin.json` IS EGO's own runtime directory — paths are now compared on the FOLDED name.
+
+  **EVERY UNAUTHORIZED ALLOW OF EXIT REVIEW 8 IS CLOSED** (HEAD 161c610, 60 local commits). What the sweep of all
+  186 unique findings reports at this HEAD: **0 unauthorized ALLOW, 0 over-gated DENY, 45 rows still below the
+  reviewer's floor** — 19 of them DENY-arriving-as-ASK, which is the designed human gate, and 26 of them
+  proportionality rows where EGO asks about something the reviewer would allow. The three CRITICAL/HIGH rows that
+  remain are an unclassified kubeconfig context (`make deploy`) and `git merge FETCH_HEAD`.
+
+  **THE LAST BATCH WAS A CLASS OF ITS OWN, AND IT RUNS THE OTHER WAY: LOOKING AT SOMETHING IS NOT DOING IT.**
+  Ten commands arrived as an ABSOLUTE DENY, which is the one verdict a human cannot approve — so EGO was refusing
+  the INSPECTION an operator performs before deciding, while the act itself stayed reachable by other spellings.
+  `git config core.hooksPath` reads the value; `make -n deploy` prints the recipe; `sed -n '1p'
+  .claude/settings.json` prints one line; `psql -h /tmp` is the local unix SOCKET DIRECTORY; `influx -host
+  localhost` is a Go-style LONG option, not `-h ost`, a host named "ost"; `aws s3 cp s3://fixtures/x .` is a
+  DOWNLOAD; `cp README.md ..` writes into a directory that "contains" `.harness` only because it contains the
+  checkout. A false positive of this shape is worse than a merely noisy one: it removes the gate instead of
+  raising it.
+
+  The mirror of that class closed with it. `command.script-opaque` means "something ran that I did not read", and
+  it ASKS — correctly, for text nobody can read. Four commands carried their command as PLAIN TEXT in an option's
+  value and still arrived there: sed's `e` command, git's `-O<pager>`, a Dockerfile on standard input in a
+  HEREDOC, and `--pathspec-from-file`. Each now hands its text back to the canonical analyzer as its own segment;
+  the call-site count in the producer contract goes 8 -> 10 with the reasons written down, and the streams that
+  genuinely cannot be read stay opacity. The in-repo cross-product then found what two passes of mine had missed:
+  a carrier anchored at token 0 sees neither `sudo git …` nor `FOO=bar sed …`, and a single-command `bash -c "…"`
+  body was never re-entered, so the quoting that makes an awk program ONE WORD was already gone when the carrier
+  read it.
+
+  Also closed in this review: `$'…'` ANSI-C strings; `/dev/tcp` as a socket and `/dev/..` as an escape; a
+  definition inside a branch the shell may never take binding nothing; a Dockerfile as a producer in nine more
+  shapes (`# escape=`, `RUN <<EOF`, `SHELL [...]`, `ONBUILD`); nine make shapes (`?=`, every branch of a
+  conditional as a candidate value, `define`/`endef`, target variables inherited by prerequisites, a cycle key
+  that ignored command-line assignments); a reached search cap returning PARTIAL rather than ABSENT_VERIFIED; a
+  cloud CLI run as a container image; awk's `system()`/`print |`/`getline`; a database client's standard input,
+  which is SQL and not shell, and which can re-target the session with a `\c` before it does anything else;
+  `zip -m`, which DELETES every source it archives; a `--mount type=volume` with `volume-opt=device=/…,o=bind`,
+  which is a bind mount wearing another word; and nerdctl, named by the privileged-mount MATCHER but never
+  reaching the resolver that judges the source.
+
+  **THE 200,334-COMMAND ATTACK CORPORA ARE GONE** — they lived in a session temp directory that has since been
+  cleaned. The in-repo generated cross-product is their permanent replacement and is now three times the size it
+  was when this review began: **17,400** combinations across **45** root semantic classes, 164 canonical
+  spellings, 95 transformations, 2,500 producer-carried variants and 103 ordinary commands. The proportionality
+  probe that also lived in `/tmp` is redundant: `corpus.test.ts` enforces the same property in the repository,
+  and every gated ordinary command is named with its reason in `EXPECTED_GATES`.
+
+  **PHASE 1 IS STILL NOT CLOSED.** Nothing from this review is open, but the exit criterion is a FRESH review
+  finding none, and the review that found these is not that review. `INDEPENDENT-AGENT REVIEW` stays IN PROGRESS.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same

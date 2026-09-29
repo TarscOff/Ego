@@ -255,6 +255,29 @@ One stays, as a decision:
 That one is not an unauthorized ALLOW; it is the designed human gate. The next fresh review is the criterion, not
 this list.
 
+## Closed after exit review 8 (2026-09-28)
+
+Every unauthorized ALLOW the review produced is resolved. What remains below the reviewer's floor at HEAD 161c610
+is 19 rows where EGO ASKS and the reviewer wanted DENY — the designed human gate — and 26 proportionality rows
+where EGO asks about something the reviewer would allow. Neither is an unauthorized ALLOW.
+
+The review's own lesson, recorded by CAUSE rather than by instance:
+
+| Cause | The general statement |
+|---|---|
+| **The shell deletes a backslash-newline before it parses anything.** | `do\<newline>cker` is `docker`. The line-continuation is removed by the lexer, ahead of every other rule, so any parser that tokenises first reads a head that will never exist. Removed before tokenization now, verified against bash, zsh and dash. |
+| **A filename is what the FILESYSTEM says it is.** | macOS folds `ſ` to `s` and `K` (U+212A) to `k`, so `.harnesſ/runtime/pin.json` IS the governance tree. Paths are compared on `p.normalize('NFC').toUpperCase().toLowerCase()`. |
+| **Looking at something is not doing it.** | `git config core.hooksPath` reads; `make -n` prints; `sed -n '1p'` prints; `psql -h /tmp` is a unix socket DIRECTORY; `influx -host localhost` is a Go-style LONG option; `aws s3 cp s3://… .` downloads; `cp README.md ..` writes into a directory that only "contains" `.harness` because it contains the checkout. Ten absolute DENYs over INSPECTIONS — and an absolute deny is the one verdict a human cannot approve, so this shape of false positive removes the gate instead of raising it. |
+| **A readable command is not opacity.** | `command.script-opaque` ASKS, correctly, for text nobody can read. sed's `e`, git's `-O<pager>`, a Dockerfile in a heredoc and `--pathspec-from-file` all carried their command as plain text and still arrived there. Each now feeds the canonical analyzer; the streams that genuinely cannot be read stay opacity. |
+| **A tool the matchers name and the analyzer does not is a hole with a sign on it.** | nerdctl was in the privileged-mount matcher and absent from the bind-mount resolver, so the identical docker line was DENY and nerdctl ASK. Pinned by `PROPERTY: every tool the target model knows reaches the target model`. |
+| **The flag is what makes the tool a writer.** | Judged as writers unconditionally, `sed` and `perl` refused every READ of a governed file; judged never, `ruby -i -pe` and `gawk -i inplace` rewrote one. One question, asked once, in `editsInPlace`. |
+| **A carrier anchored at token 0 sees no wrapper.** | `sudo git …`, `FOO=bar sed …` and a single-command `bash -c "…"` body all hid the same three carriers, because the normalizer returns strings and the quoting that makes a program ONE WORD is gone by then. Found by the in-repo cross-product, twice, after I had added the carriers. |
+
+Three fixes in this review were themselves found defective before they landed, and two of those were found by
+attacking my own last two commits: `git rm` classified ALLOW without judging its pathspecs; an "in-place edit is
+an ordinary write" rule that swallowed `perl -i -e '<code>'`; `sed -f script.sed OPERAND`, where the operand is
+an INPUT and not the script; and `/` excluded from the ancestor test because `/` + `/` is `//`.
+
 ## A validation gate that lives in a temporary directory is not a gate
 
 The 200,334-command attack corpora that earlier rounds reported were ad-hoc text files in a session temporary
@@ -263,8 +286,13 @@ gate it represented no longer exists. Recorded because the lesson generalises: e
 not evidence.
 
 The permanent replacement is `packages/kernel/test/support/corpus.ts`, which is IN THE REPOSITORY and GENERATED
-rather than accumulated — 34 root semantic classes × 87 transformations × 35 producers, asserting 11,645
+rather than accumulated — 45 root semantic classes × 95 transformations × 60 producers, asserting **17,400**
 combinations, and growing by one line per new transformation.
+
+The proportionality probe that lived beside those corpora is gone too, and it is not missed: `corpus.test.ts`
+enforces the same property in the repository, over 103 ordinary commands across seven ecosystems, and every one
+that gates is named with its reason in `EXPECTED_GATES`. A gate that only exists while a shell session is open is
+the same non-gate twice.
 
 ## The parallel-test failure, and a diagnosis this document got wrong
 
