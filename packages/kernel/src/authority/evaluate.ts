@@ -899,7 +899,7 @@ function splitWords(s: string): string[] {
       cur += ch;
       continue;
     }
-    if (/\s/.test(ch)) {
+    if (IFS_RE.test(ch)) {
       if (cur) out.push(cur);
       cur = '';
       continue;
@@ -1574,13 +1574,17 @@ export function redirectionTargets(segment: string): string[] {
   // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
   // a backslash-newline continuation is erased by the shell before it opens the file, so erase it first too
   const joined = segment.replace(/\\\r?\n/g, '');
-  const unglued = joined.replace(/([^\s&|<>])(<>|>{1,2})/g, '$1 $2');
+  const unglued = joined.replace(/([^ \t\n\r&|<>])(<>|>{1,2})/g, '$1 $2');
   // a target is a run of quoted and unquoted chunks: `"control-plane"/permissions/x`, `control-plan\e/x`, 'a b'/c
   // `>&WORD` IS A FILE REDIRECT WHENEVER WORD IS NOT A FILE DESCRIPTOR. bash treats `>&log` exactly like `&>log`
   // and sends BOTH streams to that file, so `echo x >& .git/hooks/pre-commit` writes the hook — and it was not
   // read as a write at all, because the `&` was not part of the operator (exit review 4). The operator is now
   // captured so that a numeric target — `2>&1`, `>&-` — can be told apart as the fd duplication it is.
-  const re = /(?:^|\s)(\d?<>|\d?>>?&?\|?|&>>?\|?)\s*((?:"[^"]*"|'[^']*'|\\.|[^\s;&|])+)/g;
+  // THE SEPARATORS ARE THE SHELL'S, NOT JAVASCRIPT'S. `\s` also matches U+00A0 and its Unicode siblings, which
+  // no POSIX shell treats as IFS — so a target containing one was TRUNCATED at it, and
+  // `echo x > control-plane/<U+00A0>evil.md` was read as a write to the bare directory `control-plane/`, which
+  // the glob `control-plane/**` does not match (exit review 10).
+  const re = /(?:^|[ \t\n\r])(\d?<>|\d?>>?&?\|?|&>>?\|?)[ \t\n\r]*((?:"[^"]*"|'[^']*'|\\.|[^ \t\n\r;&|])+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(unglued))) {
     const target = unquoteShellWord(m[2]!);
@@ -1865,7 +1869,7 @@ export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
       cur += c;
       continue;
     }
-    if (/\s/.test(c)) {
+    if (IFS_RE.test(c)) {
       flush();
       out += c;
       continue;
@@ -1909,7 +1913,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
       wasQuoted = true;
       continue;
     }
-    if (/\s/.test(ch)) {
+    if (IFS_RE.test(ch)) {
       flush();
       continue;
     }
@@ -2008,7 +2012,7 @@ function tokenize(s: string): string[] {
       quote = ch;
       continue;
     }
-    if (/\s/.test(ch)) {
+    if (IFS_RE.test(ch)) {
       if (cur) out.push(cur);
       cur = '';
       continue;
@@ -2195,6 +2199,18 @@ function editsInPlace(head: string, tokens: string[]): boolean {
   // and a loose test read the `i` of `lib` as the in-place flag.
   return tokens.some((t) => t === '--in-place' || t.startsWith('--in-place=') || /^-[nrEsuzpalwc0]*i/.test(t));
 }
+
+/** THE SHELL'S WORD SEPARATORS, AND ONLY THOSE. Default IFS is space, tab and newline — nothing else. JavaScript's
+ *  `\s` also matches U+00A0 NO-BREAK SPACE, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000 and U+FEFF, and NO
+ *  POSIX shell treats any of them as a separator. Using it meant EGO SPLIT A WORD THE SHELL KEEPS WHOLE, which
+ *  TRUNCATES a path: `echo x > control-plane/<U+00A0>evil.md` writes one file inside the control plane, and EGO
+ *  read the redirection target as the bare directory `control-plane/` — which the glob `control-plane/**` does
+ *  not match, because only its descendants do (exit review 10).
+ *
+ *  Every review before this one looked for a separator the shell honours and EGO does not. This is the mirror:
+ *  a separator EGO INVENTS, which shortens a governed path into an ungoverned one. A carriage return is included
+ *  because a CRLF file reaches the splitter with the `\r` still attached to the last word. */
+const IFS_RE = /[ \t\n\r]/;
 
 const WRITE_HEADS = new Set([
   'cp',
@@ -6972,13 +6988,25 @@ function isPathLike(tok: string, cwdIsSensitive = false): boolean {
   );
 }
 
-function expandHome(tok: string): string | null {
+function expandHome(tok: string, cwd?: string): string | null {
   const home = homedir();
-  if (tok === '~' || tok.startsWith('~/')) return home + tok.slice(1);
-  if (/^~[A-Za-z0-9_.-]+/.test(tok)) return null; // another user's home: opaque
-  if (tok.startsWith('$HOME')) return home + tok.slice(5);
-  if (tok.startsWith('${HOME}')) return home + tok.slice(7);
-  return tok;
+  // A ONE-CHARACTER BRACKET CLASS IS THAT CHARACTER. `[h]` matches exactly `h` and nothing else, so
+  // `.[h]arness/runtime/decisions/d1.json` IS `.harness/runtime/decisions/d1.json` — which is how both zsh and
+  // bash opened it. Collapsed here rather than left as a glob, because a glob only reaches ASK and this
+  // spelling is not ambiguous at all: it names one path (exit review 10). A class with more than one character,
+  // a range or a negation stays a glob and keeps its opacity.
+  const t = tok.replace(/\[([^\]!^\\/-])\]/g, '$1');
+  // `~+` IS $PWD AND `~-` IS $OLDPWD — tilde expansion, not directory names. `~+/control-plane/permissions/
+  // matchers.md` is the live policy file, and resolving `~+` as an ordinary path COMPONENT put the real path
+  // one level too deep, where the root-anchored globs no longer matched it (exit review 10). `~-` is the
+  // previous directory, which this kernel does not track, so it stays opaque.
+  if (t === '~+' || t.startsWith('~+/')) return cwd === undefined ? null : cwd + t.slice(2);
+  if (t === '~-' || t.startsWith('~-/') || /^~[+-]?\d/.test(t)) return null; // the directory stack: not tracked
+  if (t === '~' || t.startsWith('~/')) return home + t.slice(1);
+  if (/^~[A-Za-z0-9_.-]+/.test(t)) return null; // another user's home: opaque
+  if (t.startsWith('$HOME')) return home + t.slice(5);
+  if (t.startsWith('${HOME}')) return home + t.slice(7);
+  return t;
 }
 
 /** Path-like tokens of a segment, resolved against the tracked cwd; tokens with unresolved variables are reported as dynamic. */
@@ -7010,7 +7038,7 @@ function pathTokens(segment: string, cwd: string): Array<{ raw: string; abs: str
             ? raw.slice(eq + 1)
             : raw;
     if (!tok || !isPathLike(tok, cwdIsSensitive) || tok === '{}') continue;
-    const expanded = expandHome(tok);
+    const expanded = expandHome(tok, cwd);
     if (expanded === null || /[$`]/.test(expanded)) {
       out.push({ raw: tok, abs: null, glob: false });
       continue;
@@ -7149,7 +7177,7 @@ function classifyShellPaths(
     if (targetDir !== null && ops.length >= 1) {
       const linkDir = isAbsolute(targetDir) ? targetDir : resolve(cwd, targetDir);
       for (const src of ops) {
-        const expanded = expandHome(src);
+        const expanded = expandHome(src, cwd);
         if (expanded === null || /[$`*?]/.test(expanded)) continue;
         const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(linkDir, expanded));
         const entry = paths.find((q) => q.raw === src);
@@ -7165,7 +7193,7 @@ function classifyShellPaths(
       const lastAbs = isAbsolute(last) ? last : resolve(cwd, last);
       const linkDir = directoryExists(lastAbs) ? lastAbs : dirname(lastAbs);
       for (const src of ops.slice(0, -1)) {
-        const expanded = expandHome(src);
+        const expanded = expandHome(src, cwd);
         if (expanded === null || /[$`*?]/.test(expanded)) continue;
         const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(linkDir, expanded));
         // the path entry is REPLACED rather than judged separately, so the protected-tree reasoning that already
@@ -7579,7 +7607,7 @@ function classifyShellPaths(
   if (dest === 'ALL_PATHSPECS') {
     for (const sp of gitPathspecs) {
       if (paths.some((q) => q.raw === sp)) continue;
-      const expanded = expandHome(sp);
+      const expanded = expandHome(sp, cwd);
       if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: sp, abs: null, glob: false });
       else {
         const glob = /[*?[{]/.test(expanded);
@@ -7594,7 +7622,7 @@ function classifyShellPaths(
     dest = 'ALL';
   }
   if (dest && dest !== 'ALL' && dest !== 'AFTER_DASHDASH' && !paths.some((p) => p.raw === dest)) {
-    const expanded = expandHome(dest);
+    const expanded = expandHome(dest, cwd);
     if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: dest, abs: null, glob: false });
     else {
       const glob = /[*?[{]/.test(expanded);
@@ -7609,7 +7637,7 @@ function classifyShellPaths(
   if (dest === 'ALL') {
     for (const t of tokens.slice(1)) {
       if (t.startsWith('-') || paths.some((p) => p.raw === t) || /^[sy]\/|^\d+$/.test(t)) continue;
-      const expanded = expandHome(t);
+      const expanded = expandHome(t, cwd);
       if (expanded === null || /[$`]/.test(expanded)) continue;
       paths.push({
         raw: t,
@@ -7620,7 +7648,7 @@ function classifyShellPaths(
   }
   if (dest === 'AFTER_DASHDASH') {
     for (const t of tokens.slice(tokens.indexOf('--') + 1)) {
-      const expanded = expandHome(t);
+      const expanded = expandHome(t, cwd);
       if (expanded === null || /[$`]/.test(expanded)) continue;
       paths.push({
         raw: t,
@@ -7643,7 +7671,7 @@ function classifyShellPaths(
     for (const [ti, t] of tokens.entries()) {
       if (ti === 0 || ti === patternAt || patternWords.includes(t)) continue;
       if (t.startsWith('-')) continue;
-      const expanded = expandHome(t);
+      const expanded = expandHome(t, cwd);
       if (expanded === null || /[$`*?[{]/.test(expanded)) continue;
       const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded))
         .split(sep)
@@ -8704,8 +8732,15 @@ function analyzeSegments(
     const redirTargets = new Set(redirectionTargets(seg));
     for (const n of normalizeSegment(seg)) for (const t of redirectionTargets(n)) redirTargets.add(t);
     for (const target of redirTargets) {
-      const expanded = expandHome(target);
-      if (expanded === null || /[$`*?]/.test(expanded)) {
+      const expanded = expandHome(target, effectiveCwd);
+      // THE WHOLE METACHARACTER SET, not four fifths of it. Every other glob test in this file uses `[*?[{]`;
+      // this one omitted the BRACKET, so `.[h]arness/runtime/decisions/d1.json` — a POSIX bracket expression
+      // that both zsh and bash expand to the real directory — was resolved as a literal path that will never
+      // exist, classified as an ordinary in-repo file, and ALLOWED. One character defeated every root-anchored
+      // protected glob: `[c]ontrol-plane`, `[p]olicies`, `.[c]laude`, `.h[u]sky`, `[n]ode_modules`, `.[m]cp.json`
+      // (exit review 10). The operand readers had it right all along, which is why `cp x [c]ontrol-plane/...`
+      // reported a glob destination while the redirection form did not.
+      if (expanded === null || /[$`*?[{]/.test(expanded)) {
         hits.push({
           capability: 'command.unknown',
           verdict: verdictFor(table, ctx, 'command.unknown'),
