@@ -2274,7 +2274,13 @@ const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   // A variable whose VALUE IS A PROGRAM re-points the tool itself, so it is relevant to EVERY producer and to no
   // producer at all — `EDITOR=<prog> git commit` and `CC=<prog> make build` run <prog> whichever branch resolved
   // the body. Listing it per kind meant it was relevant where someone remembered to list it.
-  'make-target': [PROGRAM_NAMING_ENV, /^(MAKEFILES|MAKEFLAGS|GNUMAKEFLAGS|MAKE|SHELL|PATH)$/],
+  // A MAKE RECIPE CAN RUN ANY TOOL, so every variable that changes what a tool executes is relevant to it — not
+  // only make's own. `export NODE_OPTIONS := --require=./evil.js` makes every Node tool in every recipe load
+  // that file, and the recipe text says nothing about it (exit review 8).
+  'make-target': [
+    PROGRAM_NAMING_ENV,
+    /^(MAKEFILES|MAKEFLAGS|GNUMAKEFLAGS|MAKE|SHELL|PATH|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|BASH_ENV|ENV|GEM_PATH|CLASSPATH|JAVA_TOOL_OPTIONS)$/,
+  ],
   'npm-script': [
     PROGRAM_NAMING_ENV,
     /^(npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/,
@@ -2877,6 +2883,14 @@ interface MakeFileModel {
   targetVars: Map<string, Map<string, string>>;
   /** the names assigned with `override`, whose makefile value WINS over a command-line assignment. */
   overridden: Set<string>;
+  /** Every value a name is given inside a CONDITIONAL. The resolver cannot always evaluate the condition, so
+   *  each branch's value is a candidate and the recipe is expanded with each of them. */
+  altVars: Map<string, Set<string>>;
+  /** `export NAME := value` — the names the makefile puts in EVERY recipe's environment. `export PGHOST :=
+   *  prod-db.acme.com` makes the recipe's `psql` connect to production, and `export NODE_OPTIONS :=
+   *  --require=./evil.js` makes every Node tool in every recipe load that file; the recipe text says neither
+   *  (exit review 8). */
+  exported: Map<string, string>;
   /** `%.o: %.c` — an IMPLICIT rule, which builds a target no literal rule names. Recording only the FLAG that
    *  the file has some made every pattern-built prerequisite an opacity; keeping the rules lets the one that
    *  matches be resolved like any other recipe (exit review 7). */
@@ -2906,7 +2920,13 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
     return /^\/(bin|usr\/bin|usr\/local\/bin)\/(sh|bash|zsh|dash|ksh|ash)$/.test(v) || /^(sh|bash|zsh|dash|ksh)$/.test(v);
   if (name === '.SHELLFLAGS') return /^-[a-zA-Z]+(\s+-[a-zA-Z]+)*$/.test(v);
   // PATH: ordinary only when every NEW entry is an absolute system directory
-  const added = v.replace(/\$[({]?PATH[)}]?/g, '').split(':').filter((p) => p.trim().length > 0);
+  // AN EMPTY ENTRY IN PATH IS THE CURRENT DIRECTORY. `export PATH := :$(PATH)` puts the checkout first, so every
+  // bare program name the recipe uses resolves to a repository file — and filtering empties away made the list
+  // of NEW entries empty, which `every` calls ordinary (exit review 8).
+  const parts = v.replace(/\$[({]?PATH[)}]?/g, '\0').split(':');
+  if (parts.some((q, i) => q.trim() === '' && !(parts.length > 1 && i === parts.length - 1 && v.trimEnd().endsWith('\0'))))
+    return false;
+  const added = parts.filter((p) => p.trim().length > 0 && p.trim() !== '\0');
   // ...AND AN ENTRY IS JUDGED ON WHAT IT RESOLVES TO. `/usr/../tmp/evilbin` begins with `/usr` and IS `/tmp`,
   // so a writable directory anyone can plant a `cc` in was read as a system directory (exit review 7).
   return added.every((p) => {
@@ -3194,6 +3214,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     hasPatternRules: false,
     targetVars: new Map(),
     overridden: new Set(),
+    altVars: new Map(),
+    exported: new Map(),
     patternRules: [],
     rebinds: [],
     vars: new Map(),
@@ -3214,6 +3236,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   const lines = makeLogicalLines(text);
   let current: MakeRule | null = null;
   const openConditions: string[] = [];
+  // `define NAME` … `endef` holds a variable's VALUE. The lines between were fed through the ordinary loop, so
+  // an assignment written inside a help text overwrote a live variable (exit review 8).
+  let inDefine: { name: string; lines: string[]; override: boolean; exported: boolean; conditional: boolean } | null =
+    null;
   // GNU make lets `.RECIPEPREFIX` replace the tab that introduces a recipe line. A parser that only knows the tab
   // sees an EMPTY recipe and reports the target fully resolved — its own gap becoming a positive claim.
   let prefix = '\t';
@@ -3233,6 +3259,34 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
+
+    // `define NAME` … `endef` holds a variable's VALUE, not live makefile text. The lines between were fed
+    // through the ordinary loop, so an assignment written inside a help text overwrote a live variable and the
+    // recipe was analysed with the wrong one (exit review 8).
+    if (inDefine !== null) {
+      if (/^endef\b/.test(trimmed)) {
+        // the body IS the variable's value: `override define CMD` / `git push origin main` / `endef` is the
+        // multi-line spelling of an override, and recording only the `=` forms left it invisible (exit review 8)
+        const prior = model.vars.get(inDefine.name);
+        if (!(inDefine.conditional && prior !== undefined))
+          model.vars.set(inDefine.name, inDefine.lines.join('\n').trim());
+        if (inDefine.override) model.overridden.add(inDefine.name);
+        if (inDefine.exported) model.exported.set(inDefine.name, inDefine.lines.join('\n').trim());
+        inDefine = null;
+      } else inDefine.lines.push(trimmed);
+      continue;
+    }
+    const defOpen = /^((?:override\s+|export\s+)*)define\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(::?=|[+?!]=|=)?\s*$/.exec(trimmed);
+    if (defOpen) {
+      inDefine = {
+        name: defOpen[2]!,
+        lines: [],
+        override: /override/.test(defOpen[1]!),
+        exported: /export/.test(defOpen[1]!),
+        conditional: defOpen[3] === '?=',
+      };
+      continue;
+    }
 
     // `include a.mk b.mk` — the included rules really execute, so an unreadable one is not "no such target"
     const inc = /^([-s]?)include\s+(.+)$/.exec(trimmed);
@@ -3335,11 +3389,29 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     );
     if (anyAssign) {
       const [, name, op, value] = anyAssign as unknown as [string, string, string, string];
+      // `?=` IS CONDITIONAL: it sets the variable only when it has no value yet. Treating it as a plain set let
+      // `KUBECTL = <production delete>` be overwritten by a following `KUBECTL ?= echo skipped`, and the recipe
+      // was analysed with the harmless value while make ran the real one (exit review 8).
+      if (op === '?=' && model.vars.has(name)) continue;
+      // ...and INSIDE A CONDITIONAL, EVERY BRANCH IS POSSIBLE. The resolver keeps both branches on purpose,
+      // because it cannot always evaluate the condition — so neither the first nor the last assignment may be
+      // the only one considered. `ifeq ($(ENV),)` / `CMD = <production delete>` / `else` / `CMD = echo local`
+      // was analysed as `echo local` while make, with ENV unset, ran the delete (exit review 8); keeping only
+      // the first would lose the mirror case, where the effect is in the `else`. Both values are recorded and
+      // the recipe is expanded with each.
+      if (openConditions.length) {
+        const alts = model.altVars.get(name) ?? new Set<string>();
+        const prior = model.vars.get(name);
+        if (prior !== undefined) alts.add(prior);
+        alts.add(value);
+        model.altVars.set(name, alts);
+      }
       // `override VAR = …` INVERTS make's precedence: the makefile's value wins over `make VAR=…`. Applying the
       // command line last regardless let an attacker-written recipe be read with the operator's harmless value —
       // `make KUBECTL=true ship` was analysed as `true …` while make really ran the makefile's `kubectl
       // --context prod delete deploy api` (exit review 7).
       if (/^override\s/.test(trimmed)) model.overridden.add(name);
+      if (/^(export|override\s+export)\s/.test(trimmed)) model.exported.set(name, value);
       const prior = model.vars.get(name);
       // `:=` and `::=` are SIMPLY EXPANDED: the value is fixed HERE, so a later assignment to what it referenced
       // does not change it. Storing the text and expanding it lazily gave every variable recursive flavour, and
@@ -3361,7 +3433,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     // `$(shell …)` ANYWHERE outside a recipe runs while make PARSES — for every target, and for `make -n`
     for (const c of expandMakeText(trimmed, model.vars).ran) model.parseRan.push(c);
-    if (/\$\(eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
+    // GNU make reads `${…}` and `$(…)` as the SAME reference, and the guard saw only the paren form
+    if (/\$[({]eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
     if (/^\.ONESHELL\s*:/.test(trimmed)) {
       // the WHOLE recipe goes to one shell, so a `cd` on one line leaks into the next
       model.oneShell = true;
@@ -3397,7 +3470,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       // -f app` overrides DOCKER for that target's recipes, and it was parsed as a rule whose prerequisites are
       // the words of the assignment — so the recipe `$(DOCKER)` was expanded with the GLOBAL value and the
       // production command it really runs was never seen (exit review 7).
-      const tsv = /^([A-Za-z_][A-Za-z0-9_.]*)\s*[:+?]?=\s*(.*)$/.exec(rule[2]!.trim());
+      const tsv = /^(?:override\s+|export\s+)*([A-Za-z_][A-Za-z0-9_.]*)\s*(?:::?|[+?!])?=\s*(.*)$/.exec(rule[2]!.trim());
       if (tsv) {
         for (const t of targets) {
           const m = model.targetVars.get(t) ?? new Map<string, string>();
@@ -4417,7 +4490,9 @@ function resolveScriptCommand(
     // `make -f -` reads the makefile from STDIN and `-E`/`--eval` injects makefile text on the command line:
     // neither is a file this resolver can read, and reporting "no Makefile" over them claimed proven absence of
     // a recipe an attacker supplies (exit review 2).
-    if (makeFiles.includes('-') || tokens.some((t) => /^(-E|--eval)(=|$)/.test(t)))
+    // `-E'deploy: ; CMD'` is GLUED, like every other short option, and the guard matched only the detached and
+    // `=` forms (exit review 8)
+    if (makeFiles.includes('-') || tokens.some((t) => /^(-E|--eval)(=|$)/.test(t) || /^-E./.test(t)))
       return {
         kind: 'make-target',
         key: `make:injected:${norm}`,
@@ -4471,6 +4546,8 @@ function resolveScriptCommand(
       hasPatternRules: false,
       targetVars: new Map(),
       overridden: new Set(),
+      altVars: new Map(),
+      exported: new Map(),
       patternRules: [],
       rebinds: [],
       vars: new Map(),
@@ -4493,6 +4570,12 @@ function resolveScriptCommand(
       if (m.hasPatternRules) merged.hasPatternRules = true;
       merged.patternRules.push(...m.patternRules);
       for (const n of m.overridden) merged.overridden.add(n);
+      for (const [k, v] of m.exported) merged.exported.set(k, v);
+      for (const [k, vs] of m.altVars) {
+        const into = merged.altVars.get(k) ?? new Set<string>();
+        for (const v of vs) into.add(v);
+        merged.altVars.set(k, into);
+      }
       for (const [t, vars] of m.targetVars) {
         const into = merged.targetVars.get(t) ?? new Map<string, string>();
         for (const [k, v] of vars) into.set(k, v);
@@ -4517,7 +4600,9 @@ function resolveScriptCommand(
     // the LONG forms only: a `-v` or `-h` on this line may belong to a command spliced into a variable's value
     // (`make CMD='docker run -v /:/host alpine sh' run`), and reading it as make's own probe flag would make the
     // whole producer resolve to nothing — found immediately by the producer cross-product
-    if (tokens.some((t) => /^(--version|--help)$/.test(t)))
+    // make's OWN probe flags, read from the segment AS WRITTEN: `make ship NOTE="see --version output"` puts the
+    // word inside a quoted VALUE, and a token scan saw it as make's option (exit review 8).
+    if (tokenizeMarked(env.rawSegment ?? tokens.join(' ')).some((t) => !t.quoted && /^(--version|--help)$/.test(t.text)))
       return { kind: 'make-target', key: `make:probe`, body: null, reason: 'a version or help probe selects no goal', resolution: 'NOT_A_PRODUCER' };
     const wanted = targets.length ? targets : [merged.defaultGoal ?? merged.firstTarget].filter((t): t is string => !!t);
     const body: string[] = [];
@@ -4563,17 +4648,43 @@ function resolveScriptCommand(
         partial = `prerequisite chain of "${t}" is deeper than this resolver follows`;
         return;
       }
+      // A TARGET-SPECIFIC VARIABLE IS IN EFFECT FOR THE TARGET AND FOR EVERY PREREQUISITE IN ITS CHAIN. The walk
+      // looked it up for the target being expanded only, so `deploy: GIT = git push --force` with the recipe on
+      // the prerequisite `push` was analysed with the global value (exit review 8).
+      const inheritedHere = merged.targetVars.get(t);
+      if (inheritedHere)
+        for (const [k, val] of inheritedHere) {
+          const into = merged.targetVars.get('\0inherited') ?? new Map<string, string>();
+          into.set(k, val);
+          merged.targetVars.set('\0inherited', into);
+        }
       for (const p of rule.prereqs) walk(p, depth + 1);
       for (const rl of rule.recipes) {
         const cmd = rl.replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
         // make expands the line BEFORE the shell sees it: the variables it splices in can carry whole commands,
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
-        const tv = merged.targetVars.get(t);
+        const tv0 = merged.targetVars.get(t);
+        const inherited = merged.targetVars.get('\0inherited');
+        const tv = tv0 || inherited ? new Map([...(inherited ?? []), ...(tv0 ?? [])]) : undefined;
         // a target-specific value wins over the global one, and a command-line assignment still wins over both
         const cliWins = new Map([...cliVars].filter(([k]) => !merged.overridden.has(k)));
         const vars = tv ? new Map([...merged.vars, ...tv, ...cliWins]) : merged.vars;
-        const expanded = expandMakeText(cmd, vars, { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') });
+        const auto = { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') };
+        // EVERY BRANCH OF A CONDITIONAL IS A CANDIDATE: the line is expanded once per value the resolver saw,
+        // bounded so a file full of conditionals cannot blow the walk up.
+        let budget = 6;
+        for (const [name, values] of merged.altVars) {
+          if (budget <= 0) break;
+          if (!new RegExp(`\\$[({]${name}[)}]`).test(cmd)) continue;
+          for (const v of values) {
+            if (budget-- <= 0) break;
+            const alt = expandMakeText(cmd, new Map([...vars, [name, v]]), auto);
+            for (const inner of alt.ran) body.push(inner);
+            if (alt.text !== null && alt.text.trim()) body.push(alt.text.trim());
+          }
+        }
+        const expanded = expandMakeText(cmd, vars, auto);
         for (const inner of expanded.ran) body.push(inner);
         // WHAT IS KNOWN IS HANDED OVER EVEN WHEN THE LINE IS NOT FULLY KNOWN. The prefix up to the first unknown
         // still carries the command, so `git push $(UNKNOWN)` keeps its locked deny instead of degrading to an
@@ -4604,10 +4715,20 @@ function resolveScriptCommand(
       config: { read: merged.sources, unresolved: [] },
       sources: Object.fromEntries(merged.sources.map((f) => [f, fingerprint(merged.text)])),
     });
+    // ...and what the makefile EXPORTS is in every recipe's environment, which is how the recipe's `psql` finds
+    // a production host and its `tsc` loads a Node require hook that the recipe text never mentions.
+    for (const [k, v] of merged.exported) {
+      const expanded = expandMakeText(v, merged.vars).text ?? v;
+      if (EXECUTION_ENV_INPUTS.test(k) || TARGET_ENV_RE.test(k)) bodyEnv.envInputs[k] = expanded;
+    }
     // THE KEY'S SEPARATOR MUST NOT BE A LEGAL TARGET NAME CHARACTER. A comma is: `make build test` keyed as
     // `build,test`, byte-identical to the key of `make build,test`, so a recipe that re-entered make with that
     // literal goal hit the cycle guard and its `git push --force` was never analysed (exit review 7).
-    const key = `make:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}`;
+    // ...AND THE COMMAND-LINE VARIABLES, which change what every recipe expands to. Omitting them made
+    // `make run` and its own `make CMD="git push origin main" run` the SAME execution, so the cycle guard
+    // stopped the second one and its recipe was never analysed (exit review 8).
+    const cliKey = [...cliVars].map(([k, v]) => `${k}=${v}`).sort().join('\u0000');
+    const key = `make:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}:${cliKey}`;
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
