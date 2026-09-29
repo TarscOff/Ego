@@ -2177,6 +2177,10 @@ function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null
 /** Finds the nearest `name` walking upward. Returns the path when the file EXISTS, whether or not we could read it:
  *  conflating "not there" with "there but unreadable" is what let an oversized or unreadable manifest keep a
  *  declared class's ALLOW (challenge finding 1). The caller decides what an unreadable one means. */
+/** A REACHED CAP IS NOT AN ABSENCE. The upward walk stops after 64 levels, and returning the same `null` as a
+ *  genuine miss let the caller report ABSENT_VERIFIED — the one outcome that carries a positive claim — for a
+ *  manifest it simply never reached (exit review 8). The two are now different values. */
+const SEARCH_EXHAUSTED = '\0exhausted';
 function findUp(ctx: EvaluationContext, start: string, name: string): string | null {
   let dir = resolve(start);
   for (let i = 0; i < 64; i++) {
@@ -2187,7 +2191,7 @@ function findUp(ctx: EvaluationContext, start: string, name: string): string | n
     if (parent === dir || !insideRoots(parent, ctx)) return null;
     dir = parent;
   }
-  return null;
+  return SEARCH_EXHAUSTED;
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -2397,7 +2401,8 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
     'package.json',
   ];
   for (const n of names) {
-    const f = findUp(ctx, cwd, n);
+    const f0 = findUp(ctx, cwd, n);
+    const f = f0 === SEARCH_EXHAUSTED ? null : f0;
     if (f === null) continue;
     const text = readInsideWorkspace(ctx, f);
     if (text === null) return f; // a configuration EGO cannot read cannot be shown to name no code
@@ -3019,6 +3024,11 @@ const DOCKER_BUILD_VALUE_OPTS =
  *  exec without a shell, so its argv is joined into one command line rather than parsed as shell. Continuations
  *  are joined first, because a `RUN` line may span many physical lines. */
 function dockerfileShellLines(text: string): string[] {
+  // `# escape=<char>` CHANGES THE LINE-CONTINUATION CHARACTER for the whole file — a documented directive whose
+  // usual use is a backtick on Windows. It is read BEFORE comment lines are dropped, because it is one of them,
+  // and joining only backslash-newline left the continued half of a RUN as its own line (exit review 8).
+  const esc = /^\s*#\s*escape\s*=\s*(\S)/im.exec(text)?.[1];
+  if (esc && esc !== '\\') text = text.split(esc + '\n').join(' ');
   // A COMMENT LINE IS REMOVED BEFORE CONTINUATIONS ARE JOINED. Docker strips comment lines first, so a trailing
   // backslash in a comment joins NOTHING — but this reader joined continuations first, so `# helper \` swallowed
   // the `RUN` beneath it and that line became invisible (exit review 8). The `# syntax=` directive is kept,
@@ -3029,8 +3039,16 @@ function dockerfileShellLines(text: string): string[] {
     .join('\n');
   // `RUN <<EOF … EOF` is BuildKit's heredoc form: the body is the script the shell runs, exactly as it is for
   // `bash <<EOF` (exit review 8, self-attack).
-  text = text.replace(/^[ \t]*(?:ONBUILD[ \t]+)?RUN[ \t]+(?:--\S+[ \t]+)*<<-?["']?(\w+)["']?[^\n]*\n([\s\S]*?)\n[ \t]*\1[ \t]*$/gim,
-    (_m, _d: string, body: string) => body.split('\n').map((l) => `RUN ${l}`).join('\n'));
+  // ...INCLUDING BuildKit's interpreter form, `RUN sh <<EOF`, which is how the documentation writes it. The
+  // rewrite matched only the bare `RUN <<DELIM`, so the body of every `RUN sh <<EOF` stayed invisible
+  // (exit review 8).
+  text = text.replace(
+    /^[ \t]*(?:ONBUILD[ \t]+)?RUN[ \t]+(?:--\S+[ \t]+)*(?:[^\s<]+[ \t]+)*<<-?["']?(\w+)["']?[^\n]*\n([\s\S]*?)\n[ \t]*\1[ \t]*$/gim,
+    (_m, _d: string, body: string) => body.split('\n').map((l) => `RUN ${l}`).join('\n'),
+  );
+  // `# escape=<char>` CHANGES THE LINE-CONTINUATION CHARACTER for the whole file — a documented directive whose
+  // usual use is a backtick on Windows. Joining only backslash-newline left the continued half of a RUN as its
+  // own line, which then matched nothing (exit review 8).
   const joined = text.replace(/\\\r?\n\s*/g, ' ');
   const out: string[] = [];
   for (const raw of joined.split('\n')) {
@@ -3131,6 +3149,7 @@ export function expandMakeText(
   // quotes the same value is one word. Without this distinction the single most common release makefile,
   // `VERSION := $(shell git describe)` with `echo "building $(VERSION)"`, was opaque and asked (exit review 5).
   let inDouble = false;
+  let inSingleQ = false;
   const unknownHere = (): void => {
     if (inDouble) out += '$MAKEVAR';
     else opaque = true;
@@ -3145,7 +3164,11 @@ export function expandMakeText(
       i++;
       continue;
     }
-    if (ch === '"') inDouble = !inDouble;
+    // ...and a `'` suppresses the `"` inside it: toggling on every double quote without tracking single quotes
+    // made `echo ' " ' $(UNDEFINED)` look like it was inside a string, so the undefined variable was treated as
+    // quoted text rather than as the opaque splice make really performs (exit review 8)
+    if (ch === "'" && !inDouble) inSingleQ = !inSingleQ;
+    else if (ch === '"' && !inSingleQ) inDouble = !inDouble;
     if (ch !== '$') {
       out += ch;
       if (!opaque) prefix = out;
@@ -4302,7 +4325,16 @@ function resolveScriptCommand(
       'ci', 'add', 'update', 'up', 'upgrade', 'udpate', 'rebuild', 'rb',
     ]);
     if (INSTALL_SUBS.has(sub) || (head === 'yarn' && sub === '')) {
-      const pkgPath = findUp(ctx, cwd, 'package.json');
+      const pkgPath0 = findUp(ctx, cwd, 'package.json');
+      const pkgPath = pkgPath0 === SEARCH_EXHAUSTED ? null : pkgPath0;
+      if (pkgPath0 === SEARCH_EXHAUSTED)
+        return {
+          kind: 'npm-script',
+          key: `npm:${cwd}:${script}`,
+          body: null,
+          reason: 'the search for a manifest was cut off before it could reach one',
+          resolution: 'PARTIAL',
+        };
       const text = pkgPath ? readInsideWorkspace(ctx, pkgPath) : null;
       if (pkgPath === null || text === null) return manifestUnresolved(ctx, pkgPath, 'npm:install', 'package.json');
       let scripts: Record<string, unknown> = {};
@@ -4379,7 +4411,16 @@ function resolveScriptCommand(
         };
       return { kind: 'none', key: `npm:${sub}`, body: null, reason: 'not a script invocation', resolution: 'ABSENT_VERIFIED' };
     }
-    const pkgPath = findUp(ctx, cwd, 'package.json');
+    const pkgPathRaw = findUp(ctx, cwd, 'package.json');
+    const pkgPath = pkgPathRaw === SEARCH_EXHAUSTED ? null : pkgPathRaw;
+    if (pkgPathRaw === SEARCH_EXHAUSTED)
+      return {
+        kind: 'npm-script',
+        key: `npm:${cwd}:exhausted`,
+        body: null,
+        reason: 'the search for a manifest was cut off before it could reach one',
+        resolution: 'PARTIAL',
+      };
     if (pkgPath !== null && stale(pkgPath))
       return {
         kind: 'npm-script',
@@ -4448,7 +4489,9 @@ function resolveScriptCommand(
     );
     // the same settings live in `.npmrc` / `.yarnrc.yml`, which npm reads from the package directory upwards.
     // A flag on the command line was modelled and the FILE that sets the identical key was not (challenge 8).
-    const rcFile = ['.npmrc', '.yarnrc.yml', '.yarnrc'].map((n) => findUp(ctx, cwd, n)).find((f) => f !== null);
+    const rcFile = ['.npmrc', '.yarnrc.yml', '.yarnrc']
+      .map((n) => findUp(ctx, cwd, n))
+      .find((f) => f !== null && f !== SEARCH_EXHAUSTED);
     const rcText = rcFile ? readInsideWorkspace(ctx, rcFile) : null;
     const rcRebinds =
       rcFile !== null && rcFile !== undefined && (rcText === null || /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText))
@@ -4841,7 +4884,16 @@ function resolveScriptCommand(
   // same configuration-closure rule applied to a tool instead of to git or make — and it is what keeps `git
   // commit` out of the way in the husky + lint-staged setup a large share of JavaScript repositories use.
   if (head === 'lint-staged' || (head === 'npx' && tokens[1] === 'lint-staged')) {
-    const pkgPath = findUp(ctx, cwd, 'package.json');
+    const pkgPathRaw = findUp(ctx, cwd, 'package.json');
+    const pkgPath = pkgPathRaw === SEARCH_EXHAUSTED ? null : pkgPathRaw;
+    if (pkgPathRaw === SEARCH_EXHAUSTED)
+      return {
+        kind: 'npm-script',
+        key: `npm:${cwd}:exhausted`,
+        body: null,
+        reason: 'the search for a manifest was cut off before it could reach one',
+        resolution: 'PARTIAL',
+      };
     const candidates = ['.lintstagedrc', '.lintstagedrc.json', '.lintstagedrc.yaml', '.lintstagedrc.yml']
       .map((n) => join(cwd, n))
       .filter((f) => fileExists(f));

@@ -28,6 +28,10 @@ organization policy layer says otherwise, Q98).
 
 ## Requires human approval
 
+- [x] `git.local.merge.network` — apply whatever the last fetch brought (`FETCH_HEAD`, `ORIG_HEAD`). The fetch
+  itself is ordinary and names any URL it likes; the merge is where that content reaches the working tree, and it
+  rewrites tracked files — governed ones included — that no human has seen.
+
 - [x] `git.local.amend` — amend the last local commit.
 - [x] `git.local.rebase` — rebase local history.
 - [x] `git.local.reset` — reset local history or the index.

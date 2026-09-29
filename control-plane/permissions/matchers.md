@@ -499,6 +499,13 @@ matchers:
   - capability: command.script-opaque
     tool: Bash
     command: '^git\s+(checkout|restore|add|rm|stash|commit)\b[^|;&]*--pathspec-from-file(=|\s)'
+  # `git merge FETCH_HEAD` APPLIES WHATEVER THE LAST FETCH BROUGHT, from whatever URL that fetch named — and a
+  # fetch from an arbitrary URL is itself ordinary. The merge rewrites tracked files, governed ones included,
+  # with content that came off the network and no human saw (exit review 8). Merging a NAMED branch is ordinary
+  # work and stays out of this.
+  - capability: git.local.merge.network
+    tool: Bash
+    command: '^git\s+(merge|rebase|cherry-pick|reset)\b[^|;&]*\s(FETCH_HEAD|ORIG_HEAD)(\s|$)'
   # `git stash -u` / `--include-untracked` removes UNTRACKED files from the working tree as well as the tracked
   # ones — content that exists nowhere else, since it was never committed (exit review 8).
   - capability: command.destructive
