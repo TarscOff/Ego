@@ -73,6 +73,9 @@ export interface SemanticClass {
   readonly floor: 'DENY' | 'ASK';
   /** canonical spellings — the SAME effect, written the ways real tools accept */
   readonly cases: readonly string[];
+  /** FIXTURE FILES THE EFFECT NEEDS. A few classes only exist against content: `--pathspec-from-file=paths.txt`
+   *  names a file, and without it the command is an unresolvable opacity rather than the effect it carries. */
+  readonly files?: Readonly<Record<string, string>>;
 }
 
 export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
@@ -481,7 +484,61 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'echo x > policies/organization/permissions.md',
       // `--all` stashes untracked AND ignored files: every generated artifact and the whole governance tree
       'git stash --all',
+      // AN IN-PLACE EDIT IS A WRITE WHATEVER SPELLS IT. `sed -i` was judged and its twins were not, so the same
+      // byte change reached ALLOW through ruby's `-i -pe` and gawk's `inplace` extension (exit review 8).
+      "ruby -i -pe 'gsub(/.*/, \"x\")' .claude/settings.json",
+      "gawk -i inplace '{print \"x\"}' .claude/settings.json",
+      "gawk -iinplace '{print \"x\"}' .claude/settings.json",
     ],
+  },
+  {
+    family: 'opacity',
+    // A READABLE COMMAND INSIDE AN OPTION'S VALUE IS NOT OPACITY. Each of these carries its command as plain
+    // text that the kernel can read; reported as "something ran that I did not read" they arrived at ASK, which
+    // is approvable, over an act that is absolutely denied when spelled directly (exit review 8).
+    id: 'a command carried as the value of an option',
+    floor: 'DENY',
+    cases: [
+      "gsed '1e git push origin main' f.txt",
+      "sed -e '/x/e git push origin main' f.txt",
+      "sed --expression='$e git push --force origin main' f.txt",
+      "git grep -O'git push origin main #' needle",
+      "git grep --open-files-in-pager='git push origin main #' needle",
+    ],
+  },
+  {
+    family: 'fs',
+    // `zip -m` MOVES: every source it archives is deleted afterwards. Judging only the archive made emptying the
+    // working tree look like writing a file in /tmp (exit review 8).
+    id: 'an archiver that deletes what it archives',
+    floor: 'DENY',
+    cases: ['zip -rm /tmp/x.zip .', 'zip --move /tmp/x.zip .'],
+  },
+  {
+    family: 'container',
+    // the matchers named nerdctl and the mount resolver did not, so the identical docker line was DENY and this
+    // one ASK (exit review 8)
+    id: 'a host filesystem handed to a container by a runtime other than docker',
+    floor: 'DENY',
+    cases: [
+      'nerdctl run --rm --mount type=bind,source=/,target=/host alpine sh',
+      'podman run --rm --mount type=bind,source=/,target=/host alpine sh',
+      // a "volume" with a device and `o=bind` IS a bind mount: the local driver takes mount(8)'s own options
+      'docker run --rm --mount type=volume,dst=/h,volume-driver=local,volume-opt=type=none,volume-opt=device=/,volume-opt=o=bind alpine ls',
+    ],
+  },
+  {
+    family: 'git',
+    // git's own way of naming more paths than a command line holds. Nothing read the file, so the policy it
+    // names was replaced while the same command with the path spelled out was an absolute deny (exit review 8).
+    id: 'pathspecs named by a file rather than on the command line',
+    floor: 'DENY',
+    cases: [
+      'git checkout HEAD~1 --pathspec-from-file=paths.txt',
+      'git restore --pathspec-from-file=paths.txt',
+      'git rm --pathspec-from-file=paths.txt',
+    ],
+    files: { 'paths.txt': 'control-plane/permissions/matchers.md\n' },
   },
 ];
 
@@ -663,8 +720,14 @@ const noDollar = (c: string): boolean => !c.includes('$');
 /** A Dockerfile `RUN` line executes on the IMAGE's filesystem, not the workspace's, so this producer does not
  *  carry a class whose effect IS a host path. The commands it carries are still carried — a `git push`, a
  *  `curl … | sh` or an unreadable operand inside a RUN is as real as anywhere else. */
+/** A DOCKERFILE `RUN` OPERATES ON THE IMAGE, NOT ON THE HOST. A class whose whole effect is a path — a governed
+ *  file, a credential store, the working tree — is genuinely NOT carried into a build, so composing it with the
+ *  image producers would assert something false. `containerPaths` says the same thing inside the kernel. */
 const noHostPath = (c: string): boolean =>
-  !/(\.harness|\.git\/|control-plane|policies\/|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials)/.test(c);
+  !/(\.harness|\.git\/|control-plane|policies\/|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials)/.test(c) &&
+  // ...and a bulk deletion of the working tree is a path effect too, however it is spelled — as is a command
+  // whose governed path is named by a FILE rather than on the line, since that file is the image's too
+  !/^(rm|shred)\b|\bzip\b[^|;&]*\s-[a-zA-Z]*m|--pathspec-from-file/.test(c);
 
 export const PRODUCERS: readonly Producer[] = [
   { name: 'make recipe', build: (c) => [{ Makefile: `run:\n\t${c}\n` }, 'make run'], safe: noDollar },

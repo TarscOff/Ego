@@ -14,21 +14,24 @@ import {
 } from './support/corpus.ts';
 
 test('every canonical spelling of a semantic class meets its floor', () => {
-  const dir = workspace();
+  const bare = workspace();
   const failures: string[] = [];
-  for (const cls of SEMANTIC_CLASSES)
+  for (const cls of SEMANTIC_CLASSES) {
+    const dir = cls.files ? workspace(cls.files) : bare;
     for (const c of cls.cases) {
       const got = verdict(c, dir);
       if (RANK[got]! < RANK[cls.floor]!) failures.push(`[${cls.family}] ${cls.id}: "${c}" ${cls.floor} -> ${got}`);
     }
+  }
   assert.deepEqual(failures, [], `a canonical spelling fell under its floor:\n  ${failures.join('\n  ')}`);
 });
 
 test('every generated shell variant meets the floor of the class it carries', () => {
-  const dir = workspace();
+  const bare = workspace();
   const failures: string[] = [];
   let checked = 0;
-  for (const cls of SEMANTIC_CLASSES)
+  for (const cls of SEMANTIC_CLASSES) {
+    const dir = cls.files ? workspace(cls.files) : bare;
     for (const c of cls.cases)
       for (const t of TRANSFORMS) {
         if (t.safe && !t.safe(c)) continue; // not a variant: the pair cannot be spelled
@@ -36,6 +39,7 @@ test('every generated shell variant meets the floor of the class it carries', ()
         const got = verdict(t.apply(c), dir);
         if (RANK[got]! < RANK[cls.floor]!) failures.push(`[${cls.family}] ${t.name}: "${c}" ${cls.floor} -> ${got}`);
       }
+  }
   assert.ok(checked > 1000, `the cross-product collapsed: only ${checked} variants`);
   assert.deepEqual(failures, [], `a shell transformation reduced authority:\n  ${failures.join('\n  ')}`);
 });
@@ -51,7 +55,7 @@ test('every producer-carried variant meets the floor of the body it resolves', (
       if (p.safe && !p.safe(c)) continue;
       checked++;
       const [files, invoke] = p.build(c);
-      const got = verdict(invoke, workspace(files));
+      const got = verdict(invoke, workspace({ ...cls.files, ...files }));
       if (RANK[got]! < RANK[cls.floor]!) failures.push(`[${cls.family}] ${p.name}: "${c}" ${cls.floor} -> ${got}`);
     }
   }

@@ -1940,6 +1940,23 @@ export function isScratchPath(abs: string): boolean {
   for (const r of roots) if (posix === r || posix.startsWith(r + '/')) return true;
   return false;
 }
+/** WHETHER A STREAM EDITOR EDITS THE FILE OR MERELY PRINTS IT. `sed -n '1p' f`, `perl -ne 'print' f` and
+ *  `awk '{print}' f` READ their operands and write nothing; only the in-place flag turns the same tool into a
+ *  writer. Treating the whole family as writers made `sed -n '1p' .claude/settings.json` — looking at a governed
+ *  file — an ABSOLUTE DENY, while treating none of them as writers let `gawk -i inplace` rewrite it (exit
+ *  review 8). Both halves are the same question, so it is asked once, here. */
+function editsInPlace(head: string, tokens: string[]): boolean {
+  if (/^(gawk|awk|mawk|nawk)$/.test(head))
+    // gawk edits in place through an EXTENSION, not a flag: `-i inplace`, `-iinplace`, `--include inplace`
+    return tokens.some((t, i) =>
+      /^(-i|--include)$/.test(t) ? tokens[i + 1] === 'inplace' : /^(-i|--include=)inplace$/.test(t),
+    );
+  // `-i`, `-i.bak` (the backup suffix is glued to it), or the letter inside a cluster of flags that take no
+  // argument. The cluster is spelled out rather than `[A-Za-z]*` because perl's `-Ilib` names an include PATH
+  // and a loose test read the `i` of `lib` as the in-place flag.
+  return tokens.some((t) => t === '--in-place' || t.startsWith('--in-place=') || /^-[nrEsuzpalwc0]*i/.test(t));
+}
+
 const WRITE_HEADS = new Set([
   'cp',
   'mv',
@@ -2260,6 +2277,11 @@ export interface ExecutionEnvironment {
    *  proportionality defect introduced by the Dockerfile producer itself (exit review 8). The COMMANDS are still
    *  classified: a `git push` or a `curl … | sh` inside a RUN is as real as anywhere else. */
   containerPaths?: boolean;
+  /** THE TEXT THIS SEGMENT READS ON STANDARD INPUT, when the kernel can see it: a heredoc body. A producer that
+   *  takes its own input from stdin — `docker build -f -` is the one that matters — can then read what it will
+   *  actually build instead of reporting the stream as unreadable (exit review 8). Absent when the stream comes
+   *  from anywhere the kernel cannot read, which stays the opacity it is. */
+  stdinText?: string;
   /** Names DEFINED IN THIS UNIT whose body the analyzer already read — a shell function. A call to one of them
    *  executes text that is already accounted for, so it is neither an unknown producer nor an unresolved binding:
    *  EGO knows exactly what the name means. An ALIAS is not here, because its body is not handed over. */
@@ -4180,15 +4202,35 @@ function resolveScriptCommand(
   if (/^(docker|podman|nerdctl|buildah)$/.test(head) && buildAt > 0) {
     // a glued short option keeps its `=`: `-f=Dockerfile.evil` names `Dockerfile.evil`, not `=Dockerfile.evil`
     const named = optionValue(tokens, 'f', ['--file'])?.replace(/^=/, '') ?? null;
-    // `-f -` reads the Dockerfile from STANDARD INPUT — a stream this kernel cannot read, whatever the context is
-    if (named === '-')
+    // `-f -` reads the Dockerfile from STANDARD INPUT. That is a stream — UNLESS the command line holds it, which
+    // a heredoc does: `docker build -f - . <<EOF\nFROM alpine\nRUN git push origin main\nEOF` writes the whole
+    // Dockerfile in plain sight, and calling it unreadable gave an absolute deny the approvable ASK of opacity
+    // (exit review 8). A `< file` redirect names a file the kernel may also be able to read.
+    if (named === '-') {
+      const piped =
+        env.stdinText ??
+        (() => {
+          const redir = /(?:^|\s)<\s*([^\s<>|&;]+)/.exec(env.rawSegment ?? norm)?.[1];
+          if (redir === undefined || /[$`*?]/.test(redir)) return undefined;
+          return readInsideWorkspace(ctx, isAbsolute(redir) ? redir : resolve(cwd, redir)) ?? undefined;
+        })();
+      if (piped === undefined)
+        return {
+          kind: 'shell-script',
+          key: 'dockerfile:stdin',
+          body: null,
+          reason: 'the Dockerfile is read from standard input',
+          resolution: 'UNREADABLE',
+        };
       return {
         kind: 'shell-script',
-        key: 'dockerfile:stdin',
-        body: null,
-        reason: 'the Dockerfile is read from standard input',
-        resolution: 'UNREADABLE',
+        key: `dockerfile:stdin:${fingerprint(piped)}`,
+        body: dockerfileShellLines(piped),
+        reason: 'the Dockerfile arrives on standard input and the command line holds it',
+        resolution: 'RESOLVED_COMPLETE',
+        containerPaths: true,
       };
+    }
     // the build CONTEXT is the last bare operand; `-` and a URL are contexts EGO cannot read
     // AN OPTION THIS KERNEL DOES NOT KNOW STILL TAKES ITS VALUE. Reading the LAST bare operand as the context
     // let `docker build . --no-cache-filter src` read `src` as the context, so the real Dockerfile was never
@@ -5632,9 +5674,19 @@ export function containerMountSources(tokens: string[]): string[] {
   }
   for (const m of tokens.join(' ').matchAll(/--mount[= ]\s*([^\s]+)/g)) {
     const spec = m[1]!;
-    if (!/type=bind/.test(spec)) continue;
-    const src = /(?:^|,)(?:source|src)=([^,\s]+)/.exec(spec)?.[1];
-    if (src) out.push(src);
+    // A "VOLUME" WITH A DEVICE IS A BIND MOUNT WEARING A DIFFERENT WORD. The local volume driver takes the same
+    // options `mount(8)` does, so `type=volume,volume-driver=local,volume-opt=type=none,volume-opt=device=/Users/…,
+    // volume-opt=o=bind` hands the container that host directory exactly as `type=bind,source=…` would — and it
+    // was not a bind mount by spelling, so the source was never judged (exit review 8).
+    if (/type=bind/.test(spec)) {
+      const src = /(?:^|,)(?:source|src)=([^,\s]+)/.exec(spec)?.[1];
+      if (src) out.push(src);
+      continue;
+    }
+    if (!/(?:^|,)volume-opt=device=/.test(spec)) continue;
+    const dev = /(?:^|,)volume-opt=device=([^,\s]+)/.exec(spec)?.[1];
+    // a device that is a PATH is a host directory; a real block device is the privileged class, not this one
+    if (dev && /^(~|\.\.?)?\//.test(dev) && !/^\/dev\//.test(dev)) out.push(dev);
   }
   return out;
 }
@@ -6316,7 +6368,11 @@ function classifyShellPaths(
       absolute: false,
       opaqueUnread: true,
     });
-  if (head === 'docker' || head === 'podman') {
+  // EVERY RUNTIME THE MODEL KNOWS, not two of them. The privileged-mount MATCHER already named nerdctl, so the
+  // command was recognised as a bind mount of `/` and asked — while the identical docker line was denied,
+  // because only docker and podman reached the resolver that judges the SOURCE path (exit review 8). A tool the
+  // matchers name and the analyzer does not is a hole with a sign on it.
+  if (/^(docker|podman|nerdctl)$/.test(head)) {
     for (const src of containerMountSources(tokenize(seg))) {
       const expanded = expandHome(src) ?? src;
       if (/[$`]/.test(expanded)) {
@@ -6396,6 +6452,8 @@ function classifyShellPaths(
     (rawOutput !== null && rawOutput !== '' && !/^-/.test(rawOutput)) ||
     // an in-place formatter rewrites the files it is given
     (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf)$/.test(head) && tokens.some((t) => /^(-w|--write|-i|--in-place)$/.test(t))) ||
+    // ...and so does a stream editor, but ONLY with its in-place flag: without it the same tool is a reader
+    (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head) && editsInPlace(head, tokens)) ||
     (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv)$/.test(tokens[1] ?? '')) ||
     (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
@@ -6467,7 +6525,11 @@ function classifyShellPaths(
       } else dest = null; // list / compare: read-only
     } else if (head === 'zip') {
       const operands = bareOperands();
-      dest = operands.length ? operands[0]! : null; // zip writes its archive: the first non-option operand
+      // `zip -m` MOVES: it deletes every source file once it has added it, so `zip -rm /tmp/x.zip .` empties the
+      // working tree exactly as `rm -rf .` does. Only the ARCHIVE was judged, so the deletion was invisible and
+      // the act arrived as the approvable `command.destructive` (exit review 8).
+      if (tokens.some((t) => t === '--move' || /^-[a-zA-Z]*m/.test(t))) dest = 'ALL';
+      else dest = operands.length ? operands[0]! : null; // zip writes its archive: the first non-option operand
     } else if (head === 'unzip') {
       dest = optionValue(tokens, 'd', ['--exdir']) ?? '.';
     } else if (head === 'find') {
@@ -6529,12 +6591,42 @@ function classifyShellPaths(
       // `git rm` DELETES the files it names, and the matcher that classifies it is an ALLOW capability. Its
       // pathspecs were never judged, so `git rm -r control-plane` removed the policy that decides every later
       // verdict (exit review 8). Same shape as checkout's pathspecs, minus the tree-ish.
+      // THE PATHSPECS MAY BE IN A FILE. `--pathspec-from-file=paths.txt` is git's own way of naming more paths
+      // than a command line holds, and every verb that takes pathspecs accepts it. None of them read it, so
+      // `git checkout HEAD~1 --pathspec-from-file=paths.txt` replaced the policy the file names while the
+      // identical command with that path spelled out was an absolute deny (exit review 8). The file is read only
+      // from inside the workspace; `-` is standard input, which cannot be read at all and is reported as the
+      // opacity it is.
+      const fromFile = optionValue(tokens, '', ['--pathspec-from-file']);
+      const fileSpecs: string[] = [];
+      let pathspecFileUnread: string | null = null;
+      if (fromFile !== null) {
+        if (fromFile === '-') pathspecFileUnread = 'standard input';
+        else {
+          const text = readInsideWorkspace(ctx, isAbsolute(fromFile) ? fromFile : resolve(cwd, fromFile));
+          if (text === null) pathspecFileUnread = fromFile;
+          // `--pathspec-file-nul` separates with NUL instead of newlines
+          else fileSpecs.push(...text.split(/\0|\r?\n/).map((l) => l.trim()).filter(Boolean));
+        }
+      }
+      if (pathspecFileUnread !== null)
+        hits.push({
+          capability: 'command.script-opaque',
+          verdict: verdictFor(table, ctx, 'command.script-opaque'),
+          via: `the pathspecs come from ${pathspecFileUnread}, which this kernel has not read`,
+          segment: seg,
+          absolute: false,
+          opaqueUnread: true,
+        });
       if (sub === 'rm' || sub === 'mv') {
-        const specs = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        const specs = [...tokens.slice(2).filter((t) => !t.startsWith('-')), ...fileSpecs];
         if (specs.length) {
           gitPathspecs = specs;
           dest = 'ALL_PATHSPECS';
         } else dest = null;
+      } else if ((sub === 'checkout' || sub === 'restore') && fileSpecs.length) {
+        gitPathspecs = fileSpecs;
+        dest = 'ALL_PATHSPECS';
       } else if ((sub === 'checkout' || sub === 'restore') && dd > 0) dest = 'AFTER_DASHDASH';
       else if (sub === 'checkout' || sub === 'restore') {
         const rest = tokens.slice(2).filter((t) => !t.startsWith('-'));
@@ -6569,6 +6661,11 @@ function classifyShellPaths(
     } else if (head === 'patch') {
       // `patch -o FILE` / `patch -oFILE` / `patch --output=FILE` writes FILE instead of the patched originals
       dest = optionValue(tokens, 'o', ['--output']) ?? 'ALL';
+    } else if (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head)) {
+      // A STREAM EDITOR WRITES ITS OPERANDS ONLY IN PLACE. Unconditionally it made every READ of a governed file
+      // an absolute deny; never, it let `gawk -i inplace '{print "x"}' .claude/settings.json` rewrite one
+      // (exit review 8).
+      dest = editsInPlace(head, tokens) ? 'ALL' : null;
     } else if (
       [
         'tee',
@@ -6579,10 +6676,6 @@ function classifyShellPaths(
         'rm',
         'mkdir',
         'rmdir',
-        'sed',
-        'gsed',
-        'perl',
-        'ruby',
         'ln',
         'shred',
         'unlink',
@@ -6996,6 +7089,84 @@ function carriedShellBodies(seg: string): string[] {
  *
  *  Separate from `carriedShellBodies` because these bodies have no other route into the analyzer: the normalizer
  *  reaches a `trap` or a herestring body on its own, and it has no path for an awk program at all. */
+/** WHERE THE COMMAND ACTUALLY STARTS. `FOO=bar awk …`, `sudo git …`, `timeout 5 sed …` and `command awk …` are
+ *  all the same invocation as the bare one; a carrier anchored at token 0 sees none of them, which the producer
+ *  cross-product finds the moment such a carrier is added. */
+function commandHeadIndex(t: readonly string[]): number {
+  let i = 0;
+  while (i < t.length) {
+    const w = t[i]!;
+    if (
+      /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) ||
+      WRAPPERS.has(w) ||
+      PREFIX_KEYWORDS.has(w) ||
+      /^(timeout|sudo|doas|xargs|--)$/.test(w)
+    ) {
+      i++;
+      // a wrapper's own operands: `nice -n 5`, `timeout 60`, `exec -c -a NAME`
+      while (i < t.length && /^(-|\d)/.test(t[i]!)) {
+        const opt = t[i]!;
+        i++;
+        if (/^(-n|-a|-C|-u|-g|-p|-t)$/.test(opt) && i < t.length && !t[i]!.startsWith('-')) i++;
+      }
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+/** THE COMMANDS A SED SCRIPT RUNS. GNU sed's `e` command executes a shell command and splices its output into
+ *  the stream: `gsed '1e git push origin main' f.txt` pushes. The text is RIGHT THERE in the script, and
+ *  reporting it as opacity gave an absolute deny the approvable ASK of "something ran that I did not read"
+ *  (exit review 8). The `e` FLAG on a substitution (`s/x/y/e`) executes the PATTERN SPACE, which is content
+ *  this kernel has not seen; that stays opacity, which is what it is. */
+function sedShellCommands(seg: string): string[] {
+  const t = tokenize(seg);
+  const i = commandHeadIndex(t);
+  if (!/^(sed|gsed)$/.test((t[i] ?? '').replace(/^.*\//, ''))) return [];
+  // the script is every `-e`/`--expression` value, or — when none was given — the first bare operand
+  const scripts: string[] = [];
+  let sawE = false;
+  for (let j = i + 1; j < t.length; j++) {
+    const w = t[j]!;
+    if (w === '-e' || w === '--expression') {
+      if (t[j + 1] !== undefined) { scripts.push(t[j + 1]!); sawE = true; j++; }
+      continue;
+    }
+    const eq = /^(?:--expression=|-e)(.+)$/.exec(w);
+    if (eq) { scripts.push(eq[1]!); sawE = true; continue; }
+    if (w === '-f' || w === '--file') { j++; continue; } // a script FILE, which this resolver has not read
+    if (w.startsWith('-')) continue;
+    if (!sawE && !scripts.length) scripts.push(w);
+  }
+  const out: string[] = [];
+  for (const script of scripts)
+    for (const line of script.split('\n'))
+      // an address may select the lines: a line number, `$`, a range, or a `/regex/`. `e` then takes the REST
+      // of the line as the command.
+      for (const m of line.matchAll(/(?:^|;)\s*(?:\/(?:\\.|[^/])*\/|[0-9$,~+]+)?\s*!?\s*e[ \t]+([^\n]+)/g))
+        out.push(m[1]!.trim());
+  return out;
+}
+
+/** THE PAGER IS A COMMAND, AND `git grep -O<cmd>` RUNS IT. Git spells it `-O<pager>` (glued only) and
+ *  `--open-files-in-pager=<pager>`; the value is a shell command line that git runs with the matching files
+ *  appended, so `git grep -O'git push origin main #' hello` pushes and the `#` eats the file list. It arrived as
+ *  `command.script-opaque` — an ASK — over text the kernel can read perfectly well (exit review 8). */
+function gitPagerCommands(seg: string): string[] {
+  const t = tokenize(seg);
+  // the head is where the COMMAND starts, not at token 0: `sudo git …`, `FOO=bar git …` and `timeout 5 git …`
+  // are the same invocation, and anchoring at position 0 missed every one of them (found by the cross-product)
+  if (!/^git$/.test((t[commandHeadIndex(t)] ?? '').replace(/^.*\//, ''))) return [];
+  const out: string[] = [];
+  for (const w of t) {
+    const m = /^(?:-O|--open-files-in-pager=)(.+)$/.exec(w);
+    if (m?.[1]) out.push(m[1]);
+  }
+  return out;
+}
+
 function awkShellCommands(seg: string): string[] {
   const t = tokenize(seg);
   // THE HEAD IS FOUND WHERE THE COMMAND STARTS, not at token 0: `FOO=bar awk …` and `command awk …` are the same
@@ -7247,6 +7418,9 @@ function analyzeSegments(
       envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg) },
       definedNames: functionNames,
       rawSegment: seg,
+      // A HEREDOC IS STANDARD INPUT THE KERNEL CAN READ. `docker build -f - . <<EOF … EOF` writes the whole
+      // Dockerfile right there on the command line.
+      ...(stage.heredocBody !== undefined ? { stdinText: stage.heredocBody } : {}),
       ...(bindingWhy !== null ? { binding: { kind: 'redefined' as const, why: bindingWhy } } : {}),
       get treeFresh(): boolean {
         return !written.has(TREE_DIRTY);
@@ -7287,14 +7461,30 @@ function analyzeSegments(
     for (const body of awkShellCommands(seg))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by awk)`.trim() });
+    // the same rule for the two other places where a readable command hides inside an option's value
+    for (const body of sedShellCommands(seg))
+      for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
+        hits.push({ ...h, via: `${h.via ?? ''} (run by sed's e command)`.trim() });
+    for (const body of gitPagerCommands(seg))
+      for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
+        hits.push({ ...h, via: `${h.via ?? ''} (run by git as the pager)`.trim() });
     for (const body of carriedShellBodies(seg))
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
       // sibling units of the OUTER segment, where the per-unit state — the working directory and the environment
       // — is the outer one. So `bash -c "export PGHOST=prod-db… && psql -c 'DROP TABLE users'"` lost the
       // assignment that the same text without the carrier carries perfectly well (exit review 7, cross-product).
-      // A SINGLE-command body needs no re-entry: the normalizer reaches it on its own.
-      if (splitShellPipeline(body).length > 1)
+      // A SINGLE-command body needs no re-entry: the normalizer reaches it on its own — EXCEPT when what it
+      // carries is a program held in an option's VALUE. The normalizer returns strings, so the quoting that made
+      // `awk 'BEGIN{system("git push origin main")}'` one word is gone by the time it arrives, and the carriers
+      // below read a program that no longer has any word boundaries. The body still has its own quoting, so a
+      // body that feeds one of them is re-entered whole (found by the producer cross-product, exit review 8).
+      if (
+        splitShellPipeline(body).length > 1 ||
+        awkShellCommands(body).length > 0 ||
+        sedShellCommands(body).length > 0 ||
+        gitPagerCommands(body).length > 0
+      )
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
     // A PIPE INTO AN INTERPRETER IS AN EXECUTION EDGE. `echo 'rm -rf /' | bash` runs the first stage's output as

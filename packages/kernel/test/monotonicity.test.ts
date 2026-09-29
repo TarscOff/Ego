@@ -213,6 +213,22 @@ test('PROPERTY: looking at something is not doing it', () => {
     // what must never happen is that separating the two also released the doing form
     assert.notEqual(verdict(doing, dir), 'ALLOW', `the act it inspects stays gated: ${doing}`);
   }
+  // A STREAM EDITOR IS A READER UNTIL ITS IN-PLACE FLAG SAYS OTHERWISE. Judged as writers, every one of these
+  // reads of a governed file was an absolute deny; judged as readers, `gawk -i inplace` rewrote one.
+  const editors: ReadonlyArray<readonly [string, string]> = [
+    ["sed -n '1p' .claude/settings.json", "sed -i 's/a/b/' .claude/settings.json"],
+    ["sed 's/a/b/' .claude/settings.json", "sed -i.bak 's/a/b/' .claude/settings.json"],
+    ["perl -ne 'print' .claude/settings.json", "perl -pi -e 's/a/b/' .claude/settings.json"],
+    ["perl -Ilib -ne 'print' .claude/settings.json", "perl -i -pe 's/a/b/' .claude/settings.json"],
+    ["awk '{print}' .claude/settings.json", "gawk -i inplace '{print \"x\"}' .claude/settings.json"],
+    ["gawk '{print}' .claude/settings.json", "gawk -iinplace '{print \"x\"}' .claude/settings.json"],
+    ["ruby -ne 'puts' .claude/settings.json", "ruby -i -pe 'gsub(/a/,\"b\")' .claude/settings.json"],
+  ];
+  for (const [reading, writing] of editors) {
+    const dir = workspace({ '.claude/settings.json': '{}' });
+    assert.notEqual(verdict(reading, dir), 'DENY', `reading a governed file is not writing it: ${reading}`);
+    assert.equal(verdict(writing, dir), 'DENY', `an in-place edit is a write whatever spells it: ${writing}`);
+  }
   // make keeps TWO exceptions under `-n`, and so does EGO: a `+`-prefixed line and a line naming $(MAKE) run
   const dir = workspace({ Makefile: mk });
   assert.equal(verdict('make -n push', dir), 'DENY', 'a `+` recipe line runs even under --dry-run');
