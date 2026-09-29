@@ -4448,6 +4448,57 @@ function resolveScriptCommand(
       continue;
     }
   }
+  // `docker buildx bake` BUILDS EVERY TARGET IN A BAKE FILE, and each target names its own Dockerfile. The file
+  // is HCL or JSON and it is right there in the workspace, so the Dockerfiles it names are read exactly as
+  // `docker build`'s is — `bake` was an unknown command and the `RUN git push origin main` in the Dockerfile it
+  // selects was never seen (exit review 9). A bake file this kernel cannot read is opacity, not absence.
+  const bakeAt = tokens.findIndex((t, i) => i > 0 && t === 'bake' && DOCKER_GROUPS.test(tokens[i - 1] ?? ''));
+  if (/^(docker|podman|nerdctl)$/.test(head) && bakeAt > 0) {
+    const named = tokens
+      .map((t, i) => (t === '-f' || t === '--file' ? tokens[i + 1] : /^(?:--file=|-f)(.+)$/.exec(t)?.[1]))
+      .filter((f): f is string => typeof f === 'string' && f !== '');
+    const candidates = named.length
+      ? named
+      : ['docker-bake.hcl', 'docker-bake.json', 'docker-bake.override.hcl', 'docker-compose.yml'];
+    const texts: string[] = [];
+    const unread: string[] = [];
+    for (const f of candidates) {
+      const abs = isAbsolute(f) ? f : resolve(cwd, f);
+      const text = readInsideWorkspace(ctx, abs);
+      if (text !== null) texts.push(text);
+      else if (named.length || fileExists(abs)) unread.push(f);
+    }
+    if (!texts.length)
+      return {
+        kind: 'shell-script',
+        key: `bake:${cwd}:${candidates.join(',')}`,
+        body: null,
+        reason: unread.length ? 'the bake file could not be read' : 'no bake file',
+        resolution: unread.length ? 'UNREADABLE' : 'ABSENT_VERIFIED',
+      };
+    // `dockerfile = "X"` (HCL) and `"dockerfile": "X"` (JSON) name the file; `context` says where it sits
+    const lines: string[] = [];
+    const gaps: Unresolved[] = [];
+    for (const text of texts) {
+      const ctxDir = /(?:^|\n)\s*"?context"?\s*[:=]\s*"([^"]+)"/.exec(text)?.[1] ?? '.';
+      const files = [...text.matchAll(/(?:^|\n)\s*"?dockerfile"?\s*[:=]\s*"([^"]+)"/g)].map((m) => m[1]!);
+      for (const f of files.length ? files : [`${ctxDir}/Dockerfile`]) {
+        const abs = resolve(cwd, isAbsolute(f) ? f : `${ctxDir}/${f}`.replace(/^\.\//, ''));
+        const dt = readInsideWorkspace(ctx, abs);
+        if (dt === null) gaps.push({ what: 'body', where: f, why: 'a Dockerfile this bake file names could not be read' });
+        else lines.push(...dockerfileShellLines(dt));
+      }
+    }
+    return {
+      kind: 'shell-script',
+      key: `bake:${cwd}:${fingerprint(texts.join('\n'))}`,
+      body: lines,
+      reason: gaps.length ? `bake targets; NOT fully resolved: ${gaps[0]!.why}` : 'bake targets',
+      resolution: gaps.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
+      containerPaths: true,
+      ...(gaps.length ? { unresolved: gaps } : {}),
+    };
+  }
   // A DOCKERFILE IS A PRODUCER. `docker build .` executes every `RUN` line in the build context's Dockerfile —
   // as root, with the whole context copied in — and EGO resolved Makefiles, manifest scripts and shell scripts
   // while treating this one as an opaque `container.build`. A Dockerfile whose `RUN` line POSTs `.env` to a
@@ -5182,16 +5233,27 @@ function resolveScriptCommand(
         const auto = { '@': t, '<': rule.prereqs[0] ?? '', '^': rule.prereqs.join(' '), '+': rule.prereqs.join(' '), '?': rule.prereqs.join(' ') };
         // EVERY BRANCH OF A CONDITIONAL IS A CANDIDATE: the line is expanded once per value the resolver saw,
         // bounded so a file full of conditionals cannot blow the walk up.
+        // A REACHED CAP IS NOT AN ABSENCE. The bound exists so a file full of conditionals cannot blow the walk
+        // up, and it was SILENT: with four `ifeq` blocks assigning the same name, the branch holding `git push
+        // --force origin main` was never expanded and the target still resolved RESOLVED_COMPLETE — a positive
+        // claim over values nobody looked at (exit review 9). Every other bound in this resolver reports itself;
+        // now this one does too, and the target becomes PARTIAL.
         let budget = 6;
         for (const [name, values] of merged.altVars) {
-          if (budget <= 0) break;
+          if (budget <= 0) {
+            partial = `"${t}" has more conditional branch values than this resolver expands`;
+            break;
+          }
           // `$V` IS `$(V)`. make reads a single character after `$` as a whole variable name, and the test
           // required the parens, so a recipe line spelled `$V` never saw the branch values of `V` — `make E=1
           // run` with `V = git push --force origin main` in the taken branch was ALLOW (exit review 9).
           const ref = name.length === 1 ? `\\$([({]${name}[)}]|${name}(?![A-Za-z0-9_]))` : `\\$[({]${name}[)}]`;
           if (!new RegExp(ref).test(cmd)) continue;
           for (const v of values) {
-            if (budget-- <= 0) break;
+            if (budget-- <= 0) {
+              partial = `"${t}" has more conditional branch values than this resolver expands`;
+              break;
+            }
             const alt = expandMakeText(cmd, new Map([...vars, [name, v]]), auto);
             for (const inner of alt.ran) body.push(inner);
             if (runs && alt.text !== null && alt.text.trim()) body.push(alt.text.trim());
@@ -6731,6 +6793,30 @@ function classifyShellPaths(
       absolute: false,
       opaqueUnread: true,
     });
+  // `git show <rev>:<path>` READS THAT PATH OUT OF HISTORY. The file need not be in the working tree at all —
+  // a `.env` deleted last week is still in every commit that had it — and the operand carries a `<rev>:` prefix
+  // that made it look like nothing the path scan recognises, so `git show HEAD:.env` printed a credential file
+  // at ALLOW (exit review 9). `git cat-file -p` and `git checkout <rev> -- <path>` name it the same way.
+  if (head === 'git' && /^(show|cat-file)$/.test(tokens[1] ?? '')) {
+    for (const t of tokens.slice(2)) {
+      const at = t.indexOf(':');
+      if (at <= 0 || t.startsWith('-')) continue;
+      const rel = t.slice(at + 1);
+      if (!rel || /[$`*?]/.test(rel)) continue;
+      const abs = canonicalPath(isAbsolute(rel) ? rel : resolve(cwd, rel.replace(/^\.\//, '')));
+      const h = classifyPath(table, ctx, 'Read', abs);
+      if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `git reads ${rel} out of history (${h.via})`, segment: seg });
+    }
+  }
+  // `--secret src=PATH` HANDS A FILE TO THE BUILD. BuildKit mounts it inside the image at build time, so the
+  // file's bytes leave the workspace exactly as `cat` would send them anywhere else (exit review 9).
+  for (const m of seg.matchAll(/--secret[= ]\s*\S*?(?:^|,)(?:src|source|file)=([^,\s]+)/g)) {
+    const v = m[1]!;
+    if (/[$`*?]/.test(v)) continue;
+    const abs = canonicalPath(isAbsolute(v) ? v : resolve(cwd, v));
+    const h = classifyPath(table, ctx, 'Read', abs);
+    if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `build secret from ${v} (${h.via})`, segment: seg });
+  }
   // A SYMLINK'S TARGET IS RELATIVE TO THE DIRECTORY THE LINK LIVES IN, not to the working directory. `ln -s
   // ../.harness k/h` creates `k/h` pointing at `<repo>/.harness` — one directory up FROM k — and resolving the
   // target against the cwd read it as the parent of the checkout, which is protected by nothing. The link then

@@ -203,6 +203,17 @@ matchers:
   - capability: production.k8s.mutate
     tool: Bash
     command: '^(kubectl|oc)\b(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))(?=.*\s(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward|debug|certificate|proxy)\b)'
+  # READING A SECRET IS A CREDENTIAL READ, whatever the verb is called. `kubectl --context production get -f
+  # secret.yaml -o yaml` prints the Secret's data — base64 is not encryption — and the production matcher below
+  # lists only MUTATING verbs, so the read reached ALLOW (exit review 9). `describe` and `-o json|yaml` are the
+  # same act by other spellings.
+  - capability: fs.credential-store.read
+    tool: Bash
+    command: '^(kubectl|oc)\b(?=[^|;&]*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))[^|;&]*\s(get|describe|extract)\b[^|;&]*\b(secret|secrets)\b'
+  # ...and reading one by FILE is the same read: `-f secret.yaml` names the object, and the file says it is a Secret
+  - capability: fs.credential-store.read
+    tool: Bash
+    command: '^(kubectl|oc)\b(?=[^|;&]*(--context[= ]\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))[^|;&]*\s(get|describe)\b[^|;&]*\s-f[= ]?\S*secret\S*'
   - capability: production.helm.mutate
     tool: Bash
     command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
