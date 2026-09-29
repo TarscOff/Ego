@@ -2289,7 +2289,12 @@ export function classifyPath(
   }
   for (const m of table.matchers) {
     if (!m.path) continue;
-    if (m.tool !== tool && !(m.tool === 'Write' && tool === 'Edit')) continue;
+    // `any` MEANS EVERY TOOL, and it is the SILENT DEFAULT for a matcher that omits `tool:`. `classifyCommand`
+    // and `classifyUrl` both honour it; this one did not, so a path rule written without a `tool:` key — the
+    // single most likely authoring slip in an overlay, and the only field with a default — compiled clean, was
+    // reported by nothing, and protected nothing: not Write, not Edit, not a Bash redirection. An organization
+    // believing `secrets/**` was a credential store got ALLOW for every write to it (exit review 9).
+    if (m.tool !== 'any' && m.tool !== tool && !(m.tool === 'Write' && tool === 'Edit')) continue;
     if (matchPathPattern(m.path, abs, ctx)) {
       return {
         capability: m.capability,
@@ -8383,6 +8388,16 @@ export function evaluate(
       // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
       if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
         hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
+      // THE PREFIX IS NOT THE ONLY LITERAL PART OF A PATTERN. `**/.env` has NO literal prefix — it reaches the
+      // workspace root, which is ordinary — while its literal TAIL names the file it will actually open, and an
+      // explicit glob overrides both ripgrep's skip-hidden default and .gitignore. So `Grep` with
+      // `glob: '**/.env'` and output_mode "content" PRINTED a credential file at ALLOW (exit review 9). The
+      // tail is classified as the file it names, anywhere the pattern can reach.
+      const tail = reach.split('/').filter(Boolean).pop() ?? '';
+      if (tail && !/[*?[{]/.test(tail)) {
+        const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, tail)));
+        if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
+      }
     }
     if (
       abs === home ||

@@ -383,6 +383,22 @@ matchers:
   - capability: fs.hook-config.write
     tool: Write
     path: '**/.claude/settings.local.json'
+  # THE SETTINGS FILE REGISTERS A SCRIPT; THE SCRIPT IS WHAT RUNS. `.claude/hooks/<name>.sh` is the conventional
+  # location for a project hook, named from settings.json as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/<name>.sh` —
+  # so rewriting the script is the same tamper as rewriting the registration, and only the registration was
+  # protected (exit review 9). The same is true of every other agent directory that holds executable content.
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.claude/hooks/**'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '~/.claude/hooks/**'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.claude/agents/**'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.claude/commands/**'
   - capability: fs.hook-config.write
     tool: Write
     path: '**/.codex/**'
@@ -412,7 +428,7 @@ matchers:
     path: '**/.git'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/settings|\.codex/|core\.hooksPath)'
+    command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
   - capability: fs.git-internals.write
     tool: Bash
     command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(^|\s|/)\.git/'
@@ -928,7 +944,7 @@ matchers:
     command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.ego/(trust|runtimes|releases|index)\b'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|core\.hooksPath|\.claude/settings|\.codex/)'
+    command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|core\.hooksPath|\.claude/(settings|hooks/|agents/|commands/)|\.codex/)'
   - capability: ego.runtime.tamper
     tool: Bash
     command: '(^|\s)(node|nodejs|deno|bun|tsx|ts-node|python|python2|python3|ruby|perl|php|Rscript|osascript)\b[^;|&]*?\s(-e|-c|-r|-E|-p|--eval|--exec|--command)\b[\s\S]*\.harness/(generated|runtime)\b'

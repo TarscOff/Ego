@@ -17,7 +17,9 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { RANK, TRANSFORMS, PRODUCERS, workspace, verdict } from './support/corpus.ts';
-import { expandBraces } from '../src/authority/evaluate.ts';
+import { expandBraces, evaluate } from '../src/authority/evaluate.ts';
+import { compileAuthority } from '../src/authority/compile.ts';
+import { loadControlPlane } from '../src/control-plane/load.ts';
 
 /** Effects whose verdict is decided by what they DO, with the floor that must never be crossed. */
 const BASE: ReadonlyArray<{ readonly cmd: string; readonly floor: 'DENY' | 'ASK'; readonly what: string }> = [
@@ -268,4 +270,32 @@ test('PROPERTY: braces expand exactly as this machine’s shell expands them', (
       mismatches.push(`${w}: shell ${JSON.stringify(want)} vs ego ${JSON.stringify(got)}`);
   }
   assert.deepEqual(mismatches, [], `the expansion disagrees with ${shell}:\n  ${mismatches.join('\n  ')}`);
+});
+
+test('PROPERTY: `tool: any` means every tool, for paths as much as for commands', () => {
+  // `any` IS THE SILENT DEFAULT for a matcher that omits `tool:` — `load.ts` and the overlay loader both apply
+  // it — and it is the single most likely authoring slip in a consumer overlay. `classifyCommand` and
+  // `classifyUrl` honoured it; `classifyPath` did not, so an organization that wrote `path: 'secrets/**'` with
+  // no `tool:` key got a rule that compiled clean, was reported by nothing, and protected nothing: not Write,
+  // not Edit, not a Bash redirection (exit review 9).
+  const base = compileAuthority(loadControlPlane(new URL('../../../control-plane/', import.meta.url).pathname));
+  const withAny = {
+    ...base,
+    matchers: [
+      { capability: 'fs.credential-store.write', tool: 'any', path: 'secrets/**', layer: 'overlay' as const },
+      ...base.matchers,
+    ],
+  };
+  const dir = workspace({ 'secrets/deploy.key': 'k', 'src/a.ts': 'x' });
+  const c = { profile: 'STANDARD' as const, mode: 'NORMAL_DELIVERY' as const, repoRoots: [dir], cwd: dir };
+  const at = (t: 'Write' | 'Edit', p: string): string =>
+    evaluate(withAny, c, { tool: t, input: { file_path: join(dir, p), content: 'x' } }).verdict;
+  assert.notEqual(at('Write', 'secrets/deploy.key'), 'ALLOW', 'a `tool: any` path rule governs Write');
+  assert.notEqual(at('Edit', 'secrets/deploy.key'), 'ALLOW', 'and Edit');
+  assert.notEqual(
+    evaluate(withAny, c, { tool: 'Bash', input: { command: 'printf x > secrets/deploy.key' } }).verdict,
+    'ALLOW',
+    'and a Bash redirection into it',
+  );
+  assert.equal(at('Write', 'src/a.ts'), 'ALLOW', 'and nothing else');
 });
