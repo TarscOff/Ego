@@ -3841,12 +3841,15 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
     // config names a clean filter executes it (exit review 7).
     // ...but NOT `log`, `show` or `blame`: those read COMMITTED objects, where the content is already clean and
     // no filter runs. The line is the working tree, not "read versus write".
-    new Set(['add', 'status', 'diff', 'grep', 'ls-files', 'describe', 'checkout', 'switch', 'restore', 'commit', 'merge', 'stash', 'clone', 'pull', 'reset', 'rm', 'mv', 'apply', 'am', 'cherry-pick', 'rebase', 'revert', 'archive', 'update-index', 'read-tree', 'checkout-index', 'diff-files', 'diff-index', 'sparse-checkout']),
+    new Set(['add', 'status', 'diff', 'grep', 'ls-files', 'describe', 'blame', 'cat-file', 'checkout', 'switch', 'restore', 'commit', 'merge', 'stash', 'clone', 'pull', 'reset', 'rm', 'mv', 'apply', 'am', 'cherry-pick', 'rebase', 'revert', 'archive', 'update-index', 'read-tree', 'checkout-index', 'diff-files', 'diff-index', 'sparse-checkout']),
   ],
   [/^diff\.[^.]+\.(textconv|command)$/i, new Set(['diff', 'show', 'log', 'blame', 'difftool', 'range-diff'])],
   [/^core\.fsmonitor$/i, new Set(['status', 'add', 'diff', 'commit', 'checkout', 'switch', 'restore', 'stash'])],
   [/^core\.pager$/i, new Set(['log', 'show', 'diff', 'blame', 'branch', 'tag', 'shortlog', 'grep'])],
   [/^core\.(sshCommand|gitProxy)$/i, new Set(['fetch', 'push', 'pull', 'clone', 'ls-remote', 'submodule', 'remote'])],
+  // `remote.<n>.uploadpack` / `receivepack` NAME THE PROGRAM git runs to serve the transfer, and for a local or
+  // `file://` remote git runs it on THIS machine (exit review 8).
+  [/^remote\.[^.]+\.(uploadpack|receivepack|proxy)$/i, new Set(['fetch', 'pull', 'clone', 'push', 'ls-remote', 'remote'])],
   [/^core\.editor$/i, new Set(['commit', 'rebase', 'tag', 'merge', 'revert', 'cherry-pick', 'config'])],
   // AN ENUMERATION OF PROGRAM-VALUED KEYS IS AN ALLOWLIST, AND EVERYTHING OFF IT REACHED ALLOW. `diff.external`,
   // `merge.<d>.driver`, `gpg.program`, `trailer.<t>.command`, `credential.helper`, `sendemail.smtpPass`-style
@@ -3862,7 +3865,7 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
 ];
 /** The git verbs that only READ the working tree. A content filter runs for these too — git needs it to decide
  *  whether a stat-dirty file really changed — but a DECLARED filter doing that is ordinary work. */
-const GIT_READ_VERBS = new Set(['status', 'diff', 'grep', 'ls-files', 'describe',
+const GIT_READ_VERBS = new Set(['status', 'diff', 'grep', 'ls-files', 'describe', 'blame', 'cat-file',
   'diff-files', 'diff-index', 'update-index']);
 /** The content filters a repository installs as a matter of course. Git LFS is the reason the read verbs were
  *  exempted at all; naming it keeps that reason and drops the blanket.
@@ -5392,7 +5395,10 @@ function resolveContainerTarget(
   // MANAGEMENT GROUP is not a verb — `image` and `context` name a whole family whose members mutate, so treating
   // the group as a read let `docker --context production image rm|prune|load` reach ALLOW against a production
   // engine (exit review 4). When the first positional is a group, the verb is the pair.
-  const reads = new Set(['ps', 'images', 'inspect', 'logs', 'version', 'info', 'top', 'port', 'stats', 'events', 'history', 'diff', 'search']);
+  // `inspect` and `logs` PRINT the container's configuration and output — its environment variables, its mounts
+  // and whatever it logged, which is where credentials live. Against a non-local engine that is an act on it,
+  // exactly as `kubectl get secrets` is against a cluster (exit review 8).
+  const reads = new Set(['ps', 'images', 'version', 'info', 'top', 'port', 'stats', 'events', 'history', 'diff', 'search']);
   const groupReads = new Set([
     ...['image ls', 'image inspect', 'image history', 'image save', 'image tree'],
     ...['container ls', 'container inspect', 'container logs', 'container port', 'container stats', 'container top', 'container diff'],
@@ -5551,6 +5557,9 @@ export function containerMountSources(tokens: string[]): string[] {
  *  and table names never look like this, which is what lets the statement scan stop at one. */
 function looksLikeDbTarget(t: string): boolean {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return true;
+  // `prod-mongo/admin` is `host/database` with no dot in it at all, which is how mongosh is normally invoked
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]*(:\d+)?\/[A-Za-z0-9._-]+$/.test(t) && !/\.(sql|js|py|rb|json|txt|sh)$/i.test(t))
+    return true;
   return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z0-9-]*(:\d+)?(\/\S*)?$/.test(t) && !/\.(sql|js|py|rb|json|txt)$/i.test(t);
 }
 
@@ -5671,8 +5680,7 @@ function resolveDbTarget(
     signals.length === 0 &&
     bare &&
     !FILE_EXT.test(bare) &&
-    /^[A-Za-z0-9][A-Za-z0-9.-]*(:\d+)?(\/[^\s]*)?$/.test(bare) &&
-    /[.:]/.test(bare)
+    looksLikeDbTarget(bare)
   )
     push(bare.split(/[:/]/)[0]!, 'host');
   if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
@@ -6271,6 +6279,11 @@ function classifyShellPaths(
       : (rawOutput ?? (/(?:^|[\s,])dest=([^,\s]+)/.exec(seg)?.[1] ?? null));
   const write =
     WRITE_HEADS.has(head) ||
+    // an EXPLICIT output flag names a destination whatever the value looks like: `--outDir control-plane` has
+    // neither a slash nor a dot in it, and the `/[/.]/` shape test below rejected it (exit review 8)
+    (rawOutput !== null && rawOutput !== '' && !/^-/.test(rawOutput)) ||
+    // an in-place formatter rewrites the files it is given
+    (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf)$/.test(head) && tokens.some((t) => /^(-w|--write|-i|--in-place)$/.test(t))) ||
     (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv)$/.test(tokens[1] ?? '')) ||
     (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
@@ -6300,7 +6313,8 @@ function classifyShellPaths(
     // `cp -l` MAKES A HARD LINK: a second name for the same inode, through which a governed file is writable by a
     // path no rule covers. `cp -l control-plane/permissions/absolute-denies.md /tmp/alias` is the same act as
     // `ln <same> /tmp/alias`, which is DENY, so both operands are judged (exit review 7).
-    if (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))) dest = 'ALL';
+    if (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf)$/.test(head)) dest = 'ALL';
+    else if (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))) dest = 'ALL';
     else if (head === 'tar' || head === 'bsdtar' || head === 'gtar') {
       // traditional tar also takes a DASH-LESS function-letter operand as its first argument: `tar xf a`, `tar cf a`,
       // `tar czf a` — recognise it alongside the dashed `-cf`/`-xf` forms
@@ -6473,7 +6487,9 @@ function classifyShellPaths(
   }
   // a generic `-o FILE` / `--output FILE` names a write destination whatever the tool is called; enumerating every
   // "read-only" tool that happens to accept one is the losing game (round 15)
-  if (!dest && genericOutput && /[/.]/.test(genericOutput)) dest = genericOutput;
+  // ...and an EXPLICIT output flag names a destination whatever the value looks like: `--outDir control-plane`
+  // has neither a slash nor a dot, and this shape test rejected it (exit review 8)
+  if (!dest && genericOutput && !/^-/.test(genericOutput)) dest = genericOutput;
   if (dest === 'ALL_PATHSPECS') {
     for (const sp of gitPathspecs) {
       if (paths.some((q) => q.raw === sp)) continue;

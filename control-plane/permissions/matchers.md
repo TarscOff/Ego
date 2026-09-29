@@ -499,6 +499,11 @@ matchers:
   - capability: command.script-opaque
     tool: Bash
     command: '^git\s+(checkout|restore|add|rm|stash|commit)\b[^|;&]*--pathspec-from-file(=|\s)'
+  # `git stash -u` / `--include-untracked` removes UNTRACKED files from the working tree as well as the tracked
+  # ones — content that exists nowhere else, since it was never committed (exit review 8).
+  - capability: command.destructive
+    tool: Bash
+    command: '^git\s+stash\b[^|;&]*\s(-[a-zA-Z]*u|--include-untracked)(\s|$)'
   # `git checkout .` and `git restore .` DISCARD every uncommitted change in the working tree — a repository-wide
   # destruction the command line does not enumerate, and the narrow-path spellings are judged on their paths.
   - capability: command.destructive
@@ -665,6 +670,18 @@ matchers:
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'
+  # `--insecure-skip-tls-verify` turns off the check that the cluster is the one it claims to be.
+  - capability: k8s.target.unclassified
+    tool: Bash
+    command: '^(kubectl|oc|helm)\b[^|;&]*--insecure-skip-tls-verify\b'
+  # `docker trust sign` publishes a signature that makes an image trusted for everyone who pulls it.
+  - capability: container.registry.push
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+trust\s+(sign|key\s+generate|signer\s+add|revoke)\b'
+  # `docker compose run --build` builds before it runs, so the Dockerfile the compose file names executes.
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\srun\b[^|;&]*--build\b'
   # `docker compose build` builds whatever the compose FILE names, which EGO does not parse: the Dockerfile it
   # chooses, its context and its build args are all decided by a file this kernel never read.
   - capability: command.script-opaque
@@ -758,6 +775,28 @@ matchers:
     # regex, so the honest choice is the simple rule plus this note rather than a lookahead that silently means
     # something else.
     command: '^rm\s+(-[a-zA-Z]+\s+)*((\./)?(node_modules|bower_components|dist|build|out|target|coverage|htmlcov|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.next|\.nuxt|\.turbo|\.parcel-cache|\.svelte-kit|\.angular|\.gradle|\.venv|venv|vendor|\.terraform|Pods|DerivedData)/?\s*)+$'
+  # An option whose value NAMES A PROGRAM the compiler or runtime will run: rustc's linker, javac's `-J` JVM
+  # options (which carry `-javaagent:`), and the in-place formatters that rewrite the file they are given.
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^(rustc|cargo|clang|gcc|g\+\+|ld)\b[^|;&]*\s-C\s*(linker|link-arg|link-args|linker-plugin)='
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^(javac|java|kotlinc|scalac|gradle|mvn)\b[^|;&]*\s-J?-?(javaagent|agentlib|agentpath|Xbootclasspath)'
+  # `shfmt -w`, `prettier --write`, `black`, `gofmt -w`: an in-place rewrite of the file named, which the path
+  # rules then judge — a hook or a policy file is not an ordinary destination (exit review 8).
+  - capability: command.local-mutation
+    tool: Bash
+    command: '^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf|buf\s+format)\b[^|;&]*\s(-w|--write|-i|--in-place)(\s|$)'
+  # `tar --remove-files` DELETES every file once it is archived, and `docker trust sign` publishes a signature
+  # that makes an image trusted for everyone who pulls it.
+  - capability: command.destructive
+    tool: Bash
+    command: '^g?tar\b[^|;&]*--remove-files\b'
+  # `lint-staged --config F` takes its command list from a file this kernel never read.
+  - capability: command.unmodelled-closure
+    tool: Bash
+    command: '^(npx\s+)?lint-staged\b[^|;&]*\s(-c|--config)(=|\s)'
   # `tar cf host:/path` uses tar's REMOTE archive syntax: the archive is written on another machine over rsh/ssh,
   # which is egress with no network binary on the line (exit review 8).
   - capability: command.network-tool
