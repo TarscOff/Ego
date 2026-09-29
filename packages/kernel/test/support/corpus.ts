@@ -653,6 +653,12 @@ export interface Producer {
 /** make expands `$` before the shell sees the line, so a `$`-carrying body is a different command in a recipe. */
 const noDollar = (c: string): boolean => !c.includes('$');
 
+/** A Dockerfile `RUN` line executes on the IMAGE's filesystem, not the workspace's, so this producer does not
+ *  carry a class whose effect IS a host path. The commands it carries are still carried — a `git push`, a
+ *  `curl … | sh` or an unreadable operand inside a RUN is as real as anywhere else. */
+const noHostPath = (c: string): boolean =>
+  !/(\.harness|\.git\/|control-plane|policies\/|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials)/.test(c);
+
 export const PRODUCERS: readonly Producer[] = [
   { name: 'make recipe', build: (c) => [{ Makefile: `run:\n\t${c}\n` }, 'make run'], safe: noDollar },
   { name: 'make prerequisite', build: (c) => [{ Makefile: `run: dep\n\techo ok\ndep:\n\t${c}\n` }, 'make run'], safe: noDollar },
@@ -673,14 +679,14 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'make prerequisite named like a special', build: (c) => [{ Makefile: `.PHONY-thing:\n\t${c}\nrun: .PHONY-thing\n\t@echo a\n` }, 'make run'], safe: noDollar },
   { name: 'make pattern-rule prerequisite', build: (c) => [{ Makefile: `run: evil.o\n\t@echo linking\n\n%.o: %.c\n\t${c}\n`, 'evil.c': 'x' }, 'make run'], safe: noDollar },
   // a Dockerfile's RUN lines execute during `docker build`
-  { name: 'Dockerfile RUN', build: (c) => [{ Dockerfile: `FROM alpine\nRUN ${c}\n` }, 'docker build .'] },
-  { name: 'Dockerfile RUN with a mount flag', build: (c) => [{ Dockerfile: `FROM alpine\nRUN --mount=type=cache,target=/c ${c}\n` }, 'docker build .'] },
-  { name: 'Dockerfile RUN by a named file', build: (c) => [{ 'docker/Dockerfile': `FROM alpine\nRUN ${c}\n` }, 'docker build -f docker/Dockerfile .'] },
+  { name: 'Dockerfile RUN', build: (c) => [{ Dockerfile: `FROM alpine\nRUN ${c}\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'Dockerfile RUN with a mount flag', build: (c) => [{ Dockerfile: `FROM alpine\nRUN --mount=type=cache,target=/c ${c}\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'Dockerfile RUN by a named file', build: (c) => [{ 'docker/Dockerfile': `FROM alpine\nRUN ${c}\n` }, 'docker build -f docker/Dockerfile .'], safe: noHostPath },
   // exit review 8, self-attack: the Dockerfile shapes the first pass did not read
-  { name: 'Dockerfile heredoc RUN', build: (c) => [{ Dockerfile: `FROM alpine\nRUN <<EOF\n${c}\nEOF\n` }, 'docker build .'] },
-  { name: 'Dockerfile ONBUILD RUN', build: (c) => [{ Dockerfile: `FROM alpine\nONBUILD RUN ${c}\n` }, 'docker build .'] },
-  { name: 'Dockerfile lowercase directives', build: (c) => [{ Dockerfile: `from alpine\nrun ${c}\n` }, 'docker build .'] },
-  { name: 'podman Containerfile', build: (c) => [{ Containerfile: `FROM alpine\nRUN ${c}\n` }, 'podman build .'] },
+  { name: 'Dockerfile heredoc RUN', build: (c) => [{ Dockerfile: `FROM alpine\nRUN <<EOF\n${c}\nEOF\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'Dockerfile ONBUILD RUN', build: (c) => [{ Dockerfile: `FROM alpine\nONBUILD RUN ${c}\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'Dockerfile lowercase directives', build: (c) => [{ Dockerfile: `from alpine\nrun ${c}\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'podman Containerfile', build: (c) => [{ Containerfile: `FROM alpine\nRUN ${c}\n` }, 'podman build .'], safe: noHostPath },
   { name: 'make $(shell) in a recipe', build: (c) => [{ Makefile: `run:\n\techo $(shell ${c})\n` }, 'make run'], safe: noDollar },
   { name: 'make $$ shell substitution', build: (c) => [{ Makefile: `run:\n\techo $$(${c})\n` }, 'make run'], safe: (c) => noDollar(c) && noParens(c) },
   // make's own control flow and its non-obvious target shapes

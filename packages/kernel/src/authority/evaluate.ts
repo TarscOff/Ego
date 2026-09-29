@@ -2194,6 +2194,12 @@ export interface ExecutionEnvironment {
    *  line needs the quoting: `make V="git push origin main" run` normalizes to five bare words, and the override's
    *  value then looked like four separate targets (exit review 5). */
   rawSegment?: string;
+  /** True when the body being analysed runs INSIDE a container image, so its paths are the image's and not the
+   *  workspace's. `RUN go build -o /out/app .` and `RUN cp entrypoint.sh /usr/local/bin/` write nothing on the
+   *  host, and judging them as host paths denied the two most generic Dockerfile idioms there are — a
+   *  proportionality defect introduced by the Dockerfile producer itself (exit review 8). The COMMANDS are still
+   *  classified: a `git push` or a `curl … | sh` inside a RUN is as real as anywhere else. */
+  containerPaths?: boolean;
   /** Names DEFINED IN THIS UNIT whose body the analyzer already read — a shell function. A call to one of them
    *  executes text that is already accounted for, so it is neither an unknown producer nor an unresolved binding:
    *  EGO knows exactly what the name means. An ALIAS is not here, because its body is not handed over. */
@@ -2821,6 +2827,8 @@ export interface ProducerResult {
    *  resolution state; it may not fall back to an untyped `null` channel that silently meant ABSENT_VERIFIED
    *  (challenge 6, finding 28). */
   kind: 'shell-script' | 'npm-script' | 'make-target' | 'git-ambient' | 'none';
+  /** True when this producer's bodies run INSIDE a container image, so their paths are the image's. */
+  containerPaths?: boolean;
   /** execution IDENTITY for the cycle guard: everything that makes this a distinct execution — the directory, the
    *  makefile or manifest actually read, and the target. A bare name collided across directories and across
    *  `-f other.mk` (challenge 4, findings 20, 34). */
@@ -2939,6 +2947,14 @@ const DOCKER_BUILD_VALUE_OPTS =
  *  exec without a shell, so its argv is joined into one command line rather than parsed as shell. Continuations
  *  are joined first, because a `RUN` line may span many physical lines. */
 function dockerfileShellLines(text: string): string[] {
+  // A COMMENT LINE IS REMOVED BEFORE CONTINUATIONS ARE JOINED. Docker strips comment lines first, so a trailing
+  // backslash in a comment joins NOTHING — but this reader joined continuations first, so `# helper \` swallowed
+  // the `RUN` beneath it and that line became invisible (exit review 8). The `# syntax=` directive is kept,
+  // because it is the one comment that changes what the file MEANS.
+  text = text
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l) || /^\s*#\s*syntax\s*=/i.test(l))
+    .join('\n');
   // `RUN <<EOF … EOF` is BuildKit's heredoc form: the body is the script the shell runs, exactly as it is for
   // `bash <<EOF` (exit review 8, self-attack).
   text = text.replace(/^[ \t]*(?:ONBUILD[ \t]+)?RUN[ \t]+(?:--\S+[ \t]+)*<<-?["']?(\w+)["']?[^\n]*\n([\s\S]*?)\n[ \t]*\1[ \t]*$/gim,
@@ -2947,15 +2963,29 @@ function dockerfileShellLines(text: string): string[] {
   const out: string[] = [];
   for (const raw of joined.split('\n')) {
     const line = raw.replace(/^\s+/, '');
-    if (!line || line.startsWith('#')) continue;
+    if (!line) continue;
     // `SHELL ["/x","-c"]` RE-POINTS EVERY LATER `RUN` at that program, exactly as a makefile's `SHELL :=` does,
     // so the recipe text below it is not what determines the effect. `ONBUILD RUN …` records a command the CHILD
     // build runs; EGO can read it here and nowhere else, so it is classified here (exit review 8, self-attack).
+    // `# syntax=<image>` makes BuildKit pull that image and let IT interpret the whole file, so the RUN lines
+    // read here decide nothing at all (exit review 8).
+    const syn = /^#\s*syntax\s*=\s*(\S+)/i.exec(line);
+    if (syn) {
+      out.push(`${MARK}dockerfile-shell frontend ${syn[1]!}`);
+      continue;
+    }
+    if (line.startsWith('#')) continue;
     const sh = /^SHELL\s+(.+)$/i.exec(line);
     if (sh) {
-      const prog = /\[\s*"([^"]+)"/.exec(sh[1]!)?.[1] ?? sh[1]!.trim().split(/\s+/)[0]!;
-      if (!/^\/(bin|usr\/bin|usr\/local\/bin)\/(sh|bash|zsh|dash|ksh|ash)$/.test(prog) && !/^(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)$/.test(prog))
-        out.push(`${MARK}dockerfile-shell ${prog}`);
+      // THE WHOLE ARRAY IS THE SHELL, not its first element: `SHELL ["/bin/sh","-c","curl … | sh"]` puts an
+      // ordinary interpreter in front of a payload that then runs before every later RUN (exit review 8).
+      const argv = [...sh[1]!.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!);
+      const prog = argv[0] ?? sh[1]!.trim().split(/\s+/)[0]!;
+      const ordinary =
+        (/^\/(bin|usr\/bin|usr\/local\/bin)\/(sh|bash|zsh|dash|ksh|ash)$/.test(prog) ||
+          /^(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)$/.test(prog)) &&
+        argv.slice(1).every((a) => /^-[a-zA-Z]+$/.test(a));
+      if (!ordinary) out.push(`${MARK}dockerfile-shell ${argv.length > 1 ? argv.join(' ') : prog}`);
       continue;
     }
     const m = /^(?:ONBUILD\s+)?RUN\s+([\s\S]*)$/i.exec(line);
@@ -3985,7 +4015,17 @@ function resolveScriptCommand(
     (t, i) => i > 0 && t === 'build' && (i === 1 || /^(image|buildx|builder)$/.test(tokens[i - 1] ?? '')),
   );
   if (/^(docker|podman|nerdctl|buildah)$/.test(head) && buildAt > 0) {
-    const named = optionValue(tokens, 'f', ['--file']);
+    // a glued short option keeps its `=`: `-f=Dockerfile.evil` names `Dockerfile.evil`, not `=Dockerfile.evil`
+    const named = optionValue(tokens, 'f', ['--file'])?.replace(/^=/, '') ?? null;
+    // `-f -` reads the Dockerfile from STANDARD INPUT — a stream this kernel cannot read, whatever the context is
+    if (named === '-')
+      return {
+        kind: 'shell-script',
+        key: 'dockerfile:stdin',
+        body: null,
+        reason: 'the Dockerfile is read from standard input',
+        resolution: 'UNREADABLE',
+      };
     // the build CONTEXT is the last bare operand; `-` and a URL are contexts EGO cannot read
     // AN OPTION THIS KERNEL DOES NOT KNOW STILL TAKES ITS VALUE. Reading the LAST bare operand as the context
     // let `docker build . --no-cache-filter src` read `src` as the context, so the real Dockerfile was never
@@ -4041,6 +4081,7 @@ function resolveScriptCommand(
       kind: 'shell-script',
       key: `dockerfile:${abs}`,
       body: dockerfileShellLines(text),
+      containerPaths: true,
       reason: `Dockerfile ${dockerfile}`,
       resolution: 'RESOLVED_COMPLETE',
       provenance: { source: abs, fingerprint: fingerprint(text) },
@@ -5713,7 +5754,11 @@ function classifyNormalized(
   }
   // the body resolves against ITS OWN execution environment, not the caller's — but the SAME write ledger, so a
   // write inside this body invalidates a conclusion drawn after it, one level up (transitive freshness)
-  const bodyEnv = effect.bodyEnv ?? state.env;
+  // a producer whose bodies run inside a container image says so, and the flag travels with the environment
+  const bodyEnv: ExecutionEnvironment =
+    effect.containerPaths === true
+      ? { ...(effect.bodyEnv ?? state.env), containerPaths: true }
+      : (effect.bodyEnv ?? state.env);
   // the producer's body re-enters THE SAME pipeline, with its own execution context — never a weaker sub-layer
   const inner = analyzeSegments(
     table,
@@ -5911,6 +5956,9 @@ function classifyShellPaths(
   seg: string,
   cwd: string,
   patternWords: string[] = [],
+  /** the body runs inside a container image, so its PATHS are the image's — but what the analyzer cannot READ
+   *  is unreadable wherever it runs, so that opacity survives */
+  containerPaths = false,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   const tokens = tokenize(seg);
@@ -6331,7 +6379,7 @@ function classifyShellPaths(
         absolute: false,
       });
   }
-  if (paths.length === 0) return hits;
+  if (containerPaths || paths.length === 0) return hits;
   for (const p of paths) {
     if (p.abs === null) {
       hits.push({
@@ -6992,7 +7040,11 @@ function analyzeSegments(
         !rawMarked.some((t) => /^-[a-zA-Z]*[ef]$/.test(t.text) || /^--(regexp|file)=/.test(t.text))
           ? (rawMarked.find((t, i) => i > 0 && !t.text.startsWith('-'))?.text ?? '').split(/\s+/).filter(Boolean)
           : [];
-      for (const h of classifyShellPaths(table, ctx, norm, effectiveCwd, patternWords)) hits.push(h);
+      // A CONTAINER'S PATHS ARE THE IMAGE'S. A Dockerfile RUN line writes inside the image, not on the host, so
+      // its path operands are not judged against the workspace; its COMMANDS still are, and so is anything the
+      // analyzer could not READ, which is unreadable wherever it runs (exit review 8).
+      for (const h of classifyShellPaths(table, ctx, norm, effectiveCwd, patternWords, env.containerPaths === true))
+        hits.push(h);
     }
     // shell writes whose target token resolves under the EGO home trust stores are trust tampering wherever EGO_HOME is
     if (ctx.egoHome) {
