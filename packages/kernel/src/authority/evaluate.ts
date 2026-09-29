@@ -3176,6 +3176,10 @@ interface MakeFileModel {
    *  which branch runs depends on the environment — so all of them are candidates, exactly as `altVars` treats
    *  a variable assigned in several branches (exit review 9). */
   altGoals: Set<string>;
+  /** OPTIONAL INCLUDES THAT WERE NOT THERE. `-include gen.mk` is skipped when the file is missing — which is why
+   *  it exists — but "missing" is a claim about NOW, and an earlier unit of the same command may have just
+   *  written it. The producer checks these against the freshness ledger (exit review 9). */
+  pendingIncludes: string[];
   oneShell: boolean;
   /** constructs that affect the WHOLE file, so no conclusion drawn from it is complete ($(eval), VPATH, an
    *  include this resolver could not read or whose path is computed) */
@@ -3540,6 +3544,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     firstTarget: null,
     defaultGoal: null,
     altGoals: new Set<string>(),
+    pendingIncludes: [],
     oneShell: false,
     unsupported: [],
     unsupportedFor: new Map(),
@@ -3663,7 +3668,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         // file. What EGO read is a PRE-IMAGE of what will run, so the file it read cannot carry a positive claim
         // (exit review 7).
         if (model.rules.has(name)) model.unsupported.push(`an included makefile is remade by this makefile: ${name}`);
-        if (optional && !fileExists(resolve(dir, name))) continue;
+        if (optional && !fileExists(resolve(dir, name))) {
+          model.pendingIncludes.push(resolve(dir, name));
+          continue;
+        }
         const sub = parseMakefile(ctx, resolve(dir, name), dir, depth + 1);
         for (const [t, r] of sub.rules) {
           const existing = model.rules.get(t);
@@ -3682,6 +3690,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         model.sources.push(...sub.sources);
         if (sub.defaultGoal) model.defaultGoal = sub.defaultGoal; // make takes the LAST assignment
         for (const g of sub.altGoals) model.altGoals.add(g);
+        model.pendingIncludes.push(...sub.pendingIncludes);
         if (sub.oneShell) model.oneShell = true;
         if (!model.firstTarget) model.firstTarget = sub.firstTarget;
       }
@@ -4814,6 +4823,21 @@ function resolveScriptCommand(
       .map((n) => findUp(ctx, cwd, n))
       .find((f) => f !== null && f !== SEARCH_EXHAUSTED);
     const rcText = rcFile ? readInsideWorkspace(ctx, rcFile) : null;
+    // A CONFIGURATION FILE THIS COMMAND REWRITES IS NOT THE ONE npm WILL READ. `printf 'script-shell=/tmp/evil.sh'
+    // > .npmrc && npm run build` hands every package script to a different interpreter, and the rc text this
+    // resolver read is the PRE-IMAGE — it said nothing about script-shell, so nothing was recorded (exit
+    // review 9). The candidate NAMES are tested, because the file may not exist yet either.
+    const rcStale =
+      (rcFile !== null && rcFile !== undefined && stale(rcFile)) ||
+      ['.npmrc', '.yarnrc.yml', '.yarnrc'].some((n) => stale(join(cwd, n)));
+    if (rcStale)
+      return {
+        kind: 'npm-script',
+        key: `npm:rc-stale:${cwd}`,
+        body: null,
+        reason: 'an npm configuration file is written earlier in the same command, so what was read is not what runs',
+        resolution: 'STALE',
+      };
     const rcRebinds =
       rcFile !== null && rcFile !== undefined && (rcText === null || /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText))
         ? [rcFile]
@@ -4948,7 +4972,15 @@ function resolveScriptCommand(
         // `Makefile` are the same file but canonicalise to different strings, which silently unhooked the
         // freshness ledger.
         defaultMakefile(makeDir);
-    if (paths.some((p) => stale(p)))
+    // A FILE THIS COMMAND JUST WROTE IS NOT ABSENT. `defaultMakefile` returns nothing when no makefile is on
+    // disk — which is exactly the state after `printf 'x:\n\tgit push origin main\n' > Makefile` and before
+    // `make x` runs — so the stale test had nothing to test and the producer claimed ABSENT_VERIFIED, a POSITIVE
+    // claim, over a makefile the same command line creates (exit review 9). The candidate NAMES are checked,
+    // whether or not a file is sitting at them yet.
+    const staleCandidates = paths.length
+      ? paths
+      : ['GNUmakefile', 'makefile', 'Makefile'].map((n) => join(makeDir, n));
+    if (staleCandidates.some((p) => stale(p)))
       return {
         kind: 'make-target',
         key: `make:${makeDir}:${targets.join(',')}`,
@@ -4972,6 +5004,7 @@ function resolveScriptCommand(
       firstTarget: null,
       defaultGoal: null,
       altGoals: new Set<string>(),
+      pendingIncludes: [],
       oneShell: false,
       unsupported: [],
       unsupportedFor: new Map(),
@@ -5023,8 +5056,20 @@ function resolveScriptCommand(
       if (m.oneShell) merged.oneShell = true;
       if (m.defaultGoal) merged.defaultGoal = m.defaultGoal; // make takes the LAST assignment
       for (const g of m.altGoals) merged.altGoals.add(g);
+      merged.pendingIncludes.push(...m.pendingIncludes);
       if (!merged.firstTarget) merged.firstTarget = m.firstTarget;
     }
+    // ...AND SO DOES AN OPTIONAL INCLUDE THAT WAS NOT THERE. `-include gen.mk` is skipped when the file is
+    // missing, which is the whole point of the spelling — but "missing" is a claim about NOW, and `printf
+    // 'x:\n\tgit push origin main\n' > gen.mk && make x` writes it first (exit review 9).
+    if (merged.pendingIncludes.some((f) => stale(f)))
+      return {
+        kind: 'make-target',
+        key: `make:${makeDir}:${targets.join(',')}`,
+        body: null,
+        reason: 'an optional include is written earlier in the same command, so what was read is not what runs',
+        resolution: 'STALE',
+      };
     // A bare `make` builds .DEFAULT_GOAL when set, not the first rule (challenge 5, finding 16).
     // A VERSION OR HELP PROBE READS NO MAKEFILE. `make --version` prints the version and exits: it selects no
     // goal, expands nothing and executes nothing. In any repository whose default goal happens to contain a
@@ -6681,6 +6726,27 @@ function classifyShellPaths(
       absolute: false,
       opaqueUnread: true,
     });
+  // A SYMLINK'S TARGET IS RELATIVE TO THE DIRECTORY THE LINK LIVES IN, not to the working directory. `ln -s
+  // ../.harness k/h` creates `k/h` pointing at `<repo>/.harness` — one directory up FROM k — and resolving the
+  // target against the cwd read it as the parent of the checkout, which is protected by nothing. The link then
+  // opened a writable route into the governance tree and `echo x > k/h/runtime/pin.json` was ALLOW
+  // (exit review 9). The link is a second NAME for the target, so the target is judged as both.
+  if (head === 'ln' && tokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
+    const ops = tokens.slice(1).filter((t) => !t.startsWith('-') && t !== '--');
+    if (ops.length >= 2) {
+      const linkDir = dirname(isAbsolute(ops[ops.length - 1]!) ? ops[ops.length - 1]! : resolve(cwd, ops[ops.length - 1]!));
+      for (const src of ops.slice(0, -1)) {
+        const expanded = expandHome(src);
+        if (expanded === null || /[$`*?]/.test(expanded)) continue;
+        const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(linkDir, expanded));
+        // the path entry is REPLACED rather than judged separately, so the protected-tree reasoning that already
+        // knows "a link to a directory that CONTAINS protected paths opens a route into them" applies unchanged
+        const entry = paths.find((q) => q.raw === src);
+        if (entry) entry.abs = abs;
+        else paths.push({ raw: src, abs, glob: false });
+      }
+    }
+  }
   // A SED SCRIPT'S OWN `w FILE` IS A WRITE TO THAT FILE, and only to that file. `sed -n '1w
   // .claude/settings.json' README.md` replaces the agent's configuration while READING README.md, so the
   // destination is judged here, on its own, rather than through the coarse "every operand is a write" switch —
