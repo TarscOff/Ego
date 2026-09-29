@@ -200,6 +200,17 @@ const SUBSHELL_CWD_RESTORE = `${MARK}subshell-cwd-restore`;
 const HEREDOC_UNTERMINATED = `${MARK}heredoc-unterminated`;
 /** marks a function definition whose header the splitter consumed: it binds a name and executes nothing */
 const FUNCTION_DEF_PREFIX = `${MARK}define-function`;
+/** Closes a function BODY. The splitter inlines the body as ordinary sibling segments — which is right, because
+ *  its commands must be analysed — but they are the FUNCTION's commands, not the caller's: `f() { cd sub; };
+ *  tee control-plane/permissions/matchers.md` does not move the caller's working directory, and EGO followed the
+ *  `cd` out of the body and resolved the governed path under `sub/` (exit review 10). The marker says where the
+ *  body ends so the binding dimension can be suspended across it. */
+const FUNCTION_BODY_END = `${MARK}end-function`;
+/** UNBINDS a name a SUBSHELL defined. `git() { true; } & git push origin main` runs the definition in a
+ *  background subshell and `echo $(git() { true; })` runs it in a substitution, so neither shadows the real
+ *  program — and EGO believed both did, which made an organization-locked push read as a call to a known local
+ *  function (exit review 10). A definition inside `( )` was already handled; these are its two other spellings. */
+const FUNCTION_UNBIND = `${MARK}unbind-function`;
 /** a segment that is only redirections — the tail of a group or subshell whose delimiters were consumed */
 const REDIRECT_ONLY_RE = /^(?:(?:\d*(?:>>?|<>?)\|?|&>>?)\s*(?:"[^"]*"|'[^']*'|\S+)\s*)+$/;
 /** shell keywords that may precede a command WITHOUT being one: after them, the next word is still a command */
@@ -296,6 +307,10 @@ export function splitShellPipeline(command: string): ShellStage[] {
     cur = '';
   };
   let caseDepth = 0;
+  /** groups opened by a function DEFINITION, mapped to the name, so the closing brace can say where the body ends */
+  const functionBodyGroups = new Map<number, string>();
+  /** the name and end position of the most recent function body, for the `&` that may background it */
+  let lastFnDefEnd: { name: string; at: number } | null = null;
   /** true where a COMMAND may begin: nothing pending, or only a shell keyword */
   const atCommandStart = (): boolean => cur.trim() === '' || KEYWORD_PREFIX_RE.test(cur.trim());
   /** true where a FUNCTION BODY may begin: the pending text is the definition header and nothing else */
@@ -447,6 +462,20 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // governed path asked instead of being denied (exit review 4).
       if (ch === '&' && next !== '&' && next !== '>' && command[i - 1] !== '>' && command[i - 1] !== '<') {
         push();
+        // A BACKGROUND COMMAND IS ITS OWN SUBSHELL, exactly as a pipeline stage is. `cd sub & tee
+        // control-plane/permissions/matchers.md` leaves the caller where it was, and the analyzer followed the
+        // `cd` out of it — the same defect exit review 4 fixed for the pipe spelling, in the branch beside it
+        // (exit review 10). A DEFINITION before `&` binds nothing outside either: `git() { true; } & git push
+        // origin main` does not shadow git, and EGO believed it did.
+        if (/^(cd|pushd|popd)(\s|$)/.test(segments[segments.length - 1]?.text ?? ''))
+          segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
+        // a DEFINITION that the `&` backgrounds runs in that subshell and binds nothing in the caller. The body
+        // sits between the header and here, so the closing brace records where it ended and this tests whether
+        // the `&` is what immediately follows it.
+        if (lastFnDefEnd !== null && lastFnDefEnd.at === segments.length) {
+          segments.push({ text: `${FUNCTION_UNBIND} ${lastFnDefEnd.name}`, pipedFromPrevious: false });
+          lastFnDefEnd = null;
+        }
         i++;
         continue;
       }
@@ -508,6 +537,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
           segments.push({ text: `${FUNCTION_DEF_PREFIX} ${declared[1]}`, pipedFromPrevious: false });
         cur = '';
         groupStack.push(++groupSeq);
+        if (declared && caseDepth === 0) functionBodyGroups.set(groupSeq, declared[1]!);
         if (ch === '(') {
           if (subshell === 0) subshellStart = segments.length;
           subshell++;
@@ -522,7 +552,11 @@ export function splitShellPipeline(command: string): ShellStage[] {
         continue;
       }
       if (ch === '}' && cur.trim() === '') {
-        groupStack.pop();
+        const closed = groupStack.pop();
+        if (closed !== undefined && functionBodyGroups.has(closed)) {
+          segments.push({ text: FUNCTION_BODY_END, pipedFromPrevious: false });
+          lastFnDefEnd = { name: functionBodyGroups.get(closed)!, at: segments.length };
+        }
         i++;
         continue;
       }
@@ -625,6 +659,13 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // sub/ (exit review 4).
         if (innerSegments.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
           segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
+        // ...and a DEFINITION in it binds nothing in the caller either, for exactly the same reason
+        for (const sg of innerSegments)
+          if (sg.text.startsWith(`${FUNCTION_DEF_PREFIX} `))
+            segments.push({
+              text: `${FUNCTION_UNBIND} ${sg.text.slice(FUNCTION_DEF_PREFIX.length + 1)}`,
+              pipedFromPrevious: false,
+            });
         // the placeholder stands INSIDE the word the substitution was part of. Separating it with a space made
         // `TODAY=$(date +%F)` read as the assignment `TODAY=` followed by a command whose head is a substitution,
         // so the most ordinary line in any script was opaque (exit review 4).
@@ -8374,6 +8415,12 @@ function analyzeSegments(
     // ALLOW, through an organization-locked deny and through absolute core denies for psql and the cloud CLIs
     // (exit review 8). A binding is trusted only where it is UNCONDITIONAL.
     let condDepth = 0;
+    /** the previous working directory, for `cd -` and `popd`: one deep, and deeper leaves the context unproven */
+    let cdPrev: string | null = null;
+    /** how deep inside a function BODY this segment sits: its bindings are the function's, not the caller's */
+    let fnBodyDepth = 0;
+    /** set once a directory change could not be proven; every LATER segment resolves relative paths unverified */
+    let cdDoubtCarried = false;
     const stages = unit;
     // the stage whose standard output the NEXT piped stage will read. A GROUP writes the CONCATENATION of what
     // its commands write, so this is a LIST: `{ echo 'git push origin main'; echo ls; } | sh` feeds the shell
@@ -8397,7 +8444,7 @@ function analyzeSegments(
     let after = stageIndex + 1;
     while (stages[after]?.groupId !== undefined) after++;
     const inPipeline = stage.pipedFromPrevious === true || stages[after]?.pipedFromPrevious === true;
-    const bindingIsProven = condDepth === 0 && !inPipeline;
+    const bindingIsProven = condDepth === 0 && !inPipeline && fnBodyDepth === 0;
     if (kw) condDepth++;
     else if (kwEnd) condDepth = Math.max(0, condDepth - 1);
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
@@ -8428,6 +8475,19 @@ function analyzeSegments(
     // a consumed function header binds a name for everything after it, and is not a command
     if (cdTrimmed.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
       if (bindingIsProven) functionNames.add(cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1));
+      // ...and everything until the body closes is the FUNCTION's, not the caller's: its commands are analysed,
+      // but a `cd` or a definition inside it does not move or rebind anything outside (exit review 10)
+      fnBodyDepth++;
+      continue;
+    }
+    if (cdTrimmed === FUNCTION_BODY_END) {
+      fnBodyDepth = Math.max(0, fnBodyDepth - 1);
+      continue;
+    }
+    if (cdTrimmed.startsWith(`${FUNCTION_UNBIND} `)) {
+      const name = cdTrimmed.slice(FUNCTION_UNBIND.length + 1);
+      functionNames.delete(name);
+      definedNames.delete(name);
       continue;
     }
     // `unset -f NAME` UNBINDS IT AGAIN, and everything after it is the REAL program. A definition earlier in the
@@ -8441,10 +8501,46 @@ function analyzeSegments(
       const functionsToo = !args.some((a) => /^-[a-zA-Z]*v$/.test(a)) || args.some((a) => /^-[a-zA-Z]*f$/.test(a));
       if (functionsToo) for (const a of args) if (!a.startsWith('-')) functionNames.delete(a);
     }
+    // A DIRECTORY CHANGE THE SHELL RUNS IN A SUBSHELL, OR IN A BRANCH THAT MAY NOT RUN, BINDS NOTHING OUTSIDE IT.
+    // `bindingIsProven` already says exactly that, and the function definitions use it — the cwd tracker did not,
+    // so `f() { cd sub; }; tee control-plane/permissions/matchers.md`, `cd sub & tee …`, `true | cd sub; tee …`
+    // and a `cd` inside an `if` or a `case` branch all moved the working directory for the rest of the line. The
+    // governed path was then resolved under `sub/`, where no rule matches it (exit review 10, five spellings).
+    // The conservative answer is to keep the OUTER directory — that is where the governed paths are — and to
+    // stop asserting the context, so nothing positive rests on it.
     const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
-    const cdArgs = cdTokens ? cdTokens.filter((a) => a !== '--' && !a.startsWith('-')) : null;
+    // THE DOUBT IS RECORDED, NOT ANNOUNCED. Not applying the change is the fix; emitting a hit on top of it made
+    // `popd >/dev/null` — a line in every shell function that saves its directory — ASK for no effect at all.
+    // Clearing `cwdVerified` is the conservative part: nothing POSITIVE may then rest on the directory, while a
+    // command that changes nothing keeps its verdict.
+    // ...AND IT ATTACHES TO WHAT COMES AFTER, NOT TO THE SEGMENT THAT RAISED IT. `popd` resolves no path of its
+    // own, so marking ITS environment unverified made the context-unverified opacity fire on the `popd` itself.
+    // The flag is carried forward instead, which is where a relative path could actually be misread.
+    const cdUnproven = cdDoubtCarried;
+    if (cdTokens && !bindingIsProven) cdDoubtCarried = true;
+    // `cd -` RETURNS TO THE PREVIOUS DIRECTORY and `popd` pops the stack. Both were filtered out as options or
+    // not recognised at all, so the tracker believed it was still in `sub` and resolved every later relative
+    // path under it (exit review 10). A one-deep record of the previous directory covers both, and anything
+    // deeper leaves the context unproven rather than guessed.
+    if (bindingIsProven && /^popd(\s|$)/.test(cdTrimmed)) {
+      if (cdPrev !== null) {
+        const back = cdPrev;
+        cdPrev = cwd === '\0dynamic' ? null : cwd;
+        cwd = back;
+      } else cdDoubtCarried = true;
+    }
+    const cdArgs =
+      cdTokens && bindingIsProven ? cdTokens.filter((a) => a !== '--' && !a.startsWith('-')) : null;
+    if (cdTokens && bindingIsProven && cdTokens.includes('-') && !cdArgs?.length) {
+      if (cdPrev !== null) {
+        const back = cdPrev;
+        cdPrev = cwd === '\0dynamic' ? null : cwd;
+        cwd = back;
+      } else cdDoubtCarried = true;
+    }
     if (cdArgs && cdArgs.length) {
-      const target = expandHome(cdArgs[cdArgs.length - 1]!);
+      cdPrev = cwd === '\0dynamic' ? null : cwd;
+      const target = expandHome(cdArgs[cdArgs.length - 1]!, cwd === '\0dynamic' ? state.env.cwd : cwd);
       const base = cwd === '\0dynamic' ? state.env.cwd : cwd;
       const logical = target === null ? null : isAbsolute(target) ? target : resolve(base, target);
       let resolvedCd = target === null || /[$`*?]/.test(target) ? null : canonicalPath(logical!);
@@ -8506,7 +8602,7 @@ function analyzeSegments(
       ...state.env,
       written,
       cwd: effectiveCwd,
-      cwdVerified: cwd !== '\0dynamic',
+      cwdVerified: cwd !== '\0dynamic' && !cdUnproven,
       // ENVIRONMENT-INPUT CLOSURE: captured HERE, before normalizeSegment strips the assignments, so the producer
       // boundary sees what the command line did to the tool it is about to resolve
       envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg) },
