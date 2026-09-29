@@ -1825,9 +1825,17 @@ function expandBraceWord(word: string, depth = 0, overflow?: { hit: boolean }): 
 }
 
 /** A produced word is re-emitted into the segment text, so anything that would make the shell SPLIT it again —
- *  whitespace — or read it as structure must be quoted back in. */
+ *  whitespace — or read it as structure must be quoted back in.
+ *
+ *  THE WORD IS RE-EMITTED AS THE SHELL WILL SEE IT, i.e. AFTER QUOTE REMOVAL. Wrapping the alternative's RAW
+ *  text in single quotes SUPPRESSED the escape the shell would have removed: `--no{\-,\-}verify` expands to
+ *  `--no\-verify`, which the shell then de-escapes to `--no-verify`, and re-emitting it quoted left the matchers
+ *  looking at a literal backslash — so the hook-bypass flag, a `git branch -\D`, and a make goal `deplo\y` all
+ *  went unrecognised (exit review 10). `{"--no-verify","--no-verify"}` was the same defect through the double
+ *  quote. Quote removal is the tokenizer's own, so the two agree by construction. */
 function requoteBraceResult(w: string): string {
-  return /[\s;&|<>()`$"'\\*?[\]]/.test(w) ? `'${w.split("'").join(`'\\''`)}'` : w;
+  const bare = unquoteShellWord(w);
+  return /[ \t\n\r;&|<>()`$"'\\*?[\]]/.test(bare) ? `'${bare.split("'").join(`'\\''`)}'` : bare;
 }
 
 /** Expand every unquoted brace group in a SEGMENT, word by word. Segmentation has already happened, exactly as
@@ -1854,6 +1862,22 @@ export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
   };
   for (let i = 0; i < seg.length; i++) {
     const c = seg[i]!;
+    // `$'…'` IS AN ANSI-C STRING AND A BACKSLASH ESCAPES INSIDE IT. Treated as an ordinary single-quoted string,
+    // the `\'` of `$'\''` read as quote-open, backslash, quote-close, quote-OPEN — so the scanner believed it
+    // was inside a quote for the rest of the line and every brace after it went unexpanded, which put the
+    // hook-bypass flag back out of reach (exit review 10). The same defect the segment splitter had in review 7,
+    // in the scanner added in review 9.
+    if (c === '$' && seg[i + 1] === "'" && !q) {
+      let j = i + 2;
+      while (j < seg.length) {
+        if (seg[j] === '\\' && j + 1 < seg.length) j += 2;
+        else if (seg[j] === "'") break;
+        else j++;
+      }
+      cur += seg.slice(i, Math.min(j + 1, seg.length));
+      i = j;
+      continue;
+    }
     if (c === '\\' && q !== "'" && i + 1 < seg.length) {
       cur += c + seg[i + 1]!;
       i++;
@@ -5881,9 +5905,18 @@ const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete'
 const WRITES_SOMEWHERE =
   /;|\b(analyse|analyze)\b|(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|vacuum|reindex|cluster|call|merge|rename|refresh|shutdown|detach|attach|lock|flush|kill|import|restore|replace|upsert|remove|destroy|purge|expire|rewrite|repair|optimi[sz]e|set[A-Z_])/i;
 
+/** Options whose VALUE is the next token on the surfaces these exceptions serve. A probe flag sitting in that
+ *  position is not a probe: `helm upgrade --description --help` sets the release description to the string
+ *  `--help` and performs the upgrade, and `kubectl apply --field-manager --help` names the field manager
+ *  (exit review 10). Both were read as requests for documentation against a PRODUCTION cluster. */
+const VALUE_OPT_BEFORE_PROBE =
+  /^(--description|--field-manager|--context|--kube-context|--namespace|--kubeconfig|--server|--user|--username|--password|--token|--cluster|--as|--as-group|--output|-o|--filename|-f|--selector|-l|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|--set-json|--post-renderer|--timeout|--history-max|--atomic-timeout|--profile|--region|--endpoint-url|--cli-input-json|--query|--message|-m|--file|--config|--log-file|--comment|--reason|--annotation|--label|--name|-n|--revision|--wait-timeout|--suffix|--prefix|--template|--format|--filter|--project|--account|--impersonate-service-account|--subscription|--resource-group|-g)$/;
+
 function isProbeInvocation(seg: string): boolean {
   const t = tokenizeMarked(seg).filter((x) => !x.quoted).map((x) => x.text);
   return t.some((w, i) => {
+    // a probe flag in an option's VALUE position is that option's value, not a probe
+    if (i > 0 && VALUE_OPT_BEFORE_PROBE.test(t[i - 1] ?? '')) return false;
     if (/^(--help|-help|--usage|-\?)$/.test(w)) return true;
     // `--version` IS ALSO AN OPTION THAT TAKES A VALUE. `helm upgrade --install acme acme/web --version 1.4.2`
     // pins a chart version and installs it; read as a probe it reached ALLOW against a production cluster.
@@ -5895,9 +5928,18 @@ function isProbeInvocation(seg: string): boolean {
       const next = t[i + 1];
       return next === undefined || next.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(next);
     }
-    // ...and a bare `help` is a VERB, not any word. `psql -h prod-db -c "TRUNCATE TABLE help"` truncates a
-    // table that happens to be called `help`, and it was read as a request for documentation.
-    return w === 'help' && i > 0 && i === t.length - 1;
+    // ...and a bare `help` is a PSEUDO-COMMAND OF THE TOOLS THAT DOCUMENT IT THERE, not any trailing word.
+    // `aws ec2 terminate-instances help` opens the manual; `kubectl --context production delete deployment help`
+    // deletes a deployment CALLED help, and `helm uninstall help` uninstalls a release called help. There is no
+    // syntactic difference between the two, so the tools that put `help` LAST are named and the ones that put it
+    // FIRST — kubectl, helm — are not (exit review 10).
+    const head = (t[commandHeadIndex(t)] ?? '').replace(/^.*\//, '');
+    return (
+      w === 'help' &&
+      i > 0 &&
+      i === t.length - 1 &&
+      /^(aws|gcloud|az|terraform|tofu|pulumi|docker|podman|nerdctl|git|gh|glab|npm|pnpm|yarn|cargo|go|dotnet|brew)$/.test(head)
+    );
   });
 }
 /** A DRY RUN PERFORMS THE ACT'S CHECKS AND NOT THE ACT. `kubectl apply --dry-run=client`, `helm upgrade
@@ -5905,7 +5947,11 @@ function isProbeInvocation(seg: string): boolean {
  *  each was refused absolutely (exit review 9). The gate that remains is the ordinary one: a dry run against a
  *  production target still reaches it, and a human can still say no. */
 function isDryRun(seg: string): boolean {
-  const t = tokenizeMarked(seg).filter((x) => !x.quoted).map((x) => x.text);
+  const t = tokenizeMarked(seg)
+    .filter((x) => !x.quoted)
+    .map((x) => x.text)
+    // a dry-run flag in an option's VALUE position is that option's value, not a dry run
+    .filter((w, i, a) => !(i > 0 && VALUE_OPT_BEFORE_PROBE.test(a[i - 1] ?? '')));
   // `--dry-run=none` IS NOT A DRY RUN. It is the EXPLICIT spelling of "really do it": kubectl documents none as
   // the default, and helm's own help says `--dry-run=none` executes the operation normally and persists
   // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
@@ -8565,7 +8611,10 @@ function analyzeSegments(
         gitPagerCommands(body).length > 0 ||
         gitConfigCommands(body).length > 0 ||
         redirectionTargets(body).length > 0 ||
-        /(^|\s)(git|env)\s+(?:-\S+\s+)*-C(\s|=|\S)/.test(body) ||
+        // the LONG spelling too: the condition is a list of the readers that work on the segment as written, and
+        // it named only the short `-C` — so `flock /tmp/l -c "env --chdir=.harness/runtime tee pin.json"` never
+        // re-entered, and the chdir reader this condition exists to serve never saw the body (exit review 10)
+        /(^|\s)(git|env)\s+(?:-\S+\s+)*(-C(\s|=|\S)|--chdir(\s|=))/.test(body) ||
         commitBypassFlag(body)
       )
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
