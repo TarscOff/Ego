@@ -594,6 +594,17 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'as an until condition', apply: (c) => `until ${c}; do break; done`, safe: noParens },
   { name: 'inside nested backticks', apply: (c) => 'echo `echo \\`' + c + '\\``', safe: (c) => noSingle(c) && noDouble(c) },
   { name: 'after an old-form arithmetic', apply: (c) => `echo $[1<<2]\n${c}` },
+  // exit review 9: the shell expands braces BEFORE anything else, and `{x..x}` is exactly one word.
+  // ONLY AN ALPHANUMERIC CHARACTER may be replaced: `{x..x}` is a range only between letters or digits, so
+  // rewriting the `/` of `rm -rf /` as `{/..//}` produces a LITERAL path and a different command — which the
+  // property test caught the moment the transformation was added, exactly as it should.
+  { name: 'a brace range inside the first word', apply: (c) => c.replace(/^(\S)([A-Za-z0-9])/, (_m, a, b) => `${a}{${b}..${b}}`), safe: (c) => /^\S[A-Za-z0-9]/.test(c) },
+  { name: 'a brace range inside the last word', apply: (c) => c.replace(/([A-Za-z0-9])\s*$/, (_m, a) => `{${a}..${a}}`), safe: (c) => /[A-Za-z0-9]\s*$/.test(c) },
+  // THERE IS NO COMMA-LIST FORM THAT CARRIES A COMMAND UNCHANGED. `d{o,o}cker run` is `docker docker run` and
+  // `{git,git} push` is `git git push` — the shell duplicates the word, so the result is a DIFFERENT command
+  // and not a variant of this one. Only the RANGE forms above collapse to a single word. The cross-product
+  // reported the list form as a floor crossing the moment it was added and was right to; the comma-list
+  // expansion itself is covered by the differential test against the real shell in monotonicity.test.ts.
   // an OPTION'S VALUE is not the program: the scan for `-c` must step over `-o pipefail` / `-O extglob`
   { name: 'sh -c behind a valued option', apply: (c) => `bash -o pipefail -c '${c}'`, safe: noSingle },
   { name: 'sh -c behind a shopt option', apply: (c) => `bash -O extglob -c '${c}'`, safe: noSingle },

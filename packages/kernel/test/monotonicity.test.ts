@@ -13,10 +13,11 @@
 // rather than as one more corpus entry going red.
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { RANK, TRANSFORMS, PRODUCERS, workspace, verdict } from './support/corpus.ts';
+import { expandBraces } from '../src/authority/evaluate.ts';
 
 /** Effects whose verdict is decided by what they DO, with the floor that must never be crossed. */
 const BASE: ReadonlyArray<{ readonly cmd: string; readonly floor: 'DENY' | 'ASK'; readonly what: string }> = [
@@ -233,4 +234,38 @@ test('PROPERTY: looking at something is not doing it', () => {
   const dir = workspace({ Makefile: mk });
   assert.equal(verdict('make -n push', dir), 'DENY', 'a `+` recipe line runs even under --dry-run');
   assert.notEqual(verdict('make -n sub', dir), 'ALLOW', 'a recursive make runs even under --dry-run');
+});
+
+test('PROPERTY: braces expand exactly as this machine’s shell expands them', () => {
+  // THE SHELL EXPANDS BRACES BEFORE IT EXPANDS ANYTHING ELSE, unconditionally — unlike pathname expansion it
+  // does not care whether the file exists. Nothing in the kernel performed the expansion, so every literal
+  // reader was handed a word that will never exist: `.harnes{s..s}/runtime/decisions/d1.json` wrote EGO's own
+  // decision records at ALLOW, and `--no-verif{y..y}` bypassed the commit hooks (exit review 9).
+  //
+  // The claim is not "the implementation looks right". It is that for each word below, handing EGO's expansion
+  // BACK to the real shell produces exactly what the shell produces from the original. That is a differential
+  // test against the thing being modelled, which is the only kind that can settle this.
+  const shell = ['/bin/zsh', '/bin/bash'].find((s) => existsSync(s));
+  if (!shell) return; // a platform without either is not one this property can be checked on
+  const words = [
+    '{a,b}', 'x{a,b}y', '{1..5}', '{5..1}', '{a..e}', '{a,{b,c}}', '{}', '{a}', '{a,b}{c,d}',
+    'a{b,c}d{e,f}', '{-1..1}', '--no-verif{y..y}', '-{n..n}', '.harnes{s..s}/x', '{a,b', 'a,b}',
+    '{a..c}{1..2}', '{{a,b},c}', 'pre{1..3}post', '{10..1}', '{a,b}.txt', 'foo', '{x..x}',
+    "'{a,b}'", '"{a,b}"', '\\{a,b\\}', '{a..b}{c..d}{e..f}', 'build/{a,b}', 'x.{ts,js}',
+  ];
+  // no `*` in the list: PATHNAME expansion is a different expansion, it happens AFTER this one, and whether it
+  // finds a file depends on the directory the probe happens to run in — which would make this a flaky test of
+  // something it is not trying to state.
+  const run = (w: string): string[] => {
+    const r = spawnSync(shell, ['-c', `printf '%s\\n' ${w}`], { encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.split('\n').slice(0, -1) : ['\0error'];
+  };
+  const mismatches: string[] = [];
+  for (const w of words) {
+    const want = run(w).filter((x) => x !== ''); // an empty word carries no path, no flag and no program
+    const got = run(expandBraces(w)).filter((x) => x !== '');
+    if (JSON.stringify(got) !== JSON.stringify(want))
+      mismatches.push(`${w}: shell ${JSON.stringify(want)} vs ego ${JSON.stringify(got)}`);
+  }
+  assert.deepEqual(mismatches, [], `the expansion disagrees with ${shell}:\n  ${mismatches.join('\n  ')}`);
 });

@@ -1637,6 +1637,215 @@ function unquoteShellWord(w: string): string {
 }
 
 /** Like tokenize, but records whether each token contained a quote (quoted words are data, not command heads). */
+/* ----------------------------------------------------------------------------------------------------------- *
+ * BRACE EXPANSION
+ *
+ * THE SHELL EXPANDS BRACES BEFORE IT EXPANDS ANYTHING ELSE, and it does so unconditionally — unlike pathname
+ * expansion, it does not care whether the file exists. `.harnes{s..s}/runtime/decisions/d1.json` is EXACTLY the
+ * one word `.harness/runtime/decisions/d1.json`, `--no-verif{y..y}` is `--no-verify`, and `-{n..n}` is `-n`.
+ * Nothing in this kernel performed the expansion, so every literal reader below — the matchers, the redirection
+ * target scan, `classifyPath`, the short-flag cluster reader — was handed a word that will never exist. A write
+ * to EGO's own decision records reached ALLOW, and so did the hook-bypass flag on `git commit` (exit review 9).
+ *
+ * This is the same shape as the backslash-newline of exit review 8: something the shell does AHEAD of parsing.
+ * It is done here, once, on the segment text, so that every reader downstream sees the words that will really
+ * exist rather than each having to learn the rule.
+ * ----------------------------------------------------------------------------------------------------------- */
+
+/** A run of `.` repeated is not a range, and a group with neither a comma nor a range is LITERAL — `{a}` and
+ *  `{}` are themselves, which is why the test is on the CONTENT and not on the braces. */
+const BRACE_ALPHA_RANGE = /^([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?$/;
+const BRACE_NUM_RANGE = /^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$/;
+
+/** The words `{x..y}` or `{x..y..n}` stands for, or null when the content is not a range. */
+function braceRange(body: string): string[] | null {
+  const a = BRACE_ALPHA_RANGE.exec(body);
+  if (a) {
+    const from = a[1]!.charCodeAt(0);
+    const to = a[2]!.charCodeAt(0);
+    const step = Math.abs(Number(a[3] ?? 1)) || 1;
+    const out: string[] = [];
+    for (let c = from; from <= to ? c <= to : c >= to; c += from <= to ? step : -step)
+      out.push(String.fromCharCode(c));
+    return out;
+  }
+  const n = BRACE_NUM_RANGE.exec(body);
+  if (!n) return null;
+  const from = Number(n[1]);
+  const to = Number(n[2]);
+  const step = Math.abs(Number(n[3] ?? 1)) || 1;
+  // `{01..3}` pads to the WIDTH OF THE WIDER ENDPOINT — `01 02 03` — which is what zsh and bash 4 and later
+  // do. The bash 3.2 that Apple still ships prints `1 2 3` instead; the padded reading is taken because it is
+  // what this machine's own shell does and what every current bash does, and the difference cannot matter to a
+  // path: `{s..s}` and `{y..y}`, the spellings that actually reached ALLOW, are identical in every shell.
+  const pad = /^-?0\d/.test(n[1]!) || /^-?0\d/.test(n[2]!) ? Math.max(n[1]!.length, n[2]!.length) : 0;
+  const out: string[] = [];
+  for (let v = from; from <= to ? v <= to : v >= to; v += from <= to ? step : -step) {
+    const t = String(Math.abs(v));
+    out.push((v < 0 ? '-' : '') + (pad ? t.padStart(pad - (v < 0 ? 1 : 0), '0') : t));
+    if (out.length > BRACE_BUDGET) return out; // the caller's budget check refuses it
+  }
+  return out;
+}
+
+const BRACE_BUDGET = 64;
+
+/** Split a brace group's body on the commas AT ITS OWN DEPTH, ignoring quoted ones and nested groups. Returns
+ *  null when there is no such comma, which is what makes `{a}` literal. */
+function braceAlternatives(body: string): string[] | null {
+  const out: string[] = [];
+  let depth = 0;
+  let q: "'" | '"' | null = null;
+  let cur = '';
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === '\\' && q !== "'" && i + 1 < body.length) {
+      cur += c + body[i + 1]!;
+      i++;
+      continue;
+    }
+    if (q) {
+      cur += c;
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      cur += c;
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+    else if (c === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  out.push(cur);
+  return out.length > 1 ? out : null;
+}
+
+/** The words one WORD expands to. Returns null when the expansion is refused — no brace, or over budget — so
+ *  the caller can leave the word exactly as written and let the existing `{`-is-dynamic guards apply. */
+function expandBraceWord(word: string, depth = 0): string[] | null {
+  if (depth > 8 || !word.includes('{')) return null;
+  let q: "'" | '"' | null = null;
+  for (let i = 0; i < word.length; i++) {
+    const c = word[i]!;
+    if (c === '\\' && q !== "'") {
+      i++;
+      continue;
+    }
+    if (q) {
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      continue;
+    }
+    if (c !== '{') continue;
+    // the matching close brace, at this depth and unquoted
+    let d = 0;
+    let qq: "'" | '"' | null = null;
+    let end = -1;
+    for (let j = i; j < word.length; j++) {
+      const e = word[j]!;
+      if (e === '\\' && qq !== "'") {
+        j++;
+        continue;
+      }
+      if (qq) {
+        if (e === qq) qq = null;
+        continue;
+      }
+      if (e === "'" || e === '"') {
+        qq = e;
+        continue;
+      }
+      if (e === '{') d++;
+      else if (e === '}' && --d === 0) {
+        end = j;
+        break;
+      }
+    }
+    if (end < 0) return null; // unmatched: the shell leaves the word alone
+    const body = word.slice(i + 1, end);
+    const parts = braceAlternatives(body) ?? braceRange(body);
+    // a group that is neither a list nor a range is LITERAL: `{a}` stays `{a}`, and the scan continues past it
+    if (!parts) {
+      i = end;
+      continue;
+    }
+    const pre = word.slice(0, i);
+    const post = word.slice(end + 1);
+    const out: string[] = [];
+    for (const part of parts) {
+      for (const tail of expandBraceWord(post, depth + 1) ?? [post]) {
+        const w = pre + part + tail;
+        for (const full of expandBraceWord(w, depth + 1) ?? [w]) {
+          out.push(full);
+          if (out.length > BRACE_BUDGET) return null;
+        }
+      }
+    }
+    return out;
+  }
+  return null;
+}
+
+/** A produced word is re-emitted into the segment text, so anything that would make the shell SPLIT it again —
+ *  whitespace — or read it as structure must be quoted back in. */
+function requoteBraceResult(w: string): string {
+  return /[\s;&|<>()`$"'\\*?[\]]/.test(w) ? `'${w.split("'").join(`'\\''`)}'` : w;
+}
+
+/** Expand every unquoted brace group in a SEGMENT, word by word. Segmentation has already happened, exactly as
+ *  in the shell: `{a,b;c}` is two segments before it is anything else, so a group never crosses an operator. */
+export function expandBraces(seg: string): string {
+  if (!seg.includes('{')) return seg;
+  let out = '';
+  let cur = '';
+  let q: "'" | '"' | null = null;
+  const flush = (): void => {
+    if (cur === '') return;
+    // AN EMPTY WORD IS DROPPED. `{a,}` produces `a` and the empty string; the empty one carries no path, no
+    // flag and no program, and emitting it would only give the operand readers a token that means nothing.
+    // This is the one place the expansion deliberately differs from the shell, and it differs by nothing.
+    const parts = expandBraceWord(cur)?.filter((w) => w !== '');
+    out += parts?.length ? parts.map(requoteBraceResult).join(' ') : cur;
+    cur = '';
+  };
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]!;
+    if (c === '\\' && q !== "'" && i + 1 < seg.length) {
+      cur += c + seg[i + 1]!;
+      i++;
+      continue;
+    }
+    if (q) {
+      cur += c;
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      cur += c;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      flush();
+      out += c;
+      continue;
+    }
+    cur += c;
+  }
+  flush();
+  return out;
+}
+
 function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
   const out: Array<{ text: string; quoted: boolean }> = [];
   let cur = '';
@@ -7319,7 +7528,10 @@ function analyzeSegments(
     let upstreamGroup: number | undefined;
     let upstreamBody: { body: string; expanded: boolean } | null = null;
     for (const [stageIndex, stage] of stages.entries()) {
-    const seg = stage.text;
+    // BRACE EXPANSION HAPPENS HERE, ONCE, BEFORE ANY READER SEES THE SEGMENT — matchers, the redirection target
+    // scan, pathTokens, the short-flag cluster reader and every producer. The shell does it ahead of everything
+    // else, so a reader given the unexpanded text is reading a word that will never exist (exit review 9).
+    const seg = expandBraces(stage.text);
     // `if`/`while`/`until`/`for`/`case` open a branch whose body may not run; `fi`/`done`/`esac` close it
     const kw = /^(if|while|until|for|case|select)\b/.exec(seg.trim());
     const kwEnd = /^(fi|done|esac)\b/.test(seg.trim());
