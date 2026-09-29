@@ -4613,6 +4613,22 @@ function resolveScriptCommand(
     const args = tokens.slice(1).filter((t) => !t.startsWith('-'));
     if (args[0]) scriptPath = args[0];
   }
+  // `sh -n FILE` IS A SYNTAX CHECK: the shell PARSES the file and executes not one command of it. It is how an
+  // author verifies a script BEFORE trusting it, and resolving the body as if it were going to run made that
+  // verification carry the script's verdict — `bash -n run.sh` was an absolute deny over a command that reads
+  // and reports (exit review 9). `-v` echoes without running only in combination; `-n` alone is the check.
+  if (
+    scriptPath !== null &&
+    /^(bash|sh|zsh|dash|ksh)$/.test(head) &&
+    tokens.some((t) => /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t) || t === '--noexec')
+  )
+    return {
+      kind: 'shell-script',
+      key: `script:noexec:${scriptPath}`,
+      body: null,
+      reason: 'a syntax check parses the script and executes nothing',
+      resolution: 'NOT_A_PRODUCER',
+    };
   if (scriptPath !== null) {
     const abs = isAbsolute(scriptPath) ? scriptPath : resolve(cwd, scriptPath);
     if (stale(abs))
@@ -5146,12 +5162,24 @@ function resolveScriptCommand(
     // The short flag is read only inside a cluster of make's ARGUMENT-LESS options: in `-fn` the `n` is the name
     // of a makefile, not the dry run.
     const MAKE_FLAG_CLUSTER = /^-[BdeiknpqrstvwLRS]+$/;
-    const dryRun = tokenizeMarked(env.rawSegment ?? tokens.join(' ')).some(
+    const makeFlags = tokenizeMarked(env.rawSegment ?? tokens.join(' ')).filter((t) => !t.quoted);
+    const dryRun = makeFlags.some(
       (t) =>
-        !t.quoted &&
-        (/^(--just-print|--dry-run|--recon)$/.test(t.text) ||
-          (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('n'))),
+        /^(--just-print|--dry-run|--recon)$/.test(t.text) ||
+        (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('n')),
     );
+    // `make -q` IS QUESTION MODE: it runs NOTHING AT ALL and reports up-to-dateness in its exit status. It does
+    // not even print the recipe, so it is weaker than `-n`, and it resolved the target's body as if it were
+    // going to execute it — `make -q run` on a recipe with `git push origin main` was an absolute deny over a
+    // command that answers a question (exit review 9).
+    if (makeFlags.some((t) => /^--question$/.test(t.text) || (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('q'))))
+      return {
+        kind: 'make-target',
+        key: 'make:question',
+        body: null,
+        reason: 'question mode reports up-to-dateness in the exit status and runs nothing',
+        resolution: 'NOT_A_PRODUCER',
+      };
     // WITH NO GOAL ON THE COMMAND LINE, EVERY GOAL THE FILE COULD SELECT IS A CANDIDATE. `.DEFAULT_GOAL` may be
     // assigned in one branch of a conditional and something else in the other, and which branch runs depends on
     // an environment this kernel does not model — so all of them are walked, bounded, exactly as every branch of
@@ -5669,7 +5697,34 @@ const K8S_MUTATING_VERBS = new Set([
   'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward',
   'debug', 'certificate', 'proxy', 'auth', 'apply-set', 'wait',
 ]);
+/** A VERB IS NOT A MUTATION IN EVERY SUBCOMMAND IT SPELLS. `rollout` restarts and undoes — and it also REPORTS,
+ *  with `status` and `history`; `auth` changes nothing at all in the `can-i` and `whoami` forms, which are the
+ *  two commands an operator runs to find out what they may do. Judged by the verb alone, both were absolute
+ *  denies against a production cluster: refusing to LOOK, which is the one verdict nobody can approve
+ *  (exit review 9). The mutating spellings keep the verb. */
+const K8S_READ_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
+  rollout: new Set(['status', 'history']),
+  auth: new Set(['can-i', 'whoami']),
+  certificate: new Set([]),
+};
 const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test']);
+/** A COMMAND THAT ASKS FOR HELP, OR REPORTS A VERSION, CONNECTS TO NOTHING. It is the first thing anyone runs
+ *  against an unfamiliar tool and the last thing that should be refused outright (exit review 9). Read from the
+ *  RAW tokens, so a `--help` inside a quoted SQL statement or a search pattern is not one. */
+function isProbeInvocation(seg: string): boolean {
+  const t = tokenizeMarked(seg).filter((x) => !x.quoted).map((x) => x.text);
+  return t.some((w, i) => /^(--help|--version|-help|-version|--usage)$/.test(w) || (w === 'help' && i > 0));
+}
+/** A DRY RUN PERFORMS THE ACT'S CHECKS AND NOT THE ACT. `kubectl apply --dry-run=client`, `helm upgrade
+ *  --dry-run`, `git push --dry-run` and `aws … --dry-run` are how an operator finds out what WOULD happen, and
+ *  each was refused absolutely (exit review 9). The gate that remains is the ordinary one: a dry run against a
+ *  production target still reaches it, and a human can still say no. */
+function isDryRun(seg: string): boolean {
+  const t = tokenizeMarked(seg).filter((x) => !x.quoted).map((x) => x.text);
+  return t.some(
+    (w) => /^--dry-run(=.*)?$/.test(w) || w === '--server-dry-run' || w === '--what-if' || w === '--no-act',
+  );
+}
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
 const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
   // The container runtime was the one high-impact tool not enrolled in the Q98 target model, so
@@ -6016,7 +6071,19 @@ function resolveK8sTarget(
   // `kubectl --context production get secrets -o yaml` — a full credential dump from a production cluster —
   // reached ALLOW under a capability literally named k8s.local.apply (exit review 6). A secret is the one
   // resource whose READ has to be treated as an act against the cluster it is read from.
-  const mutating = switchesContext || touchesSecrets || verb === undefined ? true : mutate.has(verb);
+  // A VERB IS NOT A MUTATION IN EVERY SUBCOMMAND IT SPELLS: `rollout status` reports and `auth can-i` answers a
+  // question. And a PROBE connects to nothing while a DRY RUN performs the act's checks and not the act — both
+  // were absolute denies against a production cluster, which is a refusal to LOOK (exit review 9).
+  const line = requote(tokens);
+  const sub = tokens[(verb === undefined ? -1 : tokens.indexOf(verb)) + 1];
+  const readsOnly =
+    verb !== undefined && sub !== undefined && (K8S_READ_SUBCOMMANDS[verb]?.has(sub) ?? false);
+  const mutating =
+    switchesContext || touchesSecrets
+      ? true
+      : verb === undefined
+        ? !isProbeInvocation(line)
+        : mutate.has(verb) && !readsOnly && !isProbeInvocation(line) && !isDryRun(line);
   // EVERY signal that can select the cluster is classified, and the MOST RESTRICTIVE one decides. kubectl resolves
   // them together — `--server` overrides the context's endpoint and `--kubeconfig` chooses the file the context is
   // looked up in — so a local-looking `--context` must never end the search (round 14).
@@ -6129,7 +6196,30 @@ function resolveDbTarget(
   // Whether a statement is "executed" is not guessed any more. A client pointed at a non-local database is an
   // external effect whatever it then types: the statement can arrive by flag, by positional argument, by file, by
   // stdin redirect, or interactively (round 14 found all five spellings escaping the flag test).
-  const executes = true;
+  // TWO EXCEPTIONS, AND ONLY TWO. A PROBE connects to nothing: `PGHOST=prod-db.acme.com psql --version` prints a
+  // version string and exits, and it was an absolute deny against a database it never opens. And a statement
+  // that is ENTIRELY read-only is a read: `psql -h prod-db -U ro -c 'EXPLAIN SELECT …'` is how an operator
+  // inspects a plan, and refusing it absolutely leaves no way to look (exit review 9). The statement must be
+  // wholly read-only — one write clause anywhere in it and the whole thing acts.
+  const line = requote(tokens);
+  const statements = optionValues(tokens, 'c', ['--command', '--eval', '--execute', '--query']);
+  const readOnlyStatement =
+    statements.length > 0 &&
+    statements.every((q) =>
+      // METADATA AND PLANS ONLY. `EXPLAIN`, `SHOW` and psql's `\d` describe the schema and the plan; `SELECT`
+      // reads production ROWS, which is a different question and stays where it was.
+      // A METACOMMAND IS THE WHOLE STATEMENT, and it is matched as such. Written as a PREFIX — `\\?d\w*` —
+      // the optional backslash let `db.dropDatabase()` match as psql's `\d`, so the single worst thing a
+      // production database client can be told to do read as a schema listing. Caught by the corpus the moment
+      // it was written, which is what the corpus is for.
+      // ...and the statement reaching THIS reader is the normalized one, where the quoting that made it a single
+      // word is already gone — so `-c 'EXPLAIN SELECT …'` arrives as the bare word `EXPLAIN`. The MATCHER, which
+      // sees the raw text, is what tests the rest of the statement for a write clause; both must agree before
+      // the act is read as a read.
+      (/^\s*(explain|show|describe)(\s|$)/i.test(q) || /^\s*\\?(d\w*|l|z|sf|ef)\s*$/i.test(q)) &&
+      !/\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|vacuum|reindex|call|do|analyze)\b/i.test(q),
+    );
+  const executes = !isProbeInvocation(line) && !readOnlyStatement;
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
   const signals: Array<{ cls: TargetClass; target: string }> = [];

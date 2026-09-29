@@ -46,7 +46,12 @@ matchers:
     command: '(^|\s)hook\s+(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b'
   - capability: ego.gate.bypass
     tool: Bash
-    command: '(^|\s)(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
+    # ANCHORED AT THE `ego` COMMAND. These are EGO's OWN subcommands, and matching the bare word pair anywhere
+    # made `grep -rn "decision answer" docs/` — reading the documentation that describes them — an absolute deny
+    # (exit review 9). A wrapper or a package runner may precede the binary; a grep PATTERN may not.
+    # `harness` is the kernel's other name for itself, and a consumer repository may install it under either;
+    # both are the BINARY, which is the distinction that matters here.
+    command: '(^|\s)((\S*/)?(ego|harness)(\.js)?|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
   - capability: command.env-inject
     tool: Bash
     command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$)'
@@ -58,7 +63,11 @@ matchers:
     command: '^git\s+(alias-override|alias-shell|alias-opaque)\b'
   - capability: ego.runtime.tamper
     tool: Bash
-    command: '(^|\s)(\b(cp|mv|tee|ln|install|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?|node)\b|>>?)[^|;&]*\.harness/(runtime|generated|hooks)(/|\b)'
+    # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST. `cp .harness/runtime/state.json /tmp/x.json` copies
+    # runtime state OUT — a read — and the rule matched the path in any position, so an absolute deny fell on
+    # the act of LOOKING at the state EGO itself publishes (exit review 9). For the copying verbs the governed
+    # path must therefore be past the first operand; every other verb here writes wherever it is pointed.
+    command: '(^|\s)(\b(cp|mv|ln|install|rsync)\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?|node)\b[^|;&]*|>>?[^|;&]*)\.harness/(runtime|generated|hooks)(/|\b)'
   - capability: ego.runtime.tamper
     tool: Bash
     command: '(^|\s)(\b(cp|mv|tee|ln|install|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b|>>?)[^|;&]*\.harness/harness\.md'
@@ -116,7 +125,9 @@ matchers:
     command: '^git\s+push\b.*(--tags\b|\srefs/tags/)'
   - capability: git.remote.push
     tool: Bash
-    command: '^git\s+push\b'
+    # `--dry-run` CONTACTS THE REMOTE AND CHANGES NOTHING: it is how an author checks what a push WOULD do, and
+    # refusing it absolutely leaves no way to find out (exit review 9).
+    command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$))'
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+commit\b.*\s--no-verify\b'
@@ -202,7 +213,10 @@ matchers:
   # --- production (absolute; contexts named production/prod) ---
   - capability: production.k8s.mutate
     tool: Bash
-    command: '^(kubectl|oc)\b(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))(?=.*\s(apply|delete|patch|edit|scale|rollout|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward|debug|certificate|proxy)\b)'
+    # A DRY RUN AND A HELP PROBE PERFORM NOTHING, and `rollout status|history` REPORTS — three spellings of
+    # looking at production that were refused absolutely, which is the one verdict nobody can approve. The
+    # mutating spellings of `rollout` keep the verb (exit review 9).
+    command: '^(kubectl|oc)\b(?![^|;&]*\s(--help|--version|-help|-version|--usage|help)(\s|$))(?![^|;&]*\s--(dry-run|server-dry-run|what-if|no-act)(=|\s|$))(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))(?![^|;&]*\sauth\s+(can-i|whoami)\b)(?=.*\s(apply|delete|patch|edit|scale|rollout\s+(?!status\b|history\b)|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward|debug|certificate|proxy)\b)'
   # READING A SECRET IS A CREDENTIAL READ, whatever the verb is called. `kubectl --context production get -f
   # secret.yaml -o yaml` prints the Secret's data — base64 is not encryption — and the production matcher below
   # lists only MUTATING verbs, so the read reached ALLOW (exit review 9). `describe` and `-o json|yaml` are the
@@ -216,17 +230,23 @@ matchers:
     command: '^(kubectl|oc)\b(?=[^|;&]*(--context[= ]\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))[^|;&]*\s(get|describe)\b[^|;&]*\s-f[= ]?\S*secret\S*'
   - capability: production.helm.mutate
     tool: Bash
-    command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
+    command: '^helm\b(?![^|;&]*\s(--help|--version|-help|-version|--usage|help)(\s|$))(?![^|;&]*\s--(dry-run|server-dry-run|what-if|no-act)(=|\s|$))(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
   - capability: production.cloud.mutate
     tool: Bash
     # `cp`, `mv` and `sync` ARE DIRECTIONAL, and the direction is the whole effect. `aws s3 cp s3://fixtures/x .`
     # downloads INTO the workspace and changes nothing in the cloud; it was denied absolutely alongside
     # `aws s3 cp . s3://prod/`, which really does write there (exit review 8). The three verbs are matched only
     # when the DESTINATION is an `s3://` URI; `rm`, `rb` and `mb` have no such second reading and stay above.
-    command: '^((terraform|tofu)\s+(?:-\S+\s+)*(apply|destroy)|pulumi\s+(?:-\S+\s+)*(up|destroy)|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*s3\s+(?:-\S+\s+)*(cp|mv|sync)\s+(?:-\S+\s+)*\S+\s+(?:-\S+\s+)*s3://|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+(?!config\b|auth\b)\S+.*\b(create|delete|update|deploy|remove|rm)\b|az\s+\S+.*\b(create|delete|update|deploy|remove|purge)\b)'
+    # A VERB IS A WORD, NOT A SUBSTRING. gcloud's and az's verbs were matched with `.*\b(delete)\b`, which finds
+    # the word inside an OPTION VALUE: `gcloud compute instances list --filter=name:delete` and `az group list
+    # --query [?name==delete-me]` — two ways of LISTING — were absolute denies (exit review 9). A verb is now a
+    # standalone word, and a help probe or a dry run performs nothing at all.
+    command: '^(?![^|;&]*\s(--help|--version|-help|-version|--usage|help)(\s|$))(?![^|;&]*\s--(dry-run|server-dry-run|what-if|no-act)(=|\s|$))((terraform|tofu)\s+(?:-\S+\s+)*(apply|destroy)|pulumi\s+(?:-\S+\s+)*(up|destroy)|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*s3\s+(?:-\S+\s+)*(cp|mv|sync)\s+(?:-\S+\s+)*\S+\s+(?:-\S+\s+)*s3://|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+(?!config\b|auth\b)\S+(\s+\S+)*?\s(create|delete|update|deploy|remove|rm)(\s|$)|az\s+\S+(\s+\S+)*?\s(create|delete|update|deploy|remove|purge)(\s|$))'
   - capability: production.deploy
     tool: Bash
-    command: '^(argocd\s+app\s+(sync|delete|set|rollback)|flux\s+(reconcile|suspend|resume)|kubectl\s+argo\s+rollouts)\b'
+    # `kubectl argo rollouts` has READ verbs too — `get`, `list`, `status`, `version` — and matching the plugin
+    # name alone refused them absolutely (exit review 9).
+    command: '^(argocd\s+app\s+(sync|delete|set|rollback)|flux\s+(reconcile|suspend|resume)|kubectl\s+argo\s+rollouts\s+(promote|abort|retry|restart|undo|pause|resume|set|terminate|create|delete))\b'
   - capability: production.dns.mutate
     tool: Bash
     command: '^(aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*route53\s+change-resource-record-sets|gcloud\s+dns\s+record-sets\s+(create|update|delete)|az\s+network\s+dns\b.*\b(create|delete|update)\b)'
@@ -243,7 +263,11 @@ matchers:
   # (The general local-vs-remote target resolution lives in the evaluator; this catches the explicitly named case.)
   - capability: production.database.mutate
     tool: Bash
-    command: '^(psql|mysql|mariadb|mysqladmin|mysqlsh|mongosh|mongo|redis-cli|valkey-cli|clickhouse(-client|\s+client)|cqlsh|influx|pg_dump|pg_dumpall|pg_restore|pgbench|createdb|dropdb|mysqldump|mysqlpump|mongodump|mongorestore)\b(?=[^|;&]*(-h\s*\S*(prod|production)\S*|--host[= ]\S*(prod|production)\S*|://[^\s/]*(prod|production)[^\s/]*))'
+    # A VERSION PROBE OPENS NO CONNECTION, and a statement that is ENTIRELY read-only is a read. `psql -h prod-db
+    # -U ro -c 'EXPLAIN SELECT …'` is how an operator inspects a plan, and it was an absolute deny — the one
+    # verdict nobody can approve — so there was no way to look at production at all (exit review 9). One write
+    # clause anywhere in the statement and the whole thing acts again.
+    command: '^(psql|mysql|mariadb|mysqladmin|mysqlsh|mongosh|mongo|redis-cli|valkey-cli|clickhouse(-client|\s+client)|cqlsh|influx|pg_dump|pg_dumpall|pg_restore|pgbench|createdb|dropdb|mysqldump|mysqlpump|mongodump|mongorestore)\b(?![^|;&]*\s(--help|--version|-version|help)(\s|$))(?!\s+(?:-\S+\s+|\S+\s+)*?(-c|--command|-e|--execute|--eval|--query)(=|\s+)(explain|show|describe|\\d|\\l|\\dt)\b(?![\s\S]*\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|vacuum|reindex|call|analyze)\b))(?=[^|;&]*(-h\s*\S*(prod|production)\S*|--host[= ]\S*(prod|production)\S*|://[^\s/]*(prod|production)[^\s/]*))'
   # --- destructive roots (absolute) ---
   - capability: fs.destructive-root
     tool: Bash
