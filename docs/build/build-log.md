@@ -681,6 +681,66 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 
   **PHASE 1 IS STILL NOT CLOSED.** Nothing from this review is open, but the exit criterion is a FRESH review
   finding none, and the review that found these is not that review. `INDEPENDENT-AGENT REVIEW` stays IN PROGRESS.
+
+  **EXIT REVIEW 9 (2026-09-29, HEAD 5fa3702) — FAILED. 26 adversarial lenses, 205 agents, 15.3M subagent tokens,
+  ZERO agent errors.** 86 findings survived independent refutation: **62 unauthorized ALLOW** (23 CRITICAL, 31
+  HIGH) and 24 OVER-GATED DENY. **newClasses: 0 — the tenth consecutive review to add no architectural class.**
+  One lens came back clean; the other twenty-five did not.
+
+  The headline finding is the same SHAPE as review 8's, one layer further down: **the shell expands braces before
+  it expands anything else, and unconditionally.** `.harnes{s..s}/runtime/decisions/d1.json` IS
+  `.harness/runtime/decisions/d1.json` — one word, in every shell, whether or not the file exists. Nothing in the
+  kernel performed the expansion, so every literal reader below was handed a word that will never exist: a write
+  to EGO's OWN decision records reached ALLOW, and so did `git commit -m x --no-verif{y..y}`, which bypasses the
+  hook mechanism EGO's governance rides on. The fix is not asserted to be correct: a property test hands EGO's
+  expansion BACK to `/bin/zsh` and checks it produces what the shell produces from the original word, over 29
+  words covering lists, ranges, descending ranges, zero padding, nesting, cartesian products, unmatched braces,
+  quoted braces and escaped braces.
+
+  **THE OTHER HALF OF THE REVIEW RAN THE OTHER WAY.** 24 findings were an ABSOLUTE DENY over an act that changes
+  nothing — `make -q`, `bash -n`, `git push --dry-run`, `kubectl auth can-i`, `terraform -help apply`, `gcloud …
+  --filter=name:delete` (the word `delete` inside an OPTION VALUE), `cp .harness/runtime/state.json /tmp/` (a
+  READ), and `grep -rn "decision answer" docs/`, which is reading the documentation that describes EGO's own
+  subcommands. A DENY is the one verdict a human cannot approve, so a false positive of that shape does not raise
+  the gate: it removes it.
+
+  **THEN THE FIXES THEMSELVES WERE ATTACKED, AND FIFTY MORE DEFECTS CAME OUT** — 41 unauthorized ALLOW, 12
+  CRITICAL, from NINE lenses of which none came back clean. All of them were mine, all written in the preceding
+  hours, and the pattern is the uncomfortable one: **every exception added to let an operator LOOK is a spelling
+  that can hide the ACT.** `--dry-run=none` is the explicit "really do it" value — helm's own help says it
+  executes and persists. `EXPLAIN ANALYSE` executes what it wraps, and PostgreSQL accepts the British spelling as
+  an exact synonym my word-bounded blocklist did not know; `show dbs; db.dropDatabase()` put the write after a
+  reader, where only the first statement was inspected, and `\b` never matches inside `dropDatabase`. `ln -s
+  ../.harness k` with `k` an existing DIRECTORY creates the link INSIDE it — ln's second documented form —
+  reopening the route into the governance tree one spelling over. `make -q` runs no recipes but still PARSES, so
+  `X := $(shell git push --force origin main)` runs at parse time, verified against GNU make 3.81.
+
+  Three mistakes in the fixing itself were caught within minutes of writing them, each by a test: a `!== null`
+  comparison on a function returning a BOOLEAN (always true); a `for` without braces that put the condition
+  outside the loop; and a psql metacommand spelled as a PREFIX with an optional backslash, so `db.dropDatabase()`
+  matched as `\d` — the single worst thing a production database client can be told to do, read as a schema
+  listing. A generalisation was tried and refuted the same way: re-entering EVERY carried body makes a duplicate
+  hit change the decisive capability and defeats the LOCAL de-escalation, and nine tests said so at once.
+
+  **ONE GENERAL DEFECT CAME OUT OF THE PASS, and it is worth more than the instances: AN OPACITY MUST NEVER
+  REPLACE A STRONGER VERDICT.** A producer marked STALE returned a null body, so a script or makefile whose
+  contents are an absolute deny arrived approvable the moment ANY earlier segment of the same command line could
+  not be classified — which the wildcard freshness entry makes easy. What was read is now handed over and the
+  staleness recorded as a gap, which is the rule the make producer's own partial-expansion path already followed.
+  And staleness is consulted BEFORE absence, because absence is itself a positive claim.
+
+  **EVERY FINDING OF BOTH PASSES IS CLOSED OR REFUTED** (11 local commits). Four stand refuted by settled
+  decisions, each pinned by a test that failed when the change was attempted: renaming a LOCAL branch, merging a
+  NAMED branch, `helm get values` against production being a credential dump (exit review 7), and `rsync` into
+  `.git/hooks` keeping its `fs.git-internals.write` classification.
+
+  The in-repo cross-product now asserts **23,924** combinations across **67** root semantic classes, 218
+  canonical spellings, 97 transformations, 3,721 producer-carried variants and 103 ordinary commands — up from
+  17,400 when this review began, and from 11,645 when the corpora that could not be re-run were lost.
+
+  **PHASE 1 IS STILL NOT CLOSED.** The exit criterion is a FRESH review finding none, and neither the review that
+  found these nor the pass that attacked its own fixes is that review. `INDEPENDENT-AGENT REVIEW` stays IN
+  PROGRESS.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same

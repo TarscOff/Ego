@@ -278,6 +278,31 @@ attacking my own last two commits: `git rm` classified ALLOW without judging its
 an ordinary write" rule that swallowed `perl -i -e '<code>'`; `sed -f script.sed OPERAND`, where the operand is
 an INPUT and not the script; and `/` excluded from the ancestor test because `/` + `/` is `//`.
 
+## Closed after exit review 9 (2026-09-29)
+
+Every unauthorized ALLOW of exit review 9 is resolved, and so is every defect of the self-attack on its own
+fixes. Four findings stand REFUTED by settled decisions, each pinned by a test that failed when the change was
+attempted: renaming a LOCAL branch (`git branch -m`), merging a NAMED branch, `helm get values` against
+production being a credential dump (exit review 7), and `rsync` into `.git/hooks` keeping its
+`fs.git-internals.write` classification rather than the narrower hook one.
+
+Recorded by CAUSE. The instances are in the build log; these are the statements.
+
+| Cause | The general statement |
+|---|---|
+| **The shell expands braces before it expands anything else, and unconditionally.** | Unlike pathname expansion it does not care whether the file exists, so `.harnes{s..s}/runtime/decisions/d1.json` IS one word naming EGO's own decision records, and `--no-verif{y..y}` IS the hook-bypass flag. Every literal reader below the lexer was reading a word that will never exist. Asserted by a DIFFERENTIAL test against `/bin/zsh`, not by inspection. |
+| **A carrier's quoting stands where the body should be.** | Every reader that works on the SEGMENT AS WRITTEN — the redirection scan, `git -C`, the commit argv, brace expansion — sees `sh -c "…"` instead of what it carries, because an inner shell runs its own expansion pass. Re-entering EVERY body is NOT the fix: a duplicate hit changes the decisive capability and defeats the LOCAL de-escalation. The condition names the readers that need it. |
+| **Looking at something is not doing it — and an absolute DENY over looking removes the gate.** | 24 findings: a dry run, a help probe, a question mode, a syntax check, a read verb, a word inside an option VALUE, a copy whose first operand is the SOURCE. A human cannot approve a DENY, so this shape of false positive is worse than a noisy one. |
+| **Every exception that lets an operator LOOK is a spelling that can hide the ACT.** | The mirror of the line above, and the whole content of the self-attack. `--dry-run=none` executes and persists; `EXPLAIN ANALYSE` executes what it wraps; `help` is a verb and `--version` a flag, not any word; `ln -s SRC DIR` puts the link INSIDE the directory; `make -q` still parses, and a parse-time `$(shell …)` runs. An exception must be a claim about the WHOLE act, tested on the text as written. |
+| **An opacity must never REPLACE a stronger verdict.** | A producer marked STALE returned a null body, discarding contents it had already read — so an absolute deny became approvable the moment any earlier segment could not be classified. What was read is handed over; the staleness is a gap. And staleness is consulted BEFORE absence, because absence is a positive claim too. |
+| **A reached cap is not an absence** — met three more times. | The brace-expansion budget, the conditional branch-value budget, and the default-goal candidate cap were all silent. Each now reports, and the resolution becomes PARTIAL. |
+| **A rule under a broad ALLOW is a rule that never runs.** | Matching is first-match-wins per segment. Three rules added in this review had to be MOVED above the matchers that shadowed them, and three of five were still ALLOW after the first placement — which is how that was discovered. |
+
+Three mistakes in the fixing itself, kept because the pattern is the point: a `!== null` comparison on a function
+returning a BOOLEAN; a `for` without braces that put the condition outside the loop; and a psql metacommand
+spelled as a PREFIX with an optional backslash, so `db.dropDatabase()` matched as `\d`. All three were caught by
+a test within minutes of being written, two of them by the generated cross-product.
+
 ## A validation gate that lives in a temporary directory is not a gate
 
 The 200,334-command attack corpora that earlier rounds reported were ad-hoc text files in a session temporary
@@ -286,7 +311,7 @@ gate it represented no longer exists. Recorded because the lesson generalises: e
 not evidence.
 
 The permanent replacement is `packages/kernel/test/support/corpus.ts`, which is IN THE REPOSITORY and GENERATED
-rather than accumulated — 45 root semantic classes × 95 transformations × 60 producers, asserting **17,400**
+rather than accumulated — 67 root semantic classes × 97 transformations × 60 producers, asserting **23,924**
 combinations, and growing by one line per new transformation.
 
 The proportionality probe that lived beside those corpora is gone too, and it is not missed: `corpus.test.ts`

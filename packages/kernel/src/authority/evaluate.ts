@@ -4787,6 +4787,7 @@ function resolveScriptCommand(
         resolution: 'UNSUPPORTED',
       };
     let script: string | null = null;
+    let scriptAt = -1;
     const sub = tokens[1] ?? '';
     // npm accepts a long list of aliases for install, including the deliberate typo `isntall`; `npm it` is
     // install-test. Missing one meant the ambient closure was skipped entirely and the install reached ALLOW
@@ -4859,7 +4860,16 @@ function resolveScriptCommand(
         provenance: { source: pkgPath, fingerprint: fingerprint(text) },
       };
     }
-    if (sub === 'run' || sub === 'run-script') script = tokens.slice(2).find((t) => !t.startsWith('-')) ?? null;
+    // THE SCRIPT'S POSITION IS THE ONE THE PARSE REACHED, not the first token that spells it. `npm run run`
+    // names a script called `run`, and `tokens.indexOf(script)` below found the SUBCOMMAND instead — so the
+    // script name itself was forwarded as an argument and appended to the body. A spurious trailing word moves
+    // the LAST OPERAND of whatever the script runs: `ln -s ../.harness k` became `ln -s ../.harness k run`, and
+    // the link's directory was read from `run` (self-attack on exit review 9, found by the cross-product).
+    if (sub === 'run' || sub === 'run-script') {
+      const at = tokens.findIndex((t, i) => i >= 2 && !t.startsWith('-'));
+      script = at >= 0 ? tokens[at]! : null;
+      scriptAt = at;
+    }
     else if (sub === 'test' || sub === 'start' || sub === 'stop' || sub === 'restart') script = sub;
     else if (
       (head === 'yarn' || head === 'pnpm' || head === 'bun') &&
@@ -4943,7 +4953,7 @@ function resolveScriptCommand(
     // after the script name is passed to the script either way, so `npm run build prodk` really runs
     // `make build prodk` and `npm test deploy` runs the test script with `deploy` appended (exit review 8).
     const dd = tokens.indexOf('--');
-    const nameAt = script === null ? -1 : tokens.indexOf(script);
+    const nameAt = scriptAt >= 0 ? scriptAt : script === null ? -1 : tokens.indexOf(script);
 
     const forwarded =
       dd >= 0
@@ -5059,7 +5069,11 @@ function resolveScriptCommand(
     // scan starts where `make` actually is.
     const allRawMarked = tokenizeMarked(env.rawSegment ?? norm);
     const makeAt = allRawMarked.findIndex((t) => /^(?:.*\/)?(make|gmake)$/.test(t.text));
-    const rawMarked = makeAt > 0 ? allRawMarked.slice(makeAt) : allRawMarked;
+    // ...AND WHEN THE RAW SEGMENT IS A CARRIER, ITS TOKENS ARE THE CARRIER'S. `sh -c "make -q -f parse.mk all"`
+    // has `make` inside a single QUOTED word, so the scan finds no `make` at all and the raw tokens are `sh`,
+    // `-c` and the body — under which the `-f` file and the goal were both misread (found by the cross-product).
+    // The normalized text IS the command in that case, and it is what the producer was invoked on.
+    const rawMarked = makeAt >= 0 ? allRawMarked.slice(makeAt) : tokenizeMarked(norm);
     const rawTokens = rawMarked.map((t) => t.text);
     for (const t of rawTokens) {
       if (t.startsWith('-') || !/^[A-Za-z_][A-Za-z0-9_.]*=/.test(t)) continue;
@@ -5145,15 +5159,22 @@ function resolveScriptCommand(
       ...paths,
       ...['GNUmakefile', 'makefile', 'Makefile'].map((n) => join(makeDir, n)),
     ];
-    if (staleCandidates.some((p) => stale(p)))
-      return {
-        kind: 'make-target',
-        key: `make:${makeDir}:${targets.join(',')}`,
-        body: null,
-        reason: 'the makefile is rewritten earlier in the same command, so its analysed contents are not what runs',
-        resolution: 'STALE',
-      };
+    // WHAT WAS READ IS STILL HANDED OVER — the same rule the script producer follows. Staleness says "this may
+    // not be what runs"; it does not say the contents are harmless, and a null body threw away a makefile that
+    // had already been read, so a recipe holding an absolute deny arrived as an approvable opacity.
+    const staleNow = staleCandidates.some((p) => stale(p));
     if (!paths.length || !paths.some((p) => readInsideWorkspace(ctx, p) !== null)) {
+      // ...AND AN ABSENCE CANNOT BE CLAIMED OVER A FILE THIS COMMAND CREATES. With nothing on disk there is no
+      // body to hand over, so the staleness is the whole answer — and it must be given BEFORE the absence,
+      // which is a positive claim (exit review 9; the ordering was the self-attack's second-order finding).
+      if (staleNow)
+        return {
+          kind: 'make-target',
+          key: `make:stale:${makeDir}:${targets.join('\u0000')}`,
+          body: null,
+          reason: 'the makefile is written earlier in the same command, so its contents are not what this read',
+          resolution: 'STALE',
+        };
       const exists = paths.some((p) => fileExists(p));
       return {
         kind: 'make-target',
@@ -5234,14 +5255,10 @@ function resolveScriptCommand(
       const dirPart = canonicalPath(f.slice(0, f.search(/[*?[]/)) || '/');
       return written.has('\0any') || [...written].some((w) => w.startsWith(dirPart));
     });
-    if (includeStale)
-      return {
-        kind: 'make-target',
-        key: `make:${makeDir}:${targets.join(',')}`,
-        body: null,
-        reason: 'an optional include is written earlier in the same command, so what was read is not what runs',
-        resolution: 'STALE',
-      };
+    // ...and this one hands over what was read too. Returning a null body here discarded a makefile that had
+    // already been parsed, so its parse-time `$(shell …)` and its recipes vanished the moment ANY earlier
+    // segment of the command line could not be classified — which the wildcard ledger entry makes easy. An
+    // opacity must never REPLACE a stronger verdict (self-attack on exit review 9, third instance).
     // A bare `make` builds .DEFAULT_GOAL when set, not the first rule (challenge 5, finding 16).
     // A VERSION OR HELP PROBE READS NO MAKEFILE. `make --version` prints the version and exits: it selects no
     // goal, expands nothing and executes nothing. In any repository whose default goal happens to contain a
@@ -5452,6 +5469,14 @@ function resolveScriptCommand(
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
+    if (staleNow || includeStale)
+      gaps.push({
+        what: 'body',
+        where: makeDir,
+        why: includeStale
+          ? 'an optional include is written earlier in the same command, so what was read is not what runs'
+          : 'the makefile is rewritten earlier in the same command, so its analysed contents are not what runs',
+      });
     // A target this resolver could not find is PROVEN absent only when nothing in the makefile could define it
     // invisibly. Returning early on the first missing target also discarded every gap found for the OTHER goals
     // on the same command line, so `make nosuch deploy` claimed proven absence over an unresolved `deploy`
@@ -7148,6 +7173,36 @@ function classifyShellPaths(
         const entry = paths.find((q) => q.raw === src);
         if (entry) entry.abs = abs;
         else paths.push({ raw: src, abs, glob: false });
+        // ...AND THE JUDGEMENT IS MADE HERE TOO, not only through the shared path list. A link is a SECOND NAME
+        // for its target, so a link to a directory that CONTAINS protected paths opens a writable route into
+        // them — and routing that through the shared list made it depend on conditions further down that a
+        // producer body does not always meet (the corpus found `npm run` carrying it reaching ALLOW while the
+        // identical command alone was DENY).
+        const linkRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
+          canonicalPath(r).split(sep).join('/'),
+        );
+        const linkPosix = abs.split(sep).join('/');
+        for (const pp of table.protectedPaths) {
+          if (pp.tool === 'Read') continue;
+          const prefix = pp.path
+            .replace(/^\*\*\//, '')
+            .replace(/^~\//, homedir() + '/')
+            .split(/[*?[{]/)[0]!
+            .replace(/\/$/, '');
+          const candidates = (isAbsolute(prefix) ? [prefix] : linkRoots.map((r: string) => `${r}/${prefix}`)).map(
+            foldName,
+          );
+          const here = foldName(linkPosix);
+          if (!candidates.some((c) => c === here || c.startsWith(here + '/'))) continue;
+          hits.push({
+            capability: pp.capability,
+            verdict: verdictFor(table, ctx, pp.capability),
+            via: `symlink ${ops[ops.length - 1]} points at ${src}, which is or contains protected ${pp.path}`,
+            segment: seg,
+            absolute: isAbsoluteCap(table, pp.capability),
+          });
+          break;
+        }
       }
     }
   }
