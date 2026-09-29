@@ -127,6 +127,10 @@ const WRAPPER_VALUE_OPTS: Record<string, RegExp> = {
   'systemd-run': /^(-p|--property|-u|--unit|-E|--setenv|-M|--machine)$/,
   'sandbox-exec': /^(-f|-p|-n|-D)$/,
   nsenter: /^(-t|--target)$/,
+  // macOS `arch`: `-arch NAME` selects the slice, `-d NAME` deletes an environment variable and `-e NAME=VALUE`
+  // sets one. Without them `arch -arm64 -d ls bash -c '…'` handed `ls` to the head reader as the program and
+  // the real `bash -c` behind it was never seen (exit review 9).
+  arch: /^(-arch|-d|-e)$/,
   sem: /^(-j|--jobs|--id)$/,
   doas: /^(-u|-C)$/,
   gtimeout: /^(-s|--signal|-k|--kill-after)$/,
@@ -1475,7 +1479,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
             // the same SHAPE rule as CONFIG_PROGRAM_VERBS: a key that ends in one of git's program-valued words
             // names a program git will run, and enumerating them left `trailer.<t>.command`, `gpg.program` and
             // every other one off the list reaching ALLOW (exit review 6)
-            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
+            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.[A-Za-z0-9_-]*(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook)=/i.test(
               value,
             )
           )
@@ -1497,7 +1501,7 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
         if (!m) continue;
         const value = m[2] ?? restGit[k + 1] ?? '';
         if (
-          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)=/i.test(
+          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.[A-Za-z0-9_-]*(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook)=/i.test(
             value,
           )
         )
@@ -2213,6 +2217,7 @@ const WRITE_HEADS = new Set([
   'git',
   'find', // `-fprint`/`-fls`/`-fprintf FILE` write FILE
   'scp',
+  'ar', // `ar rcS ARCHIVE member…` writes ARCHIVE, whatever its extension says it is
 ]);
 
 /** Value of an option in every spelling that a real CLI accepts: `--long VALUE`, `--long=VALUE`, `-o VALUE` and the
@@ -3238,6 +3243,10 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
 /** Images whose ENTRYPOINT is a tool this kernel models, so the container's argv IS that tool's command line.
  *  Deliberately a short, named list: the argv of an arbitrary image is not a command line, and guessing would
  *  gate every `docker run myapp --port 8080`. */
+/** docker's MANAGEMENT GROUPS: `docker container run` is `docker run`, `docker image build` is `docker build`.
+ *  Every verb has both spellings, so a rule anchored on `tokens[1]` sees only half of them. */
+const DOCKER_GROUPS = /^(container|image|manifest|compose|buildx|builder|volume|network|system|context|plugin|node|secret|config|swarm|stack|service|trust)$/;
+
 const CLI_IMAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/(^|\/)(amazon\/aws-cli|aws-cli\/aws-cli)$/i, 'aws'],
   [/(^|\/)hashicorp\/vault$/i, 'vault'],
@@ -4374,8 +4383,15 @@ function resolveScriptCommand(
   // vendor's own image it ran under a container capability (exit review 7). Only the images whose ENTRYPOINT IS
   // the tool are read this way — the argv of an arbitrary image is not a command line this kernel can parse —
   // and the tool's own name is put back in front of it so the target model sees what it always sees.
-  if (/^(docker|podman|nerdctl)$/.test(head) && /^(run|create)$/.test(tokens[1] ?? '')) {
-    for (let i = 2; i < tokens.length; i++) {
+  // THE MANAGEMENT GROUP IS OPTIONAL AND CHANGES NOTHING. `docker container run` IS `docker run` — the modern
+  // CLI spells every verb both ways — and anchoring on `tokens[1]` saw only the short form, so the vendor's own
+  // CLI image reached ALLOW again through the long one (exit review 9). The same shape as `docker image build`,
+  // which was already handled; this makes the rule general instead of per-verb.
+  const runAt = tokens.findIndex(
+    (t, i) => i > 0 && /^(run|create)$/.test(t) && (i === 1 || DOCKER_GROUPS.test(tokens[i - 1] ?? '')),
+  );
+  if (/^(docker|podman|nerdctl)$/.test(head) && runAt > 0) {
+    for (let i = runAt + 1; i < tokens.length; i++) {
       const t = tokens[i]!;
       if (t.startsWith('-')) {
         if (DOCKER_RUN_VALUE_OPTS.test(t) && !t.includes('=')) i++;
@@ -6534,6 +6550,10 @@ function classifyShellPaths(
   containerPaths = false,
   /** paths this command already created or replaced, so a name may no longer mean what it says */
   written: ReadonlySet<string> = new Set(),
+  /** THE SEGMENT AS WRITTEN. A sed script is ONE quoted word and normalization has already dropped the quoting
+   *  that says so, which turned `sed -n '1w .claude/settings.json' README.md` into four bare tokens where the
+   *  script is just `1w` (exit review 9). Only the destinations inside the script need it. */
+  rawSeg: string = seg,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   const tokens = tokenize(seg);
@@ -6577,6 +6597,16 @@ function classifyShellPaths(
       absolute: false,
       opaqueUnread: true,
     });
+  // A SED SCRIPT'S OWN `w FILE` IS A WRITE TO THAT FILE, and only to that file. `sed -n '1w
+  // .claude/settings.json' README.md` replaces the agent's configuration while READING README.md, so the
+  // destination is judged here, on its own, rather than through the coarse "every operand is a write" switch —
+  // which would have made reading a governed file a write and reintroduced the defect closed one commit ago.
+  for (const w of sedWrittenFiles(rawSeg, ctx, cwd)) {
+    if (/[$`]/.test(w)) continue;
+    const abs = canonicalPath(isAbsolute(w) ? w : resolve(cwd, w));
+    const h = classifyPath(table, ctx, 'Write', abs);
+    if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `sed writes ${w} (${h.via})`, segment: seg });
+  }
   // EVERY RUNTIME THE MODEL KNOWS, not two of them. The privileged-mount MATCHER already named nerdctl, so the
   // command was recognised as a bind mount of `/` and asked — while the identical docker line was denied,
   // because only docker and podman reached the resolver that judges the SOURCE path (exit review 8). A tool the
@@ -6661,8 +6691,10 @@ function classifyShellPaths(
     (rawOutput !== null && rawOutput !== '' && !/^-/.test(rawOutput)) ||
     // an in-place formatter rewrites the files it is given
     (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf)$/.test(head) && tokens.some((t) => /^(-w|--write|-i|--in-place)$/.test(t))) ||
-    // ...and so does a stream editor, but ONLY with its in-place flag: without it the same tool is a reader
-    (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head) && editsInPlace(head, tokens)) ||
+    // ...and so does a stream editor, but ONLY with its in-place flag: without it the same tool is a reader —
+    // unless its own SCRIPT names a file to write, which `w FILE` does (exit review 9)
+    (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head) &&
+      (editsInPlace(head, tokens) || sedWrittenFiles(rawSeg, ctx, cwd).length > 0)) ||
     (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv)$/.test(tokens[1] ?? '')) ||
     (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
@@ -6729,9 +6761,22 @@ function classifyShellPaths(
       } else if (extract) {
         // the change-directory flag has several spellings: -C DIR, -CDIR, -xCDIR, --directory DIR, --directory=DIR,
         // --cd DIR, and --one-top-level[=DIR] creates and extracts into its own directory
-        dest =
-          optionValue(tokens, 'C', ['--directory', '--cd', '--one-top-level']) ?? '.'; // else the working directory
+        // SUCCESSIVE `-C` ARE CUMULATIVE. tar enters each in turn, so `-C .harness -C runtime` extracts into
+        // `.harness/runtime`; taking only the LAST one read it as `runtime` relative to the working directory,
+        // which is a different place entirely and not a protected one (exit review 9).
+        const cds = optionValues(tokens, 'C', ['--directory', '--cd']);
+        const top = optionValue(tokens, '', ['--one-top-level']);
+        dest = top ?? (cds.length ? cds.reduce((acc, d) => (isAbsolute(d) ? d : `${acc}/${d}`)) : '.');
       } else dest = null; // list / compare: read-only
+    } else if (head === 'ar') {
+      // `ar` WRITES ITS ARCHIVE, and the archive is the first operand after the key letters. `ar rcS
+      // .harness/runtime/state.json payload/blob` replaces a runtime file EGO alone may write, under a name
+      // that looks like a build step (exit review 9). The modes that only READ are `t` (list) and `p` (print).
+      const ops = bareOperands();
+      const keys = ops[0] ?? '';
+      dest = /^[a-zA-Z]+$/.test(keys) && !/^[tp]/.test(keys) ? (ops[1] ?? null) : null;
+      // the dashed spelling puts the key letters in an option: `ar -r -c archive member`
+      if (dest === null && tokens.some((t) => /^-[a-zA-Z]*[rqm]/.test(t))) dest = ops[0] ?? null;
     } else if (head === 'zip') {
       const operands = bareOperands();
       // `zip -m` MOVES: it deletes every source file once it has added it, so `zip -rm /tmp/x.zip .` empties the
@@ -6875,6 +6920,14 @@ function classifyShellPaths(
       // an absolute deny; never, it let `gawk -i inplace '{print "x"}' .claude/settings.json` rewrite one
       // (exit review 8).
       dest = editsInPlace(head, tokens) ? 'ALL' : null;
+      // ...and a sed script's own `w FILE` writes wherever it says, whatever the operands are (exit review 9)
+      for (const w of sedWrittenFiles(rawSeg, ctx, cwd))
+        if (!paths.some((q) => q.raw === w) && !/[$`]/.test(w)) {
+          const glob = /[*?[{]/.test(w);
+          const literal = glob ? w.slice(0, w.search(/[*?[{]/)) : w;
+          paths.push({ raw: w, abs: canonicalPath(isAbsolute(literal) ? literal : resolve(cwd, literal)), glob });
+          if (dest === null) dest = 'ALL';
+        }
     } else if (
       [
         'tee',
@@ -7333,38 +7386,113 @@ function commandHeadIndex(t: readonly string[]): number {
  *  reporting it as opacity gave an absolute deny the approvable ASK of "something ran that I did not read"
  *  (exit review 8). The `e` FLAG on a substitution (`s/x/y/e`) executes the PATTERN SPACE, which is content
  *  this kernel has not seen; that stays opacity, which is what it is. */
-function sedShellCommands(seg: string): string[] {
+/** Every sed SCRIPT this command runs, and every script FILE it names that could not be read. A `-f` file inside
+ *  the workspace IS readable, and reading it is the difference between knowing what the script does and guessing:
+ *  `sed -fevil.sed package.json` with `w .git/hooks/pre-commit` in the file installed a git hook at ALLOW
+ *  (exit review 9). A `-f` file outside the workspace, or one that is not there, stays unread and is reported. */
+function sedScripts(
+  seg: string,
+  ctx?: EvaluationContext,
+  cwd?: string,
+): { texts: string[]; unread: string[] } | null {
   const t = tokenize(seg);
   const i = commandHeadIndex(t);
-  if (!/^(sed|gsed)$/.test((t[i] ?? '').replace(/^.*\//, ''))) return [];
+  if (!/^(sed|gsed)$/.test((t[i] ?? '').replace(/^.*\//, ''))) return null;
   // the script is every `-e`/`--expression` value, or — when none was given — the first bare operand
-  const scripts: string[] = [];
+  const texts: string[] = [];
+  const unread: string[] = [];
   let sawE = false;
   let sawF = false;
+  const readScript = (f: string): void => {
+    sawF = true;
+    if (!ctx || cwd === undefined || /[$`*?]/.test(f)) {
+      unread.push(f);
+      return;
+    }
+    const text = readInsideWorkspace(ctx, isAbsolute(f) ? f : resolve(cwd, f));
+    if (text === null) unread.push(f);
+    else texts.push(text);
+  };
   for (let j = i + 1; j < t.length; j++) {
     const w = t[j]!;
     if (w === '-e' || w === '--expression') {
-      if (t[j + 1] !== undefined) { scripts.push(t[j + 1]!); sawE = true; j++; }
+      if (t[j + 1] !== undefined) { texts.push(t[j + 1]!); sawE = true; j++; }
       continue;
     }
     const eq = /^(?:--expression=|-e)(.+)$/.exec(w);
-    if (eq) { scripts.push(eq[1]!); sawE = true; continue; }
-    // a script FILE, which this resolver has not read — and which means NO bare operand is the script: with
-    // `-f` every operand is an INPUT, so reading the first one as a script made `sed -f s.sed '1e git push'`
-    // deny a file whose NAME happens to look like a script (self-attack, exit review 8)
-    if (w === '-f' || w === '--file') { j++; sawF = true; continue; }
+    if (eq) { texts.push(eq[1]!); sawE = true; continue; }
+    // a script FILE — and `-f` also means NO bare operand is the script: with it every operand is an INPUT, so
+    // reading the first one as a script made `sed -f s.sed '1e git push'` deny a file whose NAME happens to
+    // look like a script (self-attack, exit review 8)
+    if (w === '-f' || w === '--file') { if (t[j + 1] !== undefined) readScript(t[j + 1]!); j++; continue; }
     const feq = /^(?:--file=|-f)(.+)$/.exec(w);
-    if (feq) { sawF = true; continue; }
+    if (feq) { readScript(feq[1]!); continue; }
     if (w.startsWith('-')) continue;
-    if (!sawE && !sawF && !scripts.length) scripts.push(w);
+    if (!sawE && !sawF && !texts.length) texts.push(w);
   }
+  return { texts, unread };
+}
+
+function sedShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
+  const scripts = sedScripts(seg, ctx, cwd);
+  if (!scripts) return [];
   const out: string[] = [];
-  for (const script of scripts)
+  for (const script of scripts.texts)
     for (const line of script.split('\n'))
       // an address may select the lines: a line number, `$`, a range, or a `/regex/`. `e` then takes the REST
       // of the line as the command.
       for (const m of line.matchAll(/(?:^|;)\s*(?:\/(?:\\.|[^/])*\/|[0-9$,~+]+)?\s*!?\s*e[ \t]+([^\n]+)/g))
         out.push(m[1]!.trim());
+  return out;
+}
+
+/** The files a sed script WRITES. `w FILE` and `W FILE` write the pattern space to FILE, and `s/x/y/w FILE`
+ *  writes it when the substitution succeeds — an ordinary `sed -n '1w .claude/settings.json' README.md` replaces
+ *  the agent's own configuration, at ALLOW, because nothing read the script for its destinations (exit review 9).
+ *  The filename runs to the END OF THE LINE, which is what sed documents: a `;` after it is part of the name. */
+function sedWrittenFiles(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
+  const scripts = sedScripts(seg, ctx, cwd);
+  if (!scripts) return [];
+  const out: string[] = [];
+  for (const script of scripts.texts)
+    for (const line of script.split('\n')) {
+      // the bare `w`/`W` command, with its optional address in front
+      for (const m of line.matchAll(/(?:^|;)\s*(?:\/(?:\\.|[^/])*\/|[0-9$,~+]+)?\s*!?\s*[wW][ \t]+([^\n]+)/g))
+        out.push(m[1]!.trim());
+      // the `w` FLAG of a substitution, which comes after the closing delimiter and its other flags
+      for (const m of line.matchAll(/s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpiImMe0-9]*w[ \t]+([^\n]+)/g))
+        out.push(m[2]!.trim());
+    }
+  return out;
+}
+
+/** THE VALUE OF AN EXECUTING GIT CONFIG KEY IS A COMMAND, AND IT IS RIGHT THERE. `git -c
+ *  core.alternateRefsCommand="sh -c \"git push origin main\"" fetch origin` runs that shell command, and the
+ *  key was reported as opacity — an ASK — over text the kernel can read (exit review 9). Only the keys whose
+ *  value git EXECUTES are read this way; a key whose value is a path, a boolean or a number is not a command.
+ *  An unreadable or dynamic value keeps the opacity it already has. */
+const GIT_EXEC_CONFIG_KEY =
+  /^(core\.(hooksPath|fsmonitor|editor|pager|sshCommand|gitProxy|askPass|alternateRefsCommand)|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|diff\.external|alias\.|filter\.|credential\.[^=]*helper|uploadpack\.[^=]*Hook|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.[^.]+\.command|gpg\.[^.]*program|ssh\.variant)/i;
+
+function gitConfigCommands(seg: string): string[] {
+  const t = tokenizeMarked(seg).map((x) => x.text);
+  if (!/^git$/.test((t[commandHeadIndex(t)] ?? '').replace(/^.*\//, ''))) return [];
+  const out: string[] = [];
+  for (let i = 0; i < t.length; i++) {
+    const w = t[i]!;
+    const kv =
+      w === '-c' || w === '--config' || w === '--config-env'
+        ? (t[i + 1] ?? null)
+        : (/^(?:--config=|--config-env=|-c)(.+)$/.exec(w)?.[1] ?? null);
+    if (kv === null) continue;
+    const eq = kv.indexOf('=');
+    if (eq < 0) continue;
+    const key = kv.slice(0, eq);
+    const value = kv.slice(eq + 1);
+    // a value that is a bare PATH, a boolean or a number names no command line to read
+    if (!GIT_EXEC_CONFIG_KEY.test(key) || !value.trim() || /^[\w./~-]+$/.test(value)) continue;
+    out.push(value);
+  }
   return out;
 }
 
@@ -7385,7 +7513,7 @@ function gitPagerCommands(seg: string): string[] {
   return out;
 }
 
-function awkShellCommands(seg: string): string[] {
+function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
   const t = tokenize(seg);
   // THE HEAD IS FOUND WHERE THE COMMAND STARTS, not at token 0: `FOO=bar awk …` and `command awk …` are the same
   // awk invocation, and anchoring at position 0 missed both (exit review 7, cross-product).
@@ -7412,7 +7540,27 @@ function awkShellCommands(seg: string): string[] {
   const head = (t[i] ?? '').replace(/^.*\//, '');
   if (!/^(awk|gawk|mawk|nawk)$/.test(head)) return [];
   const out: string[] = [];
-  const program = t.slice(i + 1).filter((x) => !x.startsWith('-')).join(' ');
+  // `-f progfile` NAMES THE PROGRAM, and a progfile inside the workspace is readable. `awk -fevil.awk data.txt`
+  // with `BEGIN{system("git push origin main")}` in the file pushed at ALLOW, because only the command line was
+  // read (exit review 9). With `-f`, no bare operand is the program: every one of them is an input FILE.
+  const fromFiles: string[] = [];
+  let sawF = false;
+  for (let j = i + 1; j < t.length; j++) {
+    const w = t[j]!;
+    const f =
+      w === '-f' || w === '--file' || w === '--source-file'
+        ? (t[++j] ?? null)
+        : (/^(?:--file=|--source-file=|-f)(.+)$/.exec(w)?.[1] ?? null);
+    if (f === null) continue;
+    sawF = true;
+    if (ctx && cwd !== undefined && !/[$`*?]/.test(f)) {
+      const text = readInsideWorkspace(ctx, isAbsolute(f) ? f : resolve(cwd, f));
+      if (text !== null) fromFiles.push(text);
+    }
+  }
+  const program = sawF
+    ? fromFiles.join('\n')
+    : t.slice(i + 1).filter((x) => !x.startsWith('-')).join(' ');
   const literals = new Map<string, string>();
   for (const m of program.matchAll(/([A-Za-z_]\w*)\s*=\s*"((?:[^"\\]|\\.)*)"/g)) literals.set(m[1]!, m[2]!);
   for (const m of program.matchAll(/\bsystem\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)/g)) out.push(m[1]!);
@@ -7568,6 +7716,17 @@ function analyzeSegments(
       if (bindingIsProven) functionNames.add(cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1));
       continue;
     }
+    // `unset -f NAME` UNBINDS IT AGAIN, and everything after it is the REAL program. A definition earlier in the
+    // script made the name a known local function whose body the analyzer had already read — which is true only
+    // while the definition stands. `aws() { echo hi; }; unset -f aws; aws iam delete-user --user-name bob`
+    // deleted an IAM user at ALLOW, because the decoy definition was still believed (exit review 9). `unset`
+    // with no `-f` removes a VARIABLE and leaves the function alone; `unset -v` likewise.
+    const unset = /^unset\s+(.*)$/.exec(cdTrimmed);
+    if (unset) {
+      const args = tokenize(cdTrimmed).slice(1);
+      const functionsToo = !args.some((a) => /^-[a-zA-Z]*v$/.test(a)) || args.some((a) => /^-[a-zA-Z]*f$/.test(a));
+      if (functionsToo) for (const a of args) if (!a.startsWith('-')) functionNames.delete(a);
+    }
     const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
     const cdArgs = cdTokens ? cdTokens.filter((a) => a !== '--' && !a.startsWith('-')) : null;
     if (cdArgs && cdArgs.length) {
@@ -7679,16 +7838,19 @@ function analyzeSegments(
     // strings. The body re-enters the canonical analyzer whole, which is the only place the edge can be seen.
     // An awk program's shell commands have no other route in, so they are always handed over. Read from the RAW
     // segment: the program is ONE quoted word, and the normalizer has already dropped the quotes that say so.
-    for (const body of awkShellCommands(seg))
+    for (const body of awkShellCommands(seg, ctx, env.cwd))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by awk)`.trim() });
     // the same rule for the two other places where a readable command hides inside an option's value
-    for (const body of sedShellCommands(seg))
+    for (const body of sedShellCommands(seg, ctx, env.cwd))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by sed's e command)`.trim() });
     for (const body of gitPagerCommands(seg))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by git as the pager)`.trim() });
+    for (const body of gitConfigCommands(seg))
+      for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
+        hits.push({ ...h, via: `${h.via ?? ''} (run by git from its configuration)`.trim() });
     for (const body of carriedShellBodies(seg))
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
@@ -7702,8 +7864,8 @@ function analyzeSegments(
       // body that feeds one of them is re-entered whole (found by the producer cross-product, exit review 8).
       if (
         splitShellPipeline(body).length > 1 ||
-        awkShellCommands(body).length > 0 ||
-        sedShellCommands(body).length > 0 ||
+        awkShellCommands(body, ctx, env.cwd).length > 0 ||
+        sedShellCommands(body, ctx, env.cwd).length > 0 ||
         gitPagerCommands(body).length > 0
       )
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
@@ -7821,14 +7983,21 @@ function analyzeSegments(
       // A CONTAINER'S PATHS ARE THE IMAGE'S. A Dockerfile RUN line writes inside the image, not on the host, so
       // its path operands are not judged against the workspace; its COMMANDS still are, and so is anything the
       // analyzer could not READ, which is unreadable wherever it runs (exit review 8).
+      // THE DIRECTORY A COMMAND RUNS IN IS `env.cwd`, NOT THE ONE THE SEGMENT STARTED IN. `git -C dir` and
+      // `env -C dir` are read ABOVE and recorded on the environment, which is what every producer then uses —
+      // but the path classification was still handed the OUTER directory, so `git -C control-plane checkout
+      // HEAD~1 permissions/matchers.md` and `env -C control-plane tee permissions/matchers.md` rewrote the
+      // policy that decides every later verdict, at ALLOW, while the same act with the path spelled out whole
+      // was an absolute deny (exit review 9). One directory, one meaning, for producers and paths alike.
       for (const h of classifyShellPaths(
         table,
         ctx,
         norm,
-        effectiveCwd,
+        env.cwd,
         patternWords,
         env.containerPaths === true,
         written,
+        seg,
       ))
         hits.push(h);
     }

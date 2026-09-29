@@ -646,7 +646,10 @@ matchers:
     command: '^(kustomize|kubectl\s+kustomize)\b[^|;&]*(--enable-exec|--enable-alpha-plugins|--helm-command(=|\s)|\sfn\s+run\b)'
   - capability: container.registry.push
     tool: Bash
-    command: '^(docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?(push\b|build\b[^|;&]*--push)'
+    # buildx's OWN verbs also publish: `bake --push` builds every target in a bake file and pushes each one, and
+    # `--output type=registry` is what `--push` is shorthand FOR. Naming only `--push` covered neither, so an
+    # upload to a shared registry reached ALLOW through the two spellings buildx documents (exit review 9).
+    command: '^(docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?(push\b|(build|bake)\b[^|;&]*(--push\b|--output[= ][^\s]*type=registry))'
   # Handing a registry password on the command line writes it into the shell history and the process table.
   # SCOPED TO THE VERBS THAT TAKE ONE: docker's `-p` is `--publish`, so an unscoped rule turned `docker run -p
   # 8080:80 nginx` — the most ordinary container command there is — into a credential exposure (exit review 8).
@@ -708,6 +711,12 @@ matchers:
   - capability: container.nonlocal.run
     tool: Bash
     command: '^(docker|podman|nerdctl)\s+stack\s+(deploy|up)\b'
+  # A SWARM SERVICE IS A RUNNING DEPLOYMENT, NOT AN IMAGE. `docker service update --image evil:1 acme_web`
+  # replaces what every task of that service runs, across the cluster, and `service create|scale|rollback|rm`
+  # are the same act by other names. The swarm matcher above covered only `swarm join|init` (exit review 9).
+  - capability: container.nonlocal.run
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+service\s+(create|update|scale|rollback|rm|remove)\b'
   - capability: container.build
     tool: Bash
     command: '^(docker|podman)\s+(build|buildx)\b'

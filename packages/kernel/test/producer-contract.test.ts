@@ -191,8 +191,11 @@ test('producer contract: the source has no second path around the canonical anal
   // PAGER for `grep -O<cmd>`. Both are readable text inside an option's value, and both arrived as opacity — an
   // ASK — over an absolute deny the kernel could read. Neither classifies anything itself; each hands the text
   // back to this function as its own segment.
-  assert.equal(callers, 10, 'a new call site must feed the canonical pipeline, not go around it');
-  for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand', 'readsScriptFromStdin', 'carriedShellBodies', 'awkShellCommands', 'sedShellCommands', 'gitPagerCommands', 'DB_CLIENT_HEADS'])
+  // AND ONE MORE OF THE SAME SHAPE (exit review 9): the VALUE of a git config key whose value git EXECUTES —
+  // `git -c core.alternateRefsCommand="sh -c 'git push origin main'" fetch` — which is readable text that was
+  // being reported as opacity.
+  assert.equal(callers, 11, 'a new call site must feed the canonical pipeline, not go around it');
+  for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand', 'readsScriptFromStdin', 'carriedShellBodies', 'awkShellCommands', 'sedShellCommands', 'gitPagerCommands', 'gitConfigCommands', 'DB_CLIENT_HEADS'])
     assert.ok(src.includes(site), `${site} is one of the accounted-for paths`);
   // and the producer return type still has nowhere to put a verdict
   const contract = src.slice(src.indexOf('function resolveScriptCommand('), src.indexOf('/** True when the path exists'));
