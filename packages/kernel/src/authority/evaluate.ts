@@ -3172,6 +3172,10 @@ interface MakeFileModel {
   rules: Map<string, MakeRule>;
   firstTarget: string | null;
   defaultGoal: string | null;
+  /** EVERY goal any branch of the file could select. `.DEFAULT_GOAL` may be assigned inside a conditional, and
+   *  which branch runs depends on the environment — so all of them are candidates, exactly as `altVars` treats
+   *  a variable assigned in several branches (exit review 9). */
+  altGoals: Set<string>;
   oneShell: boolean;
   /** constructs that affect the WHOLE file, so no conclusion drawn from it is complete ($(eval), VPATH, an
    *  include this resolver could not read or whose path is computed) */
@@ -3535,6 +3539,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     rules: new Map(),
     firstTarget: null,
     defaultGoal: null,
+    altGoals: new Set<string>(),
     oneShell: false,
     unsupported: [],
     unsupportedFor: new Map(),
@@ -3676,6 +3681,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         model.rebinds.push(...sub.rebinds);
         model.sources.push(...sub.sources);
         if (sub.defaultGoal) model.defaultGoal = sub.defaultGoal; // make takes the LAST assignment
+        for (const g of sub.altGoals) model.altGoals.add(g);
         if (sub.oneShell) model.oneShell = true;
         if (!model.firstTarget) model.firstTarget = sub.firstTarget;
       }
@@ -3768,8 +3774,18 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       current = null;
       continue;
     }
-    const goal = /^\.DEFAULT_GOAL\s*[:+?]?=\s*(\S+)/.exec(trimmed);
+    // `override` and `export` may precede it, exactly as they may precede any other assignment: without them
+    // `override .DEFAULT_GOAL = deploy` selected no goal at all (exit review 9).
+    const goal = /^(?:override\s+|export\s+)*\.DEFAULT_GOAL\s*[:+?]?=\s*(\S+)/.exec(trimmed);
     if (goal) {
+      // INSIDE A CONDITIONAL, EVERY BRANCH IS POSSIBLE — the same rule `altVars` applies to an ordinary
+      // variable. Outside one, assignments are SEQUENTIAL and make takes the last, which this resolver can
+      // determine exactly; recording every sequential assignment as a candidate would walk goals the file has
+      // already overwritten and gate a makefile EGO can read perfectly well.
+      if (openConditions.length) {
+        if (model.defaultGoal) model.altGoals.add(model.defaultGoal);
+        model.altGoals.add(goal[1]!);
+      }
       model.defaultGoal = goal[1]!;
       current = null;
       continue;
@@ -3832,7 +3848,11 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           model.rules.set(t, shared);
           current = shared;
         }
-        if (!model.firstTarget && !t.startsWith('.')) model.firstTarget = t;
+        // A TARGET BEGINNING WITH A DOT IS SPECIAL ONLY IF IT HAS NO SLASH. That is make's own rule for picking
+        // the default goal — ".PHONY" is skipped, "./deploy" is an ordinary file target and IS the default —
+        // and skipping both made a makefile whose first rule is `./deploy:` resolve to no goal at all, so its
+        // `git push origin main` was never seen (exit review 9).
+        if (!model.firstTarget && !(t.startsWith('.') && !t.includes('/'))) model.firstTarget = t;
       }
       continue;
     }
@@ -4829,29 +4849,31 @@ function resolveScriptCommand(
     // -f app" run` reaches the scan below as eight bare words: the override kept only `docker`, `--context` and
     // `production` became goals, and `-f app` was read as make's own `--file` option — which made the resolver
     // read a makefile that does not exist and PROVE the target absent, laundering the command (exit review 5).
-    const rawAssignedWords = new Set<string>();
-    for (const t of tokenizeMarked(env.rawSegment ?? norm)) {
-      if (t.text.startsWith('-') || !/^[A-Za-z_][A-Za-z0-9_.]*=/.test(t.text)) continue;
-      const value = t.text.slice(t.text.indexOf('=') + 1);
-      cliVars.set(t.text.slice(0, t.text.indexOf('=')), value);
-      if (/\s/.test(value)) for (const w of value.split(/\s+/).filter(Boolean)) rawAssignedWords.add(w);
+    // ...and the GOALS are read from the raw tokens too, because there an assignment is still ONE word. Matching
+    // the normalized words against a SET of the words seen inside assignment values dropped any goal that
+    // happened to share a word with one: `make NOTE="run deploy" deploy` lost its real goal and resolved the
+    // DEFAULT one, so a recipe with `git push origin main` in it reached ALLOW (exit review 9). A word is part
+    // of an assignment because of WHERE it is, not because of what it says.
+    const rawTokens = tokenizeMarked(env.rawSegment ?? norm).map((t) => t.text);
+    for (const t of rawTokens) {
+      if (t.startsWith('-') || !/^[A-Za-z_][A-Za-z0-9_.]*=/.test(t)) continue;
+      cliVars.set(t.slice(0, t.indexOf('=')), t.slice(t.indexOf('=') + 1));
     }
 
     let makeDir = cwd;
     const makeFiles: string[] = []; // every -f/--file/--makefile: make reads them ALL, not just the last
-    for (let i = 1; i < tokens.length; i++) {
-      const t = tokens[i]!;
-      if (rawAssignedWords.has(t)) continue; // a word INSIDE a quoted assignment value is not make's own argument
+    for (let i = 1; i < rawTokens.length; i++) {
+      const t = rawTokens[i]!;
       if (t.startsWith('-')) {
         const dirEq = /^(?:--directory=|-C)(.+)$/.exec(t);
         const fileEq = /^(?:--file=|--makefile=|-f)(.+)$/.exec(t);
         // successive -C are CUMULATIVE in make: `make -C a -C b` enters a, then a/b (challenge 5, finding 17)
-        if ((t === '-C' || t === '--directory') && tokens[i + 1]) makeDir = resolve(makeDir, tokens[i + 1]!);
+        if ((t === '-C' || t === '--directory') && rawTokens[i + 1]) makeDir = resolve(makeDir, rawTokens[i + 1]!);
         else if (dirEq) makeDir = resolve(makeDir, dirEq[1]!);
-        if ((t === '-f' || t === '--file' || t === '--makefile') && tokens[i + 1]) makeFiles.push(tokens[i + 1]!);
+        if ((t === '-f' || t === '--file' || t === '--makefile') && rawTokens[i + 1]) makeFiles.push(rawTokens[i + 1]!);
         else if (fileEq) makeFiles.push(fileEq[1]!);
         if (MAKE_ARG_OPTS.has(t)) i++;
-        else if (MAKE_OPTIONAL_NUMBER_OPTS.has(t) && /^\d+(\.\d+)?$/.test(tokens[i + 1] ?? '')) i++;
+        else if (MAKE_OPTIONAL_NUMBER_OPTS.has(t) && /^\d+(\.\d+)?$/.test(rawTokens[i + 1] ?? '')) i++;
         continue;
       }
       if (t.includes('=')) {
@@ -4865,7 +4887,9 @@ function resolveScriptCommand(
         continue;
 
       }
-      targets.push(t);
+      // `make ./deploy` BUILDS THE TARGET `deploy`: make canonicalises a goal's leading `./` away, so a goal
+      // spelled that way found no rule and the DEFAULT goal was resolved instead (exit review 9).
+      targets.push(t.replace(/^(?:\.\/)+/, ''));
     }
     // THE QUOTING IS ONLY IN THE RAW SEGMENT. Normalization de-quotes, so `make V="git push origin main" run`
     // reaches the scan above as five bare words: the override kept only `git`, and `push origin main` became
@@ -4925,6 +4949,7 @@ function resolveScriptCommand(
       rules: new Map(),
       firstTarget: null,
       defaultGoal: null,
+      altGoals: new Set<string>(),
       oneShell: false,
       unsupported: [],
       unsupportedFor: new Map(),
@@ -4975,6 +5000,7 @@ function resolveScriptCommand(
       merged.text += m.text + '\n';
       if (m.oneShell) merged.oneShell = true;
       if (m.defaultGoal) merged.defaultGoal = m.defaultGoal; // make takes the LAST assignment
+      for (const g of m.altGoals) merged.altGoals.add(g);
       if (!merged.firstTarget) merged.firstTarget = m.firstTarget;
     }
     // A bare `make` builds .DEFAULT_GOAL when set, not the first rule (challenge 5, finding 16).
@@ -5003,7 +5029,16 @@ function resolveScriptCommand(
         (/^(--just-print|--dry-run|--recon)$/.test(t.text) ||
           (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('n'))),
     );
-    const wanted = targets.length ? targets : [merged.defaultGoal ?? merged.firstTarget].filter((t): t is string => !!t);
+    // WITH NO GOAL ON THE COMMAND LINE, EVERY GOAL THE FILE COULD SELECT IS A CANDIDATE. `.DEFAULT_GOAL` may be
+    // assigned in one branch of a conditional and something else in the other, and which branch runs depends on
+    // an environment this kernel does not model — so all of them are walked, bounded, exactly as every branch of
+    // a variable assignment is (exit review 9).
+    // ...and `.DEFAULT_GOAL` REPLACES the first rule, it does not join it: listing both walked a target the
+    // file had deliberately overridden.
+    const goals = [...new Set([merged.defaultGoal, ...merged.altGoals])].filter((t): t is string => !!t);
+    const wanted = targets.length
+      ? targets
+      : (goals.length ? goals : [merged.firstTarget].filter((t): t is string => !!t)).slice(0, 8);
     const body: string[] = [];
     const missing: string[] = [];
     let partial: string | null = null;
@@ -5015,7 +5050,7 @@ function resolveScriptCommand(
       if (visited.has(t)) return;
       visited.add(t);
       touchedBlind.push(...(merged.unsupportedFor.get(t) ?? []));
-      let rule = merged.rules.get(t);
+      let rule = merged.rules.get(t) ?? merged.rules.get(`./${t}`);
       if (!rule) {
         // AN IMPLICIT RULE BUILDS IT. `all: evil.o` with `%.o: %.c` runs that rule's recipe, and recording only
         // the blindness made the effect an opacity where the recipe is right there to read (exit review 7).
@@ -5059,10 +5094,11 @@ function resolveScriptCommand(
         }
       for (const p of rule.prereqs) walk(p, depth + 1);
       for (const rl of rule.recipes) {
-        const cmd = rl.replace(/^[@+-]+/, '').trim();
+        const cmd = rl.replace(/^[@+\s-]*[@+-]/, '').trimStart().replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
-        // under `-n` the line is expanded but not executed, unless it is one of make's own two exceptions
-        const runs = !dryRun || /^[@-]*\+/.test(rl) || /\$[({]MAKE[)}]/.test(rl);
+            // make's recipe PREFIX CHARACTERS may appear in any order AND BE SEPARATED BY WHITESPACE, so `@ +cmd`
+        // carries the `+` exactly as `+@cmd` does — and `+` is what still runs under `-n` (exit review 9).
+        const runs = !dryRun || /^[@\s-]*\+/.test(rl) || /\$[({]MAKE[)}]/.test(rl);
         // make expands the line BEFORE the shell sees it: the variables it splices in can carry whole commands,
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
         const tv0 = merged.targetVars.get(t);
@@ -5077,7 +5113,11 @@ function resolveScriptCommand(
         let budget = 6;
         for (const [name, values] of merged.altVars) {
           if (budget <= 0) break;
-          if (!new RegExp(`\\$[({]${name}[)}]`).test(cmd)) continue;
+          // `$V` IS `$(V)`. make reads a single character after `$` as a whole variable name, and the test
+          // required the parens, so a recipe line spelled `$V` never saw the branch values of `V` — `make E=1
+          // run` with `V = git push --force origin main` in the taken branch was ALLOW (exit review 9).
+          const ref = name.length === 1 ? `\\$([({]${name}[)}]|${name}(?![A-Za-z0-9_]))` : `\\$[({]${name}[)}]`;
+          if (!new RegExp(ref).test(cmd)) continue;
           for (const v of values) {
             if (budget-- <= 0) break;
             const alt = expandMakeText(cmd, new Map([...vars, [name, v]]), auto);
@@ -5119,9 +5159,15 @@ function resolveScriptCommand(
     });
     // ...and what the makefile EXPORTS is in every recipe's environment, which is how the recipe's `psql` finds
     // a production host and its `tsc` loads a Node require hook that the recipe text never mentions.
+    const exportedInjects: string[] = [];
     for (const [k, v] of merged.exported) {
       const expanded = expandMakeText(v, merged.vars).text ?? v;
       if (EXECUTION_ENV_INPUTS.test(k) || TARGET_ENV_RE.test(k)) bodyEnv.envInputs[k] = expanded;
+      // AN EXPORTED NAME THAT REDEFINES EXECUTION IS AN INJECTION WHEREVER IT IS WRITTEN. `export LD_AUDIT =
+      // ./evil.so` in a makefile re-points every program the recipe runs exactly as `LD_AUDIT=./evil.so cmd`
+      // does on a command line — and only the command-line spelling emitted the marker, so the makefile form
+      // recorded the value on the environment and gated nothing (exit review 9).
+      if (ENV_INJECT_RE.test(k) && envInjects(k, `${k}=${expanded}`)) exportedInjects.push(`${MARK}env-inject ${k}`);
     }
     // THE KEY'S SEPARATOR MUST NOT BE A LEGAL TARGET NAME CHARACTER. A comma is: `make build test` keyed as
     // `build,test`, byte-identical to the key of `make build,test`, so a recipe that re-entered make with that
@@ -5164,7 +5210,8 @@ function resolveScriptCommand(
     return {
       kind: 'make-target',
       key,
-      body,
+      // the injections come FIRST, because they are in force for every line that follows
+      body: exportedInjects.length ? [...exportedInjects, ...body] : body,
       bodyEnv,
       provenance,
       // .ONESHELL hands the WHOLE recipe to one shell, so a `cd` leaks into the next line (challenge 5, finding 10)
