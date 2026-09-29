@@ -434,6 +434,12 @@ matchers:
   # `git clone --config k=v` is clone's own spelling of the global `-c k=v`, and it sits AFTER the verb where the
   # global-option stripper never looks. The same keys, the same effect: core.sshCommand and its neighbours name a
   # program git runs during the clone.
+  # A CONFIG VALUE THAT STARTS WITH `!` IS A SHELL COMMAND, whatever the key is called. git's own convention
+  # marks a shell-executed value that way — `submodule.<n>.update = !/tmp/pwn.sh` runs during a recursive clone
+  # or update — and keying on the NAME could never cover it (exit review 8).
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\b[\s\S]*\s(-c|--config|--config-env)(=|\s+)[A-Za-z0-9._-]+=["'']?!'
   # `interactive.diffFilter` runs a shell command over the diff before `add -p` prints it, so it is a
   # program-valued key like the rest; the clone form sets it for every later command in the new repository.
   - capability: git.alias.inline
@@ -488,6 +494,11 @@ matchers:
   - capability: git.remote.configure
     tool: Bash
     command: '^git\s+remote\s+(add|remove|rm|rename|set-url|set-branches|set-head|prune)\b'
+  # `--pathspec-from-file=F` takes the pathspecs from a FILE, so the paths a checkout will overwrite are not on
+  # the command line at all and nothing judged them.
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^git\s+(checkout|restore|add|rm|stash|commit)\b[^|;&]*--pathspec-from-file(=|\s)'
   # `git checkout .` and `git restore .` DISCARD every uncommitted change in the working tree — a repository-wide
   # destruction the command line does not enumerate, and the narrow-path spellings are judged on their paths.
   - capability: command.destructive
@@ -587,7 +598,7 @@ matchers:
     # every flag that removes the isolation the accepted container decision relies on. `--device` hands the
     # container a host device and `--security-opt seccomp=unconfined` / `apparmor=unconfined` remove the syscall
     # filter; the residuals document claimed these gated before they did (decision challenge, finding 9).
-    command: '^(docker|podman)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--uts[= ]host|--cgroupns[= ]host|--device[= ]|--device-cgroup-rule|--security-opt[= ]?\S*(unconfined|seccomp=unconfined|apparmor=unconfined|no-new-privileges=false)|--cap-add[= ]?(CAP_)?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH|SYS_CHROOT|SYS_BOOT|SYS_RAWIO|MKNOD|NET_ADMIN|NET_RAW|SETUID|SETGID|AUDIT_CONTROL|BPF|PERFMON)|--pid[= ]container|--userns[= ]keep-id)'
+    command: '^(docker|podman|nerdctl)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--uts[= ]host|--cgroupns[= ]host|--device[= ]|--device-cgroup-rule|--security-opt[= ]?\S*(unconfined|seccomp=unconfined|apparmor=unconfined|no-new-privileges=false)|--cap-add[= ]?(CAP_)?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH|SYS_CHROOT|SYS_BOOT|SYS_RAWIO|MKNOD|NET_ADMIN|NET_RAW|SETUID|SETGID|AUDIT_CONTROL|BPF|PERFMON)|--pid[= ]container|--userns[= ]keep-id)'
   # `docker|podman exec` enters an ALREADY-RUNNING container whose isolation EGO never established, and runs an
   # unclassified command there. `run` is judged by its own flags and bind mounts above and below, so it is not
   # gated wholesale: that would make ordinary local development ask on every invocation. The unverified isolation
@@ -598,6 +609,22 @@ matchers:
   # A PUSH IS A PUSH IN EVERY SPELLING. The management-group form (`docker image push`), the compose form
   # (`docker compose push`) and buildx's `--push` were not all covered, so the same upload to a shared registry
   # was DENY as `docker push` and ALLOW as `docker image push` (exit review 7).
+  # `--mount type=bind,source=/…` is the long spelling of `-v /…:/…`, and a `local` volume whose `device=` names
+  # a host path is a bind mount by another name: both hand the host filesystem to the container (exit review 8).
+  - capability: command.privileged
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\b[^|;&]*--mount[= ][^\s]*(type=bind[^\s]*,\s*source=(/|~|\$HOME)|volume-opt=device=(/|~|\$HOME))'
+  # helm PLUGINS are arbitrary programs installed into helm and run by it.
+  - capability: command.network-tool
+    tool: Bash
+    command: '^helm\b[^|;&]*\splugin\s+(install|update)\b'
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^helm\b[^|;&]*\splugin\s+(uninstall|remove|run)\b'
+  # kustomize's exec plugins and KRM functions run arbitrary programs and images against the rendered manifests.
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^(kustomize|kubectl\s+kustomize)\b[^|;&]*(--enable-exec|--enable-alpha-plugins|--helm-command(=|\s)|\sfn\s+run\b)'
   - capability: container.registry.push
     tool: Bash
     command: '^(docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?(push\b|build\b[^|;&]*--push)'
@@ -658,7 +685,7 @@ matchers:
   # reads it just as surely as `cat` would (round 14)
   - capability: fs.credential-store.read
     tool: Bash
-    command: '^(docker|podman)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|[^:\s]*\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
+    command: '^(docker|podman|nerdctl)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|[^:\s]*\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
   # `nerdctl` is containerd's docker-compatible client: the same flags, the same `--context`, the same effects.
   # It is enrolled in the target RESOLVER and was missing here, so nothing classified it and its target was never
   # resolved — found by the property that pins these two lists together (exit review 7).
@@ -729,6 +756,15 @@ matchers:
     # regex, so the honest choice is the simple rule plus this note rather than a lookahead that silently means
     # something else.
     command: '^rm\s+(-[a-zA-Z]+\s+)*((\./)?(node_modules|bower_components|dist|build|out|target|coverage|htmlcov|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.next|\.nuxt|\.turbo|\.parcel-cache|\.svelte-kit|\.angular|\.gradle|\.venv|venv|vendor|\.terraform|Pods|DerivedData)/?\s*)+$'
+  # `tar cf host:/path` uses tar's REMOTE archive syntax: the archive is written on another machine over rsh/ssh,
+  # which is egress with no network binary on the line (exit review 8).
+  - capability: command.network-tool
+    tool: Bash
+    command: '^g?tar\b[^|;&]*\s(-f(=|\s*)|[a-zA-Z]*f\s+)[A-Za-z0-9_.-]+:[^\s]'
+  # `zip -m` / `--move` DELETES every file it archived once the archive is written.
+  - capability: command.destructive
+    tool: Bash
+    command: '^zip\b[^|;&]*\s(-[a-zA-Z]*m[a-zA-Z]*|--move)(\s|$)'
   - capability: command.destructive
     tool: Bash
     command: '^rm\s+-[a-zA-Z]*r'
@@ -870,6 +906,11 @@ matchers:
   - capability: command.env-override
     tool: Bash
     command: '^(?!(?:grep|rg|ripgrep|egrep|fgrep|ag|ack|sed|gsed|awk|gawk|find|fd|xargs|comm|diff)\b)[\s\S]*(?:^|\s)(?:KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]*|HOME|PATH)\+?='
+  # `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` hands <cmd> to git's pager machinery, which runs it
+  # through a shell with the matching file names appended — a program EGO never read (exit review 8).
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^git\b[\s\S]*\s(-O|--open-files-in-pager)(=|\s*)\S'
   # ORDINARY READ-ONLY GIT PLUMBING AND EVERYDAY VERBS. These fell through every matcher to command.unknown and
   # asked: a search of tracked files, a read of an object, a read of configuration, and deleting one tracked file
   # — which `rm src/a.ts` already does without asking (exit review 7). `git config` WITHOUT a value is a read;

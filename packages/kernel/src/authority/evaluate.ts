@@ -265,7 +265,9 @@ export function splitShellPipeline(command: string): ShellStage[] {
           text: t,
           pipedFromPrevious: consumePipe(),
           fromProcessSubstitution: sawProcessSubstitution,
-          ...(groupStack.length ? { groupId: groupStack[groupStack.length - 1]! } : {}),
+          // the OUTERMOST group: a nested `{ … }` inside a group is still part of the same standard output, and
+          // keying on the innermost one broke the upstream run at the nested brace (exit review 8)
+          ...(groupStack.length ? { groupId: groupStack[0]! } : {}),
         });
       sawProcessSubstitution = false;
       if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
@@ -531,7 +533,16 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // DENY in the control plane became ALLOW through it — a regression this branch introduced and exit review 4
       // found. A shell resolves the ambiguity by requiring the span to CLOSE with `))`; when it does not, it
       // re-parses as `$( (…) …)`. So does this: arithmetic only when the two closing parens are adjacent.
-      if (ch === '$' && next === '(' && command[i + 2] === '(') {
+      // ...and a body carrying a shell OPERATOR is not arithmetic in any shell: `$((:) && (git push origin
+      // main))` is a command substitution containing two subshells (exit review 8).
+      if (
+        ch === '$' &&
+        next === '(' &&
+        command[i + 2] === '(' &&
+        // ...and only when the BODY could be arithmetic: a shell operator anywhere before the closing `))` means
+        // this is a command substitution containing subshells, which is what `$((:) && (git push …))` is
+        !/[;&|]/.test(command.slice(i + 3, (command.indexOf('))', i + 3) + 2) || command.length))
+      ) {
         let depth = 0;
         let j = i + 1;
         let inner = '';
@@ -690,7 +701,7 @@ const INLINE_SCRIPT_FLAG_RE = /^(-c|-e|-E|--eval|--command|-m|--module|-p|--prin
 /** options of those heads that consume the next token, so their value is not mistaken for a script operand.
  *  `bash -o pipefail -c CMD` and `bash -O extglob -c CMD` read `pipefail`/`extglob` as the program and lost the
  *  inline script entirely (exit review 6). */
-const STDIN_HEAD_VALUE_FLAG_RE = /^([-+][oO]|--rcfile|--init-file|-X|-W|-Q|--conf|--check-prefix)$/;
+const STDIN_HEAD_VALUE_FLAG_RE = /^([-+][a-zA-Z]*[oO]|--rcfile|--init-file|-X|-W|-Q|--conf|--check-prefix)$/;
 
 /** True when this command runs whatever is fed to its standard input: `sh`, `bash -s`, `python3 -`, `node`.
  *  A script operand, or an inline `-c`/`-e`/`-m` program, means stdin is DATA and this is false. */
@@ -887,7 +898,7 @@ export function normalizeSegment(segment: string): string[] {
   // `npm exec` is `npx` and `bun x` is `bunx` — npm-exec(1) documents them as the SAME command. Stripping the
   // two-word spelling as a transparent pair sent it down a different path from the one-word spelling, so the npx
   // ACQUISITION guard below (a runner carrying its own `--package` fetches) never saw it (exit review 4).
-  const WRAP = String.raw`(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)|env|command|nohup|setsid|stdbuf|nice(?:\s+-n\s+\S+)?|ionice|timeout(?:\s+\S+)?|caffeinate|chronic|unbuffer|--)\s+)*`;
+  const WRAP = String.raw`(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)|env|command|nohup|setsid|stdbuf|nice(?:\s+-n\s+\S+)?|ionice|timeout(?:\s+\S+)?|caffeinate|chronic|unbuffer|time|builtin|--)\s+)*`;
   // the two-word spellings are the SAME command as the one-word ones, and the rewrite must find them behind a
   // wrapper too — `env npm exec tsc` reached command.unknown while `npx tsc` was an ordinary build
   s = s.replace(new RegExp(`^(${WRAP})npm\\s+(?:exec|x)\\s+`), '$1npx ').replace(new RegExp(`^(${WRAP})bun\\s+x\\s+`), '$1bunx ');
@@ -930,6 +941,8 @@ export function normalizeSegment(segment: string): string[] {
   stripAssignments();
   // `exec -a NAME prog …` runs `prog` under the name NAME: strip the alias so the real head is classified
   s = s.replace(EXEC_ARGV0_RE, '');
+  // ...and behind a wrapper too: `command exec -a cat ./deploy.sh` forges argv[0] just the same (exit review 8)
+  s = s.replace(new RegExp(`^(${WRAP})exec\\s+(?:-[a-zA-Z]+\\s+)*-a\\s+\\S+\\s+`), '$1');
   // shell prefix keywords (`if git push`, `do npm test`, `then rm -rf x`) are normalization, not a safety
   // judgement: stripping them in the analyzer gives every producer AND the top level the same treatment.
   //
@@ -5381,7 +5394,8 @@ function resolveK8sTarget(
   // `kubectl --context production get secrets/db -o yaml` dumped a production Secret's data block at ALLOW
   // (exit review 7).
   const touchesSecrets =
-    (head === 'kubectl' && tokens.some((t) => /^secrets?(\/.+)?$/i.test(t))) ||
+    // kubectl accepts a COMMA-SEPARATED resource list: `get secrets,configmaps` reads both (exit review 8)
+    (head === 'kubectl' && tokens.some((t) => t.split(',').some((r) => /^secrets?(\/.+)?$/i.test(r)))) ||
     // `helm get values|all|manifest|notes|hooks` PRINTS THE RENDERED RELEASE, which carries whatever the chart
     // templated — database URLs, tokens, the contents of every Secret it defines. Against a production cluster
     // that is a credential dump, exactly as `kubectl get secrets` is, and it was ALLOW because `get` is a read
@@ -7089,10 +7103,17 @@ function analyzeSegments(
       // every command of the upstream group contributes its own literal line; if any of them is not readable the
       // whole standard output is not known, which is opacity rather than a partial script
       const parts = stdinParts.length > 1 && stdinFrom !== null ? stdinParts : [stdinFromResolved];
-      const outs = parts.map((pt, k) =>
-        literalStdout(pt, k === parts.length - 1 ? (upstreamHeredoc ?? undefined) : undefined),
-      );
-      const literal = outs.some((o) => o === null) ? null : outs.join('\n');
+      // EACH COMMAND'S STANDARD OUTPUT CARRIES THE NEWLINE ITS EMITTER WRITES. `echo` appends one and `printf`
+      // does not, so joining a group's parts with a newline split `{ printf 'git '; printf 'push origin main\n'; }`
+      // into two unrelated words instead of the one command it really produces (exit review 8).
+      const outs = parts.map((pt, k) => {
+        const lit = literalStdout(pt, k === parts.length - 1 ? (upstreamHeredoc ?? undefined) : undefined);
+        if (lit === null || parts.length === 1) return lit;
+        return /^(?:\S*\/)?echo\b/.test(pt.trim()) && !/^(?:\S*\/)?echo\s+-[a-zA-Z]*n/.test(pt.trim())
+          ? lit + '\n'
+          : lit;
+      });
+      const literal = outs.some((o) => o === null) ? null : outs.join('');
       if (literal !== null)
         for (const h of analyzeSegments(table, ctx, compiled, [literal], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried through a pipe)`.trim() });
@@ -7104,7 +7125,12 @@ function analyzeSegments(
     // A CALL TO A FUNCTION DEFINED HERE runs the body that was already handed over at the definition, so the call
     // itself adds nothing — but its REDIRECTIONS and path operands are still its own, which is why the head is
     // marked rather than the segment skipped (exit review 5).
-    const classifySeg = functionNames.has(segHead) ? `${MARK}local-function ${seg}` : seg;
+    // A LOCAL FUNCTION SHADOWS A BARE NAME, NEVER A PATH. `git() { true; }; /usr/bin/git push origin main` runs
+    // the real program: the shell looks a function up by NAME, and a command with a slash in it is a path
+    // (exit review 8). `segHead` has had its directory stripped, so the RAW head is what decides.
+    const rawHead0 = tokenize(seg)[0] ?? '';
+    const classifySeg =
+      functionNames.has(segHead) && !rawHead0.includes('/') ? `${MARK}local-function ${seg}` : seg;
     for (const norm of normalizeSegment(classifySeg)) {
       const normHits = classifyNormalized(table, ctx, compiled, norm, { ...state, env });
       for (const h of normHits) hits.push(h);
