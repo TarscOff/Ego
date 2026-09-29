@@ -156,7 +156,9 @@ const NODE_OPTIONS_EXECUTES = /--(require|import|loader|experimental-loader|expe
 /** True when this binding really changes what runs. */
 function envInjects(name: string, assignment: string): boolean {
   if (name === 'NODE_OPTIONS') {
-    const value = assignment.slice(assignment.indexOf('=') + 1);
+    // node reads `--experimental_loader` and `--experimental-loader` as the SAME option, so the test normalises
+    // the separator before looking (exit review 8)
+    const value = assignment.slice(assignment.indexOf('=') + 1).replace(/_/g, '-');
     return NODE_OPTIONS_EXECUTES.test(value);
   }
   return true;
@@ -340,6 +342,18 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // of `cat > NOTES.md <<'MD' … MD` was classified: a release note containing `git push origin main --tags`
       // was DENIED as a push (exit review 4). A QUOTED delimiter means no expansion, so the body is inert; an
       // UNQUOTED one still expands `$( )` and backticks, and those substitutions really do run.
+      // `$[ … ]` and `$(( … ))` both hold ARITHMETIC, where `<<` is a LEFT SHIFT. The old form was not
+      // recognised here, so `echo $[1<<true]` opened a heredoc named `true` — and a later line saying `true`
+      // terminated it, making every line between them the body and hiding a `git push origin main` completely
+      // (exit review 8). The whole expression is consumed as the one word it is.
+      if (ch === '$' && next === '[') {
+        const close = command.indexOf(']', i + 2);
+        if (close > 0) {
+          cur += command.slice(i, close + 1);
+          i = close + 1;
+          continue;
+        }
+      }
       if (ch === '<' && next === '<') {
         // `<<<` is a HERESTRING: it carries data and opens nothing. Consuming all three is what keeps the scanner
         // from reading the SECOND `<` as the start of a heredoc whose delimiter never arrives — which swallowed
@@ -607,9 +621,24 @@ export function splitShellPipeline(command: string): ShellStage[] {
         continue;
       }
       if (ch === '`') {
-        const end = command.indexOf('`', i + 1);
+        // A NESTED BACKTICK IS ESCAPED, and the inner pair is the one that runs LAST. POSIX nests backticks by
+        // writing the inner ones as `\``, so the FIRST unescaped backtick after this one closes the outer
+        // substitution — `indexOf` found the escaped one instead and cut the body in half, which hid the inner
+        // command entirely (exit review 8). The body then has its escapes removed, because that is what the
+        // shell hands to the inner parse.
+        let end = -1;
+        for (let k = i + 1; k < command.length; k++) {
+          if (command[k] === '\\') {
+            k++;
+            continue;
+          }
+          if (command[k] === '`') {
+            end = k;
+            break;
+          }
+        }
         if (end > i) {
-          const backticked = splitShellPipeline(command.slice(i + 1, end));
+          const backticked = splitShellPipeline(command.slice(i + 1, end).replace(/\\([`$\\])/g, '$1'));
           for (const s of backticked) segments.push(s);
           if (backticked.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
             segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
@@ -1001,7 +1030,8 @@ export function normalizeSegment(segment: string): string[] {
           if (t === 'env')
             while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) {
               const name = tokens[idx]!.slice(0, tokens[idx]!.indexOf('='));
-              if (ENV_INJECT_RE.test(name)) extra.push(`${MARK}env-inject ${name}`);
+              // ...through `env --` too: a value that cannot name a program does not change what runs
+              if (ENV_INJECT_RE.test(name) && envInjects(name, tokens[idx]!)) extra.push(`${MARK}env-inject ${name}`);
               if (TARGET_ENV_RE.test(name)) targetEnv.push(tokens[idx]!);
               idx++;
             }
@@ -1011,7 +1041,8 @@ export function normalizeSegment(segment: string): string[] {
           // assignments passed through `env` are judged exactly like leading assignments — INCLUDING the ones that
           // select the target, which this branch used to drop (round 15)
           const name = tok.slice(0, tok.indexOf('='));
-          if (ENV_INJECT_RE.test(name)) extra.push(`${MARK}env-inject ${name}`);
+          // ...and through `env NAME=value` as well, by the same test as a leading assignment
+          if (ENV_INJECT_RE.test(name) && envInjects(name, tok)) extra.push(`${MARK}env-inject ${name}`);
           if (TARGET_ENV_RE.test(name)) targetEnv.push(tok);
           idx++;
           continue;
@@ -2519,6 +2550,11 @@ function stripComment(line: string): string {
   return out;
 }
 
+/** `$[ … ]` is the OLD arithmetic form, still accepted by bash: its `<<` is a left shift, exactly as inside
+ *  `$(( … ))`. Leaving it alone let `echo $[1<<true]` open a heredoc whose delimiter never arrived, so every
+ *  remaining line of the script was read as its body (exit review 8). */
+const OLD_ARITH_RE = /\$\[[^\]]*\]/g;
+
 /** The heredoc delimiter a line opens, or null. A `<<` only opens one when it is UNQUOTED, is not the `<<<`
  *  herestring, and is not the left-shift operator inside an arithmetic expansion. Matching `<<` anywhere on the
  *  line made `grep -rn "<<<<<<< HEAD" .`, `echo "shift << Bits"`, `cat <<< ready` and `echo $((1<<BITS))` open a
@@ -2526,6 +2562,9 @@ function stripComment(line: string): string {
  *  though it were data, and a `git push` or a `chmod 777 /etc/passwd` below it was never classified at all
  *  (exit review 4). */
 function heredocDelimiter(line: string): string | null {
+  // `$[ … ]` and `$(( … ))` both hold ARITHMETIC, where `<<` is a left shift. Blanking the old form here is what
+  // keeps `echo $[1<<true]` from opening a heredoc whose delimiter never arrives (exit review 8).
+  line = line.replace(OLD_ARITH_RE, '$ARITH');
   let quote: string | null = null;
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!;
@@ -4277,7 +4316,14 @@ function resolveScriptCommand(
       // read. `--ignore-scripts` is the one spelling that provably runs none of them.
       // ONLY `--ignore-scripts` is real. npm silently ignores `--no-scripts` and runs every lifecycle script, so
       // accepting it was a positive claim that had not been earned (challenge 6, finding 34).
-      const ignore = tokens.some((t) => t === '--ignore-scripts' || t === '--ignore-scripts=true');
+      // THE LAST SPELLING ON THE LINE WINS, as it does for every npm boolean: `--ignore-scripts
+      // --no-ignore-scripts` runs every lifecycle script, and a `some()` read the first one and stopped
+      // (exit review 8).
+      const ignore = tokens.reduce<boolean>((acc, t) => {
+        if (t === '--ignore-scripts' || t === '--ignore-scripts=true') return true;
+        if (t === '--no-ignore-scripts' || t === '--ignore-scripts=false') return false;
+        return acc;
+      }, false);
       if (!ignore)
         return {
           kind: 'npm-script',
@@ -4382,6 +4428,7 @@ function resolveScriptCommand(
     // `make build prodk` and `npm test deploy` runs the test script with `deploy` appended (exit review 8).
     const dd = tokens.indexOf('--');
     const nameAt = script === null ? -1 : tokens.indexOf(script);
+
     const forwarded =
       dd >= 0
         ? tokens.slice(dd + 1)
@@ -4422,7 +4469,7 @@ function resolveScriptCommand(
             ],
           }
         : {}),
-      key: `npm:${dirname(pkgPath)}:${script}`,
+      key: `npm:${dirname(pkgPath)}:${script}:${forwarded.join('\u0000')}`,
       body,
       bodyEnv: childEnvironment(env, {
         cwd: dirname(pkgPath),
@@ -5500,6 +5547,13 @@ export function containerMountSources(tokens: string[]): string[] {
   return out;
 }
 
+/** A word that can only be a connection target: a URI, or a host-shaped name with a path or a port. SQL words
+ *  and table names never look like this, which is what lets the statement scan stop at one. */
+function looksLikeDbTarget(t: string): boolean {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return true;
+  return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z0-9-]*(:\d+)?(\/\S*)?$/.test(t) && !/\.(sql|js|py|rb|json|txt)$/i.test(t);
+}
+
 function resolveDbTarget(
   tokens: string[],
   targets: LocalTargets,
@@ -5597,7 +5651,10 @@ function resolveDbTarget(
       // against the local socket, interrupting the agent for approval (exit review 7). Everything up to the next
       // option belongs to the statement.
       if (/^(-c|--command|-e|--execute|--eval|--query)$/.test(t)) {
-        while (i + 1 < tokens.length && !tokens[i + 1]!.startsWith('-')) i++;
+        // ...but it stops at a CONNECTION TARGET. The statement is one quoted word whose quoting is gone by
+        // now, so the scan runs to the next option — and `mongosh --eval '…' prod-mongo.acme.com/app` puts the
+        // host AFTER the statement, where the scan swallowed it (exit review 8).
+        while (i + 1 < tokens.length && !tokens[i + 1]!.startsWith('-') && !looksLikeDbTarget(tokens[i + 1]!)) i++;
         continue;
       }
       if (/^(-f|--file|-U|--username|-p|--port|-d|--dbname|-o|--output)$/.test(t)) i++;
@@ -6094,6 +6151,8 @@ function classifyShellPaths(
   /** the body runs inside a container image, so its PATHS are the image's — but what the analyzer cannot READ
    *  is unreadable wherever it runs, so that opacity survives */
   containerPaths = false,
+  /** paths this command already created or replaced, so a name may no longer mean what it says */
+  written: ReadonlySet<string> = new Set(),
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   const tokens = tokenize(seg);
@@ -6503,6 +6562,23 @@ function classifyShellPaths(
   // ALLOW capability `fs.repo.delete`. So `rm -f $(cat target.txt)` and `X=/etc/passwd; rm -f $X` removed any file
   // on the machine at ALLOW while `rm -f /etc/passwd` was DENY: the laundering was the whole exploit
   // (exit review 7). Naming the opacity is what the analyzer can honestly say here.
+  // THE DERIVED-DIRECTORY ALLOWANCE RESTS ON THE NAME DENOTING DERIVED CONTENT, and a rename or a symlink
+  // earlier in the SAME command breaks that: `mv docs dist && rm -rf dist` and `ln -s docs dist && rm -rf dist/`
+  // delete the documentation through a name the policy calls regenerable (exit review 8). The write ledger
+  // already knows the name was just created, so the allowance simply does not apply to it.
+  if (/^(rm|rmdir|unlink)$/.test(head))
+    for (const t of tokens.slice(1)) {
+      if (t.startsWith('-')) continue;
+      const abs = canonicalPath(isAbsolute(t) ? t : resolve(cwd, t.replace(/\/$/, '')));
+      if (!written.has(abs) && !written.has('\0any')) continue;
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: `${t} was created or replaced earlier in this command, so what it names now is not what the name says`,
+        segment: seg,
+        absolute: false,
+      });
+    }
   if (DESTRUCTIVE_HEADS.has(head)) {
     const opaque = tokens.slice(1).filter((t) => !t.startsWith('-') && /[$`]/.test(t));
     for (const t of opaque)
@@ -7190,7 +7266,15 @@ function analyzeSegments(
       // A CONTAINER'S PATHS ARE THE IMAGE'S. A Dockerfile RUN line writes inside the image, not on the host, so
       // its path operands are not judged against the workspace; its COMMANDS still are, and so is anything the
       // analyzer could not READ, which is unreadable wherever it runs (exit review 8).
-      for (const h of classifyShellPaths(table, ctx, norm, effectiveCwd, patternWords, env.containerPaths === true))
+      for (const h of classifyShellPaths(
+        table,
+        ctx,
+        norm,
+        effectiveCwd,
+        patternWords,
+        env.containerPaths === true,
+        written,
+      ))
         hits.push(h);
     }
     // shell writes whose target token resolves under the EGO home trust stores are trust tampering wherever EGO_HOME is

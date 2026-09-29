@@ -629,9 +629,11 @@ matchers:
     tool: Bash
     command: '^(docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?(push\b|build\b[^|;&]*--push)'
   # Handing a registry password on the command line writes it into the shell history and the process table.
+  # SCOPED TO THE VERBS THAT TAKE ONE: docker's `-p` is `--publish`, so an unscoped rule turned `docker run -p
+  # 8080:80 nginx` — the most ordinary container command there is — into a credential exposure (exit review 8).
   - capability: command.credential-exposure
     tool: Bash
-    command: '^(docker|podman|nerdctl|helm|npm|gh|glab)\s+[^|;&]*\s(-p|--password)(=|\s)(?!-)'
+    command: '^(docker|podman|nerdctl|helm|npm|gh|glab)\s+(registry\s+)?(login|publish|push|adduser)\b[^|;&]*\s(-p|--password)(=|\s)(?!-)'
   # FORWARDING A CREDENTIAL INTO A CONTAINER IS AN ACT OF ITS OWN. `docker run -e AWS_SECRET_ACCESS_KEY <image>`
   # hands the host's production credentials to a program EGO never read, and the official CLI images turn that
   # into the CLI itself: `docker run -e AWS_… amazon/aws-cli iam delete-user` performed an absolute core deny
