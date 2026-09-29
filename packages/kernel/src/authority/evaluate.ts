@@ -2911,7 +2911,7 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
  *  Deliberately a short, named list: the argv of an arbitrary image is not a command line, and guessing would
  *  gate every `docker run myapp --port 8080`. */
 const CLI_IMAGES: ReadonlyArray<readonly [RegExp, string]> = [
-  [/(^|\/)amazon\/aws-cli$/i, 'aws'],
+  [/(^|\/)(amazon\/aws-cli|aws-cli\/aws-cli)$/i, 'aws'],
   [/(^|\/)hashicorp\/vault$/i, 'vault'],
   [/(^|\/)hashicorp\/terraform$/i, 'terraform'],
   [/(^|\/)(google\/cloud-sdk|cloudsdktool\/[a-z-]+)$/i, 'gcloud'],
@@ -3968,7 +3968,10 @@ function resolveScriptCommand(
           resolution: 'RESOLVED_COMPLETE',
         };
       }
-      break; // the first bare operand is the image; an image this kernel does not know is opaque to it
+      // ...and the scan does NOT stop at the first bare operand: an option this kernel does not know consumes
+      // its value, so `docker run --cgroup-parent foo amazon/aws-cli …` put `foo` where the image was expected
+      // (exit review 8). The image names are specific enough that scanning every operand is safe.
+      continue;
     }
   }
   // A DOCKERFILE IS A PRODUCER. `docker build .` executes every `RUN` line in the build context's Dockerfile —
@@ -3976,11 +3979,21 @@ function resolveScriptCommand(
   // while treating this one as an opaque `container.build`. A Dockerfile whose `RUN` line POSTs `.env` to a
   // remote host was ALLOW (exit review 7). It is read like any other producer: its shell lines are handed to the
   // canonical analysis, and a Dockerfile that cannot be read is opacity rather than absence.
-  if (/^(docker|podman|nerdctl|buildah)$/.test(head) && /^(build|buildx)$/.test(tokens[1] ?? '')) {
+  // `docker image build` is `docker build` through the management GROUP, and `docker buildx build` through the
+  // plugin: the verb is the LAST word of the pair, not `tokens[1]` (exit review 8).
+  const buildAt = tokens.findIndex(
+    (t, i) => i > 0 && t === 'build' && (i === 1 || /^(image|buildx|builder)$/.test(tokens[i - 1] ?? '')),
+  );
+  if (/^(docker|podman|nerdctl|buildah)$/.test(head) && buildAt > 0) {
     const named = optionValue(tokens, 'f', ['--file']);
     // the build CONTEXT is the last bare operand; `-` and a URL are contexts EGO cannot read
-    const operands = tokens.slice(2).filter((t, i) => (t === '-' || !t.startsWith('-')) && !DOCKER_BUILD_VALUE_OPTS.test(tokens[i + 1] ?? ''));
-    const context = operands[operands.length - 1] ?? '.';
+    // AN OPTION THIS KERNEL DOES NOT KNOW STILL TAKES ITS VALUE. Reading the LAST bare operand as the context
+    // let `docker build . --no-cache-filter src` read `src` as the context, so the real Dockerfile was never
+    // found. The context is the FIRST bare operand, which docker documents as the single PATH|URL|- argument.
+    const after = tokens.slice(buildAt + 1);
+    const operands = after.filter((t, i) => (t === '-' || !t.startsWith('-')) && !DOCKER_BUILD_VALUE_OPTS.test(after[i - 1] ?? ''));
+    const context0 = operands[0];
+    const context = context0 ?? '.';
     // `docker build -` reads the Dockerfile from STANDARD INPUT, and a URL context is fetched: neither is a file
     // this kernel can read, so neither can carry a positive claim
     if (/^(-$|https?:|git@|ssh:|github\.com\/)/.test(context) && named === null)
@@ -4237,8 +4250,17 @@ function resolveScriptCommand(
     // `prodk` deleted a production pod and `nuke` was `rm -rf /`, all at ALLOW, because only the manifest string
     // was resolved and every remaining token was discarded (exit review 7). The forwarded words go to the MAIN
     // script only — `pre` and `post` are separate processes and npm passes them nothing.
+    // NPM FORWARDS POSITIONALS WITH OR WITHOUT `--`. The separator only stops npm parsing FLAGS; a bare word
+    // after the script name is passed to the script either way, so `npm run build prodk` really runs
+    // `make build prodk` and `npm test deploy` runs the test script with `deploy` appended (exit review 8).
     const dd = tokens.indexOf('--');
-    const forwarded = dd >= 0 ? tokens.slice(dd + 1) : [];
+    const nameAt = script === null ? -1 : tokens.indexOf(script);
+    const forwarded =
+      dd >= 0
+        ? tokens.slice(dd + 1)
+        : nameAt > 0
+          ? tokens.slice(nameAt + 1).filter((t) => !t.startsWith('-'))
+          : [];
     const body = names.map((n) =>
       n === script && forwarded.length ? `${scripts[n] as string} ${requote(forwarded)}` : (scripts[n] as string),
     );
@@ -4978,7 +5000,7 @@ const KUBECTL_VERBS = new Set([
 ]);
 /** kubectl/helm options that consume the NEXT token; their value must never be mistaken for the verb. */
 const K8S_VALUE_OPTS =
-  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--log-flush-frequency|--warnings-as-errors|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
+  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--warnings-as-errors|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
 
 const HELM_VERBS = new Set([
   ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency'],
@@ -6007,7 +6029,7 @@ function classifyShellPaths(
       : (rawOutput ?? (/(?:^|[\s,])dest=([^,\s]+)/.exec(seg)?.[1] ?? null));
   const write =
     WRITE_HEADS.has(head) ||
-    (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick)$/.test(tokens[1] ?? '')) ||
+    (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv)$/.test(tokens[1] ?? '')) ||
     (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
@@ -6136,7 +6158,16 @@ function classifyShellPaths(
       // everything after it is a pathspec.
       const sub = tokens[1];
       const dd = tokens.indexOf('--');
-      if ((sub === 'checkout' || sub === 'restore') && dd > 0) dest = 'AFTER_DASHDASH';
+      // `git rm` DELETES the files it names, and the matcher that classifies it is an ALLOW capability. Its
+      // pathspecs were never judged, so `git rm -r control-plane` removed the policy that decides every later
+      // verdict (exit review 8). Same shape as checkout's pathspecs, minus the tree-ish.
+      if (sub === 'rm' || sub === 'mv') {
+        const specs = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        if (specs.length) {
+          gitPathspecs = specs;
+          dest = 'ALL_PATHSPECS';
+        } else dest = null;
+      } else if ((sub === 'checkout' || sub === 'restore') && dd > 0) dest = 'AFTER_DASHDASH';
       else if (sub === 'checkout' || sub === 'restore') {
         const rest = tokens.slice(2).filter((t) => !t.startsWith('-'));
         const specs = rest.length > 1 && !/[/.]/.test(rest[0] ?? '') ? rest.slice(1) : rest;
@@ -7015,8 +7046,10 @@ function analyzeSegments(
     let bare = seg.trim();
     for (;;) {
       const kw = /^(\S+)\s+/.exec(bare);
-      if (kw && (PREFIX_KEYWORDS.has(kw[1]!) || kw[1] === 'export' || kw[1] === 'declare' || kw[1] === 'typeset')) {
+      if (kw && (PREFIX_KEYWORDS.has(kw[1]!) || /^(export|declare|typeset|local|readonly)$/.test(kw[1]!))) {
         bare = bare.slice(kw[0].length).trim();
+        // `declare -x NAME=value` is `export NAME=value`: the builtin's own options come first
+        bare = bare.replace(/^(-[a-zA-Z]+\s+)+/, '');
         continue;
       }
       break;

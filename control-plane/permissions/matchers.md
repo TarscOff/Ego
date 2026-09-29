@@ -612,7 +612,7 @@ matchers:
   # the credential is what makes this reviewable, whatever the image then does with it.
   - capability: command.credential-exposure
     tool: Bash
-    command: '^(docker|podman|nerdctl)\s+(container\s+)?(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s+)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
+    command: '^(docker|podman|nerdctl)\s+(container\s+)?(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s*)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
   # `kubectl config view --raw` PRINTS THE KUBECONFIG UNREDACTED — client certificates, bearer tokens and the
   # credentials of every cluster the developer can reach, production included. Without `--raw` the values are
   # redacted, so the flag is the whole difference (exit review 7).
@@ -642,7 +642,12 @@ matchers:
     tool: Bash
     # the COMPOSE form only: `(compose\s+)?` was optional, so this swallowed every plain `docker build` and made
     # an ordinary image build opaque — the proportionality half of the same rule
-    command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\s+(build\b|up\b[^|;&]*--build\b)'
+    command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\s(build\b|up\b[^|;&]*--build\b)'
+  # `docker stack deploy` ships a compose file to a SWARM — a cluster, not this machine — and the file names
+  # the images, the mounts and the secrets, none of which this kernel read (exit review 8).
+  - capability: container.nonlocal.run
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+stack\s+(deploy|up)\b'
   - capability: container.build
     tool: Bash
     command: '^(docker|podman)\s+(build|buildx)\b'
@@ -737,9 +742,22 @@ matchers:
   - capability: fs.repo.rename
     tool: Bash
     command: '^mv\s+(-[fivn]+\s+)*[^-]'
+  # An option whose VALUE IS A PROGRAM the tool will run: go's analysis tool, cargo's compiler wrapper, and the
+  # in-place editors whose `-e` program is a script (exit review 8).
+  - capability: command.script-opaque
+    tool: Bash
+    command: '^(go|gofmt|cargo|rustc|dotnet|mvn|gradle)\b[\s\S]*(-vettool|-toolexec|--vettool|rustc-wrapper|rustc_wrapper|target\.[^\s=]*\.runner|--exec|--plugin)(=|\s)'
+  # `perl -i -e`, `ruby -i -pe`, `gawk -i inplace`: an in-place edit whose program is inline code. The program is
+  # executed and the FILE is rewritten, so both halves matter.
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(perl|ruby|python3?)\b[^|;&]*\s-[a-zA-Z]*i[a-zA-Z]*(\s|\.)[^|;&]*\s-[a-zA-Z]*e'
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(gawk|awk)\b[^|;&]*\s-i\s+inplace\b'
   - capability: command.test
     tool: Bash
-    command: '^(npm\s+(test|run\s+test\S*)|(npx\s+)?(vitest|jest|mocha|playwright|ava|tap|karma)|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|node\s+--test|python3?\s+-m\s+(pytest|unittest))\b'
+    command: '^(npm\s+(test|run\s+test\S*)|(npx\s+)?(vitest|jest|mocha|playwright|ava|tap|karma)|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|node\s+--test(?!-)|python3?\s+-m\s+(pytest|unittest))\b'
   - capability: command.build
     tool: Bash
     command: '^(npm\s+run\s+(build|typecheck|lint|format|check)|(npx\s+)?(tsc|esbuild|eslint|prettier|biome|oxlint|dprint|lint-staged|vite|rollup|webpack|swc|turbo|nx|next|ng|tsup|parcel)\b|pnpm\s+(build|lint)|yarn\s+(build|lint)|go\s+(build|vet)|cargo\s+(build|check|clippy)|make\b)'
@@ -811,9 +829,21 @@ matchers:
     tool: Bash
     command: '^(?:sed|gsed)\b[\s\S]*\ss(.)(?:(?!\1)[\s\S])*\1(?:(?!\1)[\s\S])*\1[a-z]*e'
   # a program supplied by FILE is opaque: it is judged like any other script, not as a read-only one-liner
+  # sed's `e` COMMAND — `1e CMD`, `$e CMD`, `/re/e CMD` — executes CMD for the matching lines; the existing rule
+  # covered only the `s///e` FLAG. gawk's `-i`/`-l` load a library and `-E` takes its program from a file, and
+  # each of those is a program EGO never read (exit review 8).
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(sed|gsed)\b[\s\S]*(^|[;{''"\s])[0-9$,~+/^]*\s*e\s+\S'
   - capability: command.interpreter-script
     tool: Bash
-    command: '^(awk|gawk|mawk|nawk|sed)\b[^|;&]*\s(-f|--file|--source)(=|\s)'
+    command: '^(awk|gawk|mawk|nawk|sed|gsed)\b[^|;&]*\s(-f|--file|--source)(=|\s)'
+  # gawk's library flags load a program file. `-E` is deliberately absent: every matcher here is compiled
+  # case-insensitively, so it cannot be told apart from `-e`, and `sed -e s/a/b/ f` is the most ordinary
+  # invocation there is. The long spelling `--exec` says the same thing and can be matched.
+  - capability: command.interpreter-script
+    tool: Bash
+    command: '^(gawk|awk|mawk|nawk)\b[^|;&]*\s(-i|--include|-l|--load|--exec|--source)(=|\s)'
   # read-only search tools that can hand a file to an arbitrary program
   - capability: command.interpreter-script
     tool: Bash
@@ -867,10 +897,13 @@ matchers:
   - capability: command.read-only
     tool: Bash
     command: '^\[\[?\s'
-  # an IN-PLACE edit is an ordinary write, and the path rules judge the file it names
+  # An IN-PLACE edit is an ordinary write, and the path rules judge the file it names — but only for `sed`,
+  # whose program is a substitution script. `perl -i -e '…'` and `ruby -i -pe '…'` carry INLINE CODE, and this
+  # rule sat above the interpreter rules, so it turned `perl -i -e 'exec "git push origin main"'` into an
+  # ordinary local write (exit review 8, in a rule added one pass earlier to fix proportionality).
   - capability: command.local-mutation
     tool: Bash
-    command: '^(sed|gsed|perl|ruby)\s+(-[a-zA-Z]*i|--in-place)(\S*)?\s'
+    command: '^(sed|gsed)\s+(-[a-zA-Z]*i|--in-place)(\S*)?\s'
   # `kustomize build` RENDERS to stdout: it reads kustomization.yaml and contacts no cluster at all.
   - capability: command.read-only
     tool: Bash
