@@ -6956,9 +6956,12 @@ function classifyShellPaths(
       // `rm -rf ..` and `tar -xf a.tar -C ..` denied is the pair of guards below, not this one: a removal and an
       // unenumerable write DO reach the protected subtree, and neither is exempted here.
       const folded = foldName(posix);
+      // the trailing slash is normalized away so the FILESYSTEM ROOT is an ancestor like any other: `/` folded
+      // is `/`, and comparing against `//` excluded the one directory that contains every checkout
+      const foldedDir = folded === '/' ? '' : folded;
       const atRoot = roots.some((r) => {
         const f = foldName(r);
-        return f === folded || f.startsWith(folded + '/');
+        return f === folded || f.startsWith(foldedDir + '/');
       });
       const unenumerable = isArchive || writesUnenumerably(seg) || recursive;
       // A DELETE IS NOT A WRITE INTO. The `contains` rule exists to catch content PUT somewhere protected; a
@@ -7128,6 +7131,7 @@ function sedShellCommands(seg: string): string[] {
   // the script is every `-e`/`--expression` value, or — when none was given — the first bare operand
   const scripts: string[] = [];
   let sawE = false;
+  let sawF = false;
   for (let j = i + 1; j < t.length; j++) {
     const w = t[j]!;
     if (w === '-e' || w === '--expression') {
@@ -7136,9 +7140,14 @@ function sedShellCommands(seg: string): string[] {
     }
     const eq = /^(?:--expression=|-e)(.+)$/.exec(w);
     if (eq) { scripts.push(eq[1]!); sawE = true; continue; }
-    if (w === '-f' || w === '--file') { j++; continue; } // a script FILE, which this resolver has not read
+    // a script FILE, which this resolver has not read — and which means NO bare operand is the script: with
+    // `-f` every operand is an INPUT, so reading the first one as a script made `sed -f s.sed '1e git push'`
+    // deny a file whose NAME happens to look like a script (self-attack, exit review 8)
+    if (w === '-f' || w === '--file') { j++; sawF = true; continue; }
+    const feq = /^(?:--file=|-f)(.+)$/.exec(w);
+    if (feq) { sawF = true; continue; }
     if (w.startsWith('-')) continue;
-    if (!sawE && !scripts.length) scripts.push(w);
+    if (!sawE && !sawF && !scripts.length) scripts.push(w);
   }
   const out: string[] = [];
   for (const script of scripts)
