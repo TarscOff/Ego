@@ -205,7 +205,15 @@ const REDIRECT_ONLY_RE = /^(?:(?:\d*(?:>>?|<>?)\|?|&>>?)\s*(?:"[^"]*"|'[^']*'|\S
 /** shell keywords that may precede a command WITHOUT being one: after them, the next word is still a command */
 const KEYWORD_PREFIX_RE = /^(if|then|else|elif|while|until|do|!|time|coproc)$/;
 /** a function definition header: `f()`, `f ()`, `function f`, `function f ()` — structure, not a command */
-const FUNC_DEF_RE = /^(?:function\s+)?[A-Za-z_][A-Za-z0-9_:.-]*\s*\(\s*\)$|^function\s+[A-Za-z_][A-Za-z0-9_:.-]*$/;
+/** A FUNCTION NAME IS ALMOST ANY WORD. bash and zsh both accept `./run.sh() { :; }` — verified with `-n` on
+ *  this machine — and the name may hold a slash, a dot or a dash anywhere. Requiring it to START with a letter
+ *  meant a definition like `./decoy.sh() { :; }` was not recognised as a definition at all: it was classified
+ *  as an unknown command, which poisons the freshness ledger with the wildcard, and every later conclusion in
+ *  that command line became STALE — so a script whose real contents are an absolute deny arrived as an
+ *  approvable opacity instead (self-attack on exit review 9). The characters excluded are the ones the shell
+ *  itself cannot have in a name here: whitespace and its own metacharacters. */
+const FUNC_DEF_RE =
+  /^(?:function\s+)?[^\s()<>|&;'"$`]+\s*\(\s*\)$|^function\s+[^\s()<>|&;'"$`]+$/;
 
 /** One stage of a shell unit. A PIPELINE IS AN EXECUTION EDGE, not merely a separator: `echo 'rm -rf /' | bash`
  *  runs the first stage's standard output as the second stage's SCRIPT, and a model that discards the `|` cannot
@@ -1154,7 +1162,13 @@ export function normalizeSegment(segment: string): string[] {
   const stripped = stripToolGlobalOptions(head, rest);
   rest = stripped.rest;
   extra.push(...stripped.extra);
-  return [...extra, ...normalizeTail(rest)];
+  // A CARRIER'S INNER SHELL RUNS ITS OWN EXPANSION PASS. `sh -c "echo x > .harnes{s..s}/runtime/pin.json"`
+  // keeps the braces QUOTED at the outer level — where a real shell does not expand them either — and the inner
+  // shell then expands them for real. The segment-level expansion therefore cannot see them, and the write to
+  // EGO's own runtime reached ASK through every carrier there is (found by the cross-product, exit review 9).
+  // The normalizer's output IS the command as the inner shell sees it, so it is expanded here, once, for all of
+  // them; a segment with no brace returns unchanged.
+  return [...extra, ...normalizeTail(rest)].map((n) => expandBraces(n));
 }
 
 /** git accepts any UNAMBIGUOUS abbreviation of a long option, so `--no-verif`, `--forc`, `--amen` and `--de` all work.
@@ -1733,7 +1747,7 @@ function braceAlternatives(body: string): string[] | null {
 
 /** The words one WORD expands to. Returns null when the expansion is refused — no brace, or over budget — so
  *  the caller can leave the word exactly as written and let the existing `{`-is-dynamic guards apply. */
-function expandBraceWord(word: string, depth = 0): string[] | null {
+function expandBraceWord(word: string, depth = 0, overflow?: { hit: boolean }): string[] | null {
   if (depth > 8 || !word.includes('{')) return null;
   let q: "'" | '"' | null = null;
   for (let i = 0; i < word.length; i++) {
@@ -1787,11 +1801,17 @@ function expandBraceWord(word: string, depth = 0): string[] | null {
     const post = word.slice(end + 1);
     const out: string[] = [];
     for (const part of parts) {
-      for (const tail of expandBraceWord(post, depth + 1) ?? [post]) {
+      for (const tail of expandBraceWord(post, depth + 1, overflow) ?? [post]) {
         const w = pre + part + tail;
-        for (const full of expandBraceWord(w, depth + 1) ?? [w]) {
+        for (const full of expandBraceWord(w, depth + 1, overflow) ?? [w]) {
           out.push(full);
-          if (out.length > BRACE_BUDGET) return null;
+          if (out.length > BRACE_BUDGET) {
+            // THE BUDGET WAS REACHED, which is a different thing from "this word needed no expansion". Setting
+            // the flag on every unexpanded word made find's own `{}` placeholder an opacity and turned the most
+            // ordinary `find . -exec grep {} +` into an ASK (self-attack, second order).
+            if (overflow) overflow.hit = true;
+            return null;
+          }
         }
       }
     }
@@ -1808,7 +1828,13 @@ function requoteBraceResult(w: string): string {
 
 /** Expand every unquoted brace group in a SEGMENT, word by word. Segmentation has already happened, exactly as
  *  in the shell: `{a,b;c}` is two segments before it is anything else, so a group never crosses an operator. */
-export function expandBraces(seg: string): string {
+/** A REACHED BUDGET IS NOT AN ABSENCE — the lesson this phase has now met three times. When a word expands to
+ *  more than BRACE_BUDGET results the expansion is refused and the word is left LITERAL, which is safe for a
+ *  path (the `{`-is-dynamic guards take over) and was NOT safe for a flag: a single word with 65 alternatives,
+ *  the last being `--no-verify`, left the flag sitting behind a comma where the hook-bypass matcher — which
+ *  requires whitespace in front of it — could never see it. A real shell expands all 65 and git skips the
+ *  hooks (self-attack on exit review 9). The caller is told, and reports the opacity. */
+export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
   if (!seg.includes('{')) return seg;
   let out = '';
   let cur = '';
@@ -1818,7 +1844,7 @@ export function expandBraces(seg: string): string {
     // AN EMPTY WORD IS DROPPED. `{a,}` produces `a` and the empty string; the empty one carries no path, no
     // flag and no program, and emitting it would only give the operand readers a token that means nothing.
     // This is the one place the expansion deliberately differs from the shell, and it differs by nothing.
-    const parts = expandBraceWord(cur)?.filter((w) => w !== '');
+    const parts = expandBraceWord(cur, 0, overflow)?.filter((w) => w !== '');
     out += parts?.length ? parts.map(requoteBraceResult).join(' ') : cur;
     cur = '';
   };
@@ -3589,7 +3615,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // a line that starts with the CURRENT recipe prefix is a recipe line, whatever it says: a tab-indented
     // `.RECIPEPREFIX` is a command make hands to the shell, and reading it as a directive changed the prefix so
     // every remaining recipe line of that target became invisible (exit review 5)
-    const rp = line.startsWith(prefix) ? null : /^\s*\.RECIPEPREFIX\s*[:+?]?=\s*(\S?)/.exec(line);
+    // `override` may precede it exactly as it may precede any other assignment (self-attack on exit review 9)
+    const rp = line.startsWith(prefix)
+      ? null
+      : /^\s*(?:override\s+|export\s+)*\.RECIPEPREFIX\s*[:+?]?=\s*(\S?)/.exec(line);
     if (rp) {
       prefix = rp[1] || '\t'; // an empty assignment restores the tab
       current = null;
@@ -3667,6 +3696,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           continue;
         }
         for (const entry of listed) if (re.test(entry)) names.push(prefix + entry);
+        // A PATTERN INCLUDE TAKES WHATEVER MATCHES WHEN MAKE RUNS, and an earlier unit of the same command may
+        // have created a file that matches it. The directory listing is a snapshot from BEFORE that write, so
+        // the pattern itself is recorded and the producer tests it against the ledger (self-attack).
+        model.pendingIncludes.push(resolve(dir, name));
       }
       for (const name of names) {
         // AN INCLUDED MAKEFILE THAT IS ITSELF A TARGET IS REMADE, and make then re-executes itself with the new
@@ -3731,6 +3764,16 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     if (assign && !isOrdinaryShellAssignment(assign[1]!, assign[2]!)) model.rebinds.push(trimmed);
     // EVERY variable, not only the ones that rebind execution: a recipe's `$(VAR)` is substituted with the value
     // make will splice in, and a value carrying `;` or `&&` really does become new commands (exit review 4).
+    // `export NAME` ON ITS OWN LINE exports a variable assigned elsewhere. Only the combined `export NAME=value`
+    // form was read, so `LD_PRELOAD := ./evil.so` followed by `export LD_PRELOAD` re-pointed every program the
+    // recipe runs while nothing recorded it (self-attack on exit review 9).
+    const bareExport = /^(?:override\s+)?export\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$/.exec(trimmed);
+    if (bareExport) {
+      const v = model.vars.get(bareExport[1]!);
+      if (v !== undefined) model.exported.set(bareExport[1]!, v);
+      current = null;
+      continue;
+    }
     const anyAssign = /^(?:override\s+|export\s+|unexport\s+)*([A-Za-z_][A-Za-z0-9_.]*)\s*(::?=|[+?!]=|=)\s*([\s\S]*)$/.exec(
       trimmed,
     );
@@ -3796,11 +3839,18 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       // variable. Outside one, assignments are SEQUENTIAL and make takes the last, which this resolver can
       // determine exactly; recording every sequential assignment as a candidate would walk goals the file has
       // already overwritten and gate a makefile EGO can read perfectly well.
+      const g = goal[1]!.replace(/^(?:\.\/+)+/, '') || goal[1]!;
       if (openConditions.length) {
         if (model.defaultGoal) model.altGoals.add(model.defaultGoal);
-        model.altGoals.add(goal[1]!);
+        model.altGoals.add(g);
+        // ...AND IF THE CONDITION IS FALSE THE ASSIGNMENT NEVER HAPPENS, so make falls back to the FIRST RULE.
+        // `ifdef PROD / .DEFAULT_GOAL := safe / endif` with PROD unset builds the first target, and taking the
+        // conditional assignment as the answer resolved `safe` while make ran `deploy` (self-attack on exit
+        // review 9). The first target is a candidate too; it is recorded as one the moment the goal becomes
+        // conditional, because the rule that defines it may not have been read yet.
+        model.altGoals.add('\0firstTarget');
       }
-      model.defaultGoal = goal[1]!;
+      model.defaultGoal = g;
       current = null;
       continue;
     }
@@ -3850,7 +3900,12 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         if (t.includes('%') && !t.includes('$')) model.patternRules.push({ target: t, prereqs, recipes: shared.recipes });
       const localBlind = [...openConditions];
       if (prereqs.some((p) => /[$]/.test(p))) localBlind.push(`computed prerequisites: ${trimmed}`);
-      for (const t of targets) {
+      for (const raw of targets) {
+        // `./deploy:` AND `deploy:` ARE THE SAME TARGET: make canonicalises a leading `./` away, so a makefile
+        // may define the safe recipe under one spelling and the dangerous one under the other. Registered
+        // under the CANONICAL name, the two merge exactly as two `::` rules do, and `make deploy` sees both
+        // (self-attack on exit review 9).
+        const t = raw.replace(/^(?:\.\/+)+/, '') || raw;
         if (localBlind.length) model.unsupportedFor.set(t, [...(model.unsupportedFor.get(t) ?? []), ...localBlind]);
         const existing = model.rules.get(t);
         if (existing) {
@@ -3862,6 +3917,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           model.rules.set(t, shared);
           current = shared;
         }
+
         // A TARGET BEGINNING WITH A DOT IS SPECIAL ONLY IF IT HAS NO SLASH. That is make's own rule for picking
         // the default goal — ".PHONY" is skipped, "./deploy" is an ordinary file target and IS the default —
         // and skipping both made a makefile whose first rule is `./deploy:` resolve to no goal at all, so its
@@ -4632,13 +4688,27 @@ function resolveScriptCommand(
   if (scriptPath !== null) {
     const abs = isAbsolute(scriptPath) ? scriptPath : resolve(cwd, scriptPath);
     if (stale(abs))
-      return {
-        kind: 'shell-script',
-        key: `script:${abs}`,
-        body: null,
-        reason: 'this script is rewritten earlier in the same command, so its analysed contents are not what runs',
-        resolution: 'STALE',
-      };
+      {
+        // WHAT WAS READ IS STILL HANDED OVER. Staleness says "this may not be what runs" — it does not say the
+        // contents are harmless, and returning a null body threw away a body that had already been read. A
+        // script holding an absolute deny then arrived as an approvable opacity the moment ANY earlier segment
+        // of the same command line could not be classified, which the wildcard ledger entry makes easy:
+        // `if false; then ./decoy.sh() { :; }; fi; ./decoy.sh` was ASK (self-attack on exit review 9). The
+        // staleness is recorded as an unresolved gap, so the verdict is the STRONGER of the two — which is the
+        // same rule the make producer already follows for a line it could only partly expand.
+        const staleText = readInsideWorkspace(ctx, abs);
+        const staleBody = staleText === null ? null : scriptSegments(staleText);
+        return {
+          kind: 'shell-script',
+          key: `script:stale:${abs}`,
+          body: staleBody,
+          bodyEnv: env,
+          oneShell: true,
+          reason: 'this script is rewritten earlier in the same command, so its analysed contents are not what runs',
+          resolution: staleBody ? 'PARTIAL' : 'STALE',
+          unresolved: [{ what: 'body', where: abs, why: 'the script is rewritten earlier in the same command' }],
+        };
+      }
     const text = readInsideWorkspace(ctx, abs);
     if (text === null)
       return {
@@ -4899,9 +4969,17 @@ function resolveScriptCommand(
     // > .npmrc && npm run build` hands every package script to a different interpreter, and the rc text this
     // resolver read is the PRE-IMAGE — it said nothing about script-shell, so nothing was recorded (exit
     // review 9). The candidate NAMES are tested, because the file may not exist yet either.
+    // npm reads the rc file from the package directory UPWARDS, so a write in an ancestor is a write to the
+    // file this command will read: `printf … > .npmrc && cd sub && npm run build` rewrites the one npm finds
+    // from `sub` (self-attack on exit review 9). Every directory from the cwd to each repository root is tested.
+    const rcDirs: string[] = [];
+    for (let d = cwd; ; d = dirname(d)) {
+      rcDirs.push(d);
+      if (d === dirname(d) || (ctx.repoRoots ?? []).some((r) => canonicalPath(r) === canonicalPath(d))) break;
+    }
     const rcStale =
       (rcFile !== null && rcFile !== undefined && stale(rcFile)) ||
-      ['.npmrc', '.yarnrc.yml', '.yarnrc'].some((n) => stale(join(cwd, n)));
+      rcDirs.some((d) => ['.npmrc', '.yarnrc.yml', '.yarnrc'].some((n) => stale(join(d, n))));
     if (rcStale)
       return {
         kind: 'npm-script',
@@ -4950,6 +5028,9 @@ function resolveScriptCommand(
   }
   // make targets
   if (head === 'make' || head === 'gmake') {
+    // (the head is resolved by the normalizer, which strips wrappers; `nice -n 10 make deploy` reaches here as
+    //  `make deploy` — but a wrapper the normalizer does NOT strip would leave `head` wrong, which is why the
+    //  producer cross-product carries every wrapper transformation)
     const MAKE_ARG_OPTS = new Set([
       '-C', '--directory', '-f', '--file', '--makefile', '-o', '--old-file', '-W', '--what-if', '-I',
       '--include-dir',
@@ -4972,7 +5053,14 @@ function resolveScriptCommand(
     // happened to share a word with one: `make NOTE="run deploy" deploy` lost its real goal and resolved the
     // DEFAULT one, so a recipe with `git push origin main` in it reached ALLOW (exit review 9). A word is part
     // of an assignment because of WHERE it is, not because of what it says.
-    const rawTokens = tokenizeMarked(env.rawSegment ?? norm).map((t) => t.text);
+    // ...AND THE RAW SEGMENT STILL HAS THE WRAPPER THE NORMALIZER STRIPPED. `nice -n 10 make deploy` reaches
+    // the producer as `make deploy`, but its raw form starts at `nice`, so reading the goals from raw token 1
+    // read `10` and `make` as goals and the real one was never resolved (self-attack on exit review 9). The
+    // scan starts where `make` actually is.
+    const allRawMarked = tokenizeMarked(env.rawSegment ?? norm);
+    const makeAt = allRawMarked.findIndex((t) => /^(?:.*\/)?(make|gmake)$/.test(t.text));
+    const rawMarked = makeAt > 0 ? allRawMarked.slice(makeAt) : allRawMarked;
+    const rawTokens = rawMarked.map((t) => t.text);
     for (const t of rawTokens) {
       if (t.startsWith('-') || !/^[A-Za-z_][A-Za-z0-9_.]*=/.test(t)) continue;
       cliVars.set(t.slice(0, t.indexOf('=')), t.slice(t.indexOf('=') + 1));
@@ -5007,7 +5095,7 @@ function resolveScriptCommand(
       }
       // `make ./deploy` BUILDS THE TARGET `deploy`: make canonicalises a goal's leading `./` away, so a goal
       // spelled that way found no rule and the DEFAULT goal was resolved instead (exit review 9).
-      targets.push(t.replace(/^(?:\.\/)+/, ''));
+      targets.push(t.replace(/^(?:\.\/+)+/, ''));
     }
     // THE QUOTING IS ONLY IN THE RAW SEGMENT. Normalization de-quotes, so `make V="git push origin main" run`
     // reaches the scan above as five bare words: the override kept only `git`, and `push origin main` became
@@ -5049,9 +5137,14 @@ function resolveScriptCommand(
     // `make x` runs — so the stale test had nothing to test and the producer claimed ABSENT_VERIFIED, a POSITIVE
     // claim, over a makefile the same command line creates (exit review 9). The candidate NAMES are checked,
     // whether or not a file is sitting at them yet.
-    const staleCandidates = paths.length
-      ? paths
-      : ['GNUmakefile', 'makefile', 'Makefile'].map((n) => join(makeDir, n));
+    // EVERY CANDIDATE NAME, ALWAYS — not only when none resolved. `printf … > GNUmakefile && make x` in a
+    // repository that already has a `Makefile` resolves the EXISTING file and never tests the one the command
+    // creates, which make reads FIRST because GNUmakefile wins its precedence order. The case-folded twin
+    // `makefile` is the same trap on this filesystem (self-attack on exit review 9).
+    const staleCandidates = [
+      ...paths,
+      ...['GNUmakefile', 'makefile', 'Makefile'].map((n) => join(makeDir, n)),
+    ];
     if (staleCandidates.some((p) => stale(p)))
       return {
         kind: 'make-target',
@@ -5134,7 +5227,14 @@ function resolveScriptCommand(
     // ...AND SO DOES AN OPTIONAL INCLUDE THAT WAS NOT THERE. `-include gen.mk` is skipped when the file is
     // missing, which is the whole point of the spelling — but "missing" is a claim about NOW, and `printf
     // 'x:\n\tgit push origin main\n' > gen.mk && make x` writes it first (exit review 9).
-    if (merged.pendingIncludes.some((f) => stale(f)))
+    // the ledger holds CANONICAL paths — on this filesystem `/var/...` canonicalises to `/private/var/...` —
+    // so the pattern's directory is canonicalised before the prefix comparison, or the two never meet
+    const includeStale = [...merged.pendingIncludes, ...merged.sources].some((f) => {
+      if (!/[*?[]/.test(f)) return stale(f);
+      const dirPart = canonicalPath(f.slice(0, f.search(/[*?[]/)) || '/');
+      return written.has('\0any') || [...written].some((w) => w.startsWith(dirPart));
+    });
+    if (includeStale)
       return {
         kind: 'make-target',
         key: `make:${makeDir}:${targets.join(',')}`,
@@ -5162,7 +5262,10 @@ function resolveScriptCommand(
     // The short flag is read only inside a cluster of make's ARGUMENT-LESS options: in `-fn` the `n` is the name
     // of a makefile, not the dry run.
     const MAKE_FLAG_CLUSTER = /^-[BdeiknpqrstvwLRS]+$/;
-    const makeFlags = tokenizeMarked(env.rawSegment ?? tokens.join(' ')).filter((t) => !t.quoted);
+    // ...AND SO ARE MAKE'S OWN FLAGS. Read from the whole raw segment, the `-n` of `nice -n 10 make deploy` is
+    // a make flag containing `n` — so every command wrapped in `nice` was read as a DRY RUN and its recipe was
+    // never carried. A wrapper's options belong to the wrapper (self-attack on exit review 9).
+    const makeFlags = rawMarked.filter((t) => !t.quoted);
     const dryRun = makeFlags.some(
       (t) =>
         /^(--just-print|--dry-run|--recon)$/.test(t.text) ||
@@ -5172,24 +5275,31 @@ function resolveScriptCommand(
     // not even print the recipe, so it is weaker than `-n`, and it resolved the target's body as if it were
     // going to execute it — `make -q run` on a recipe with `git push origin main` was an absolute deny over a
     // command that answers a question (exit review 9).
-    if (makeFlags.some((t) => /^--question$/.test(t.text) || (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('q'))))
-      return {
-        kind: 'make-target',
-        key: 'make:question',
-        body: null,
-        reason: 'question mode reports up-to-dateness in the exit status and runs nothing',
-        resolution: 'NOT_A_PRODUCER',
-      };
+    // ...BUT IT STILL PARSES THE MAKEFILE, and a `:=` assignment holding `$(shell …)` is expanded at parse
+    // time, so that command runs. Returning before the body dropped those, and `make -q all` on a makefile with
+    // `X := $(shell git push --force origin main)` force-pushed at ALLOW — verified against GNU make 3.81. The
+    // `-n` path had this right all along; only the `-q` path I added dropped them (self-attack).
+    const questionMode = makeFlags.some(
+      (t) => /^--question$/.test(t.text) || (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('q')),
+    );
+    // make's `+` prefix runs a line under `-n`, `-t` AND `-q` alike, so question mode suppresses recipes on
+    // exactly the same terms a dry run does — and, like a dry run, it leaves the parse-time expansions alone.
+    const noRecipes = dryRun || questionMode;
     // WITH NO GOAL ON THE COMMAND LINE, EVERY GOAL THE FILE COULD SELECT IS A CANDIDATE. `.DEFAULT_GOAL` may be
     // assigned in one branch of a conditional and something else in the other, and which branch runs depends on
     // an environment this kernel does not model — so all of them are walked, bounded, exactly as every branch of
     // a variable assignment is (exit review 9).
     // ...and `.DEFAULT_GOAL` REPLACES the first rule, it does not join it: listing both walked a target the
     // file had deliberately overridden.
-    const goals = [...new Set([merged.defaultGoal, ...merged.altGoals])].filter((t): t is string => !!t);
-    const wanted = targets.length
-      ? targets
-      : (goals.length ? goals : [merged.firstTarget].filter((t): t is string => !!t)).slice(0, 8);
+    const goals = [...new Set([merged.defaultGoal, ...merged.altGoals])]
+      .map((g) => (g === '\0firstTarget' ? merged.firstTarget : g))
+      .filter((t): t is string => !!t);
+    const candidateGoals = goals.length ? goals : [merged.firstTarget].filter((t): t is string => !!t);
+    const wanted = targets.length ? targets : candidateGoals.slice(0, 8);
+    // A REACHED CAP IS NOT AN ABSENCE — the same lesson, in the third place this phase. Ten `ifeq` blocks each
+    // assigning `.DEFAULT_GOAL` produce ten candidates; walking the first eight and saying nothing made the
+    // other two vanish under a positive claim (self-attack on exit review 9).
+    const goalsCapped = !targets.length && candidateGoals.length > 8;
     const body: string[] = [];
     const missing: string[] = [];
     let partial: string | null = null;
@@ -5249,7 +5359,7 @@ function resolveScriptCommand(
         if (!cmd) continue;
             // make's recipe PREFIX CHARACTERS may appear in any order AND BE SEPARATED BY WHITESPACE, so `@ +cmd`
         // carries the `+` exactly as `+@cmd` does — and `+` is what still runs under `-n` (exit review 9).
-        const runs = !dryRun || /^[@\s-]*\+/.test(rl) || /\$[({]MAKE[)}]/.test(rl);
+        const runs = !noRecipes || /^[@\s-]*\+/.test(rl) || /\$[({]MAKE[)}]/.test(rl);
         // make expands the line BEFORE the shell sees it: the variables it splices in can carry whole commands,
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
         const tv0 = merged.targetVars.get(t);
@@ -5346,6 +5456,12 @@ function resolveScriptCommand(
     // invisibly. Returning early on the first missing target also discarded every gap found for the OTHER goals
     // on the same command line, so `make nosuch deploy` claimed proven absence over an unresolved `deploy`
     // (exit review 2).
+    if (goalsCapped)
+      gaps.push({
+        what: 'body',
+        where: makeDir,
+        why: 'this makefile selects more default goals than this resolver walks',
+      });
     const blind = merged.unsupported.length > 0 || merged.hasPatternRules || merged.unsupportedFor.size > 0;
     if (blind)
       for (const t of missing)
@@ -5711,9 +5827,37 @@ const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete'
 /** A COMMAND THAT ASKS FOR HELP, OR REPORTS A VERSION, CONNECTS TO NOTHING. It is the first thing anyone runs
  *  against an unfamiliar tool and the last thing that should be refused outright (exit review 9). Read from the
  *  RAW tokens, so a `--help` inside a quoted SQL statement or a search pattern is not one. */
+/** ANY SIGN OF A WRITE, ANYWHERE IN A STATEMENT. A read-only exception has to be a claim about the WHOLE
+ *  statement, and a blocklist of word-bounded SQL verbs was neither:
+ *    - `EXPLAIN ANALYSE …` EXECUTES what it wraps, and PostgreSQL accepts the British spelling as an exact
+ *      synonym of ANALYZE — the list knew only one of the two, so terminating every backend connection to a
+ *      production database read as a query plan;
+ *    - `show dbs; db.dropDatabase()` puts the write AFTER a reader, and only the first statement was inspected;
+ *    - `\b` never matches inside an identifier, so `dropDatabase` and `deleteMany` — the way every driver
+ *      spells it — passed a list containing `drop` and `delete`.
+ *  So: a statement separator disqualifies it outright, and the verbs are matched as SUBSTRINGS of an
+ *  identifier as well as words (self-attack on exit review 9). */
+const WRITES_SOMEWHERE =
+  /;|\b(analyse|analyze)\b|(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|vacuum|reindex|cluster|call|merge|rename|refresh|shutdown|detach|attach|lock|flush|kill|import|restore|replace|upsert|remove|destroy|purge|expire|rewrite|repair|optimi[sz]e|set[A-Z_])/i;
+
 function isProbeInvocation(seg: string): boolean {
   const t = tokenizeMarked(seg).filter((x) => !x.quoted).map((x) => x.text);
-  return t.some((w, i) => /^(--help|--version|-help|-version|--usage)$/.test(w) || (w === 'help' && i > 0));
+  return t.some((w, i) => {
+    if (/^(--help|-help|--usage|-\?)$/.test(w)) return true;
+    // `--version` IS ALSO AN OPTION THAT TAKES A VALUE. `helm upgrade --install acme acme/web --version 1.4.2`
+    // pins a chart version and installs it; read as a probe it reached ALLOW against a production cluster.
+    // A probe's `--version` is the last word, or is followed by another option (self-attack on exit review 9).
+    // ...and the normalizer moves a leading assignment to the END of the line so the environment input stays
+    // visible, so `PGHOST=prod-db psql --version` arrives as `psql --version PGHOST=prod-db`: the word after
+    // `--version` is an ASSIGNMENT, not its value (self-attack, second order).
+    if (/^(--version|-version)$/.test(w)) {
+      const next = t[i + 1];
+      return next === undefined || next.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(next);
+    }
+    // ...and a bare `help` is a VERB, not any word. `psql -h prod-db -c "TRUNCATE TABLE help"` truncates a
+    // table that happens to be called `help`, and it was read as a request for documentation.
+    return w === 'help' && i > 0 && i === t.length - 1;
+  });
 }
 /** A DRY RUN PERFORMS THE ACT'S CHECKS AND NOT THE ACT. `kubectl apply --dry-run=client`, `helm upgrade
  *  --dry-run`, `git push --dry-run` and `aws … --dry-run` are how an operator finds out what WOULD happen, and
@@ -5721,8 +5865,18 @@ function isProbeInvocation(seg: string): boolean {
  *  production target still reaches it, and a human can still say no. */
 function isDryRun(seg: string): boolean {
   const t = tokenizeMarked(seg).filter((x) => !x.quoted).map((x) => x.text);
+  // `--dry-run=none` IS NOT A DRY RUN. It is the EXPLICIT spelling of "really do it": kubectl documents none as
+  // the default, and helm's own help says `--dry-run=none` executes the operation normally and persists
+  // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
+  // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
+  // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
   return t.some(
-    (w) => /^--dry-run(=.*)?$/.test(w) || w === '--server-dry-run' || w === '--what-if' || w === '--no-act',
+    (w, i) =>
+      w === '--server-dry-run' ||
+      w === '--what-if' ||
+      w === '--no-act' ||
+      (w === '--dry-run' && !/^(none|false|0|no)$/i.test(t[i + 1] ?? '')) ||
+      /^--dry-run=(client|server|true|1|yes)$/i.test(w),
   );
 }
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
@@ -6053,6 +6207,7 @@ function resolveK8sTarget(
     (head === 'helm' && tokens.includes('get') && tokens.some((t) => /^(values|all|manifest|notes|hooks)$/.test(t)));
   const mutate = head === 'helm' ? HELM_MUTATING_VERBS : K8S_MUTATING_VERBS;
   let verb: string | undefined;
+  let verbAt = -1;
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
     if (t.startsWith('-')) {
@@ -6061,6 +6216,7 @@ function resolveK8sTarget(
     }
     if (known.has(t)) {
       verb = t;
+      verbAt = i;
       break;
     }
   }
@@ -6075,7 +6231,10 @@ function resolveK8sTarget(
   // question. And a PROBE connects to nothing while a DRY RUN performs the act's checks and not the act — both
   // were absolute denies against a production cluster, which is a refusal to LOOK (exit review 9).
   const line = requote(tokens);
-  const sub = tokens[(verb === undefined ? -1 : tokens.indexOf(verb)) + 1];
+  // THE VERB'S POSITION IS THE ONE THE SCAN FOUND, not the first token that spells it. `kubectl --context
+  // production -n auth auth can-i create pods` has `auth` as the NAMESPACE first, so `indexOf` pointed at the
+  // option's value and the subcommand read as `auth` instead of `can-i` (self-attack on exit review 9).
+  const sub = tokens[verbAt + 1];
   const readsOnly =
     verb !== undefined && sub !== undefined && (K8S_READ_SUBCOMMANDS[verb]?.has(sub) ?? false);
   const mutating =
@@ -6180,7 +6339,15 @@ function looksLikeDbTarget(t: string): boolean {
   // a server by its bare service name, which is how every container network and every Kubernetes service is
   // addressed; requiring a dot or a slash made it an ordinary word and the production database was ALLOW
   // (exit review 9). A PORT is what distinguishes it from a database name or a SQL word.
-  if (/^[A-Za-z0-9][A-Za-z0-9._-]*:\d{1,5}(\/[A-Za-z0-9._-]*)?$/.test(t)) return true;
+  // ...but a PORT is only a port in a TARGET position. `redis-cli --scan --pattern session:2024` names a key
+  // pattern, and reading it as a host with a port made the most ordinary redis inspection an absolute deny
+  // (self-attack on exit review 9). A real port is at most 65535, and a year is not one — but the honest
+  // distinction is the POSITION, which the caller knows and this predicate does not, so only the port RANGE is
+  // checked here and the caller skips option values.
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]*:\d{1,5}(\/[A-Za-z0-9._-]*)?$/.test(t)) {
+    const port = Number(/:(\d{1,5})/.exec(t)?.[1] ?? '0');
+    return port > 0 && port <= 65535;
+  }
   // `prod-mongo/admin` is `host/database` with no dot in it at all, which is how mongosh is normally invoked
   if (/^[A-Za-z0-9][A-Za-z0-9._-]*(:\d+)?\/[A-Za-z0-9._-]+$/.test(t) && !/\.(sql|js|py|rb|json|txt|sh)$/i.test(t))
     return true;
@@ -6191,6 +6358,7 @@ function resolveDbTarget(
   tokens: string[],
   targets: LocalTargets,
   envInputs: Record<string, string> = {},
+  rawSeg?: string,
 ): { cls: TargetClass; target: string; executes: boolean } {
   const head = tokens[0] ?? '';
   // Whether a statement is "executed" is not guessed any more. A client pointed at a non-local database is an
@@ -6202,7 +6370,15 @@ function resolveDbTarget(
   // inspects a plan, and refusing it absolutely leaves no way to look (exit review 9). The statement must be
   // wholly read-only — one write clause anywhere in it and the whole thing acts.
   const line = requote(tokens);
-  const statements = optionValues(tokens, 'c', ['--command', '--eval', '--execute', '--query']);
+  // read from the RAW segment when there is one: there the statement is still the single quoted word it was
+  // written as, so a `;` inside it is visible and the whole statement can be judged
+  // `-e` IS mysql's SHORT `--execute`, and only `-c` was read as a short statement flag — so every read-only
+  // statement spelled the mysql way was judged as an unrestricted connection (self-attack on exit review 9).
+  const stmtTokens = rawSeg === undefined ? tokens : tokenizeMarked(rawSeg).map((t) => t.text);
+  const statements = [
+    ...optionValues(stmtTokens, 'c', ['--command', '--eval', '--query']),
+    ...optionValues(stmtTokens, 'e', ['--execute']),
+  ];
   const readOnlyStatement =
     statements.length > 0 &&
     statements.every((q) =>
@@ -6217,7 +6393,7 @@ function resolveDbTarget(
       // sees the raw text, is what tests the rest of the statement for a write clause; both must agree before
       // the act is read as a read.
       (/^\s*(explain|show|describe)(\s|$)/i.test(q) || /^\s*\\?(d\w*|l|z|sf|ef)\s*$/i.test(q)) &&
-      !/\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|vacuum|reindex|call|do|analyze)\b/i.test(q),
+      !WRITES_SOMEWHERE.test(q),
     );
   const executes = !isProbeInvocation(line) && !readOnlyStatement;
   // sqlite3 operates on a file: the path rules already govern it
@@ -6341,7 +6517,16 @@ function resolveDbTarget(
         while (i + 1 < tokens.length && !tokens[i + 1]!.startsWith('-') && !looksLikeDbTarget(tokens[i + 1]!)) i++;
         continue;
       }
-      if (/^(-f|--file|-U|--username|-p|--port|-d|--dbname|-o|--output)$/.test(t)) i++;
+      // ...and every other option that takes a VALUE, or that value becomes the bare operand and is read as a
+      // target: `redis-cli --scan --pattern session:2024` named a KEY PATTERN, and it has the shape of a host
+      // and a port, so the most ordinary redis inspection there is became an absolute deny (self-attack on
+      // exit review 9).
+      if (
+        /^(-f|--file|-U|--username|-p|--port|-d|--dbname|-o|--output|--pattern|--count|--user|--pass|--password|--db|--auth|--cluster-from|--cluster-to|--memkeys-samples|--hotkeys|--bigkeys|--rdb|--pipe-timeout|--lru-test|--seed|--keystats-samples)$/.test(
+          t,
+        )
+      )
+        i++;
       continue;
     }
     bare = t;
@@ -6447,6 +6632,10 @@ function retargetLocalCapability(
   hit: CapabilityHit,
   norm: string,
   envInputs: Record<string, string> = {},
+  /** THE SEGMENT AS WRITTEN. A statement is ONE quoted word and normalization has already dropped the quoting
+   *  that says so, so `--eval "show dbs; db.dropDatabase()"` arrives as the bare word `show` and a read-only
+   *  test on it is a test of the first word only (self-attack on exit review 9). */
+  rawSeg: string = norm,
 ): CapabilityHit {
   const kind =
     TARGET_SENSITIVE[hit.capability] ??
@@ -6475,7 +6664,7 @@ function retargetLocalCapability(
     kind === 'k8s'
       ? resolveK8sTarget(tokens, targets)
       : kind === 'db'
-        ? resolveDbTarget(tokens, targets, envInputs)
+        ? resolveDbTarget(tokens, targets, envInputs, rawSeg)
         : resolveContainerTarget(tokens, targets, envInputs);
   const acts =
     kind === 'db'
@@ -6539,6 +6728,7 @@ function classifyNormalized(
         },
         norm,
         state.env.envInputs,
+        state.env.rawSegment ?? norm,
       );
       break;
     }
@@ -6889,9 +7079,11 @@ function classifyShellPaths(
   // at ALLOW (exit review 9). `git cat-file -p` and `git checkout <rev> -- <path>` name it the same way.
   if (head === 'git' && /^(show|cat-file)$/.test(tokens[1] ?? '')) {
     for (const t of tokens.slice(2)) {
+      // `:PATH` IS THE INDEX and `:0:PATH` a merge stage — both read the file exactly as `HEAD:PATH` does, and
+      // requiring something before the colon skipped them (self-attack on exit review 9).
       const at = t.indexOf(':');
-      if (at <= 0 || t.startsWith('-')) continue;
-      const rel = t.slice(at + 1);
+      if (at < 0 || t.startsWith('-')) continue;
+      const rel = t.slice(at + 1).replace(/^[0-3]:/, '');
       if (!rel || /[$`*?]/.test(rel)) continue;
       const abs = canonicalPath(isAbsolute(rel) ? rel : resolve(cwd, rel.replace(/^\.\//, '')));
       const h = classifyPath(table, ctx, 'Read', abs);
@@ -6913,9 +7105,40 @@ function classifyShellPaths(
   // opened a writable route into the governance tree and `echo x > k/h/runtime/pin.json` was ALLOW
   // (exit review 9). The link is a second NAME for the target, so the target is judged as both.
   if (head === 'ln' && tokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
-    const ops = tokens.slice(1).filter((t) => !t.startsWith('-') && t !== '--');
-    if (ops.length >= 2) {
-      const linkDir = dirname(isAbsolute(ops[ops.length - 1]!) ? ops[ops.length - 1]! : resolve(cwd, ops[ops.length - 1]!));
+    // `-t DIR` MOVES THE LINK'S DIRECTORY OFF THE OPERAND LIST: every operand is then a SOURCE and DIR is where
+    // the links are made. Taking the last operand as the link swapped the two roles entirely (self-attack).
+    const targetDir = optionValue(tokens, 't', ['--target-directory']);
+    const ops: string[] = [];
+    for (let i = 1; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t === '-t' || t === '--target-directory') { i++; continue; } // its value is the directory, not a source
+      if (t.startsWith('-') || t === '--') continue;
+      // A REDIRECTION IS NOT AN OPERAND. `ln -s ../.harness k/h 2>&1` put `2>&1` last, so the link's directory
+      // was read from it and the target resolved somewhere harmless (found by the cross-product).
+      if (/^\d*[<>]|^&[<>]|^[<>]/.test(t)) {
+        if (!t.includes('/') && i + 1 < tokens.length) i++;
+        continue;
+      }
+      ops.push(t);
+    }
+    if (targetDir !== null && ops.length >= 1) {
+      const linkDir = isAbsolute(targetDir) ? targetDir : resolve(cwd, targetDir);
+      for (const src of ops) {
+        const expanded = expandHome(src);
+        if (expanded === null || /[$`*?]/.test(expanded)) continue;
+        const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(linkDir, expanded));
+        const entry = paths.find((q) => q.raw === src);
+        if (entry) entry.abs = abs;
+        else paths.push({ raw: src, abs, glob: false });
+      }
+    } else if (ops.length >= 2) {
+      // ...AND WHEN THE LAST OPERAND IS AN EXISTING DIRECTORY, ln puts the link INSIDE it — its second
+      // documented form, on BSD and GNU alike. `ln -s ../.harness k` with `k` a directory creates
+      // `k/.harness -> ../.harness`, which is the same writable route into the governance tree this rule was
+      // written to close, one spelling over (self-attack on exit review 9).
+      const last = ops[ops.length - 1]!;
+      const lastAbs = isAbsolute(last) ? last : resolve(cwd, last);
+      const linkDir = directoryExists(lastAbs) ? lastAbs : dirname(lastAbs);
       for (const src of ops.slice(0, -1)) {
         const expanded = expandHome(src);
         if (expanded === null || /[$`*?]/.test(expanded)) continue;
@@ -6933,7 +7156,8 @@ function classifyShellPaths(
   // destination is judged here, on its own, rather than through the coarse "every operand is a write" switch —
   // which would have made reading a governed file a write and reintroduced the defect closed one commit ago.
   for (const w of sedWrittenFiles(rawSeg, ctx, cwd)) {
-    if (/[$`]/.test(w)) continue;
+    // a device sink is a DISCARD, exactly as it is for `> /dev/null` (self-attack on exit review 9)
+    if (/[$`]/.test(w) || isDeviceDiscard(w)) continue;
     const abs = canonicalPath(isAbsolute(w) ? w : resolve(cwd, w));
     const h = classifyPath(table, ctx, 'Write', abs);
     if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `sed writes ${w} (${h.via})`, segment: seg });
@@ -7105,9 +7329,18 @@ function classifyShellPaths(
       // that looks like a build step (exit review 9). The modes that only READ are `t` (list) and `p` (print).
       const ops = bareOperands();
       const keys = ops[0] ?? '';
-      dest = /^[a-zA-Z]+$/.test(keys) && !/^[tp]/.test(keys) ? (ops[1] ?? null) : null;
-      // the dashed spelling puts the key letters in an option: `ar -r -c archive member`
-      if (dest === null && tokens.some((t) => /^-[a-zA-Z]*[rqm]/.test(t))) dest = ops[0] ?? null;
+      // `t` lists and `p` prints — both read. `x` EXTRACTS, which writes the members into the working
+      // directory and leaves the archive untouched (self-attack on exit review 9).
+      dest = /^[a-zA-Z]+$/.test(keys)
+        ? /^[tp]/.test(keys)
+          ? null
+          : /^x/.test(keys)
+            ? '.'
+            : (ops[1] ?? null)
+        : null;
+      // the dashed spelling puts the key letters in an option: `ar -r -c archive member`. `d` DELETES members
+      // and `s` rewrites the index, so both write the archive exactly as `r`, `q` and `m` do (self-attack).
+      if (dest === null && tokens.some((t) => /^-[a-zA-Z]*[rqmds]/.test(t))) dest = ops[0] ?? null;
     } else if (head === 'zip') {
       const operands = bareOperands();
       // `zip -m` MOVES: it deletes every source file once it has added it, so `zip -rm /tmp/x.zip .` empties the
@@ -7699,11 +7932,13 @@ function commandHeadIndex(t: readonly string[]): number {
       /^(timeout|sudo|doas|xargs|--)$/.test(w)
     ) {
       i++;
-      // a wrapper's own operands: `nice -n 5`, `timeout 60`, `exec -c -a NAME`
+      // a wrapper's own operands: `nice -n 5`, `timeout 60`, `exec -c -a NAME`, `command -p`
       while (i < t.length && /^(-|\d)/.test(t[i]!)) {
         const opt = t[i]!;
         i++;
-        if (/^(-n|-a|-C|-u|-g|-p|-t)$/.test(opt) && i < t.length && !t[i]!.startsWith('-')) i++;
+        // ...and only the ones that TAKE a value consume the next token: `command -p sed …` has none, and
+        // treating `-p` as valued swallowed `sed` itself (self-attack on exit review 9)
+        if (/^(-n|-a|-C|-u|-g|-t)$/.test(opt) && i < t.length && !t[i]!.startsWith('-')) i++;
       }
       continue;
     }
@@ -7755,8 +7990,15 @@ function sedScripts(
     // a script FILE — and `-f` also means NO bare operand is the script: with it every operand is an INPUT, so
     // reading the first one as a script made `sed -f s.sed '1e git push'` deny a file whose NAME happens to
     // look like a script (self-attack, exit review 8)
-    if (w === '-f' || w === '--file') { if (t[j + 1] !== undefined) readScript(t[j + 1]!); j++; continue; }
-    const feq = /^(?:--file=|-f)(.+)$/.exec(w);
+    // `-f` MAY SIT IN A CLUSTER. `sed -nf evil.sed` is `-n -f evil.sed`, and matching only the bare and glued
+    // forms left the script file unread — so a `w .claude/settings.json` inside it installed nothing anyone saw
+    // (self-attack on exit review 9). In a cluster `f` must be LAST, because it consumes the rest.
+    if (w === '-f' || w === '--file' || /^-[a-zA-Z]*f$/.test(w)) {
+      if (t[j + 1] !== undefined) readScript(t[j + 1]!);
+      j++;
+      continue;
+    }
+    const feq = /^(?:--file=|-[a-zA-Z]*f)(.+)$/.exec(w);
     if (feq) { readScript(feq[1]!); continue; }
     if (w.startsWith('-')) continue;
     if (!sawE && !sawF && !texts.length) texts.push(w);
@@ -7788,7 +8030,12 @@ function sedWrittenFiles(seg: string, ctx?: EvaluationContext, cwd?: string): st
   for (const script of scripts.texts)
     for (const line of script.split('\n')) {
       // the bare `w`/`W` command, with its optional address in front
-      for (const m of line.matchAll(/(?:^|;)\s*(?:\/(?:\\.|[^/])*\/|[0-9$,~+]+)?\s*!?\s*[wW][ \t]+([^\n]+)/g))
+      // AN ADDRESS MAY BE A RANGE, AND A COMMAND MAY SIT IN A BRACED BLOCK. `1,/x/w FILE` and `1{w FILE\n}` are
+      // both ordinary sed, and an address pattern that allowed only ONE line number or ONE regex matched
+      // neither, so the destination went unread (self-attack on exit review 9).
+      for (const m of line.matchAll(
+        /(?:^|[;{])\s*(?:(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+)(?:\s*,\s*(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+))?)?\s*!?\s*\{?\s*[wW][ \t]+([^\n;}]+)/g,
+      ))
         out.push(m[1]!.trim());
       // the `w` FLAG of a substitution, which comes after the closing delimiter and its other flags
       for (const m of line.matchAll(/s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpiImMe0-9]*w[ \t]+([^\n]+)/g))
@@ -8010,7 +8257,8 @@ function analyzeSegments(
     // BRACE EXPANSION HAPPENS HERE, ONCE, BEFORE ANY READER SEES THE SEGMENT — matchers, the redirection target
     // scan, pathTokens, the short-flag cluster reader and every producer. The shell does it ahead of everything
     // else, so a reader given the unexpanded text is reading a word that will never exist (exit review 9).
-    const seg = expandBraces(stage.text);
+    const braceOverflow = { hit: false };
+    const seg = expandBraces(stage.text, braceOverflow);
     // `if`/`while`/`until`/`for`/`case` open a branch whose body may not run; `fi`/`done`/`esac` close it
     const kw = /^(if|while|until|for|case|select)\b/.exec(seg.trim());
     const kwEnd = /^(fi|done|esac)\b/.test(seg.trim());
@@ -8026,6 +8274,12 @@ function analyzeSegments(
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
     const stdinParts = stage.pipedFromPrevious ? upstreamParts : [];
     const upstreamHeredoc = stage.pipedFromPrevious ? upstreamBody : null;
+    // a word this kernel refused to expand is a word it has not read: report the opacity rather than treating
+    // the unexpanded braces as the text that will run
+    if (braceOverflow.hit)
+      hits.push(
+        opaqueHit(table, ctx, seg, 'a brace expansion produces more words than this kernel enumerates'),
+      );
     const hitsBefore = hits.length;
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
@@ -8143,7 +8397,9 @@ function analyzeSegments(
     // `-C` is a git GLOBAL option, which means before the verb. `git blame -C file` and `git diff -C` use the
     // same letter for "detect copies", and matching it anywhere downgraded every one of them to an unverified
     // context — ordinary review commands, asking for no reason.
-    const envChdir = /(^|\s)env\s+(?:-\S+\s+)*?(?:-C\s+|--chdir[= ])(\S+)/.exec(seg.trim());
+    // `-C` GLUES ITS VALUE like every other short option: `env -C.harness/runtime tee pin.json` names that
+    // directory, and requiring whitespace after the letter missed it (self-attack on exit review 9).
+    const envChdir = /(^|\s)env\s+(?:-\S+\s+)*?(?:-C\s*|--chdir[= ])(\S+)/.exec(seg.trim());
     if (envChdir) {
       const target = expandHome(envChdir[2]!);
       if (target !== null && !/[$`*?]/.test(target)) {
@@ -8151,11 +8407,29 @@ function analyzeSegments(
         env.cwdVerified = env.cwdVerified && directoryExists(env.cwd) && repoRootFor(ctx, env.cwd) !== null;
       } else env.cwdVerified = false;
     }
-    const gitDir = /^git\s+(?:-[cC]\s+\S+\s+|--[a-z-]+(?:=\S+)?\s+|-[a-z]\s+\S+\s+)*?(?:-C\s+|--work-tree[= ])(\S+)/.exec(
-      seg.trim(),
-    );
-    if (gitDir) {
-      const target = expandHome(gitDir[1]!);
+    // ...AND A SHELL KEYWORD OR A WRAPPER MAY STAND IN FRONT OF IT. Anchored at `^git`, the extraction missed
+    // `while git -C control-plane checkout …; do break; done` and every other structural position, so the
+    // command ran in a directory the path classification never heard about. The normalized text is no help
+    // here — the normalizer has ALREADY STRIPPED the `-C` by then, which is the whole reason this reads the
+    // segment as written — so the head is found the way every other carrier finds it: by skipping the wrappers
+    // and keywords in the TOKEN stream (self-attack on exit review 9). Successive `-C` are CUMULATIVE in git,
+    // exactly as they are in make and tar.
+    const gitDir = ((): string | null => {
+      const t = tokenizeMarked(seg.trim()).filter((x) => !x.quoted).map((x) => x.text);
+      const gi = commandHeadIndex(t);
+      if (!/^(?:.*\/)?git$/.test(t[gi] ?? '')) return null;
+      let dir: string | null = null;
+      for (let i = gi + 1; i < t.length; i++) {
+        const w = t[i]!;
+        if (!w.startsWith('-')) break; // the verb: `-C` is a GLOBAL option and comes before it
+        const v = w === '-C' || w === '--work-tree' ? t[++i] : /^(?:--work-tree=|-C)(.+)$/.exec(w)?.[1];
+        if (v !== undefined && v !== null) dir = dir === null || isAbsolute(v) ? v : `${dir}/${v}`;
+        else if (/^(-c|--[a-z-]+|-[a-z])$/.test(w) && !w.includes('=')) i++; // its value, not the verb
+      }
+      return dir;
+    })();
+    if (gitDir !== null) {
+      const target = expandHome(gitDir);
       if (target !== null && !/[$`*?]/.test(target)) {
         env.cwd = isAbsolute(target) ? target : resolve(effectiveCwd, target);
         env.cwdVerified = env.cwdVerified && directoryExists(env.cwd);
@@ -8182,25 +8456,38 @@ function analyzeSegments(
     for (const body of gitConfigCommands(seg))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by git from its configuration)`.trim() });
-    for (const body of carriedShellBodies(seg))
+    for (const rawBody of carriedShellBodies(seg)) {
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
       // sibling units of the OUTER segment, where the per-unit state — the working directory and the environment
       // — is the outer one. So `bash -c "export PGHOST=prod-db… && psql -c 'DROP TABLE users'"` lost the
       // assignment that the same text without the carrier carries perfectly well (exit review 7, cross-product).
-      // A SINGLE-command body needs no re-entry: the normalizer reaches it on its own — EXCEPT when what it
-      // carries is a program held in an option's VALUE. The normalizer returns strings, so the quoting that made
-      // `awk 'BEGIN{system("git push origin main")}'` one word is gone by the time it arrives, and the carriers
-      // below read a program that no longer has any word boundaries. The body still has its own quoting, so a
-      // body that feeds one of them is re-entered whole (found by the producer cross-product, exit review 8).
+      // A SINGLE-command body needs no re-entry FOR THE READERS THAT WORK ON THE NORMALIZED TEXT: the normalizer
+      // reaches it on its own. It needs one for every reader that works on the SEGMENT AS WRITTEN, because
+      // there the carrier's quoting stands where the body should be. Three of those were found missing three
+      // different effects — the redirection scan (`sh -c "echo x > control-plan{e..e}/…"`), the `git -C`
+      // working directory, and the commit hook-bypass argv (`sh -c "git commit -m x -{n..n}"`) — alongside the
+      // option-value carriers found by the cross-product a review earlier. Re-entering EVERY body was tried and
+      // is wrong: a duplicate hit does change the decisive capability and defeats the LOCAL de-escalation, and
+      // nine tests said so at once. So the condition names what actually needs it.
+      // the BODY is brace-expanded before these questions are asked of it: the carrier's quoting keeps the
+      // braces literal at this level and the inner shell expands them, so `git commit -m x -{n..n}` only looks
+      // like a hook bypass once it has been through the same expansion the inner shell performs
+      const body = expandBraces(rawBody);
       if (
         splitShellPipeline(body).length > 1 ||
         awkShellCommands(body, ctx, env.cwd).length > 0 ||
         sedShellCommands(body, ctx, env.cwd).length > 0 ||
-        gitPagerCommands(body).length > 0
+        sedWrittenFiles(body, ctx, env.cwd).length > 0 ||
+        gitPagerCommands(body).length > 0 ||
+        gitConfigCommands(body).length > 0 ||
+        redirectionTargets(body).length > 0 ||
+        /(^|\s)(git|env)\s+(?:-\S+\s+)*-C(\s|=|\S)/.test(body) ||
+        commitBypassFlag(body)
       )
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
+    }
     // A PIPE INTO AN INTERPRETER IS AN EXECUTION EDGE. `echo 'rm -rf /' | bash` runs the first stage's output as
     // the second stage's SCRIPT; with the `|` discarded the two looked unrelated and an absolute core deny asked
     // instead of being denied (exit review 4). When the upstream is a LITERAL, the text that will run is known and
@@ -8293,6 +8580,7 @@ function analyzeSegments(
                     },
                     sub,
                     env.envInputs,
+                    sub,
                   ),
                 );
               break;
@@ -8353,7 +8641,14 @@ function analyzeSegments(
       }
     }
     // a shell redirection is a path-known write: classify its target like a Write tool call
-    for (const target of redirectionTargets(seg)) {
+    // A REDIRECTION INSIDE A CARRIED BODY IS STILL A REDIRECTION, and the carrier's quoting hides it from the
+    // segment text: `sh -c "echo x > control-plan{e..e}/permissions/matrix.yaml"` keeps the braces quoted at
+    // this level, where a real shell does not expand them either, and the INNER shell expands them for real.
+    // The normalized forms are the command as that inner shell sees it — braces already expanded — so the
+    // targets are collected from the segment AND from every normalization of it (self-attack on exit review 9).
+    const redirTargets = new Set(redirectionTargets(seg));
+    for (const n of normalizeSegment(seg)) for (const t of redirectionTargets(n)) redirTargets.add(t);
+    for (const target of redirTargets) {
       const expanded = expandHome(target);
       if (expanded === null || /[$`*?]/.test(expanded)) {
         hits.push({
@@ -8393,7 +8688,7 @@ function analyzeSegments(
       break;
     }
     if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
-    const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([A-Za-z_][\w.-]*)\s*\(\s*\)\s*\{)/.exec(seg.trim());
+    const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([^\s()<>|&;'"$`]+)\s*\(\s*\)\s*\{)/.exec(seg.trim());
     if (decl && bindingIsProven) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
     // TREE-STATE PROVENANCE: a checkout, reset, stash pop, merge, rebase or worktree switch replaces a
     // repository-determined, unenumerable set of files. The per-path ledger cannot express that, so the tree
