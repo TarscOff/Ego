@@ -4722,6 +4722,20 @@ function resolveScriptCommand(
     // word inside a quoted VALUE, and a token scan saw it as make's option (exit review 8).
     if (tokenizeMarked(env.rawSegment ?? tokens.join(' ')).some((t) => !t.quoted && /^(--version|--help)$/.test(t.text)))
       return { kind: 'make-target', key: `make:probe`, body: null, reason: 'a version or help probe selects no goal', resolution: 'NOT_A_PRODUCER' };
+    // A DRY RUN PRINTS THE RECIPE AND DOES NOT RUN IT. `make -n deploy` is exactly how an operator INSPECTS a
+    // target before trusting it, and reading the inspection as the execution made looking at a recipe carry that
+    // recipe's verdict (exit review 8). GNU make keeps two exceptions under `-n` and both are kept here: a line
+    // prefixed `+`, and a line naming `$(MAKE)` — those still run for real. Expansion is NOT suppressed, because
+    // make expands a line before printing it and a `$(shell …)` inside it runs either way.
+    // The short flag is read only inside a cluster of make's ARGUMENT-LESS options: in `-fn` the `n` is the name
+    // of a makefile, not the dry run.
+    const MAKE_FLAG_CLUSTER = /^-[BdeiknpqrstvwLRS]+$/;
+    const dryRun = tokenizeMarked(env.rawSegment ?? tokens.join(' ')).some(
+      (t) =>
+        !t.quoted &&
+        (/^(--just-print|--dry-run|--recon)$/.test(t.text) ||
+          (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('n'))),
+    );
     const wanted = targets.length ? targets : [merged.defaultGoal ?? merged.firstTarget].filter((t): t is string => !!t);
     const body: string[] = [];
     const missing: string[] = [];
@@ -4780,6 +4794,8 @@ function resolveScriptCommand(
       for (const rl of rule.recipes) {
         const cmd = rl.replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
+        // under `-n` the line is expanded but not executed, unless it is one of make's own two exceptions
+        const runs = !dryRun || /^[@-]*\+/.test(rl) || /\$[({]MAKE[)}]/.test(rl);
         // make expands the line BEFORE the shell sees it: the variables it splices in can carry whole commands,
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
         const tv0 = merged.targetVars.get(t);
@@ -4799,7 +4815,7 @@ function resolveScriptCommand(
             if (budget-- <= 0) break;
             const alt = expandMakeText(cmd, new Map([...vars, [name, v]]), auto);
             for (const inner of alt.ran) body.push(inner);
-            if (alt.text !== null && alt.text.trim()) body.push(alt.text.trim());
+            if (runs && alt.text !== null && alt.text.trim()) body.push(alt.text.trim());
           }
         }
         const expanded = expandMakeText(cmd, vars, auto);
@@ -4808,14 +4824,15 @@ function resolveScriptCommand(
         // still carries the command, so `git push $(UNKNOWN)` keeps its locked deny instead of degrading to an
         // opacity ASK, which is a weaker verdict for a command the resolver could read perfectly well
         // (exit review 5).
-        if (expanded.text === null && expanded.prefix.trim()) body.push(expanded.prefix.trim());
+        if (runs && expanded.text === null && expanded.prefix.trim()) body.push(expanded.prefix.trim());
         if (expanded.text === null) {
+          if (!runs) continue;
           // ONE unresolvable line no longer discards the rest: the resolved lines are still analysed and the
           // remainder is reported (challenge 5, finding 8 — "known but incomplete body")
           partial = `a recipe line of "${t}" expands to text this resolver cannot determine`;
           continue;
         }
-        if (expanded.text.trim()) body.push(expanded.text.trim());
+        if (runs && expanded.text.trim()) body.push(expanded.text.trim());
       }
     };
     // whatever make runs while PARSING runs whichever target was asked for
@@ -5304,11 +5321,16 @@ function optionValues(tokens: string[], short: string, longs: string[]): string[
     const t = tokens[i]!;
     let matched = false;
     for (const l of longs) {
-      if (t === l) {
+      // A SINGLE DASH IN FRONT OF A WHOLE WORD IS A LONG OPTION, not a cluster of short ones. Go's flag package
+      // — influx, etcdctl, consul, nomad, half the cloud CLIs — spells every option that way, and the short-flag
+      // scan below read `-host localhost` as `-h ost`: a host named "ost", EXTERNAL, absolutely denied, for the
+      // most ordinary local command the tool has (exit review 8).
+      const single = '-' + l.replace(/^--/, '');
+      if (t === l || t === single) {
         if (tokens[i + 1] !== undefined) out.push(tokens[i + 1]!);
         matched = true;
-      } else if (t.startsWith(l + '=')) {
-        out.push(t.slice(l.length + 1));
+      } else if (t.startsWith(l + '=') || t.startsWith(single + '=')) {
+        out.push(t.slice(t.indexOf('=') + 1));
         matched = true;
       }
       if (matched) break;
@@ -5640,8 +5662,20 @@ function resolveDbTarget(
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
   const signals: Array<{ cls: TargetClass; target: string }> = [];
-  const push = (v: string, kind: string) =>
-    signals.push({ cls: classifyTargetName(v, targets.dbLocalHosts, targets), target: `${kind} ${v}` });
+  const push = (v: string, kind: string) => {
+    // A HOST THAT IS A PATH IS A UNIX-DOMAIN SOCKET DIRECTORY, not a network host. libpq, mysql and their kin
+    // read `-h /tmp` as "connect through the socket in /tmp" — the most local connection there is, and the only
+    // one that cannot leave the machine. Classified as a NAME it was an EXTERNAL host, absolutely denied, and no
+    // entry in `local-targets.md` could ever have named it (exit review 8).
+    if (/^(~|\.\.?)?\//.test(v)) {
+      signals.push({ cls: 'LOCAL', target: `${kind} ${v} (unix socket directory)` });
+      return;
+    }
+    // ...and a host written as a URL is its HOSTNAME. `influx --host http://localhost:8086` is localhost; read
+    // whole, the scheme and port made the string match no local pattern and the local dev server was denied.
+    const name = /^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? endpointHost(v) : v;
+    signals.push({ cls: classifyTargetName(name, targets.dbLocalHosts, targets), target: `${kind} ${v}` });
+  };
 
   // THE CLIENT READS THE ENVIRONMENT WHEN NO HOST IS ON THE LINE. libpq reads `PGHOST`, mysql reads `MYSQL_HOST`,
   // redis-cli reads `REDIS_HOST`; with none of them the client uses the local socket, which is why "no host
@@ -6823,7 +6857,16 @@ function classifyShellPaths(
       // not do is fire for a destination that is the ROOT, where "contains a protected path" is true of every
       // checkout: `cp /tmp/foo.txt .` was an ABSOLUTE core deny, the single most ordinary shell command there is
       // (exit review 7). At the root the rule applies only to a write nobody can enumerate.
-      const atRoot = roots.includes(posix);
+      // ...AND THE SAME IS TRUE OF EVERY ANCESTOR of a root. `..` "contains .harness/runtime/decisions/**" only
+      // because it contains the checkout, so `cp README.md ..` — and `cp x ~`, and every write into any parent
+      // directory — was an absolute deny for a write that touches nothing protected (exit review 8). What keeps
+      // `rm -rf ..` and `tar -xf a.tar -C ..` denied is the pair of guards below, not this one: a removal and an
+      // unenumerable write DO reach the protected subtree, and neither is exempted here.
+      const folded = foldName(posix);
+      const atRoot = roots.some((r) => {
+        const f = foldName(r);
+        return f === folded || f.startsWith(folded + '/');
+      });
       const unenumerable = isArchive || writesUnenumerably(seg) || recursive;
       // A DELETE IS NOT A WRITE INTO. The `contains` rule exists to catch content PUT somewhere protected; a
       // removal puts nothing there, and its own destructive class already asks. `rm -rf node_modules` — the most

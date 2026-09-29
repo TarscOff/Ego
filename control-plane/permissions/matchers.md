@@ -127,7 +127,10 @@ matchers:
     tool: Bash
     # `-c core.hooksPath=…` is a bypass wherever it sits, including AFTER the verb (`git clone -c core.hooksPath=…`,
     # round 13). Reading the value back (`--get`) is not a change.
-    command: '^git\b(?![^|;&]*\s--get\b)[^|;&]*core\.hooksPath'
+    # NEITHER IS READING IT BY NAME. `git config core.hooksPath` with nothing after it PRINTS the value — the
+    # first thing anyone does when auditing a checkout — and it was absolutely denied, which left no way to look
+    # (exit review 8). The rule now requires a VALUE: an `=` (the `-c NAME=VALUE` form) or a further word.
+    command: '^git\b(?![^|;&]*\s--get\b)[^|;&]*core\.hooksPath(=|\s+\S)'
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(commit-tree|update-ref)\b'
@@ -197,7 +200,11 @@ matchers:
     command: '^helm\b(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
   - capability: production.cloud.mutate
     tool: Bash
-    command: '^((terraform|tofu)\s+(?:-\S+\s+)*(apply|destroy)|pulumi\s+(?:-\S+\s+)*(up|destroy)|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|mv|cp|sync|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+(?!config\b|auth\b)\S+.*\b(create|delete|update|deploy|remove|rm)\b|az\s+\S+.*\b(create|delete|update|deploy|remove|purge)\b)'
+    # `cp`, `mv` and `sync` ARE DIRECTIONAL, and the direction is the whole effect. `aws s3 cp s3://fixtures/x .`
+    # downloads INTO the workspace and changes nothing in the cloud; it was denied absolutely alongside
+    # `aws s3 cp . s3://prod/`, which really does write there (exit review 8). The three verbs are matched only
+    # when the DESTINATION is an `s3://` URI; `rm`, `rb` and `mb` have no such second reading and stay above.
+    command: '^((terraform|tofu)\s+(?:-\S+\s+)*(apply|destroy)|pulumi\s+(?:-\S+\s+)*(up|destroy)|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*s3\s+(?:-\S+\s+)*(cp|mv|sync)\s+(?:-\S+\s+)*\S+\s+(?:-\S+\s+)*s3://|aws\s+(?:--\S+(?:\s+[^-]\S*)?\s+)*\S+\s+(create|delete|update|put|terminate|modify|remove|run-instances|start-instances|stop-instances|reboot-instances|rm|rb|mb|invoke|publish|associate|disassociate|attach|detach|authorize|revoke|batch-delete-image|delete-object|put-object|copy-object|delete-objects)|gcloud\s+(?!config\b|auth\b)\S+.*\b(create|delete|update|deploy|remove|rm)\b|az\s+\S+.*\b(create|delete|update|deploy|remove|purge)\b)'
   - capability: production.deploy
     tool: Bash
     command: '^(argocd\s+app\s+(sync|delete|set|rollback)|flux\s+(reconcile|suspend|resume)|kubectl\s+argo\s+rollouts)\b'

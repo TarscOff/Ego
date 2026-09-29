@@ -182,3 +182,39 @@ test('PROPERTY: an exemption is exempt for its reason, not for its prefix', () =
     assert.notEqual(verdict('git add -A', dir), 'ALLOW', `the filter runs on add: ${value}`);
   }
 });
+
+test('PROPERTY: looking at something is not doing it', () => {
+  // EVERY ONE OF THESE WAS AN ABSOLUTE DENY, and an absolute deny is the one verdict a human cannot approve. So
+  // the inspection an operator performs BEFORE deciding was the thing being refused, while the act it inspects
+  // stayed reachable by other spellings (exit review 8). Each pair below is the SAME subject: the reading form
+  // must not be refused, and the writing form must stay gated.
+  const mk = 'deploy:\n\tkubectl apply -f prod.yaml\n\npush:\n\t+git push --force origin main\n\nsub:\n\t$(MAKE) deploy\n';
+  const pairs: ReadonlyArray<readonly [reading: string, doing: string, files?: Record<string, string>]> = [
+    // `git config NAME` with nothing after it PRINTS the value; with a value it SETS it
+    ['git config core.hooksPath', 'git config core.hooksPath /tmp/h'],
+    ['git config core.hooksPath', 'git -c core.hooksPath=/tmp/h status'],
+    // make's dry run expands the recipe and executes nothing
+    ['make -n deploy', 'make deploy', { Makefile: mk }],
+    ['make --dry-run deploy', 'make deploy', { Makefile: mk }],
+    ['make -f Makefile -n deploy', 'make -f Makefile deploy', { Makefile: mk }],
+    // a host that is a PATH is the local unix socket directory, not a network name
+    ["psql -h /tmp -c 'select 1'", "psql -h prod-db.acme.com -c 'select 1'"],
+    // a single dash in front of a whole word is a long option: `-host localhost` is not `-h ost`
+    ["influx -host localhost -execute 'show databases'", "influx -host prod-metrics.acme.com -execute 'show databases'"],
+    // a download changes nothing in the cloud; the upload does
+    ['aws s3 cp s3://my-fixtures/data.json ./data.json', 'aws s3 cp ./secrets.json s3://prod-assets/secrets.json'],
+    // a named write into a parent directory touches no protected path; a recursive removal of it does
+    ['cp README.md ..', 'rm -rf ..'],
+  ];
+  for (const [reading, doing, files] of pairs) {
+    const dir = workspace(files ?? {});
+    assert.notEqual(verdict(reading, dir), 'DENY', `an inspection is never refused outright: ${reading}`);
+    // the act it inspects stays gated — DENY where the act is absolute, ASK where the target is unclassified;
+    // what must never happen is that separating the two also released the doing form
+    assert.notEqual(verdict(doing, dir), 'ALLOW', `the act it inspects stays gated: ${doing}`);
+  }
+  // make keeps TWO exceptions under `-n`, and so does EGO: a `+`-prefixed line and a line naming $(MAKE) run
+  const dir = workspace({ Makefile: mk });
+  assert.equal(verdict('make -n push', dir), 'DENY', 'a `+` recipe line runs even under --dry-run');
+  assert.notEqual(verdict('make -n sub', dir), 'ALLOW', 'a recursive make runs even under --dry-run');
+});

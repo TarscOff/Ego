@@ -530,6 +530,13 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'after a forged function marker', apply: (c) => `define-function ego; ${c}` },
   { name: 'after a forged sentinel marker', apply: (c) => `\u0000ego\u0000define-function ego; ${c}` },
   { name: 'after a forged env-inject marker', apply: (c) => `\u0000ego\u0000env-inject PATH; ${c}` },
+  // exit review 8: the structural shapes the splitter read wrongly
+  { name: 'joined by a backslash-newline', apply: (c) => c.replace(/^(\S\S)/, '$1\\\n'), safe: (c) => /^\S\S/.test(c) },
+  { name: 'after a definition in a branch never taken', apply: (c) => `if false; then\n${c.split(/\s/)[0]}() { :; }\nfi\n${c}` },
+  { name: 'as a while condition', apply: (c) => `while ${c}; do break; done`, safe: noParens },
+  { name: 'as an until condition', apply: (c) => `until ${c}; do break; done`, safe: noParens },
+  { name: 'inside nested backticks', apply: (c) => 'echo `echo \\`' + c + '\\``', safe: (c) => noSingle(c) && noDouble(c) },
+  { name: 'after an old-form arithmetic', apply: (c) => `echo $[1<<2]\n${c}` },
   // an OPTION'S VALUE is not the program: the scan for `-c` must step over `-o pipefail` / `-O extglob`
   { name: 'sh -c behind a valued option', apply: (c) => `bash -o pipefail -c '${c}'`, safe: noSingle },
   { name: 'sh -c behind a shopt option', apply: (c) => `bash -O extglob -c '${c}'`, safe: noSingle },
@@ -687,6 +694,15 @@ export const PRODUCERS: readonly Producer[] = [
   { name: 'Dockerfile ONBUILD RUN', build: (c) => [{ Dockerfile: `FROM alpine\nONBUILD RUN ${c}\n` }, 'docker build .'], safe: noHostPath },
   { name: 'Dockerfile lowercase directives', build: (c) => [{ Dockerfile: `from alpine\nrun ${c}\n` }, 'docker build .'], safe: noHostPath },
   { name: 'podman Containerfile', build: (c) => [{ Containerfile: `FROM alpine\nRUN ${c}\n` }, 'podman build .'], safe: noHostPath },
+  { name: 'Dockerfile RUN sh heredoc', build: (c) => [{ Dockerfile: `FROM alpine\nRUN sh <<EOF\n${c}\nEOF\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'Dockerfile after a backslash comment', build: (c) => [{ Dockerfile: `FROM alpine\n# helper \\\nRUN ${c}\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'docker image build', build: (c) => [{ Dockerfile: `FROM alpine\nRUN ${c}\n` }, 'docker image build .'], safe: noHostPath },
+  // exit review 8: the make shapes the parser read wrongly
+  { name: 'make ?= does not override', build: (c) => [{ Makefile: `V = ${c}\nV ?= echo skipped\nrun:\n\t$(V)\n` }, 'make run'], safe: noDollar },
+  { name: 'make conditional then branch', build: (c) => [{ Makefile: `ifeq ($(E),)\nV = ${c}\nelse\nV = echo local\nendif\nrun:\n\t$(V)\n` }, 'make run'], safe: noDollar },
+  { name: 'make define is not live code', build: (c) => [{ Makefile: `V = ${c}\n\ndefine HELP\nV = echo nothing\nendef\n\nrun:\n\t$(V)\n` }, 'make run'], safe: noDollar },
+  { name: 'make target var on a prerequisite', build: (c) => [{ Makefile: `V = echo\n\nrun: V = ${c}\nrun: dep\n\ndep:\n\t$(V)\n` }, 'make run'], safe: noDollar },
+  { name: 'make override define', build: (c) => [{ Makefile: `override define V\n${c}\nendef\nrun:\n\t$(V)\n` }, 'make V=true run'], safe: noDollar },
   { name: 'make $(shell) in a recipe', build: (c) => [{ Makefile: `run:\n\techo $(shell ${c})\n` }, 'make run'], safe: noDollar },
   { name: 'make $$ shell substitution', build: (c) => [{ Makefile: `run:\n\techo $$(${c})\n` }, 'make run'], safe: (c) => noDollar(c) && noParens(c) },
   // make's own control flow and its non-obvious target shapes
@@ -844,6 +860,16 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'time ( ls -la )',
     'ls -la > out.log 2>&1',
   ],
+  // LOOKING AT SOMETHING IS NOT DOING IT. Every one of these was an absolute DENY, which is the one verdict a
+  // human cannot approve — so the inspection an operator performs BEFORE deciding was the thing being refused
+  // (exit review 8). They are ordinary precisely because they change nothing.
+  inspection: [
+    'git config core.hooksPath', // reading the value, not setting it
+    'make -n deploy', // a dry run prints the recipe and does not run it
+    "psql -h /tmp -c 'select 1'", // a host that is a path is the local unix socket directory
+    'cp README.md ..', // a named write into a parent directory touches no protected path
+    'aws s3 cp s3://my-fixtures/data.json ./data.json', // a download changes nothing in the cloud
+  ],
 };
 
 /** The ordinary commands that DO gate, each with the reason it is not a defect. Anything else gating is one. */
@@ -867,4 +893,8 @@ export const EXPECTED_GATES: Readonly<Record<string, string>> = {
   'mvn -q compile': 'unmodelled task runner',
   'gradle --version': 'unmodelled task runner',
   './gradlew build': 'unmodelled task runner',
+  // A FETCH FROM AN UNCLASSIFIED BUCKET brings content the kernel has not seen into the workspace. It is no
+  // longer a production MUTATION — the destination is local — but it is still an ingest, and the ingest gate is
+  // the right one. ACCEPTED_PRODUCT_BEHAVIOR.
+  'aws s3 cp s3://my-fixtures/data.json ./data.json': 'a remote fetch brings unseen content into the workspace',
 };
