@@ -225,8 +225,21 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     if (m.urlSource) out.url = m.urlSource;
     return out;
   });
+  // A MODE CAN RELEASE A CAPABILITY THE BASE TABLE HOLDS. EGO_MAINTENANCE overrides `ego.hooks.edit` to ALLOW, so an
+  // overlay matcher that maps `**/*` to it looked like a narrowing (the base verdict is not ALLOW) and became, in that
+  // mode, an ALLOW for every path - including the outside-workspace write the default classification would have
+  // asked about (exit review 10). "Overlay matchers only narrow" has to hold in every mode, not only the default one.
+  const modeAllows = new Set(
+    cp.modes.flatMap((m) => m.overrides.filter((o) => o.verdict === 'ALLOW').map((o) => o.capability)),
+  );
   for (const om of opts.overlayMatchers ?? []) {
     const v = effective[om.capability];
+    if (v && v !== 'ALLOW' && modeAllows.has(om.capability)) {
+      problems.push(
+        `overlay matcher may not map "${om.command ?? om.path ?? om.url}" to "${om.capability}": a mode can release that capability to ALLOW, so the mapping would widen; overlay matchers only narrow`,
+      );
+      continue;
+    }
     if (!v) {
       problems.push(`overlay matcher references unknown capability "${om.capability}"`);
       continue;

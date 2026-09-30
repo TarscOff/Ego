@@ -2,7 +2,7 @@
 import { homedir, tmpdir } from 'node:os';
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { shimScript, gitHooksDir } from '../project/githooks.ts';
+import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
@@ -232,6 +232,10 @@ const KEYWORD_PREFIX_RE = /^(if|then|else|elif|while|until|do|!|time|coproc)$/;
 const FUNC_DEF_RE =
   /^(?:function\s+)?[^\s()<>|&;'"$`]+\s*\(\s*\)$|^function\s+[^\s()<>|&;'"$`]+$/;
 
+/** where a `case WORD in` opens, and the `esac` that ends it - used by the scanners that count parentheses */
+const CASE_OPEN_AT_RE = /^case\s+(?:"[^"]*"|'[^']*'|\S+)\s+in(?=[\s;]|$)/;
+const ESAC_AT_RE = /^esac(?=[\s;&|)]|$)/;
+
 /** One stage of a shell unit. A PIPELINE IS AN EXECUTION EDGE, not merely a separator: `echo 'rm -rf /' | bash`
  *  runs the first stage's standard output as the second stage's SCRIPT, and a model that discards the `|` cannot
  *  see that at all — the two stages look unrelated, and the effect crosses its authority floor between them
@@ -252,6 +256,8 @@ export interface ShellStage {
    *  the whole group: `{ echo 'git push origin main'; echo ls; } | sh` runs BOTH lines as the shell's script,
    *  and reading only the last stage lost the first (exit review 7). */
   readonly groupId?: number;
+  /** true when the stage sits inside a `case … esac`: the arm that holds it is a branch that may not run */
+  readonly inCase?: boolean;
 }
 
 /** The segments of a command, with the pipeline edges between them. */
@@ -262,6 +268,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
     heredocBody?: string;
     heredocExpanded?: boolean;
     fromProcessSubstitution?: boolean;
+    inCase?: boolean;
   }> = [];
   let sawProcessSubstitution = false;
   /** set by a `|` split and consumed by the NEXT stage, which is the one that reads the pipe */
@@ -299,6 +306,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
           // the OUTERMOST group: a nested `{ … }` inside a group is still part of the same standard output, and
           // keying on the innermost one broke the upstream run at the nested brace (exit review 8)
           ...(groupStack.length ? { groupId: groupStack[0]! } : {}),
+          ...(caseDepth > 0 ? { inCase: true } : {}),
         });
       sawProcessSubstitution = false;
       if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
@@ -458,7 +466,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // EACH STAGE OF A PIPELINE IS ITS OWN SUBSHELL: `cd sub | true ; make build` leaves the caller where it
         // was, and the analyzer followed the `cd` out of it (exit review 4).
         if (piped) pendingPipe = true;
-        if (piped && /^(cd|pushd|popd)(\s|$)/.test(segments[segments.length - 1]?.text ?? ''))
+        if (piped && directoryChange(segments[segments.length - 1]?.text ?? '') !== null)
           segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         i++;
         continue;
@@ -473,7 +481,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // `cd` out of it — the same defect exit review 4 fixed for the pipe spelling, in the branch beside it
         // (exit review 10). A DEFINITION before `&` binds nothing outside either: `git() { true; } & git push
         // origin main` does not shadow git, and EGO believed it did.
-        if (/^(cd|pushd|popd)(\s|$)/.test(segments[segments.length - 1]?.text ?? ''))
+        if (directoryChange(segments[segments.length - 1]?.text ?? '') !== null)
           segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         // a DEFINITION that the `&` backgrounds runs in that subshell and binds nothing in the caller. The body
         // sits between the header and here, so the closing brace records where it ended and this tests whether
@@ -522,7 +530,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         push();
         subshell--;
         groupStack.pop();
-        if (subshell === 0 && segments.slice(subshellStart).some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
+        if (subshell === 0 && segments.slice(subshellStart).some((sg) => directoryChange(sg.text) !== null))
           segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         i++;
         continue;
@@ -642,6 +650,10 @@ export function splitShellPipeline(command: string): ShellStage[] {
         let j = i + 2;
         let inner = '';
         let q: string | null = null;
+        // THE `)` THAT ENDS A `case` PATTERN CLOSES NOTHING. `echo "$(case x in y) git push origin main ;; esac)"`
+        // ended the substitution at the pattern's paren, so the push was read as text outside it and the line was
+        // ALLOW (exit review 10, cross-product). Each open `case` remembers the depth it opened at, and `esac` ends it.
+        const caseAt: number[] = [];
         while (j < command.length && depth > 0) {
           const c = command[j]!;
           // quotes and escapes inside the substitution body never close it
@@ -650,11 +662,29 @@ export function splitShellPipeline(command: string): ShellStage[] {
             j += 2;
             continue;
           }
+          if (!q && /[\s;&|(]/.test(command[j - 1] ?? ' ')) {
+            const kw = CASE_OPEN_AT_RE.exec(command.slice(j, j + 400));
+            if (kw) {
+              caseAt.push(depth);
+              inner += kw[0];
+              j += kw[0].length;
+              continue;
+            }
+            const end = ESAC_AT_RE.exec(command.slice(j, j + 8));
+            if (end && caseAt.length) {
+              caseAt.pop();
+              inner += end[0];
+              j += end[0].length;
+              continue;
+            }
+          }
           if (q) {
             if (c === q) q = null;
           } else if (c === "'" || c === '"') q = c;
           else if (c === '(') depth++;
-          else if (c === ')') depth--;
+          else if (c === ')' && caseAt.length && caseAt[caseAt.length - 1] === depth) {
+            // a pattern terminator: part of the body, and the depth does not move
+          } else if (c === ')') depth--;
           if (depth > 0) inner += c;
           j++;
         }
@@ -663,7 +693,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // A COMMAND SUBSTITUTION RUNS IN A SUBSHELL, so a `cd` in it does not move the caller either — the same
         // rule as `( )`, and without it `echo "$(cd sub && pwd)" && make build` resolved the CALLER's make against
         // sub/ (exit review 4).
-        if (innerSegments.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
+        if (innerSegments.some((sg) => directoryChange(sg.text) !== null))
           segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
         // ...and a DEFINITION in it binds nothing in the caller either, for exactly the same reason
         for (const sg of innerSegments)
@@ -699,7 +729,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         if (end > i) {
           const backticked = splitShellPipeline(command.slice(i + 1, end).replace(/\\([`$\\])/g, '$1'));
           for (const s of backticked) segments.push(s);
-          if (backticked.some((sg) => /^(cd|pushd|popd)(\s|$)/.test(sg.text)))
+          if (backticked.some((sg) => directoryChange(sg.text) !== null))
             segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
           cur += '$SUBST';
           i = end + 1;
@@ -752,8 +782,25 @@ function substitutionsIn(text: string): string[] {
     if (ch === '$' && text[i + 1] === '(') {
       let depth = 0;
       let j = i + 1;
+      // the `)` that ends a `case` pattern closes nothing (see the main splitter)
+      const caseAt: number[] = [];
       for (; j < text.length; j++) {
+        if (/[\s;&|(]/.test(text[j - 1] ?? ' ')) {
+          const kw = CASE_OPEN_AT_RE.exec(text.slice(j, j + 400));
+          if (kw) {
+            caseAt.push(depth);
+            j += kw[0].length - 1;
+            continue;
+          }
+          const end = ESAC_AT_RE.exec(text.slice(j, j + 8));
+          if (end && caseAt.length) {
+            caseAt.pop();
+            j += end[0].length - 1;
+            continue;
+          }
+        }
         if (text[j] === '(') depth++;
+        else if (text[j] === ')' && caseAt.length && caseAt[caseAt.length - 1] === depth) continue;
         else if (text[j] === ')' && --depth === 0) break;
       }
       out.push(text.slice(i + 2, j));
@@ -2162,6 +2209,28 @@ function ansiCAt(s: string, i: number): { text: string; end: number } | null {
   return { text: decodeAnsiC(body), end: j };
 }
 
+/** WHICH DIRECTORY CHANGE THIS SEGMENT IS, however its head is spelled. `'cd' control-plane`, `c\d control-plane`,
+ *  `c""d …`, `builtin cd …` and `command cd …` are all the builtin - the shell removes the quoting and the wrapper
+ *  before it looks the word up - and a test written against the text `cd` saw none of them, so the working
+ *  directory never moved and `tee permissions/matchers.md` was resolved against the wrong one: a write to the
+ *  governance tree at ALLOW (exit review 10, cross-product). Position is the one the parse reached, not the first
+ *  token that happens to spell it. */
+function directoryChange(text: string): { verb: 'cd' | 'pushd' | 'popd'; args: string[] } | null {
+  const t = tokenize(expandBraces(text));
+  let i = 0;
+  for (;;) {
+    const w = t[i];
+    if (w === 'builtin' || w === 'time') i++;
+    // `command -v cd` and `-V` only DESCRIBE the name; `command cd` and `command -p cd` run it
+    else if (w === 'command') {
+      i++;
+      while (t[i] === '-p' || t[i] === '--') i++;
+    } else break;
+  }
+  const verb = t[i];
+  return verb === 'cd' || verb === 'pushd' || verb === 'popd' ? { verb, args: t.slice(i + 1) } : null;
+}
+
 function tokenize(s: string): string[] {
   const out: string[] = [];
   let cur = '';
@@ -2489,6 +2558,103 @@ const VALUE_OPTS_BY_HEAD: Record<string, RegExp> = {
 };
 const copyValueOpts = (head: string): RegExp | undefined => VALUE_OPTS_BY_HEAD[head];
 
+/** The names git looks up in a hooks directory. */
+const GIT_HOOK_FILE_RE =
+  /^(?:applypatch-msg|pre-applypatch|post-applypatch|pre-commit|pre-merge-commit|prepare-commit-msg|commit-msg|post-commit|pre-rebase|post-checkout|post-merge|pre-push|pre-receive|update|proc-receive|post-receive|post-update|reference-transaction|push-to-checkout|pre-auto-gc|post-rewrite|sendemail-validate|fsmonitor-watchman|p4-changelist|p4-prepare-changelist|p4-post-changelist|p4-pre-submit|post-index-change)$/;
+
+const hooksDirCache = new WeakMap<object, string[]>();
+
+/** THE HOOKS DIRECTORIES THIS REPOSITORY CONFIGURES, apart from `.git/hooks`. EGO's shims live wherever
+ *  `core.hooksPath` points, and a path rule can name only the conventional places (`.githooks`, `.husky`):
+ *  `[core] hooksPath = githooks` made `githooks/pre-commit` an ordinary workspace file, so a Write replaced the
+ *  secret scan the hook exists to run (exit review 10). The value is read from the repository's own config text as
+ *  well as from git, because a checkout git cannot open is still one whose config file says where hooks live. */
+function configuredHooksDirs(ctx: EvaluationContext): string[] {
+  const cached = hooksDirCache.get(ctx);
+  if (cached) return cached;
+  const out = new Set<string>();
+  for (const root of ctx.repoRoots) {
+    const values: string[] = [];
+    try {
+      const text = readFileSync(join(root, '.git', 'config'), 'utf8');
+      let inCore = false;
+      for (const line of text.split(/\r?\n/)) {
+        const section = /^\s*\[([^\]]+)\]/.exec(line);
+        if (section) inCore = section[1]!.trim().toLowerCase() === 'core';
+        const m = inCore ? /^\s*hookspath\s*=\s*(.*?)\s*$/i.exec(line) : null;
+        if (m) values.push(m[1]!.replace(/^"(.*)"$/, '$1'));
+      }
+    } catch {
+      /* no readable config: git is asked below */
+    }
+    const viaGit = gitConfigGet(root, 'core.hooksPath');
+    if (viaGit) values.push(viaGit);
+    for (const v of values) if (v) out.add(canonicalPath(resolveHooksPath(root, v)).split(sep).join('/'));
+  }
+  const dirs = [...out];
+  hooksDirCache.set(ctx, dirs);
+  return dirs;
+}
+
+/** The names a credential file is given. A wildcard cannot be classified as a path, so it is asked of these. */
+const SECRET_FILE_NAMES: readonly string[] = [
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  '.env.staging',
+  '.env.test',
+  '.envrc',
+  '.npmrc',
+  '.netrc',
+  '.pypirc',
+  '.git-credentials',
+  'id_rsa',
+  'id_ed25519',
+  'id_ecdsa',
+  'credentials',
+  'credentials.json',
+  'secrets.json',
+  'secrets.yaml',
+  'terraform.tfvars',
+  'server.pem',
+  'private.key',
+];
+
+/** A file-name glob (`.env*`, `*.{pem,key}`, `.e[n]v`) as a regular expression, or null when it is not one this
+ *  can read. Only the last path segment: the caller has already split off the directory. */
+function tailGlobRegExp(glob: string): RegExp | null {
+  let re = '^';
+  let inBraces = false;
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i]!;
+    if (ch === '*') {
+      while (glob[i + 1] === '*') i++;
+      re += '.*';
+    } else if (ch === '?') re += '.';
+    else if (ch === '[') {
+      const end = glob.indexOf(']', i + 2);
+      if (end < 0) return null;
+      re += '[' + glob.slice(i + 1, end).replace(/^!/, '^').replace(/\\/g, '\\\\') + ']';
+      i = end;
+    } else if (ch === '{') {
+      inBraces = true;
+      re += '(?:';
+    } else if (ch === '}' && inBraces) {
+      inBraces = false;
+      re += ')';
+    } else if (ch === ',' && inBraces) re += '|';
+    else if ('\\^$.|+()[]{}'.includes(ch)) re += `\\${ch}`;
+    else re += ch;
+  }
+  if (inBraces) return null;
+  try {
+    return new RegExp(re + '$', 'i');
+  } catch {
+    return null;
+  }
+}
+
 export function classifyPath(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -2528,6 +2694,23 @@ export function classifyPath(
         via: `matcher path ${m.path}`,
         absolute: isAbsoluteCap(table, m.capability),
       };
+    }
+  }
+  // ...and the directory `core.hooksPath` names, wherever it is: a rule cannot list a place the repository chose
+  if (tool !== 'Read' && 'fs.hook-config.write' in table.capabilities) {
+    const posix = canonicalPath(abs).split(sep).join('/');
+    for (const dir of configuredHooksDirs(ctx)) {
+      // a hooks path that IS the work tree (`.`) would make every file a hook: there only the hook names count
+      const roots = ctx.repoRoots.map((r) => canonicalPath(r).split(sep).join('/'));
+      const wholeTree = roots.some((r) => r === dir || r.startsWith(dir + '/'));
+      const under = posix.startsWith(dir + '/');
+      if (under && (!wholeTree || GIT_HOOK_FILE_RE.test(posix.slice(dir.length + 1))))
+        return {
+          capability: 'fs.hook-config.write',
+          verdict: verdictFor(table, ctx, 'fs.hook-config.write'),
+          via: `the hooks directory core.hooksPath names (${dir})`,
+          absolute: isAbsoluteCap(table, 'fs.hook-config.write'),
+        };
     }
   }
   const inside = insideRoots(abs, ctx);
@@ -2655,14 +2838,29 @@ function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null
  *  genuine miss let the caller report ABSENT_VERIFIED — the one outcome that carries a positive claim — for a
  *  manifest it simply never reached (exit review 8). The two are now different values. */
 const SEARCH_EXHAUSTED = '\0exhausted';
-function findUp(ctx: EvaluationContext, start: string, name: string): string | null {
+function findUp(ctx: EvaluationContext, start: string, name: string, outward = false): string | null {
   let dir = resolve(start);
   for (let i = 0; i < 64; i++) {
     const candidate = join(dir, name);
     if (readInsideWorkspace(ctx, candidate) !== null || (insideRoots(candidate, ctx) && fileExists(candidate)))
       return candidate;
     const parent = dirname(dir);
-    if (parent === dir || !insideRoots(parent, ctx)) return null;
+    if (parent === dir) return null;
+    // THE TOOL'S SEARCH DOES NOT STOP AT THE WORKSPACE'S EDGE. `npm run build` in a checkout with no package.json of
+    // its own runs the script of the nearest manifest ABOVE it, and stopping where the registered roots end reported
+    // "no package.json" as a verified absence over a file that decides what runs (exit review 10). With `outward` the
+    // walk goes on by existence only, and a manifest found there is returned - the caller cannot read it, which is
+    // the opacity that is true.
+    if (!insideRoots(parent, ctx)) {
+      if (!outward) return null;
+      for (let d = parent, j = 0; j < 64; j++) {
+        if (fileExists(join(d, name))) return join(d, name);
+        const up = dirname(d);
+        if (up === d) return null;
+        d = up;
+      }
+      return SEARCH_EXHAUSTED;
+    }
     dir = parent;
   }
   return SEARCH_EXHAUSTED;
@@ -2958,7 +3156,10 @@ export function segmentEnvInputs(segment: string): Record<string, string> {
       // they are transparent for the ENVIRONMENT: `sudo DOCKER_HOST=tcp://prod… docker exec` really does set that
       // variable for the command. Stopping at them left the normalized `docker exec` with no engine to resolve,
       // so a shell on a production daemon asked instead of being denied (exit review 6, generated cross-product).
-      if (w && (WRAPPERS.has(w[1]!) || /^(timeout|sudo|doas|xargs|--)$/.test(w[1]!))) {
+      // ...and so is a shell KEYWORD: a segment that begins `then`, `do` or `else` holds the same command a bare one
+      // does, and the assignment in front of it configures it just the same (exit review 10, cross-product: the
+      // linker variable was seen at the top of a line and missed inside every branch)
+      if (w && (WRAPPERS.has(w[1]!) || PREFIX_KEYWORDS.has(w[1]!) || /^(timeout|sudo|doas|xargs|--)$/.test(w[1]!))) {
         s = s.slice(w[0].length);
         continue;
       }
@@ -4128,9 +4329,13 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           m.set(tsv[1]!, tsv[2]!);
           model.targetVars.set(t, m);
         }
-        continue;
+        // A SEMICOLON ENDS THE ASSIGNMENT AND STARTS A RECIPE, and GNU make cuts the line there BEFORE it asks whether
+        // it is a variable assignment (verified against make 3.81: `run: V = true; echo X` sets V to `true` and RUNS
+        // `echo X`). Taking the whole tail as the value dropped the recipe: `run: V = 1; git push --force origin
+        // main` was ALLOW (exit review 10, cross-product).
+        if (!(rule[3] && rule[3].trim())) continue;
       }
-      const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
+      const prereqs = tsv ? [] : rule[2]!.trim().split(/\s+/).filter(Boolean);
       // A target that can build something NO LITERAL RULE DEFINES makes "this goal has no rule, so nothing runs"
       // false. A `%` pattern is one; so are `.DEFAULT`, which make runs for any goal with no rule of its own, and
       // an old-style SUFFIX rule like `.c.o:` — both reached ALLOW by proving a target absent that make in fact
@@ -4874,8 +5079,11 @@ function resolveScriptCommand(
     const context0 = operands[0];
     const context = context0 ?? '.';
     // `docker build -` reads the Dockerfile from STANDARD INPUT, and a URL context is fetched: neither is a file
-    // this kernel can read, so neither can carry a positive claim
-    if (/^(-$|https?:|git@|ssh:|github\.com\/)/.test(context) && named === null)
+    // this kernel can read, so neither can carry a positive claim. NAMING A FILE WITH `-f` DOES NOT CHANGE THAT:
+    // the path is inside the fetched repository or the tarball on standard input, so `docker build -f Dockerfile
+    // https://github.com/evil/repo.git` read the LOCAL Dockerfile - a file that is not the one that runs - and
+    // called the build proven (exit review 10).
+    if (/^(-$|https?:|git@|git:|git\+|ssh:|github\.com\/)/.test(context))
       return {
         kind: 'shell-script',
         key: `dockerfile:${context}`,
@@ -5066,7 +5274,7 @@ function resolveScriptCommand(
       'ci', 'add', 'update', 'up', 'upgrade', 'udpate', 'rebuild', 'rb',
     ]);
     if (INSTALL_SUBS.has(sub) || (head === 'yarn' && sub === '')) {
-      const pkgPath0 = findUp(ctx, cwd, 'package.json');
+      const pkgPath0 = findUp(ctx, cwd, 'package.json', true);
       const pkgPath = pkgPath0 === SEARCH_EXHAUSTED ? null : pkgPath0;
       if (pkgPath0 === SEARCH_EXHAUSTED)
         return {
@@ -5161,7 +5369,7 @@ function resolveScriptCommand(
         };
       return { kind: 'none', key: `npm:${sub}`, body: null, reason: 'not a script invocation', resolution: 'ABSENT_VERIFIED' };
     }
-    const pkgPathRaw = findUp(ctx, cwd, 'package.json');
+    const pkgPathRaw = findUp(ctx, cwd, 'package.json', true);
     const pkgPath = pkgPathRaw === SEARCH_EXHAUSTED ? null : pkgPathRaw;
     if (pkgPathRaw === SEARCH_EXHAUSTED)
       return {
@@ -5801,7 +6009,7 @@ function resolveScriptCommand(
   // same configuration-closure rule applied to a tool instead of to git or make — and it is what keeps `git
   // commit` out of the way in the husky + lint-staged setup a large share of JavaScript repositories use.
   if (head === 'lint-staged' || (head === 'npx' && tokens[1] === 'lint-staged')) {
-    const pkgPathRaw = findUp(ctx, cwd, 'package.json');
+    const pkgPathRaw = findUp(ctx, cwd, 'package.json', true);
     const pkgPath = pkgPathRaw === SEARCH_EXHAUSTED ? null : pkgPathRaw;
     if (pkgPathRaw === SEARCH_EXHAUSTED)
       return {
@@ -8853,7 +9061,9 @@ function analyzeSegments(
     const braceOverflow = { hit: false };
     const seg = expandBraces(stage.text, braceOverflow);
     // `if`/`while`/`until`/`for`/`case` open a branch whose body may not run; `fi`/`done`/`esac` close it
-    const kw = /^(if|while|until|for|case|select)\b/.exec(seg.trim());
+    // ...through `time` and `!`, which are reserved words in FRONT of a compound command: `time if false` opens the
+    // same branch `if false` does (exit review 10, cross-product)
+    const kw = /^(?:(?:time|!)\s+(?:-\S+\s+)*)*(if|while|until|for|case|select)\b/.exec(seg.trim());
     const kwEnd = /^(fi|done|esac)\b/.test(seg.trim());
     // A stage that FEEDS a pipe, or is fed by one, runs in its own subshell. For a function DEFINITION the pipe
     // is attached to the stage after the whole BODY — `git() { echo hi; } | cat` puts it on `cat` — so the look
@@ -8861,7 +9071,10 @@ function analyzeSegments(
     let after = stageIndex + 1;
     while (stages[after]?.groupId !== undefined) after++;
     const inPipeline = stage.pipedFromPrevious === true || stages[after]?.pipedFromPrevious === true;
-    const bindingIsProven = condDepth === 0 && !inPipeline && fnBodyDepth === 0;
+    // A `case` ARM IS A BRANCH THAT MAY NOT RUN, AND THE SPLITTER CONSUMES ITS HEADER: `case x in y) cd sub ;; esac`
+    // reaches this loop as `cd sub`, with no `case` word left for the keyword test above to count (exit review 10,
+    // state-flow). The splitter says which stages sit inside one.
+    const bindingIsProven = condDepth === 0 && !inPipeline && fnBodyDepth === 0 && stage.inCase !== true;
     if (kw) condDepth++;
     else if (kwEnd) condDepth = Math.max(0, condDepth - 1);
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
@@ -8935,7 +9148,8 @@ function analyzeSegments(
     // governed path was then resolved under `sub/`, where no rule matches it (exit review 10, five spellings).
     // The conservative answer is to keep the OUTER directory — that is where the governed paths are — and to
     // stop asserting the context, so nothing positive rests on it.
-    const cdTokens = /^(?:cd|pushd)(?:\s|$)/.test(cdTrimmed) ? tokenize(cdTrimmed).slice(1) : null;
+    const dirChange = directoryChange(cdTrimmed);
+    const cdTokens = dirChange !== null && dirChange.verb !== 'popd' ? dirChange.args : null;
     // THE DOUBT IS RECORDED, NOT ANNOUNCED. Not applying the change is the fix; emitting a hit on top of it made
     // `popd >/dev/null` — a line in every shell function that saves its directory — ASK for no effect at all.
     // Clearing `cwdVerified` is the conservative part: nothing POSITIVE may then rest on the directory, while a
@@ -8949,7 +9163,7 @@ function analyzeSegments(
     // not recognised at all, so the tracker believed it was still in `sub` and resolved every later relative
     // path under it (exit review 10). A one-deep record of the previous directory covers both, and anything
     // deeper leaves the context unproven rather than guessed.
-    if (bindingIsProven && /^popd(\s|$)/.test(cdTrimmed)) {
+    if (bindingIsProven && dirChange?.verb === 'popd') {
       if (cdPrev !== null) {
         const back = cdPrev;
         cdPrev = cwd === '\0dynamic' ? null : cwd;
@@ -9137,7 +9351,9 @@ function analyzeSegments(
         // the LONG spelling too: the condition is a list of the readers that work on the segment as written, and
         // it named only the short `-C` — so `flock /tmp/l -c "env --chdir=.harness/runtime tee pin.json"` never
         // re-entered, and the chdir reader this condition exists to serve never saw the body (exit review 10)
-        /(^|\s)(git|env)\s+(?:-\S+\s+)*(-C(\s|=|\S)|--chdir(\s|=))/.test(body) ||
+        // ...and the word may follow a QUOTE or a paren, not only a space: `sh -c 'flock l -c "env --chdir=…"'` puts it
+        // right behind the inner double quote, where the boundary the first version demanded never matched
+        /(^|[\s"'(;&|`])(git|env)\s+(?:-\S+\s+)*(-C(\s|=|\S)|--chdir(\s|=))/.test(body) ||
         commitBypassFlag(body)
       )
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
@@ -9352,23 +9568,28 @@ function analyzeSegments(
     // the pairs that EARLIER segments recorded - taken before this segment adds its own, so the `ln` that creates a
     // link is not itself a write through it
     const linkPairs = [...written].filter((w) => w.startsWith('\0link:')).map((w) => w.slice(6).split('\0->') as [string, string]);
-    const lnTokens = tokenize(seg);
-    if ((lnTokens[0] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
-      const lnOps = lnTokens.slice(1).filter((t) => !t.startsWith('-'));
-      if (lnOps.length >= 2) {
-        const linkAbs = canonicalPath(isAbsolute(lnOps[lnOps.length - 1]!) ? lnOps[lnOps.length - 1]! : resolve(effectiveCwd, lnOps[lnOps.length - 1]!));
-        const targetAbs = canonicalPath(isAbsolute(lnOps[0]!) ? lnOps[0]! : resolve(dirname(linkAbs), lnOps[0]!));
-        written.add(`\0link:${linkAbs}\0->${targetAbs}`);
+    // THE WRITER IS FOUND WHERE THE COMMAND STARTS, not at the first word. `env cp evil/plan.mk sub && make -C sub
+    // -f plan.mk` copies through a wrapper, and reading the raw head left the ledger empty, so the makefile the
+    // next command read looked untouched (exit review 10, cross-product: every wrapper the corpus knows).
+    for (const n of new Set([seg, ...normalizeSegment(seg)])) {
+      const lnTokens = tokenize(n);
+      if ((lnTokens[0] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
+        const lnOps = lnTokens.slice(1).filter((t) => !t.startsWith('-'));
+        if (lnOps.length >= 2) {
+          const linkAbs = canonicalPath(isAbsolute(lnOps[lnOps.length - 1]!) ? lnOps[lnOps.length - 1]! : resolve(effectiveCwd, lnOps[lnOps.length - 1]!));
+          const targetAbs = canonicalPath(isAbsolute(lnOps[0]!) ? lnOps[0]! : resolve(dirname(linkAbs), lnOps[0]!));
+          written.add(`\0link:${linkAbs}\0->${targetAbs}`);
+        }
       }
-    }
-    for (const abs of writtenPathOperands(seg, effectiveCwd)) {
-      const c = canonicalPath(abs);
-      written.add(c);
-      for (const [link, target] of linkPairs) if (link === c && target) written.add(target);
+      for (const abs of writtenPathOperands(n, effectiveCwd)) {
+        const c = canonicalPath(abs);
+        written.add(c);
+        for (const [link, target] of linkPairs) if (link === c && target) written.add(target);
+      }
     }
     // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
     // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect
-    if (writesUnenumerably(seg)) written.add('\0any');
+    if ([seg, ...normalizeSegment(seg)].some(writesUnenumerably)) written.add('\0any');
     // a standalone assignment (`PATH=./bin:$PATH`, `export SHELL=…`) sets it for every LATER segment of this
     // shell, and a function or alias definition rebinds the name it declares
     // THE ASSIGNMENT IS FOUND WHERE THE COMMAND STARTS, not where the segment does. A shell keyword in front of
@@ -9577,6 +9798,20 @@ export function evaluate(
       if (tail && !/[*?[{]/.test(tail)) {
         const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, tail)));
         if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
+      } else if (tail && !/^[*?]+$/.test(tail)) {
+        // ...AND A WILDCARD TAIL NAMES A SET. `**/.env*` opens `.env`, `.env.local` and `.env.production`, and the
+        // literal test above skipped it because of the `*` (exit review 10). The set is checked against the names a
+        // credential file is actually given, and the strongest answer for any member that matches is the answer.
+        const re = tailGlobRegExp(tail);
+        if (re)
+          for (const name of SECRET_FILE_NAMES)
+            if (re.test(name)) {
+              const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, name)));
+              if (t.verdict !== 'ALLOW') {
+                hits.push({ ...t, via: `${tool} pattern ${reach} reaches ${name} (${t.via})` });
+                break;
+              }
+            }
       }
     }
     if (
@@ -9629,7 +9864,13 @@ export function evaluate(
       const domains = Array.isArray(req.input['allowed_domains'])
         ? (req.input['allowed_domains'] as unknown[]).map(String)
         : [];
-      const local = domains.length > 0 && domains.every((dm) => /^(localhost|127\.|::1|\[::1\])/i.test(dm));
+      // A LOCAL DOMAIN IS THE WHOLE NAME, not a prefix of it: `localhost.attacker.example` and `127.0.0.1.evil.test` begin
+      // with the local spellings and are public hosts (exit review 10)
+      const local =
+        domains.length > 0 &&
+        domains.every((dm) =>
+          /^(?:localhost|[^.\s]+\.localhost|127(?:\.\d{1,3}){3}|::1|\[::1\])(?::\d+)?$/i.test(dm.trim()),
+        );
       const capability = local ? 'network.localhost' : 'network.public-read';
       hits = [
         {
