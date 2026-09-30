@@ -2812,6 +2812,15 @@ const TREE_CHANGING =
 
 /** Leading `VAR=value` assignments of a segment. Only the names below are kept: the ones that decide WHICH FILE a
  *  tool reads or WHICH PROGRAM it runs. Everything else is ordinary parameterisation and is not execution input. */
+/** AN ENDPOINT NAMED BY THE ENVIRONMENT IS THE SAME ACT AS NAMING IT ON THE LINE. `npm_config_registry=`,
+ *  `PIP_INDEX_URL=`, `https_proxy=` and their neighbours point the tool somewhere else for the whole command —
+ *  and the normalizer STRIPS them, because it keeps only the assignments whose value is a PROGRAM, so the
+ *  explicit-endpoint matcher never saw them (exit review 10). The concern here is not code, it is destination,
+ *  which is why it is tested separately and on the segment as written. A default endpoint, and localhost, are
+ *  the ordinary cases and stay out. */
+const ENDPOINT_ENV_RE =
+  /(^|[\s;&|])(npm_config_registry|NPM_CONFIG_REGISTRY|yarn_registry|YARN_REGISTRY|PIP_INDEX_URL|PIP_EXTRA_INDEX_URL|UV_INDEX_URL|GOPROXY|GEM_SOURCE|NUGET_SOURCE|DOCKER_REGISTRY|HELM_REPOSITORY_CONFIG|https_proxy|http_proxy|HTTPS_PROXY|HTTP_PROXY|ALL_PROXY|all_proxy|GIT_PROXY_COMMAND|npm_config_proxy|COMPOSER_REPOSITORIES|CARGO_REGISTRIES_[A-Za-z0-9_]+_INDEX)=(?!(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\]|registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|proxy\.golang\.org|crates\.io|rubygems\.org|repo1\.maven\.org)([:/\s]|$))\S/;
+
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
@@ -6354,6 +6363,10 @@ function resolveContainerTarget(
 function resolveK8sTarget(
   tokens: string[],
   targets: LocalTargets,
+  /** THE SEGMENT AS WRITTEN. A probe flag inside a quoted VALUE is not a probe, and normalization has already
+   *  dropped the quoting that says so: `helm uninstall app --description 'run --help first'` reaches the token
+   *  scan as three bare words, one of which is `--help` (exit review 10). */
+  rawSeg?: string,
 ): { cls: TargetClass; target: string; mutating: boolean } {
   const head = tokens[0] ?? '';
   if (/^(kind|k3d|minikube)$/.test(head)) return { cls: 'LOCAL', target: head, mutating: true };
@@ -6404,7 +6417,7 @@ function resolveK8sTarget(
   // A VERB IS NOT A MUTATION IN EVERY SUBCOMMAND IT SPELLS: `rollout status` reports and `auth can-i` answers a
   // question. And a PROBE connects to nothing while a DRY RUN performs the act's checks and not the act — both
   // were absolute denies against a production cluster, which is a refusal to LOOK (exit review 9).
-  const line = requote(tokens);
+  const line = rawSeg ?? requote(tokens);
   // THE VERB'S POSITION IS THE ONE THE SCAN FOUND, not the first token that spells it. `kubectl --context
   // production -n auth auth can-i create pods` has `auth` as the NAMESPACE first, so `indexOf` pointed at the
   // option's value and the subcommand read as `auth` instead of `can-i` (self-attack on exit review 9).
@@ -6543,7 +6556,7 @@ function resolveDbTarget(
   // that is ENTIRELY read-only is a read: `psql -h prod-db -U ro -c 'EXPLAIN SELECT …'` is how an operator
   // inspects a plan, and refusing it absolutely leaves no way to look (exit review 9). The statement must be
   // wholly read-only — one write clause anywhere in it and the whole thing acts.
-  const line = requote(tokens);
+  const line = rawSeg ?? requote(tokens);
   // read from the RAW segment when there is one: there the statement is still the single quoted word it was
   // written as, so a `;` inside it is visible and the whole statement can be judged
   // `-e` IS mysql's SHORT `--execute`, and only `-c` was read as a short statement flag — so every read-only
@@ -6850,7 +6863,7 @@ function retargetLocalCapability(
   }
   const resolved =
     kind === 'k8s'
-      ? resolveK8sTarget(tokens, targets)
+      ? resolveK8sTarget(tokens, targets, rawSeg)
       : kind === 'db'
         ? resolveDbTarget(tokens, targets, envInputs, rawSeg)
         : resolveContainerTarget(tokens, targets, envInputs);
@@ -8594,6 +8607,16 @@ function analyzeSegments(
       hits.push(
         opaqueHit(table, ctx, seg, 'a brace expansion produces more words than this kernel enumerates'),
       );
+    // an endpoint named by the environment points the whole command somewhere else, and the normalizer strips
+    // the assignment because its value is not a program — so it is read here, from the segment as written
+    if (ENDPOINT_ENV_RE.test(seg))
+      hits.push({
+        capability: 'command.network-tool',
+        verdict: verdictFor(table, ctx, 'command.network-tool'),
+        via: `an endpoint is named by the environment: ${ENDPOINT_ENV_RE.exec(seg)?.[2] ?? ''}`,
+        segment: seg,
+        absolute: false,
+      });
     const hitsBefore = hits.length;
     // `cd DIR` moves the working directory for the following segments (a dynamic target makes it unknown). Options
     // and `--` are skipped (`cd -- .harness/generated`, `cd -P dir`), and the directory is the last positional.
