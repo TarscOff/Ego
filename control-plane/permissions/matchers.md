@@ -52,6 +52,16 @@ matchers:
     # `harness` is the kernel's other name for itself, and a consumer repository may install it under either;
     # both are the BINARY, which is the distinction that matters here.
     command: '(^|\s)((\S*/)?(ego|harness)(\.js)?|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
+  # AUTHORSHIP IS GOVERNED ON EVERY SPELLING OR ON NONE. `GIT_AUTHOR_NAME=X git commit` reached ASK through the
+  # GIT_* env-inject rule, while `git -c user.name=X -c user.email=Y commit` and `git commit --author=X` are the
+  # identical act and were not matched at all: a commit attributed to a named human who did not write it
+  # (exit review 10).
+  - capability: git.identity.override
+    tool: Bash
+    command: '^git\b[^|;&]*\scommit\b[^|;&]*\s--author(=|\s)'
+  - capability: git.identity.override
+    tool: Bash
+    command: '^\x00ego\x00identity-override\b'
   - capability: command.env-inject
     tool: Bash
     command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|RUBYLIB|GEM_HOME|GEM_PATH|CLASSPATH|JAVA_HOME|NODE_PATH|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|GLIBC_TUNABLES|OBJC_INSERT_LIBRARIES|LUA_PATH|LUA_CPATH)'
@@ -435,6 +445,25 @@ matchers:
     path: '**/.claude/agents/**'
   - capability: fs.hook-config.write
     tool: Write
+    path: '**/.claude/skills/**'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.agents/**'
+  # AN EDITOR'S TASK FILE RUNS ON OPEN. `.vscode/tasks.json` with `runOptions.runOn: folderOpen` executes its
+  # command the moment the folder is opened, `.vscode/launch.json` names the program a debug session starts, and
+  # `.devcontainer/devcontainer.json` carries `postCreateCommand` and `initializeCommand` — the latter runs on the
+  # HOST. Each is a hook by another name, and none was protected (exit review 10).
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.vscode/tasks.json'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.vscode/launch.json'
+  - capability: fs.hook-config.write
+    tool: Write
+    path: '**/.devcontainer/**'
+  - capability: fs.hook-config.write
+    tool: Write
     path: '**/.claude/commands/**'
   - capability: fs.hook-config.write
     tool: Write
@@ -701,7 +730,7 @@ matchers:
     # every flag that removes the isolation the accepted container decision relies on. `--device` hands the
     # container a host device and `--security-opt seccomp=unconfined` / `apparmor=unconfined` remove the syscall
     # filter; the residuals document claimed these gated before they did (decision challenge, finding 9).
-    command: '^(docker|podman|nerdctl)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--uts[= ]host|--cgroupns[= ]host|--device[= ]|--device-cgroup-rule|--security-opt[= ]?\S*(unconfined|seccomp=unconfined|apparmor=unconfined|no-new-privileges=false)|--cap-add[= ]?(CAP_)?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH|SYS_CHROOT|SYS_BOOT|SYS_RAWIO|MKNOD|NET_ADMIN|NET_RAW|SETUID|SETGID|AUDIT_CONTROL|BPF|PERFMON)|--pid[= ]container|--userns[= ]keep-id)'
+    command: '^(docker|podman|nerdctl)\b[^|;&]*\s(--privileged|--pid[= ]host|--net(work)?[= ]host|--userns[= ]host|--ipc[= ]host|--uts[= ]host|--cgroupns[= ]host|--device[= ]|--device-cgroup-rule|--security-opt[= ]?\S*(unconfined|seccomp=unconfined|apparmor=unconfined|no-new-privileges=false|label[=:]disable|label[=:]type:spc_t)|--cap-add[= ]?(CAP_)?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH|SYS_CHROOT|SYS_BOOT|SYS_RAWIO|MKNOD|NET_ADMIN|NET_RAW|SETUID|SETGID|AUDIT_CONTROL|BPF|PERFMON)|--pid[= ]container|--userns[= ]keep-id)'
   # `docker|podman exec` enters an ALREADY-RUNNING container whose isolation EGO never established, and runs an
   # unclassified command there. `run` is judged by its own flags and bind mounts above and below, so it is not
   # gated wholesale: that would make ordinary local development ask on every invocation. The unverified isolation
@@ -728,6 +757,12 @@ matchers:
   - capability: command.network-tool
     tool: Bash
     command: '^helm\b[^|;&]*\splugin\s+(install|update)\b'
+  # `kustomize build --enable-helm` runs helm to inflate charts, `--enable-alpha-plugins` runs exec plugins, and a
+  # URL or git operand FETCHES a remote base into the render. The verb was short-circuited as "a local render"
+  # in the target model and the one existing matcher named only the exec plugins (exit review 10).
+  - capability: command.network-tool
+    tool: Bash
+    command: '^(kustomize|kubectl\s+kustomize)\b[^|;&]*(\s--enable-helm\b|\s--helm-command(=|\s)|\s(https?://|git@|ssh://|git::|github\.com/|gitlab\.com/))'
   - capability: command.script-opaque
     tool: Bash
     command: '^helm\b[^|;&]*\splugin\s+(uninstall|remove|run)\b'
@@ -772,6 +807,12 @@ matchers:
     tool: Bash
     command: '^(docker|podman|nerdctl)\s+swarm\s+(join|join-token|init\b[^|;&]*--advertise-addr)'
   # destroying a local volume, network or builder cache is destructive local work, which the human approves
+  # `docker compose down -v` REMOVES THE NAMED AND ANONYMOUS VOLUMES, and `--rmi all` the service images: the same
+  # destructive local work `container.prune` governs, reached through the compose layer's own verb. The engine
+  # groups were enumerated and this one was not (exit review 10).
+  - capability: container.prune
+    tool: Bash
+    command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\sdown\b[^|;&]*\s(-v|--volumes|--rmi(=|\s+)all)(\s|$)'
   - capability: container.prune
     tool: Bash
     # ...AND THE LEGACY TOP-LEVEL VERBS. `docker rm -f c1` and `docker rmi img` are the spellings most people

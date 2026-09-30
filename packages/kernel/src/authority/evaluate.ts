@@ -1540,6 +1540,11 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
         if (name === '-c' || name === '--config-env' || name === '--config') {
           // an inline alias redefines a verb: `git -c alias.p=push p …` is `git push …`; an alias whose body is not a
           // literal (config-env) is an execution override the kernel cannot see
+          // `-c user.name=` / `-c user.email=` ATTRIBUTE THE COMMIT TO WHOEVER IS NAMED — the same act as
+          // `GIT_AUTHOR_NAME=` / `GIT_COMMITTER_EMAIL=`, which reached ASK through the GIT_* env-inject rule. The
+          // command-line spelling is stripped here as a global option, so the marker is emitted from here too
+          // (exit review 10).
+          if (name === '-c' && /^user\.(name|email|signingkey)=/i.test(value)) extra.push(`${MARK}identity-override`);
           const alias = /^alias\.([^=]+)=(.*)$/.exec(value);
           if (alias) {
             aliases.set(alias[1]!, name === '-c' ? alias[2]! : '');
@@ -5981,7 +5986,7 @@ const DB_EXECUTES_UNREAD =
   // `\ifile`), and a script path may be followed by a quote or a parenthesis rather than whitespace
   // (`mongosh --eval 'load("/tmp/evil.js")'`) — each of which put an unread program back out of reach
   // (exit review 10).
-  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$|["'),;])|\s(-f|--file|-init|--init)(=|\s|\S)|\s<\s*\S|\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(/i;
+  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$|["'),;])|\s(-f|--file|-init|--init)(=|\s|\S)|\s<\s*\S|\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(|--queries?[-_]file\b|--(multi)?query[-_]file\b/i;
 
 const TARGET_ENV_RE =
   // THE CONTAINER ENGINE IS SELECTED BY ENVIRONMENT TOO. `DOCKER_HOST` and `DOCKER_CONTEXT` were enrolled in the
@@ -6189,7 +6194,7 @@ const KUBECTL_VERBS = new Set([
 ]);
 /** kubectl/helm options that consume the NEXT token; their value must never be mistaken for the verb. */
 const K8S_VALUE_OPTS =
-  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--warnings-as-errors|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
+  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--kube-token|--kube-apiserver|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--warnings-as-errors|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
 
 const HELM_VERBS = new Set([
   ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency'],
@@ -7317,7 +7322,11 @@ function classifyShellPaths(
   // A database client handed a program file, or carrying an in-band shell escape, executes code the kernel never
   // read: `psql -f x.sql`, `\!`, sqlite3 `.shell`/`.system`, mysql `SYSTEM`, `COPY … TO PROGRAM` (challenge
   // finding 5). This is an ADDITIONAL hit so it can never mask a stronger verdict from the target resolution.
-  if (DB_CLIENT_HEADS.has(head) && DB_EXECUTES_UNREAD.test(seg))
+  // redis-cli's `--eval FILE` and `-x` name a Lua SCRIPT FILE the server will run — the flag is file-naming there
+  // and only there: mongosh's `--eval` takes CODE and psql's `-x` is "expanded output", so this is tested per
+  // client rather than folded into the shared pattern (exit review 10).
+  const redisReadsScript = /^(redis-cli|valkey-cli)$/.test(head) && tokens.some((t) => t === '--eval' || t === '-x');
+  if (DB_CLIENT_HEADS.has(head) && (DB_EXECUTES_UNREAD.test(seg) || redisReadsScript))
     hits.push({
       capability: 'command.script-opaque',
       verdict: verdictFor(table, ctx, 'command.script-opaque'),
@@ -7450,6 +7459,41 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           break;
         }
       }
+    }
+  }
+  // CARGO'S CONFIGURATION NAMES PROGRAMS. `[build] rustc-wrapper`, `linker`, `runner` and `credential-process` in
+  // `.cargo/config.toml` make cargo execute a program of the repository's choosing for every crate it compiles —
+  // the identical setting as a flag or an environment variable was already gated, and the FILE that sets it was
+  // not, which is exactly the shape of the `.npmrc` `script-shell` defect phase 1 closed for node (exit review
+  // 10). Cargo reads the file from the package directory UPWARDS, and `--config PATH` names another one to merge
+  // in; both are read here, and a file that cannot be read is opacity rather than an absence.
+  if (head === 'cargo') {
+    const cfgFiles: string[] = [];
+    for (const n of ['.cargo/config.toml', '.cargo/config']) {
+      const f = findUp(ctx, cwd, n);
+      if (f !== null && f !== SEARCH_EXHAUSTED) cfgFiles.push(f);
+    }
+    for (let i = 1; i < tokens.length; i++) {
+      const v = tokens[i] === '--config' ? tokens[i + 1] : tokens[i]!.startsWith('--config=') ? tokens[i]!.slice(9) : undefined;
+      // KEY=VALUE overrides are judged by the text matcher; a bare PATH is a file to merge
+      if (v !== undefined && !v.includes('=') && !/[$`*?]/.test(v)) cfgFiles.push(isAbsolute(v) ? v : resolve(cwd, v));
+    }
+    for (const f of cfgFiles) {
+      const text = readInsideWorkspace(ctx, f);
+      const names =
+        text === null
+          ? 'a configuration file this kernel could not read'
+          : /^\s*(rustc-wrapper|rustc-workspace-wrapper|linker|runner|credential-process|rustc|rustdoc)\s*=/m.exec(text)?.[1] ??
+            (/^\s*(rustflags|rustdocflags)\s*=[^\n]*(linker|link-arg|plugin|-Z)/m.test(text) ? 'a rustflags entry that names a program' : null);
+      if (names !== null)
+        hits.push({
+          capability: 'command.script-opaque',
+          verdict: verdictFor(table, ctx, 'command.script-opaque'),
+          via: `cargo configuration ${f.slice(f.lastIndexOf('/') + 1)} sets ${names}, which names a program cargo will run`,
+          segment: seg,
+          absolute: false,
+          opaqueUnread: true,
+        });
     }
   }
   // A RESPONSE FILE IS A COMMAND LINE: its words are spliced into argv before the tool parses anything

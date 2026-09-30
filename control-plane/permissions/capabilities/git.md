@@ -41,6 +41,10 @@ organization policy layer says otherwise, Q98).
 - [x] `git.worktree.remove` — remove worktrees.
 - [x] `git.local.recovery.destroy` — destroy the local recovery net: `reflog expire`/`reflog delete`, `gc --prune`, `stash clear`/`stash drop`. These do not change the working tree, so they read as harmless, but they are what makes an unwanted reset or force-move unrecoverable.
 - [x] `git.remote.configure` — add, rename, remove or re-point a remote (`remote add`, `set-url`, `set-branches`, `set-head`). Reconfiguring where the repository pushes and fetches is not remote inspection.
+- [x] `git.identity.override` — attribute a commit to a name or address the agent was not given: `git -c
+  user.name=… -c user.email=…`, `git commit --author=…`, or a signing key. The environment spelling
+  (`GIT_AUTHOR_NAME=…`) was already in front of a person and its two command-line spellings were not; a commit
+  credited to a named human who did not write it is a statement about who is responsible for it.
 
 ## Denied
 
