@@ -1195,7 +1195,16 @@ export function normalizeSegment(segment: string): string[] {
     // `-B` (checkout/switch) and `-M`/`-C` (branch) FORCE a ref to move, destroying commits, while `-b`/`-c`/`-m`
     // merely create or rename. Matchers are compiled case-insensitively, so the distinction cannot be expressed
     // there: it is decided here, case-sensitively, and surfaced as a marker the matcher can name (round 15).
-    const verb = rest[1] ?? '';
+    // ...AND THE VERB IS FOUND PAST GIT'S GLOBAL OPTIONS. `git --no-pager branch -M feature keep` puts
+    // `--no-pager` at position 1, so the verb read as an option and the marker was never emitted — the force
+    // rename went unmatched while the identical command without the global option was caught (exit review 10).
+    // `-c KEY=VALUE`, `-C DIR`, `--git-dir=…` and their neighbours all sit here.
+    let verbAtIdx = 1;
+    while (verbAtIdx < rest.length && rest[verbAtIdx]!.startsWith('-')) {
+      const o = rest[verbAtIdx]!;
+      verbAtIdx += /^(-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--config-env)$/.test(o) ? 2 : 1;
+    }
+    const verb = rest[verbAtIdx] ?? '';
     // checkout forces with -B, switch with -C, branch with -M (move) or -C (copy) — each the uppercase twin of a
     // harmless lowercase create/rename
     const forceLetters: Record<string, string> = { checkout: 'B', switch: 'C', branch: 'MC' };
@@ -1799,7 +1808,15 @@ function braceAlternatives(body: string): string[] | null {
 /** The words one WORD expands to. Returns null when the expansion is refused — no brace, or over budget — so
  *  the caller can leave the word exactly as written and let the existing `{`-is-dynamic guards apply. */
 function expandBraceWord(word: string, depth = 0, overflow?: { hit: boolean }): string[] | null {
-  if (depth > 8 || !word.includes('{')) return null;
+  // A REACHED DEPTH BOUND IS NOT AN ABSENCE, exactly as a reached BUDGET is not. Nesting deeper than this
+  // returns null, which leaves the word LITERAL — safe for a path, and not safe for a flag: twenty nested
+  // `{-q,{-q,…}}` put `--no-verify` at the bottom where no reader could see it (exit review 10). The budget
+  // reported itself and the depth did not, in the same function.
+  if (depth > 8) {
+    if (overflow) overflow.hit = true;
+    return null;
+  }
+  if (!word.includes('{')) return null;
   let q: "'" | '"' | null = null;
   for (let i = 0; i < word.length; i++) {
     const c = word[i]!;
@@ -2682,7 +2699,7 @@ function childEnvironment(
 /** Which process inputs materially change what each producer resolves. EGO does not model the environment: it
  *  captures only the inputs required to justify the semantic claim the producer is about to make. */
 const PROGRAM_NAMING_ENV =
-  /^(EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|CARGO_BUILD_[A-Z0-9_]*(WRAPPER|RUSTC|RUSTDOC)|RUSTC_WRAPPER|RUSTC|LD_PRELOAD|DYLD_[A-Z_]+|GOFLAGS|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS)$/;
+  /^(EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*(RUNNER|LINKER|AR)|CARGO_BUILD_[A-Z0-9_]*(WRAPPER|RUSTC|RUSTDOC)|RUSTC_WRAPPER|RUSTC|LD_PRELOAD|DYLD_[A-Z_]+|GOFLAGS|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS)$/;
 
 const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   // A variable whose VALUE IS A PROGRAM re-points the tool itself, so it is relevant to EVERY producer and to no
@@ -2824,7 +2841,7 @@ const ENDPOINT_ENV_RE =
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*RUNNER|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*(RUNNER|LINKER|AR)|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -4099,7 +4116,11 @@ type GitEvent =
 const GIT_VERB_EVENTS: Record<string, GitEvent[]> = {
   commit: ['commit-message', 'commit-created', 'ref-update', 'index-change'],
   merge: ['merge', 'commit-message', 'commit-created', 'ref-update', 'index-change'],
-  pull: ['merge', 'checkout', 'ref-update', 'index-change'],
+  // `git pull --rebase` REBASES, and a rebase fires `pre-rebase` and `post-rewrite` — neither of which this
+  // verb listed, so a repository carrying those hooks had them run under a resolution that claimed to have read
+  // every hook the command fires (exit review 10). The flag is not tested here because `pull.rebase` in the
+  // config turns it on without appearing on the line at all.
+  pull: ['merge', 'checkout', 'ref-update', 'index-change', 'rewrite'],
   fetch: ['ref-update'],
   checkout: ['checkout', 'ref-update', 'index-change'],
   switch: ['checkout', 'ref-update', 'index-change'],
@@ -5662,9 +5683,17 @@ function resolveScriptCommand(
         reason: 'the search for a manifest was cut off before it could reach one',
         resolution: 'PARTIAL',
       };
+    // lint-staged SEARCHES UPWARDS, as every cosmiconfig tool does. The candidate list looked in the working
+    // directory ONLY, so running it from a workspace package with the configuration at the repository root
+    // found nothing and the producer claimed a proven absence over a file that decides what runs
+    // (exit review 10). `findUp` is the same search the manifest half of this producer already used.
+    const upward = (n: string): string | null => {
+      const f = findUp(ctx, cwd, n);
+      return f === null || f === SEARCH_EXHAUSTED ? null : f;
+    };
     const candidates = ['.lintstagedrc', '.lintstagedrc.json', '.lintstagedrc.yaml', '.lintstagedrc.yml']
-      .map((n) => join(cwd, n))
-      .filter((f) => fileExists(f));
+      .map((n) => upward(n))
+      .filter((f): f is string => f !== null);
     // a JS/CJS/MJS config is code, and code is not resolvable by reading
     // every extension the tool resolves, derived rather than listed: `.lintstagedrc.cjs` was missing and reached
     // ALLOW (decision challenge, finding 1)
@@ -5984,7 +6013,13 @@ const K8S_READ_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   auth: new Set(['can-i', 'whoami']),
   certificate: new Set([]),
 };
-const HELM_MUTATING_VERBS = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test']);
+// `dependency update|build` FETCHES remote charts and writes them into the chart directory, and `helm repo add`
+// records where later fetches come from — neither touches the cluster, which is why the verb test missed them,
+// and both bring unreviewed content into the workspace (exit review 10).
+const HELM_MUTATING_VERBS = new Set([
+  ...['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test'],
+  ...['dependency', 'repo', 'plugin', 'registry'],
+]);
 /** A COMMAND THAT ASKS FOR HELP, OR REPORTS A VERSION, CONNECTS TO NOTHING. It is the first thing anyone runs
  *  against an unfamiliar tool and the last thing that should be refused outright (exit review 9). Read from the
  *  RAW tokens, so a `--help` inside a quoted SQL statement or a search pattern is not one. */
@@ -6334,8 +6369,13 @@ function resolveContainerTarget(
   // exactly as `kubectl get secrets` is against a cluster (exit review 8).
   const reads = new Set(['ps', 'images', 'version', 'info', 'top', 'port', 'stats', 'events', 'history', 'diff', 'search']);
   const groupReads = new Set([
-    ...['image ls', 'image inspect', 'image history', 'image save', 'image tree'],
-    ...['container ls', 'container inspect', 'container logs', 'container port', 'container stats', 'container top', 'container diff'],
+    // TWO PARALLEL TABLES THAT DISAGREED. Exit review 8 removed `inspect` and `logs` from the one-word `reads`
+    // set — reading a production container's logs or its full configuration is an act against that host — and
+    // left the `<group> <verb>` twins here, so `docker --context production container logs app` was ALLOW while
+    // `docker --context production logs app` was not (exit review 10). The same defect as the env-inject list
+    // having two copies: one statement, expressed twice, drifting apart.
+    ...['image ls', 'image history', 'image save', 'image tree'],
+    ...['container ls', 'container port', 'container stats', 'container top', 'container diff'],
     ...['volume ls', 'volume inspect', 'network ls', 'network inspect', 'system info', 'system df', 'system events'],
     ...['context ls', 'context inspect', 'context show', 'builder ls', 'buildx ls', 'buildx inspect'],
     ...['node ls', 'node inspect', 'service ls', 'service inspect', 'service logs', 'service ps'],
@@ -8443,6 +8483,7 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
   // with `BEGIN{system("git push origin main")}` in the file pushed at ALLOW, because only the command line was
   // read (exit review 9). With `-f`, no bare operand is the program: every one of them is an input FILE.
   const fromFiles: string[] = [];
+  const unread: string[] = [];
   let sawF = false;
   for (let j = i + 1; j < t.length; j++) {
     const w = t[j]!;
@@ -8455,11 +8496,19 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
     if (ctx && cwd !== undefined && !/[$`*?]/.test(f)) {
       const text = readInsideWorkspace(ctx, isAbsolute(f) ? f : resolve(cwd, f));
       if (text !== null) fromFiles.push(text);
-    }
+      // A PROGRAM FILE THIS KERNEL COULD NOT READ IS NOT AN EMPTY PROGRAM. Over the size cap, outside the
+      // workspace, or simply unreadable, the read returns null — and this was the one reader in the file that
+      // dropped that null silently, so padding a program past the cap made it invisible (exit review 10). The
+      // sentinel is a command the analyzer cannot resolve, which is exactly what the situation is.
+      else unread.push(f);
+    } else unread.push(f);
   }
+  // an unreadable program file is handed over as a command the analyzer cannot resolve, so the opacity reaches
+  // the verdict instead of the program reading as empty
   const program = sawF
     ? fromFiles.join('\n')
     : t.slice(i + 1).filter((x) => !x.startsWith('-')).join(' ');
+  if (unread.length) out.push(`${MARK}awk-program-file ${unread[0]!}`);
   const literals = new Map<string, string>();
   for (const m of program.matchAll(/([A-Za-z_]\w*)\s*=\s*"((?:[^"\\]|\\.)*)"/g)) literals.set(m[1]!, m[2]!);
   for (const m of program.matchAll(/\bsystem\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)/g)) out.push(m[1]!);

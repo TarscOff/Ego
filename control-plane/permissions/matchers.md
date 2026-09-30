@@ -623,6 +623,14 @@ matchers:
   - capability: git.local.commit
     tool: Bash
     command: '^git\s+commit\b'
+  # `--worktree` OVERWRITES THE WORKING TREE, whatever else is on the line. `git restore --staged --worktree
+  # --source=origin/evil .` replaces every tracked file from an arbitrary ref — and the STAGE matcher below
+  # sits above the discard rule, so the moment `--staged` appeared the segment was classified as an index
+  # operation and the working-tree half was never judged (exit review 10). First-match-wins means the more
+  # destructive reading has to come first.
+  - capability: git.local.restore
+    tool: Bash
+    command: '^git\s+restore\b[^|;&]*\s(-W|--worktree)(\s|$)'
   - capability: git.local.stage
     tool: Bash
     command: '^git\s+(add|rm\s+--cached|restore\s+--staged)\b'
@@ -709,6 +717,13 @@ matchers:
   - capability: command.privileged
     tool: Bash
     command: '^(docker|podman|nerdctl)\b[^|;&]*--mount[= ][^\s]*(type=bind[^\s]*,\s*source=(/|~|\$HOME)|volume-opt=device=(/|~|\$HOME))'
+  # ...AND THE TWO-STEP SPELLING DOCKER'S OWN DOCUMENTATION USES. `docker volume create --opt type=none --opt
+  # device=/ --opt o=bind hostroot` binds the host path into a NAMED volume, which a later `-v hostroot:/h`
+  # then mounts — and both rules recognised only the inline form, so the trick exit review 8 closed was open
+  # again one command earlier (exit review 10).
+  - capability: command.privileged
+    tool: Bash
+    command: '^(docker|podman|nerdctl)\s+volume\s+create\b[^|;&]*--opt[= ]\s*device=(/|~|\$HOME)'
   # helm PLUGINS are arbitrary programs installed into helm and run by it.
   - capability: command.network-tool
     tool: Bash
@@ -759,7 +774,10 @@ matchers:
   # destroying a local volume, network or builder cache is destructive local work, which the human approves
   - capability: container.prune
     tool: Bash
-    command: '^(docker|podman|nerdctl)\s+(volume|network|secret|config|builder|buildx|system|image|container)\s+(rm|remove|prune)\b'
+    # ...AND THE LEGACY TOP-LEVEL VERBS. `docker rm -f c1` and `docker rmi img` are the spellings most people
+    # type, and the rule enumerated only the `<group> <verb>` pairs — so they fell through to the blanket
+    # container ALLOW (exit review 10). The management group is optional for every verb docker has.
+    command: '^(docker|podman|nerdctl)\s+((volume|network|secret|config|builder|buildx|system|image|container)\s+(rm|remove|prune)|(rm|rmi|prune)\b)'
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'
