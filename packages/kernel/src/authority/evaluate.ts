@@ -3071,7 +3071,15 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
       out.push(...rest.slice(treeish).map(abs));
     }
   } else if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2) {
-    out.push(abs(operands[operands.length - 1]!));
+    // `cp SRC DIR` WRITES `DIR/basename(SRC)`, not DIR. The ledger recorded the destination operand verbatim,
+    // so `cp evil/Makefile sub && make -C sub all` marked `sub` written and left `sub/Makefile` — the file the
+    // next command reads — looking fresh (exit review 10). When the destination is an existing DIRECTORY, every
+    // source contributes the name it lands under.
+    const last = abs(operands[operands.length - 1]!);
+    out.push(last);
+    if (directoryExists(last))
+      for (const src of operands.slice(0, -1))
+        out.push(`${last}/${src.slice(src.lastIndexOf('/') + 1)}`);
     // A HARD LINK IS A SECOND NAME FOR THE SAME INODE. `cp -l control-plane/permissions/absolute-denies.md
     // /tmp/alias` makes the governed file writable through a path no rule covers, and the same is true of
     // `ln` without `-s`. The SOURCE is therefore part of the act, which is why it is added to the ledger here
@@ -3806,6 +3814,24 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           } else model.rules.set(t, { recipes: [...r.recipes], prereqs: [...r.prereqs] });
         }
         for (const [k, v] of sub.vars) model.vars.set(k, v); // an included file's variables are this file's too
+        // ...AND SO ARE ITS BRANCH VALUES, ITS TARGET-SPECIFIC VALUES, ITS OVERRIDES, ITS EXPORTS AND ITS
+        // PATTERN RULES. The merge copied ten fields and dropped five, so an `ifeq` block or a
+        // `deploy: GIT = …` line placed in an INCLUDED makefile was invisible while the identical line in the
+        // main file was read — `include env.mk` was all it took (exit review 10). Merged here in the same shape
+        // as the top-level file-merge loop, which had them all along.
+        for (const [k, vs] of sub.altVars) {
+          const into = model.altVars.get(k) ?? new Set<string>();
+          for (const v of vs) into.add(v);
+          model.altVars.set(k, into);
+        }
+        for (const [t, vars] of sub.targetVars) {
+          const into = model.targetVars.get(t) ?? new Map<string, string>();
+          for (const [k, v] of vars) into.set(k, v);
+          model.targetVars.set(t, into);
+        }
+        for (const n of sub.overridden) model.overridden.add(n);
+        for (const [k, v] of sub.exported) model.exported.set(k, v);
+        model.patternRules.push(...sub.patternRules);
         model.parseRan.push(...sub.parseRan);
         model.unsupported.push(...sub.unsupported);
         for (const [t, u] of sub.unsupportedFor)
@@ -5877,6 +5903,15 @@ const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`
 const PROGRAM_OPERAND_GLUED_RE = /\s(-B|-Xclang|-Xplugin|-load|-fplugin|-specs|-wrapper|-agentlib|-agentpath|-javaagent)[:=]?\S/;
 /** the archive tools where a short `-I` names a compression PROGRAM (for make it is an include directory) */
 const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
+/** A RESPONSE FILE IS A COMMAND LINE. `clang @opts.rsp`, `gcc @flags`, `javac @args`, `swiftc @f`, `link @f` and
+ *  `dotnet @f` all read that file and splice its contents into argv — so `-fplugin=/tmp/evil.so` sitting in it
+ *  loads a compiler plugin, and every option rule above was reading a command line the tool will never see
+ *  (exit review 10). The two reviews before this one closed "an option whose VALUE is a program" by naming the
+ *  options; a response file is the same hole one level up, where the OPTIONS THEMSELVES are out of sight. The
+ *  file is read when it is inside the workspace and its words are analysed as what they are; when it cannot be
+ *  read, the opacity is what it is. */
+const RESPONSE_FILE_TOOLS =
+  /^(clang|clang\+\+|gcc|g\+\+|cc|c\+\+|ld|lld|javac|java|kotlinc|scalac|swiftc|swift|link|lib|cl|csc|vbc|dotnet|rustc|nvcc|icc|icx|tsc|ar|nm|objcopy|strip)$/;
 const PROGRAM_OPERAND_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG}|-I)(=|\\s)`);
 
 const DB_CLIENT_HEADS = new Set([
@@ -7364,6 +7399,37 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       }
     }
   }
+  // A RESPONSE FILE IS A COMMAND LINE: its words are spliced into argv before the tool parses anything
+  if (RESPONSE_FILE_TOOLS.test(head))
+    for (const t of tokens.slice(1)) {
+      if (!t.startsWith('@') || t.length < 2 || /[$`*?]/.test(t)) continue;
+      const rf = t.slice(1);
+      const text = readInsideWorkspace(ctx, isAbsolute(rf) ? rf : resolve(cwd, rf));
+      if (text === null) {
+        hits.push({
+          capability: 'command.script-opaque',
+          verdict: verdictFor(table, ctx, 'command.script-opaque'),
+          via: `the response file ${rf} supplies options this kernel has not read`,
+          segment: seg,
+          absolute: false,
+          opaqueUnread: true,
+        });
+        continue;
+      }
+      const spliced = `${head} ${text.split(/\r?\n/).join(' ')}`;
+      const prog =
+        (PROGRAM_OPERAND_TOOL_RE.test(spliced) ? PROGRAM_OPERAND_RE : PROGRAM_OPERAND_LONG_RE).exec(spliced) ??
+        PROGRAM_OPERAND_GLUED_RE.exec(spliced);
+      if (prog)
+        hits.push({
+          capability: 'command.script-opaque',
+          verdict: verdictFor(table, ctx, 'command.script-opaque'),
+          via: `the response file ${rf} supplies ${prog[1] ?? prog[0]}, which names a program the command class does not bound`,
+          segment: seg,
+          absolute: false,
+          opaqueUnread: true,
+        });
+    }
   // A SED SCRIPT'S OWN `w FILE` IS A WRITE TO THAT FILE, and only to that file. `sed -n '1w
   // .claude/settings.json' README.md` replaces the agent's configuration while READING README.md, so the
   // destination is judged here, on its own, rather than through the coarse "every operand is a write" switch —
