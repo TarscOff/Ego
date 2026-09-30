@@ -149,6 +149,28 @@ several were introduced by fixes to the classes above (`docker run … sh -c`, `
 *Asserted by* the ordinary-development corpus, which pins the **exact** set of gated commands and the reason each
 one is gated, rather than a percentage.
 
+## Exit review 10 (2026-09-30): eleven reviews, no twelfth class
+
+179 findings, every one classified as an instance: 77 in class 11 (proportionality), 29 in class 6 (target
+classification), 24 in class 9 (path classification), 13 in class 3 (producer resolution), 10 in class 1 (segment
+structure), 10 in class 5 (verified environment), 8 in class 7 (provenance), 3 in class 2, 2 in class 4, 2 in class
+10 and 1 in class 8. One lens was set to look for a twelfth class outright (time, concurrency, identity, scale,
+aggregation, delegation, reversibility, the classification/containment boundary); it reported ten findings and
+the classifier placed every one of them in classes 1-11. Instances that crossed a floor, by class:
+
+- **1 Segment structure:** a `cd` in a `case` arm, a background job or a pipeline stage; the `)` that ends a
+  `case` pattern closing a `$( )`; a `case` header consumed by the splitter, leaving no keyword to count.
+- **2 Wrapper transparency:** a write behind `env`, `command`, `nohup`, `timeout` or an assignment left out of the
+  freshness ledger.
+- **3 Producer resolution:** `run: V = 1; git push …` — make cuts the rule line at `;` before asking whether it
+  assigns; `docker build -f F <url>` reading the local file; `npm run build` not searching above the workspace.
+- **5 Verified environment:** `cd -`, `popd`, and a `cd` spelled `'cd'`, `c\d`, `builtin cd` or `command cd`; an
+  assignment in front of a command inside `then`/`do`/`else`.
+- **6 Target classification:** `--help` as an option value or an object name (`helm uninstall help`).
+- **9 Path classification:** `.[h]arness`, `~+`, a no-break space, `core.hooksPath` naming a non-conventional
+  directory, a wildcard tail (`**/.env*`) in a search tool, a domain that begins with `localhost`.
+- **10 Policy layering:** an overlay matcher a mode can release to ALLOW.
+
 ## What is deliberately NOT a class
 
 - **A spelling, a flag or a wrapper name.** These are instances of classes 1, 2 and 6. They are fixed where they

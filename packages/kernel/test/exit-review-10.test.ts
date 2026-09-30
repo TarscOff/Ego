@@ -192,6 +192,8 @@ test('PROPERTY: asking for help, previewing and reading are never an absolute de
   const pairs: ReadonlyArray<readonly [reading: string, doing: string]> = [
     ['git push --help', 'git push origin main'],
     ['git push -h', 'git push origin main'],
+    ['git stash --all --help', 'git stash --all'],
+    ['git stash -a --help', 'git stash push -a -m --help'],
     ['gh pr create --help', 'gh pr create --title x --body y'],
     ['gh pr merge --help', 'gh pr merge 12 --squash'],
     ['docker login --help', 'docker login -u a -p b'],

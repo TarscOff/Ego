@@ -303,6 +303,36 @@ returning a BOOLEAN; a `for` without braces that put the condition outside the l
 spelled as a PREFIX with an optional backslash, so `db.dropDatabase()` matched as `\d`. All three were caught by
 a test within minutes of being written, two of them by the generated cross-product.
 
+## Closed after exit review 10 (2026-09-30)
+
+179 findings (100 unauthorized ALLOW, 79 over-gated DENY) and the eleven more that freezing them into the corpus
+found. Every one is closed, refuted, or recorded below. Recorded by CAUSE; the instances are in the build log and
+in `packages/kernel/test/exit-review-10.test.ts`.
+
+| Cause | The general statement |
+|---|---|
+| **The directory a line runs in is what the earlier segments LEFT, not what they SAY.** | A directory change binds the rest of the line only where the shell applied it in THIS shell, unconditionally: not in a pipeline stage, a background job, a substitution, a subshell, a function body, a branch or a `case` arm, and not when it was `cd -` or `popd`. Doubt is CARRIED to what follows and no positive claim may rest on it. A directory change is recognised by what the shell resolves the word to (`directoryChange()`): `'cd'`, `c\d`, `c""d`, `builtin cd` and `command cd` are the builtin, and a test for the text `cd` saw none of them. |
+| **A parser and a shell read different words.** | The shell removes quoting, expands braces and globs and cuts a rule line at a semicolon BEFORE the word reaches any reader. Every reader must be handed the word the shell will see, or report that it was not. Pinned against `/bin/zsh` and GNU make 3.81, not against a description. |
+| **A reader must be reachable from every carrier — two copies of one list.** | The condition that decides whether a carried body is re-read named `git -C` and `env -C` but not `--chdir`, and demanded whitespace before the word where a quote can stand. `sh -c 'flock l -c "env --chdir=…"'` never re-entered. |
+| **The tool looks where it looks, not where the workspace ends.** | `npm run build` walks up past the registered root; `docker build -f F <url>` runs the REMOTE Dockerfile; `make` runs the recipe after a `;` on a variable line; `[core] hooksPath` moves the hooks. A producer must read what the tool reads, from where the tool looks, and report what it cannot. |
+| **A write is a write behind a wrapper.** | The freshness ledger read the head of the raw segment, so `env cp evil.mk sub` recorded nothing. It reads the normalized head, as every other reader does; an extraction behind a wrapper is unenumerable too. A symlink is a second name for its target FROM THE NEXT SEGMENT ON — the `ln` that creates it is not a write through it, which is the proportionality half of the same statement. |
+| **Looking is not doing — an absolute DENY over looking removes the gate.** | 77 findings, thirty from one cause (`--help`). The exception is a claim about the WHOLE line: last word, not an option value, no `--`, a verb that carries no argv elsewhere, unquoted. Its mirror is pinned: a NAME or a VALUE that spells `help` is not the flag. |
+| **A reached bound, or a subprocess that could not answer, is not an absence.** | A git configuration too large to list, an awk program past the read bound, a brace nesting past the expander: each is ASK, with the reason, and never the same as "nothing there". |
+| **An enumeration is wrong by omission.** | Tools that name their write destination by a flag (`--tsBuildInfoFile`, `--metafile`, `prettier --write`), names a credential file is given (a wildcard tail is asked of them), hook directories, engine environment variables. Where a list must exist it is derived from the matchers or asked of a sample, and the sample is the thing under test. |
+| **"Only narrows" has to hold in every mode.** | An overlay matcher was checked against the BASE table; a mode can release the capability to ALLOW. The compile step now refuses any overlay mapping to a capability some mode overrides to ALLOW. |
+
+### Recorded, not closed
+
+- **OPEN PRODUCT DECISION — `SELECT` against a production database.** `psql -h prod-db.acme.com -U ro -c 'SELECT
+  1'` is an absolute DENY. A SELECT can call `pg_terminate_backend()`, `setval()`, `lo_import()` or take a
+  `FOR UPDATE` lock, and EGO does not parse SQL, so the exception for read statements is a short allowlist
+  (`\d…`, `SHOW`, `EXPLAIN` without `ANALYZE`, `-l`). The exit reviewer expects ASK for a plain SELECT. Making it
+  ASK is a one-line change with a real cost — a mutating function call becomes approvable instead of refused. It
+  is recorded as OPEN, not as ACCEPTED_PRODUCT_BEHAVIOR.
+- **DENY → ASK by design.** A brace nesting past 8 (the expander reports it), an awk program file past the read
+  bound, and a `cd` inside a branch, loop or function followed by a relative write. The kernel cannot say which
+  word, program or directory it is looking at, so it asks. Each is asserted as `ASK`, not left unpinned.
+
 ## A validation gate that lives in a temporary directory is not a gate
 
 The 200,334-command attack corpora that earlier rounds reported were ad-hoc text files in a session temporary

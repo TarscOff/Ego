@@ -18,7 +18,9 @@ matchers:
   # `.harness` governance tree; `--include-untracked` is the same act one step smaller (exit review 6).
   - capability: ego.runtime.tamper
     tool: Bash
-    command: '^git\s+stash\b[^|;&]*\s(--all|-a)\b'
+    # ...except the manual for it: `--all --help` at the END of the line asks git for usage and stashes nothing. The
+    # exception is only that shape - `-m --help` is a stash message, and a `--help` anywhere else may be a value.
+    command: '^git\s+stash\b(?![^|;&]*\s(--all|-a)\s+--help\s*$)[^|;&]*\s(--all|-a)\b'
   # `less`/`more`/`view` take an INITIAL COMMAND, and `!` runs it through a shell. A pager is bounded only while
   # it is paging (exit review 6).
   - capability: command.script-opaque

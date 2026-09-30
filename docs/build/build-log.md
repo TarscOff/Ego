@@ -741,6 +741,70 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   **PHASE 1 IS STILL NOT CLOSED.** The exit criterion is a FRESH review finding none, and neither the review that
   found these nor the pass that attacked its own fixes is that review. `INDEPENDENT-AGENT REVIEW` stays IN
   PROGRESS.
+  **EXIT REVIEW 10 (2026-09-29/30, HEAD 339c76b) — FAILED. 28 adversarial lenses.** 179 findings survived
+  independent refutation: **100 unauthorized ALLOW** (35 CRITICAL, 49 HIGH, 15 MEDIUM, 1 LOW) and **79
+  OVER-GATED DENY** (1 CRITICAL, 31 HIGH, 42 MEDIUM, 5 LOW). **newClasses: 0 — the eleventh consecutive review to
+  add no architectural class.** By class: 77 proportionality, 29 target classification, 24 path classification, 13
+  producer resolution, 10 segment structure, 10 verified environment, 8 provenance, 3 wrapper transparency, 2
+  positive claims, 2 policy layering, 1 ambient closure.
+
+  The unauthorized ALLOWs came from three moves. **The working directory a line runs in is whatever the earlier
+  segments left, and EGO believed the text:** `cd sub && cd - && tee control-plane/…`, `pushd`/`popd`, a `cd` in a
+  background job, a pipeline stage, an `if`, a `case` arm or a function body all moved the tracked directory for the
+  rest of the line, so a governed path was resolved under `sub/` where no rule matches it (one lens, nine
+  findings). **A parser and a shell read different words:** `--no{\-,\-}verify`, `{"--no-verify","--no-verify"}`,
+  `.[h]arness/…`, `~+/control-plane/…`, a no-break space, `-fprog.awk`, `-C dir` behind `flock -c`. **A configuration
+  file or an environment variable names a program:** `XDG_CONFIG_HOME`, `LD_AUDIT`, `PERL5LIB`, `CARGO_TARGET_*_LINKER`,
+  `clang @opts.rsp`, `.cargo/config.toml`, `[core] fsmonitor` in an included file.
+
+  The other half ran the other way, and it was the larger: **77 findings were an absolute DENY over an act that
+  changes nothing**, and thirty of them share ONE cause — `git push --help`, `gh pr create --help`, `docker login
+  --help`, `aws iam delete-user --help` were unapprovable, because the help flag was tested as an option rather than
+  as a claim about the whole line. Fixed as a claim: `--help` grants the exception only when it is the last word,
+  is not the value of an option, no `--` precedes it, the verb does not carry its arguments to a container, and it
+  was written unquoted. The mirror was pinned in the same breath — `helm uninstall help`, `--description --help`,
+  `--field-manager --help` and `annotate 'note=see --help'` are objects and values, and stay DENY.
+
+  **THEN THE FIXES WERE PUT INTO THE CORPUS, AND THE CORPUS FOUND ELEVEN MORE THE REVIEW HAD NOT.** Freezing 24 new
+  root classes (95 canonical spellings, 10,060 generated variants) with REAL newlines — the sweep that replays
+  findings feeds a multi-line case as one line with a literal backslash-n, and had reported the `case` row as ASK
+  when it was ALLOW — surfaced, in order of severity: a `cd` written `'cd'`, `c\d`, `c""d`, `builtin cd` or
+  `command cd` was not a directory change at all, because the tracker and five splitter sites tested the text `cd`
+  (a write to the governance tree after it was ALLOW); a `cd` inside a `case` arm was unconditional, because the
+  splitter consumes the header and leaves no keyword to count; the `)` that ends a `case` pattern closed a `$( )`
+  early, so `echo "$(case x in y) git push origin main ;; esac)"` read the push as text (ALLOW); `run: V = 1; git
+  push --force origin main` — GNU make cuts a rule line at `;` BEFORE asking whether it assigns (verified against
+  make 3.81), so the recipe was dropped; a write behind `env`, `command`, `nohup`, `timeout` or an assignment left
+  the freshness ledger empty; an assignment in front of a command inside `then`/`do`/`else` was not an environment
+  input; `docker build -f Dockerfile <url>` read the LOCAL Dockerfile; `npm run build` stopped looking for a
+  manifest at the workspace edge, where npm does not; `[core] hooksPath = githooks` moved the hook shims where no
+  path rule followed; `Grep` with a wildcard tail (`**/.env*`) skipped the credential check; `WebSearch` treated a
+  domain that merely BEGINS with `localhost` as local; and an overlay matcher that a MODE can release to ALLOW was
+  accepted as a narrowing (EGO_MAINTENANCE overrides `ego.hooks.edit`).
+
+  **THE CROSS-PRODUCT FOUND WHAT FOUR HOURS OF ADVERSARIAL REVIEW ON THE SAME SURFACE DID NOT.** That is the
+  argument for generated coverage over reported coverage, and it is also a warning about the trend below.
+
+  Every finding is closed, refuted or recorded: 12 local commits (5cafecc … 7fe322b) plus one line in
+  `matchers.md`. Recorded rather than closed, in `docs/architecture/phase-1-residuals.md`: (1) **OPEN PRODUCT
+  DECISION — is `SELECT` against a production database a read?** `psql -h prod-db -c 'SELECT 1'` is an absolute DENY
+  because a SELECT can call `pg_terminate_backend()`, `setval()` or `lo_import()`, and EGO does not parse SQL; the
+  reviewer expects ASK. Not decided here. (2) A brace nesting past 8, an awk program file past the read bound, and
+  a `cd` under a branch or loop are ASK, not DENY: a reached bound is not an absence, and an approvable opacity
+  is the honest verdict when the kernel cannot say which word or which directory it is looking at.
+
+  The in-repo cross-product now asserts **34,079** combinations across **91** root semantic classes, 313 canonical
+  spellings, 97 transformations, 5,067 producer-carried variants and 103 ordinary commands; the suite is 252 tests
+  (12 new in `exit-review-10.test.ts`; run against 45d1c4c, the commit before the last two fixes, 11 of them fail).
+
+  **THE TREND, stated because it is decision-relevant and this entry is the third to state it.** Reviews 8, 9 and 10
+  found 187, 86 and 179 findings and ZERO new classes; my own cross-product found 11 more on the surface review 10
+  had just covered. The architecture has converged (eleven reviews, no twelfth class). Instance discovery has not,
+  and nothing in these numbers suggests it terminates: the criterion "a fresh review finds no unauthorized ALLOW"
+  is a claim about an unbounded set. It is being pursued, because it is the criterion the product owner set, and
+  it is reported here as a criterion that may not be reachable by this method.
+
+  **PHASE 1 IS STILL NOT CLOSED.** `INDEPENDENT-AGENT REVIEW` stays IN PROGRESS.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's
   own parser gap was routed into the single state that fails open: "not parsed" and "not present" were the same
