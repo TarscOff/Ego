@@ -189,6 +189,16 @@ the classifier placed every one of them in classes 1-11. Instances that crossed 
 - **10 Policy layering:** a matcher that duplicated a rule the evaluator already owns, and disagreed with it.
 - **11 Proportionality:** `git tag -l`, `git merge-base` in the advisory mode; `psql -V`; `git stash --all --help`.
 
+### Exit review 11 (2026-09-30): twelve reviews, no twelfth class
+
+258 findings, each classified as an instance: 62 in class 9 (path classification), 47 in class 11 (proportionality), 33 in
+class 6 (target classification), 32 in class 7 (provenance and the freshness ledger), 30 in class 3 (producer resolution),
+14 in class 1, 13 in class 2, 13 in class 5, 10 in class 10, 2 in class 4 and 1 in class 8. The lens that looks for
+a twelfth class produced ten findings, all instances. **What the classification cannot say is that the instance set is
+bounded**: class 9 alone (a path judged by its spelling) produced 24 findings in review 10 and 62 in review 11.
+The taxonomy's exit criterion 3 - "a fresh high-risk review finds no instance that crosses an authority floor" - is
+therefore a claim about an unbounded set, and is recorded as unmet and not reachable by review volume alone.
+
 ## What is deliberately NOT a class
 
 - **A spelling, a flag or a wrapper name.** These are instances of classes 1, 2 and 6. They are fixed where they

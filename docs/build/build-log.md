@@ -846,6 +846,36 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   classes, 379 canonical spellings, 97 transformations, 5,605 producer-carried variants and 103 ordinary commands; the
   suite is 268 tests and takes about eleven minutes.
 
+  **EXIT REVIEW 11 (2026-09-30, HEAD 2390161) — FAILED, AND THE COUNT WENT UP. 28 fresh adversarial lenses, 558 agents,
+  39.6M subagent tokens, zero agent errors.** 258 findings survived independent refutation: **209 unauthorized ALLOW**
+  (16 CRITICAL, 119 HIGH, 66 MEDIUM, 8 LOW) and 49 OVER-GATED DENY. **newClasses: 0 — the twelfth consecutive review to
+  add no architectural class.** Two lenses came back clean (`lexer-residue`, `interpreters`); the other twenty-six did not.
+
+  THE SERIES, stated once in one place: exit review 8 found 187, exit review 9 found 86 (and its self-attack 50),
+  exit review 10 found 179 (and freezing it into the corpus 11 more), the self-attack on review 10's fixes found 121,
+  and this fresh review found 258. **Each round closes exactly the set it was shown; the next round, with new lenses
+  and a new budget, finds a set of the same size or larger.** The class count is flat at eleven and has been for
+  twelve reviews. The instance count is not converging, and nothing in the data suggests it will: the kernel ALLOWs by
+  default and denies by pattern, so every spelling nobody wrote down is an unauthorized ALLOW, and the spellings of a
+  shell and of ~200 CLIs are an unbounded set. This is the fourth time this log states the trend; this time it is also
+  stated as a conclusion rather than a worry - **the exit criterion "a fresh review finds no unauthorized ALLOW" cannot
+  be met by this method**, and continuing to run it is a choice to spend the budget on the same outcome. That is a
+  product decision, recorded as OPEN in `docs/architecture/phase-1-residuals.md`; it is not taken here.
+
+  **What this review contained that the previous ones did not:** (1) my own regressions, found by the lens that reads the
+  last commits - `git push origin help` was ALLOW because my help-probe rule treated a trailing `help` as a manual
+  request for git (CRITICAL; wrong: it is a branch name), `--dry-run=client --dry-run=none` read the FIRST flag, a `#`
+  after `$(…)` or an escaped space started a comment, and a message flag's value that looks like a flag (`-m -m -n`)
+  hid the real one; (2) brace results quoted around a redirection operator (`echo x 1>.harnes{s..s}/…`), which turned
+  a redirection into an argument; (3) the same omission class in a dozen more option and variable tables.
+
+  **Fixed in the same sitting** (commit below): the regressions above; the redirection-and-brace quoting; `$"…"`;
+  a writer whose operand is built at run time (`tee "$(…)"`, `tee $f` - now an ASK, and a variable the line assigned a
+  literal is substituted, so `f=.claude/settings.json; tee $f` is the DENY it is); `find -exec cp … {}`; every
+  spelling of `unset -f` and a function defined behind `&&`/`||` or in backticks; `python -m venv --clear .`; mongosh
+  inline JavaScript; `kubectl --as-user-extra`; `ego hook` in a grep pattern; variables reaching a `make` two
+  producers down. **Recorded, not closed: the rest** - about 220 findings, by cause, in the residuals document.
+
   **PHASE 1 IS STILL NOT CLOSED.** `INDEPENDENT-AGENT REVIEW` stays IN PROGRESS.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
   confirmed). **Resolution itself became the contract on 2026-09-22**, after challenge 5 showed that a producer's

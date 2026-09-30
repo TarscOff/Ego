@@ -355,6 +355,43 @@ in `packages/kernel/test/exit-review-10.test.ts`.
 - An `env -C`/`git -C` in play disables the alternative-directory judgement for that segment (the directory it names is judged on its own).
 - `CGO_ENABLED=0 go build` asks: `CGO_*` is in the execution-input list a producer gate reads. Unchanged from before this pass.
 
+## OPEN after exit review 11 (2026-09-30) - and the decision this document owes the product owner
+
+258 findings (209 unauthorized ALLOW, 49 over-gated DENY), zero new classes. About 30 were fixed in the same sitting
+(listed in the build log). **The remaining ~225 are OPEN**, and they are recorded by cause rather than by instance because
+the instances are not the point:
+
+| Cause (lens counts in brackets) | What is open |
+|---|---|
+| **A table is wrong by omission** (runners 13, policy-layer 13, containers 13, k8s-cloud 13, db 8) | tools that run a program named by their OWN option or config: `clang --ld-path`, `gcc -fuse-ld`, `prettier --config`, `eslint -f ./x.js`, `pylint --init-hook`, `npm --script-shell`, `yarn-path`, `bun test`, `python -m black`; `docker buildx bake` (≈10 spellings: the bake file names Dockerfiles and targets), `docker pass`, `docker debug --host`, `buildx create --driver remote`; `kubectl --cluster`, `config view --flatten`, `get -f s.yaml` of a Secret, `--kubeconfig` with a kind context; `sqlite3 … writefile()/edit()` (×5), `mysql -uroot -e'…'`, `psql -o '\|cmd'`, `dbmate --env`. |
+| **A path is judged by its spelling, not by the file** (fs-paths 14, hostapi 7, absolutes 12, errors 4) | a leading space in a tool `file_path`; a symlink whose NAME contains a glob character; `git checkout-index --prefix=.git/hooks/`; `tar --extr`/`--use=`; `cat .e*` and other wildcard shell operands that reach credential stores; `echo x > /dev/disk0`; a `Write` through a symlink to a path that does not exist yet. |
+| **A reached bound is still not an absence, on surfaces that were not wired** (limits 8, expansion-new 14) | `env env env …` nested past the depth cap, a `cd` chain past the path cap, `flock -c "flock -c …"` nested past four, a brace budget over 64 in `Glob`/`Grep` (the overflow report was wired only into the Bash loop). |
+| **Carried commands and producers** (carriers 14, producers-deep 14, claims 14) | `find … -exec` payloads of several kinds; `timeout -s KILL`, `env --unset A` before `sed 'w …'`; `yarn exec git -C …`; `watch 'git commit -nm x'`; a Dockerfile written in the same command before `docker buildx bake`; `lint-staged` config written or chosen by a variable; a `make -f ev*.mk` glob; `DF=x; docker build -f "$DF"` (a variable assigned earlier names the file). |
+| **Variables a line assigned** (claims, carriers, crossproduct) | partly closed (literals substituted; a run-time writer operand asks). Still open: `O=--context; docker $O production rm -f app`, `R=secret; kubectl get $R`, a variable holding a SUBCOMMAND or an OPTION. |
+| **Proportionality** (proportionality 14, exceptions 4, profiles 13) | 49 over-gated DENY, most of them a dry run or a listing with a redirection or an extra flag: `git push --help >/dev/null`, `git push -vn`, `git grep core.hooksPath`, `git config --file … --get`, `gh api -X GET`, `cat ~/.ego/trust/keys.json` (a READ of the trust store), `grep -rn '~/.ssh' docs`, `find . -name '*.tmp' -exec rm {} \;` (pre-existing). |
+| **Environment and bounded-command tables** (markers 8, bounded 1, policy-layer) | `printf -v PATH …`, `read PATH`, `HELM_PLUGINS=`, `git -c man.man.path=… log --help`, `bash -n +n`, `node version`. |
+| **Overlay and profile edges** (overlay 6, profiles 13, taxonomy 10) | an overlay-protected path after the overlay's matcher is deleted from the tree; `service-account.json`/`secrets/*` patterns; STRICT not narrowing `git pull --no-ff`. |
+
+### The decision (OPEN - not taken here)
+
+Twelve reviews establish two things. **The architecture is closed**: eleven classes, none added since review 1 of this series,
+and each is enforced as a general property over a generated cross-product (40,000+ combinations) that has found defects no
+reviewer reported. **The instance set is not**: 187 → 136 → 190 → 121 → 258, each round closing exactly what it was shown.
+
+The kernel's failure mode is an **unauthorized ALLOW for an input nobody listed**, because it allows by default and denies
+by pattern. Three honest options, none of which this phase can choose:
+
+1. **Amend the exit criterion to the one the taxonomy already states** - class closure, a generated cross-product that
+   holds, and every KNOWN finding closed or recorded - and close Phase 1 with the residual stated as a containment
+   dependency (issue #26: the classifier is defense in depth, the boundary is the OS sandbox). Cheapest; true to the data.
+2. **Invert the default for the highest-risk surfaces**: ALLOW only for a short positive list of command shapes with
+   strict grammars (the way a SQL read is now a grammar, not a blocklist), ASK for everything else. Unknown becomes a
+   question instead of a yes, and the unauthorized-ALLOW set becomes bounded by construction. The cost is proportionality:
+   ordinary commands outside the list ask until they are added, and the list is itself a product surface.
+3. **Keep the loop.** One cycle costs about 40M subagent tokens for the review alone, an hour of wall-clock for it, and several hours of
+   fixing; the evidence is that it will produce another ~200 findings. It is the option the current criterion implies, and it is reported here as one that has not converged
+   in five cycles.
+
 ## A validation gate that lives in a temporary directory is not a gate
 
 The 200,334-command attack corpora that earlier rounds reported were ad-hoc text files in a session temporary
