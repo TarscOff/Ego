@@ -820,11 +820,12 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   `cd dir >/dev/null` (the redirection read as the directory), `! cd`, `FOO=1 cd`, `noglob cd`, `pushd`/`popd` with a
   stack — each moved the tracked directory wrongly or not at all. `cwdTimeline` now returns, per stage, the directories
   it MAY start in; a relative path is judged in each and the strongest answer wins; more than one (or an unknown)
-  withdraws every positive claim. It is checked against real bash and zsh over 72 scripts, for SOUNDNESS (the
+  withdraws every positive claim. It is checked against real bash and zsh over 71 scripts, for SOUNDNESS (the
   directory a shell ends in is always in the set) and for precision (the ordinary cases stay exact, because a model
-  that always says "maybe" gates ordinary work). The first version of the test found five unsoundness bugs in the
+  that always says "maybe" gates ordinary work). The first run of the test found six unsoundness bugs in the
   first version of the model — `||` after a failed `cd`, `OLDPWD` after a failure, `pushd` whose target may not
-  exist, physical `cd -P link/..`, zsh running the last stage of a pipeline in the current shell.
+  exist, physical `cd -P link/..`, zsh running the last stage of a pipeline in the current shell, and `command cd`,
+  which zsh resolves to an external program.
 
   **The cross-product found one more that nobody had reported, and it was HIGH:** `cp x governed-file 2>&1` — the
   destination reader took the last WORD, which was `2>&1`, so the governed file was never seen. Every `cp`, `mv`,
@@ -837,8 +838,7 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   either way, because `$(V)` expanded in a prerequisite's recipe runs the tail. The fix I made read the tail as a
   recipe — which over-gated (`x: V = a; git push … ` with `V` never expanded was DENY) and was wrong. The parser now
   takes the whole tail as the value and reports what it does not model (`+=`, `?=`, `override`, `export`, pattern-
-  specific variables, `$(eval)` inside a `define`). The test that pinned the wrong semantics was rewritten to the right
-  ones and a differential check against make 3.81 is in the notes of that test.
+  specific variables, `$(eval)` inside a `define`). The test that pinned the wrong semantics was rewritten to the right ones.
 
   Every finding of this pass is closed, refuted or recorded (commit cd9fe65): 12 exact-verdict tests, each of which fails
   against the tree before the fixes; 10 new corpus classes (6,300 generated variants); a differential test for the
