@@ -5897,7 +5897,12 @@ const DB_EXECUTES_UNREAD =
   // `\i FILE` (psql) and `\. FILE` (mysql) READ AND RUN A SCRIPT, exactly as `-f` does — the meta-command form
   // just puts it inside the statement, where the `-f` test never looks. `psql -c "\i /tmp/payload"` executed a
   // file the kernel has not read, at ALLOW (exit review 9). `\ir` is psql's relative-include twin.
-  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$)|\s(-f|--file|-init|--init)(=|\s)|\s<\s|\\!|\\ir?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?[i.](\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S/i;
+  // EVERY SPELLING THE CLIENT ACCEPTS, not the spaced one only. A short flag GLUES its value (`psql -f/tmp/x`),
+  // the shell needs no space after `<` (`mysql </tmp/x`), psql's include has a LONG name (`\include`, `\ir`,
+  // `\ifile`), and a script path may be followed by a quote or a parenthesis rather than whitespace
+  // (`mongosh --eval 'load("/tmp/evil.js")'`) — each of which put an unread program back out of reach
+  // (exit review 10).
+  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$|["'),;])|\s(-f|--file|-init|--init)(=|\s|\S)|\s<\s*\S|\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(/i;
 
 const TARGET_ENV_RE =
   // THE CONTAINER ENGINE IS SELECTED BY ENVIRONMENT TOO. `DOCKER_HOST` and `DOCKER_CONTEXT` were enrolled in the
@@ -6503,9 +6508,14 @@ function resolveDbTarget(
   // `-e` IS mysql's SHORT `--execute`, and only `-c` was read as a short statement flag — so every read-only
   // statement spelled the mysql way was judged as an unrestricted connection (self-attack on exit review 9).
   const stmtTokens = rawSeg === undefined ? tokens : tokenizeMarked(rawSeg).map((t) => t.text);
+  // `--init-command` RUNS BEFORE EVERYTHING ELSE, so a read-only `-e` says nothing about what the session does:
+  // `mysql -h prod-db --init-command="DROP TABLE users" -e "SHOW TABLES"` drops the table and then lists
+  // (exit review 10). Every statement the client will run is collected, and the exception needs ALL of them to
+  // be read-only.
   const statements = [
     ...optionValues(stmtTokens, 'c', ['--command', '--eval', '--query']),
     ...optionValues(stmtTokens, 'e', ['--execute']),
+    ...optionValues(stmtTokens, '', ['--init-command', '--init-file', '--defaults-command']),
   ];
   const readOnlyStatement =
     statements.length > 0 &&
@@ -6598,7 +6608,16 @@ function resolveDbTarget(
     if (/^(PGSERVICE|PGURI|DATABASE_URL|REDIS_URL|MONGODB_URI|MONGO_URL)=/.test(t) && !/:\/\//.test(t))
       signals.push({ cls: 'UNCLASSIFIED', target: t.split('=')[0]! });
     // libpq / MySQL keyword-value conninfo: `psql "host=db.acme.com dbname=app"` names the host without a URI
-    for (const m of t.matchAll(/(?:^|[\s"'])host(?:addr)?\s*=\s*([^\s"';]+)/gi)) push(m[1]!, 'conninfo host');
+    // A CONNINFO STRING IS A CONNINFO STRING WHEREVER IT SITS. The boundary required whitespace or a quote
+    // before `host`, so `--dbname="host=prod-db.acme.com dbname=app"` — the glued form — never matched
+    // (exit review 10). An `=` counts as a boundary too, and so does the start of an option's value.
+    for (const m of t.matchAll(/(?:^|[\s"'=])host(?:addr)?\s*=\s*([^\s"';]+)/gi)) push(m[1]!, 'conninfo host');
+    // ...AND libpq ALLOWS SPACES AROUND THE `=`. `psql "dbname = app host = prod-db.acme.com"` is one quoted
+    // word to the shell and three tokens after normalization, so a per-token scan could never see the pair. The
+    // RAW segment still has the quoting that says it is one word (exit review 10).
+    if (rawSeg !== undefined)
+      for (const m of rawSeg.matchAll(/(?:^|[\s"'=])host(?:addr)?\s*=\s*([^\s"';]+)/gi))
+        push(m[1]!, 'conninfo host');
     // a service name resolves through a file the kernel cannot read: unknowable, so never local
     if (/(?:^|[\s"'])service\s*=/i.test(t) || t === '--service' || t.startsWith('--service='))
       signals.push({ cls: 'UNCLASSIFIED', target: 'a connection service name' });
@@ -7393,10 +7412,26 @@ function classifyShellPaths(
   // .harness/runtime` wrote runtime state, `webpack --output-path control-plane/permissions` rewrote the policy,
   // and `docker buildx build --output type=local,dest=…` wrote anywhere on the host — all at ALLOW, while the
   // same bytes through `cp` or `>` were absolute denies (exit review 7).
+  // EVERY FLAG THAT NAMES A FILE THE TOOL WRITES. Exit review 7 stated the rule — the flag names the file
+  // whatever the tool is called — and then expressed it as an ENUMERATION, which is a list that is wrong by
+  // omission: `tsc --tsBuildInfoFile .git/hooks/pre-commit` installs a git hook and
+  // `esbuild --metafile=.harness/runtime/state.json` rewrites runtime state, both at ALLOW (exit review 10).
   const OUTPUT_FLAGS = [
     '--output', '--output-file', '--out-file', '--outfile', '--out-dir', '--outdir', '--outDir', '--output-dir',
     '--output-directory', '--output-path', '--dist-dir', '--file', '--dest', '--destination', '--emit-to', '--out',
+    '--tsBuildInfoFile', '--metafile', '--stats-json', '--report', '--report-file', '--coverage-directory',
+    '--emit-decorator-metadata-to', '--declarationDir', '--declaration-dir', '--sourcemap-file', '--manifest',
+    '--lockfile-path', '--cache-location', '--cacheLocation', '--output-document', '--write-to', '--save-to',
+    '--log-file', '--result-file', '--junit', '--junit-xml', '--tap-file', '--profile-output',
   ];
+  // ...AND EVERY ONE OF THEM, not the last. A command may name two destinations — `esbuild --metafile=A
+  // --outfile=B` — and taking only the last judged B while A was the governed file (exit review 10).
+  for (const extra of optionValues(tokenize(seg), 'o', OUTPUT_FLAGS)) {
+    if (!extra || extra.startsWith('-') || /[$`]/.test(extra)) continue;
+    const eAbs = canonicalPath(isAbsolute(extra) ? extra : resolve(cwd, extra));
+    const h = classifyPath(table, ctx, 'Write', eAbs);
+    if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `output flag names ${extra} (${h.via})`, segment: seg });
+  }
   const rawOutput =
     optionValue(tokenize(seg), 'o', OUTPUT_FLAGS) ??
     optionValue(
@@ -7415,7 +7450,10 @@ function classifyShellPaths(
     // neither a slash nor a dot in it, and the `/[/.]/` shape test below rejected it (exit review 8)
     (rawOutput !== null && rawOutput !== '' && !/^-/.test(rawOutput)) ||
     // an in-place formatter rewrites the files it is given
-    (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf)$/.test(head) && tokens.some((t) => /^(-w|--write|-i|--in-place)$/.test(t))) ||
+    // AN IN-PLACE FORMATTER IS NAMED BY ITS FLAG, not by a list of heads: `npx prettier --write <path>` and
+    // `eslint --fix <path>` rewrite exactly what they are given, and neither was in the list (exit review 10).
+    (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf|prettier|eslint|biome|oxlint|dprint|ruff|stylelint|swiftformat|ktlint|php-cs-fixer|rubocop|standardrb|terraform|tofu|taplo|yamlfmt|buf|deno)$/.test(head) &&
+      tokens.some((t) => /^(-w|--write|-i|--in-place|--fix|--fix-dry-run|-f)$/.test(t))) ||
     // ...and so does a stream editor, but ONLY with its in-place flag: without it the same tool is a reader —
     // unless its own SCRIPT names a file to write, which `w FILE` does (exit review 9)
     (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head) &&
@@ -7449,7 +7487,8 @@ function classifyShellPaths(
     // `cp -l` MAKES A HARD LINK: a second name for the same inode, through which a governed file is writable by a
     // path no rule covers. `cp -l control-plane/permissions/absolute-denies.md /tmp/alias` is the same act as
     // `ln <same> /tmp/alias`, which is DENY, so both operands are judged (exit review 7).
-    if (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf)$/.test(head)) dest = 'ALL';
+    if (/^(shfmt|gofmt|rustfmt|clang-format|black|isort|yapf|prettier|eslint|biome|oxlint|dprint|ruff|stylelint|swiftformat|ktlint|php-cs-fixer|rubocop|standardrb|taplo|yamlfmt)$/.test(head) &&
+      tokens.some((t) => /^(-w|--write|-i|--in-place|--fix|--fix-dry-run)$/.test(t))) dest = 'ALL';
     else if (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))) dest = 'ALL';
     else if (head === 'tar' || head === 'bsdtar' || head === 'gtar') {
       // traditional tar also takes a DASH-LESS function-letter operand as its first argument: `tar xf a`, `tar cf a`,
