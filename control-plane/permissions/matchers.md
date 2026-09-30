@@ -39,7 +39,9 @@ matchers:
   # --- hook and gate self-protection (absolute) ---
   - capability: ego.gate.bypass
     tool: Bash
-    command: '(^|\s|/)(harness|ego|harness\.js|ego\.js|ego-hook\.sh|git-hook\.sh)(\s+hook\b|\s+(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b)'
+    # ANCHORED AT THE COMMAND, like the subcommands below: `grep -rn "ego hook" docs/` reads the documentation that describes
+    # the hook and was an absolute deny (exit review 11). A wrapper or package runner may precede the binary; a pattern may not.
+    command: '^((\S*/)?(harness|ego)(\.js)?|node\s+\S*(ego|harness)\.js|(?:(?:ba|z|da|k)?sh|source|\.)\s+\S*(ego-hook|git-hook)\.sh|\S*(ego-hook|git-hook)\.sh|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+(hook\b|(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b)'
   - capability: ego.gate.bypass
     tool: Bash
     command: '(^|\s)(npx|bunx|pnpx)\s+(harness|ego|@tarscoff/ego)\s+hook\b'
@@ -735,6 +737,11 @@ matchers:
   - capability: db.local.migrate
     tool: Bash
     command: '^(npx\s+)?(typeorm|prisma\s+migrate|alembic|flyway|liquibase|knex\s+migrate|sequelize\s+db:migrate|dbmate)\b'
+  # mongosh's --eval is a Node.js context with `require`: it is `node -e`, and reaches child_process, the filesystem and the
+  # network whatever database it is aimed at (exit review 11)
+  - capability: command.interpreter-inline
+    tool: Bash
+    command: '^(mongosh|mongo)\b[^|;&]*--eval[= ]\S*(require\s*\(|child_process|process\.|Mongo\s*\(|fs\.|os\.)'
   - capability: db.local.query
     tool: Bash
     # `mysqladmin` drops databases, `clickhouse client` is the two-word spelling of `clickhouse-client`, and the

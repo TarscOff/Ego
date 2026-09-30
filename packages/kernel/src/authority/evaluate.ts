@@ -538,7 +538,16 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // a `#` starts a comment at the start of a WORD — which is after whitespace OR after any unquoted operator
       // that ends one. `echo hi;# it's fine` put the scanner into a phantom quoted state through the apostrophe
       // (exit review 6).
-      if (ch === '#' && (i === 0 || /[\s;&|()]/.test(command[i - 1]!))) {
+      // ...AND ONLY THERE: `echo $(true)#x` and `echo a\ #b` are one word (a `)` that closes a substitution, or an escaped
+      // space, does not end it), as is `#` inside `${x:- #}` and after a non-IFS space such as U+00A0 (exit review 11). The
+      // separators are the shell's - space, tab, newline and the operators - not JavaScript's `\s`.
+      const prevCh = i === 0 ? '' : command[i - 1]!;
+      let backslashes = 0;
+      for (let b = i - 2; b >= 0 && command[b] === '\\'; b--) backslashes++;
+      const escapedPrev = backslashes % 2 === 1;
+      const openParam = cur.lastIndexOf('${') > cur.lastIndexOf('}');
+      const afterSubst = prevCh === ')' && (cur.endsWith('$SUBST') || cur.endsWith('$ARITH'));
+      if (ch === '#' && (i === 0 || (/[ \t\n;&|()]/.test(prevCh) && !escapedPrev && !afterSubst)) && !openParam) {
         const nl = command.indexOf('\n', i);
         i = nl < 0 ? command.length : nl; // the newline itself still separates the commands
         continue;
@@ -587,7 +596,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // segment says `case` any more. A definition there binds nothing unless that branch is the one taken
         // (exit review 8).
         if (declared && caseDepth === 0)
-          segments.push({ text: `${FUNCTION_DEF_PREFIX} ${declared[1]}`, pipedFromPrevious: false });
+          segments.push({ text: `${FUNCTION_DEF_PREFIX} ${declared[1]}`, pipedFromPrevious: false, ...(lastSep !== undefined ? { sepBefore: lastSep } : {}) });
         cur = '';
         groupStack.push(++groupSeq);
         if (declared && caseDepth === 0) functionBodyGroups.set(groupSeq, declared[1]!);
@@ -743,6 +752,13 @@ export function splitShellPipeline(command: string): ShellStage[] {
           }
           if (backticked.some((sg) => directoryChange(sg.text) !== null))
             segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
+          // ...and a DEFINITION in a backtick span binds nothing in the caller, exactly as in `$( )`
+          for (const sg of backticked)
+            if (sg.text.startsWith(`${FUNCTION_DEF_PREFIX} `))
+              segments.push({
+                text: `${FUNCTION_UNBIND} ${sg.text.slice(FUNCTION_DEF_PREFIX.length + 1)}`,
+                pipedFromPrevious: false,
+              });
           cur += '$SUBST';
           i = end + 1;
           continue;
@@ -1280,11 +1296,24 @@ GLOBAL_OPTIONS['nerdctl'] = GLOBAL_OPTIONS['docker']!;
  *  `--help`: in neither is the text after the operator a word of the command. */
 function commandWords(t: ReadonlyArray<{ text: string; quoted: boolean }>): Array<{ text: string; quoted: boolean }> {
   const out: Array<{ text: string; quoted: boolean }> = [];
+  const OP = /(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)/;
   for (let i = 0; i < t.length; i++) {
     const x = t[i]!;
-    if (!x.quoted && /^(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)/.test(x.text)) {
-      // a bare operator takes the NEXT word as its target; a glued one (`2>/dev/null`, `>&2`) carries it
-      if (/^(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)$/.test(x.text)) i++;
+    if (x.quoted) {
+      out.push(x);
+      continue;
+    }
+    const m = new RegExp(`^(.*?)(${OP.source})(.*)$`, 's').exec(x.text);
+    if (m && !/^[<>]\(/.test(x.text.slice(m[1]!.length))) {
+      // a word may CARRY an operator in the middle (`-n>/dev/null`, `x&>f`): what stands before it is a word of the
+      // command, what follows is the target (or the next word when there is none). A digit before `>` is the descriptor.
+      let before = m[1]!;
+      const op = m[2]!;
+      if (/^\d+$/.test(before) && op.startsWith('>')) before = '';
+      // `2>` : the descriptor is part of the operator match already when the word starts with it
+      if (before !== '') out.push({ text: before, quoted: false });
+      if (m[3] === '' && /[<>&|]$/.test(op) && !/&$/.test(op)) i++; // a bare operator takes the NEXT word as its target
+      else if (m[3] === '' && /&$/.test(op)) i++;
       continue;
     }
     out.push(x);
@@ -1405,7 +1434,9 @@ function helpProbeHead(segment: string): string | null {
     !l.quoted &&
     l.text === 'help' &&
     rest.length > 1 &&
-    /^(aws|gcloud|az|terraform|tofu|pulumi|docker|podman|nerdctl|git|gh|glab)$/.test(head) &&
+    // `help` LAST is a pseudo-command of the cloud CLIs only. For git, gh and docker it is an ordinary operand - a branch, a
+    // tag, a container, a volume: `git push origin help` pushes the branch called help (exit review 11, my regression)
+    /^(aws|gcloud|az)$/.test(head) &&
     rest.slice(0, -1).every((x) => bare(x))
   )
     return head;
@@ -1767,11 +1798,18 @@ function findPayloads(rest: string[]): string[] {
         // `-execdir` and `-okdir` run the payload IN THE DIRECTORY OF EACH MATCH, which is somewhere inside the search
         // root: its relative operands are judged under the root, which is governed wherever any of its files is
         const inMatchDir = t === '-execdir' || t === '-okdir';
+        // `{}` is a write DESTINATION for these heads, and it stands for every match under the root - `.git/hooks/pre-commit`
+        // among them - so it is written as what it is, a name built at run time (exit review 11)
+        const writerPayload = /^(cp|mv|tee|install|ln|truncate|sed|perl|dd|ginstall)$/.test((cmd[0] ?? '').replace(/^.*\//, ''));
+        // (the root form stays too: a search root that is itself governed is a deny whatever the matches are)
+        if (cmd.length && writerPayload && cmd.includes('{}'))
+          out.push(requote(cmd.map((c) => (c === '{}' ? searchRoot : c))));
         if (cmd.length)
           out.push(
             requote(
               cmd.map((c, k) =>
-                c === '{}' ? searchRoot
+                c === '{}' && writerPayload ? '$FIND_MATCH'
+                : c === '{}' ? searchRoot
                 : inMatchDir && k > 0 && !c.startsWith('-') && !c.startsWith('/') && !c.includes('=') ? `${searchRoot.replace(/\/$/, '')}/${c}`
                 : c,
               ),
@@ -1915,6 +1953,12 @@ function normalizeTail(rest: string[]): string[] {
     // privilege tool itself keeps its head, as it must, so `command.privileged` still asks.
     const after = rest.slice(i);
     return [joinWords(rest), ...(after.length ? normalizeSegment(requote(after)) : [])];
+  }
+  // `python -m venv --clear DIR` DELETES everything in DIR before it builds the environment: a recursive removal with a build
+  // verb's name (exit review 11)
+  if (/^python3?(\.\d+)?$/.test(rest[0] ?? '') && rest[1] === '-m' && rest[2] === 'venv' && rest.includes('--clear')) {
+    const target = [...rest].reverse().find((w) => !w.startsWith('-') && w !== 'venv');
+    if (target) return [joinWords(rest), `rm -r ${requote([target])}`];
   }
   return [joinWords(rest)];
 }
@@ -2524,7 +2568,10 @@ function expandBraceWord(word: string, depth = 0, overflow?: { hit: boolean }): 
  *  went unrecognised (exit review 10). `{"--no-verify","--no-verify"}` was the same defect through the double
  *  quote. Quote removal is the tokenizer's own, so the two agree by construction. */
 function requoteBraceResult(w: string): string {
-  const bare = unquoteShellWord(w);
+  // quote removal is the tokenizer's own (ANSI-C `$'…'` and `$"…"` included); an EMPTY quoted word stays as a word
+  const toks = tokenize(w);
+  const bare = toks.length === 1 ? toks[0]! : unquoteShellWord(w);
+  if (bare === '') return "''";
   return /[ \t\n\r;&|<>()`$"'\\*?[\]]/.test(bare) ? `'${bare.split("'").join(`'\\''`)}'` : bare;
 }
 
@@ -2588,6 +2635,28 @@ export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
       out += c;
       continue;
     }
+    // A REDIRECTION OPERATOR ENDS A WORD BEFORE BRACES ARE EXPANDED. `echo x 1>.harnes{s..s}/runtime/pin.json` is the word
+    // `1`, the operator `>` and the word `.harnes{s..s}/…`: expanding the whole token and then quoting the result (it
+    // contains `>`) turned a redirection into a quoted argument (exit review 11). The descriptor digits belong to the
+    // operator, and the operator is emitted untouched.
+    if ((c === '>' || c === '<') && seg[i + 1] !== '(') {
+      if (/^\d+$/.test(cur)) {
+        out += cur;
+        cur = '';
+      } else flush();
+      let j = i;
+      out += seg[j]!;
+      while (j + 1 < seg.length && /[<>&|]/.test(seg[j + 1]!) && seg[j + 1] !== '(') out += seg[++j]!;
+      i = j;
+      continue;
+    }
+    if (c === '&' && seg[i + 1] === '>') {
+      flush();
+      out += '&>';
+      i++;
+      while (i + 1 < seg.length && /[>|]/.test(seg[i + 1]!)) out += seg[++i]!;
+      continue;
+    }
     cur += c;
   }
   flush();
@@ -2623,6 +2692,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
       else cur += ch;
       continue;
     }
+    if (ch === '$' && s[i + 1] === '"' && !quote) continue;
     const ansi = ch === '$' ? ansiCAt(s, i) : null;
     if (ansi) {
       // ANSI-C `$'...'` yields an ordinary word (a possible command head), so it is NOT marked quoted
@@ -2993,6 +3063,39 @@ export function cwdTimeline(
   return out;
 }
 
+/** Replace `$NAME` and `${NAME}` with the literal value the same command line assigned earlier, outside single quotes - what the shell
+ *  does, for the values this analyzer can prove. `f=.claude/settings.json; tee $f` writes that file, and judging the
+ *  word `$f` left a governed write with no path to judge (exit review 11). An unknown name is left alone. */
+function substituteKnownVars(text: string, vars: ReadonlyMap<string, string>): string {
+  if (vars.size === 0 || !text.includes('$')) return text;
+  let out = '';
+  let q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '\\') {
+      out += c + (text[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (c === "'" ) {
+      q = !q;
+      out += c;
+      continue;
+    }
+    if (c === '$' && !q) {
+      const m = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/.exec(text.slice(i));
+      const name = m?.[1] ?? m?.[2];
+      if (m && name !== undefined && vars.has(name)) {
+        out += vars.get(name)!;
+        i += m[0].length - 1;
+        continue;
+      }
+    }
+    out += c;
+  }
+  return out;
+}
+
 /** A C string ends at its first NUL, and a command's arguments are C strings: `touch $'control-plane/x\0/../../y'`
  *  hands touch the word `control-plane/x`. Kept whole, path normalisation collapsed `x<NUL>/..` and saw the harmless
  *  `y` (exit review 10). */
@@ -3028,6 +3131,8 @@ function tokenize(s: string): string[] {
       else cur += ch;
       continue;
     }
+    // `$"…"` is a locale-translated string: the same word as `"…"` where no translation exists (exit review 11)
+    if (ch === '$' && s[i + 1] === '"') continue;
     const ansi = ch === '$' ? ansiCAt(s, i) : null;
     if (ansi) {
       cur += ansi.text;
@@ -3980,7 +4085,7 @@ const EXECUTION_ENV_INPUTS =
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
   /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*(RUNNER|LINKER|AR)|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
-export function segmentEnvInputs(segment: string): Record<string, string> {
+export function segmentEnvInputs(segment: string, allAssignments = false): Record<string, string> {
   const out: Record<string, string> = {};
   // A CONTAINER'S `-e` SETS THE CONTAINER'S ENVIRONMENT, not this shell's. `docker run --rm -e SHELL=/bin/sh
   // myapp` starts a throwaway local container with one variable set; reading it as a host binding classified an
@@ -4017,6 +4122,9 @@ export function segmentEnvInputs(segment: string): Record<string, string> {
       // one-segment spelling was an absolute deny (exit review 7).
       if (EXECUTION_ENV_INPUTS.test(name) || TARGET_ENV_RE.test(name))
         out[name] = m[2]!.replace(/^['"]|['"]$/g, '');
+      // ...and EVERY assignment under a private key: a process the command starts inherits all of them, and a `make` two
+      // producers down reads its recipe's variables from its environment (`CMD=… npm run build` reaching `make other`)
+      if (allAssignments) out[`\0env:${name}`] = m[2]!.replace(/^['"]|['"]$/g, '');
         s = s.slice(m[0].length);
         continue;
       }
@@ -6612,6 +6720,12 @@ function resolveScriptCommand(
     // the environment make was STARTED with: `V='git push …' make x` gives the recipe a `V` the makefile may never
     // assign, and with `-e` it beats the makefile's own assignment (exit review 10, self-attack)
     const makeEnvVars: Array<[string, string]> = [];
+    // the environment this make inherited from the producers above it: variables assigned on the command that started them,
+    // the command-line variables of a parent make (MAKEFLAGS carries them), and what a parent makefile exports
+    for (const [k, v] of Object.entries(env.envInputs)) {
+      if (k.startsWith('\0env:')) makeEnvVars.push([k.slice(5), v]);
+      else if (k.startsWith('\0cli:') && !cliVars.has(k.slice(5))) cliVars.set(k.slice(5), v);
+    }
     if (makeAt > 0)
       for (const t of allRawMarked.slice(0, makeAt)) {
         const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(t.text);
@@ -6956,6 +7070,11 @@ function resolveScriptCommand(
       ...(rebinds.length ? { binding: { kind: 'redefined' as const, why: rebinds[0]! } } : {}),
       config: { read: merged.sources, unresolved: [] },
       sources: Object.fromEntries(merged.sources.map((f) => [f, fingerprint(merged.text)])),
+      envInputs: {
+        ...env.envInputs,
+        ...Object.fromEntries([...cliVars].map(([k, v]) => [`\0cli:${k}`, v])),
+        ...Object.fromEntries([...merged.exported].map(([k, v]) => [`\0env:${k}`, expandMakeText(v, merged.vars).text ?? v])),
+      },
     });
     // ...and what the makefile EXPORTS is in every recipe's environment, which is how the recipe's `psql` finds
     // a production host and its `tsc` loads a Node require hook that the recipe text never mentions.
@@ -7423,27 +7542,27 @@ function isDryRun(seg: string): boolean {
   // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
   // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
   // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
-  return words.some((w, i) => {
-    if (
-      !(
-        w === '--server-dry-run' ||
-        w === '--dryrun' ||
-        w === '--what-if' ||
-        w === '--no-act' ||
-        // a BARE `--dry-run` is a dry run: kubectl's and helm's flag takes its value only with `=`, so the next word is
-        // a positional (`helm upgrade --dry-run none ./chart` upgrades a release NAMED none, as a dry run)
-        w === '--dry-run' ||
-        /^--dry-run=(client|server|true|1|yes)$/i.test(w)
-      )
-    )
-      return false;
+  // THE LAST dry-run flag decides, as it does for the tool: `--dry-run=client --dry-run=none` really applies
+  let verdict = false;
+  words.forEach((w, i) => {
+    const isFlag =
+      w === '--server-dry-run' ||
+      w === '--dryrun' ||
+      w === '--what-if' ||
+      w === '--no-act' ||
+      // a BARE `--dry-run` is a dry run: kubectl's and helm's flag takes its value only with `=`, so the next word is
+      // a positional (`helm upgrade --dry-run none ./chart` upgrades a release NAMED none, as a dry run)
+      w === '--dry-run' ||
+      /^--dry-run=/i.test(w);
+    if (!isFlag) return;
     // A FLAG IN AN OPTION'S VALUE POSITION IS THAT OPTION'S VALUE. Which options take one is not knowable for every
     // tool, so the word before must be a positional, a complete `--opt=value`, or an option known to take none
     // (`kubectl set env deploy/x A=1 --field-manager --dry-run` names a field manager)
     const prev = words[i - 1];
-    if (prev === undefined || !prev.startsWith('-') || prev.includes('=')) return true;
-    return BOOLEAN_BEFORE_DRY_RUN.test(prev);
+    if (!(prev === undefined || !prev.startsWith('-') || prev.includes('=') || BOOLEAN_BEFORE_DRY_RUN.test(prev))) return;
+    verdict = !/^--dry-run=/i.test(w) || /^--dry-run=(client|server|true|1|yes)$/i.test(w);
   });
+  return verdict;
 }
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
 const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
@@ -7537,7 +7656,7 @@ const KUBECTL_VERBS = new Set([
 ]);
 /** kubectl/helm options that consume the NEXT token; their value must never be mistaken for the verb. */
 const K8S_VALUE_OPTS =
-  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--kube-token|--kube-apiserver|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
+  /^(-n|--namespace|--as-user-extra|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--kube-token|--kube-apiserver|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
 
 const HELM_VERBS = new Set([
   ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency', 'diff'],
@@ -8720,6 +8839,24 @@ function classifyShellPaths(
   // every commit in that repository (exit review 4).
   if (STRING_OPERAND_HEADS.has(head)) return hits;
   const paths = pathTokens(bare, cwd).filter((p) => !patternWords.includes(p.raw));
+  // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
+  // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
+  // approvable question, never a silent yes.
+  {
+    const head = (tokens[commandHeadIndex(tokens)] ?? '').replace(/^.*\//, '');
+    const editsInPlaceHere = /^(sed|gsed|perl)$/.test(head) && tokens.some((t) => /^-[a-zA-Z]*i/.test(t) || t === '--in-place');
+    if (
+      (/^(tee|touch|mkdir|cp|mv|ln|install|truncate|ginstall)$/.test(head) || editsInPlaceHere) &&
+      tokens.slice(commandHeadIndex(tokens) + 1).some((t) => !t.startsWith('-') && /[$`]/.test(t))
+    )
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: `${head} writes to a path built at run time`,
+        segment: seg,
+        absolute: false,
+      });
+  }
   // a container bind mount hands the host path to the container: the SOURCE is read and written, whatever the
   // command inside the container then does. Resolving it as a path beats guessing at its spelling with a regex.
   // A KNOWN, ALLOW-classed command whose OPERAND names a program the class does not bound is not really known:
@@ -9666,7 +9803,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
 /** Whether a command string is a `git commit` with a hook-bypass flag (--no-verify, or a short-flag cluster
  *  containing `n`: -n/-nm/-nam/-vnm). Quote-aware: a `-n` inside the quoted -m/-F message is never a false positive. */
 function commitBypassFlag(cmdStr: string): boolean {
-  const m = tokenizeMarked(cmdStr);
+  const m = commandWords(tokenizeMarked(cmdStr));
   const gi = m.findIndex((t) => !t.quoted && t.text.slice(t.text.lastIndexOf('/') + 1) === 'git');
   if (gi < 0) return false;
   const ci = m.findIndex((t, i) => i > gi && !t.quoted && t.text === 'commit');
@@ -9685,18 +9822,19 @@ function commitBypassFlag(cmdStr: string): boolean {
   // `--no-verify`. Accepting every prefix is fail-closed: an ambiguous one makes git error out, never bypass.
   const abbreviatedNoVerify = (tok: string): boolean =>
     tok.length >= 6 && '--no-verify'.startsWith(tok);
+  // A message/file flag consumes the NEXT token as its value, so that token is data, not a flag - and it is data even when it
+  // looks like the flag that consumed it: `git commit -m -m -n` has the message `-m` and the flag `-n` (exit review 11).
+  let consume = false;
   for (let k = ci + 1; k < m.length; k++) {
-    const prev = m[k - 1]!;
-    // a message/file flag consumes the NEXT token as its value, so that token is data, not a flag — skip it. This
-    // includes a short-flag cluster ENDING in `m`/`F` (`-am`, `-nm`, `-qm`): the trailing m/F takes the next token as
-    // the message. (The introducer must be unquoted; a quoted `"-m"` is not one. A `-nm` bypass is already caught at
-    // the `-nm` token itself before its message is reached.)
-    if (
-      !prev.quoted &&
-      (/^(--message|--file|--reuse-message|--reedit-message|-C|-c)$/.test(prev.text) ||
-        /^-[A-Za-z]*[mF]$/.test(prev.text))
-    )
+    // a short-flag cluster ENDING in `m`/`F` (`-am`, `-nm`, `-qm`) takes the next token as the message too. (The introducer
+    // must be unquoted; a quoted `"-m"` is not one. A `-nm` bypass is caught at the `-nm` token itself before its message.)
+    if (consume) {
+      consume = false;
       continue;
+    }
+    const introducer = (tok: { text: string; quoted: boolean }): boolean =>
+      !tok.quoted &&
+      (/^(--message|--file|--reuse-message|--reedit-message|-C|-c)$/.test(tok.text) || /^-[A-Za-z]*[mF]$/.test(tok.text));
     // the token's own quotes are already stripped (the shell strips `"-n"`/`-"n"`/`-n"m"` to `-n`/`-nm`). Model the
     // remaining reconstruction tricks: `$IFS`/`${IFS}` field-split the word, and `$""`/`$''`/`$VAR` empty-expand away —
     // so `-n$IFS-m`, `-n${IFS}`, `-n$""` all reduce to a bare `-n` before git parses it.
@@ -9716,6 +9854,7 @@ function commitBypassFlag(cmdStr: string): boolean {
         if (part === '--no-verify' || abbreviatedNoVerify(part) || clusterNoVerify(part)) return true;
       }
     }
+    if (introducer(m[k]!)) consume = true;
   }
   return false;
 }
@@ -10219,6 +10358,8 @@ function analyzeSegments(
     // ALLOW, through an organization-locked deny and through absolute core denies for psql and the cloud CLIs
     // (exit review 8). A binding is trusted only where it is UNCONDITIONAL.
     let condDepth = 0;
+    /** the literal values assigned earlier in this command line, where the assignment is proven to have happened */
+    const shellVars = new Map<string, string>();
     /** how deep inside a function BODY this segment sits: its bindings are the function's, not the caller's */
     let fnBodyDepth = 0;
     const stages = unit;
@@ -10274,7 +10415,7 @@ function analyzeSegments(
     // scan, pathTokens, the short-flag cluster reader and every producer. The shell does it ahead of everything
     // else, so a reader given the unexpanded text is reading a word that will never exist (exit review 9).
     const braceOverflow = { hit: false };
-    const seg = expandBraces(stage.text, braceOverflow);
+    const seg = substituteKnownVars(expandBraces(stage.text, braceOverflow), shellVars);
     // `if`/`while`/`until`/`for`/`case` open a branch whose body may not run; `fi`/`done`/`esac` close it
     // ...through `time` and `!`, which are reserved words in FRONT of a compound command: `time if false` opens the
     // same branch `if false` does (exit review 10, cross-product)
@@ -10289,7 +10430,9 @@ function analyzeSegments(
     // A `case` ARM IS A BRANCH THAT MAY NOT RUN, AND THE SPLITTER CONSUMES ITS HEADER: `case x in y) cd sub ;; esac`
     // reaches this loop as `cd sub`, with no `case` word left for the keyword test above to count (exit review 10,
     // state-flow). The splitter says which stages sit inside one.
-    const bindingIsProven = condDepth === 0 && !inPipeline && fnBodyDepth === 0 && stage.inCase !== true;
+    // ...and after `&&` or `||`: `false && git() { true; }` never defines it (exit review 11)
+    const bindingIsProven =
+      condDepth === 0 && !inPipeline && fnBodyDepth === 0 && stage.inCase !== true && stage.sepBefore !== '&&' && stage.sepBefore !== '||';
     if (kw) condDepth++;
     else if (kwEnd) condDepth = Math.max(0, condDepth - 1);
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
@@ -10360,11 +10503,20 @@ function analyzeSegments(
     // while the definition stands. `aws() { echo hi; }; unset -f aws; aws iam delete-user --user-name bob`
     // deleted an IAM user at ALLOW, because the decoy definition was still believed (exit review 9). `unset`
     // with no `-f` removes a VARIABLE and leaves the function alone; `unset -v` likewise.
-    const unset = /^unset\s+(.*)$/.exec(cdTrimmed);
+    // `unset` IS FOUND WHERE THE COMMAND STARTS: `builtin unset -f git`, `command unset -f git`, `FOO=1 unset -f git`, `\\unset`
+    // and `"unset"` are the same removal (exit review 11)
+    const unsetWords = ((): string[] | null => {
+      const w = commandWords(tokenizeMarked(expandBraces(cdTrimmed))).map((x) => x.text);
+      let k = 0;
+      while (k < w.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[k]!) || PREFIX_KEYWORDS.has(w[k]!) || w[k] === 'builtin' || w[k] === 'command' || w[k] === '--')) k++;
+      return w[k] === 'unset' ? w.slice(k + 1) : null;
+    })();
+    const unset = unsetWords !== null ? [cdTrimmed, unsetWords.join(' ')] : null;
     if (unset) {
-      const args = tokenize(cdTrimmed).slice(1);
+      const args = unsetWords!;
       const functionsToo = !args.some((a) => /^-[a-zA-Z]*v$/.test(a)) || args.some((a) => /^-[a-zA-Z]*f$/.test(a));
       if (functionsToo) for (const a of args) if (!a.startsWith('-')) functionNames.delete(a);
+      for (const a of args) if (!a.startsWith('-')) shellVars.delete(a);
     }
     // THE WORKING DIRECTORY COMES FROM THE TIMELINE (cwdTimeline), a set that says where this stage MAY run. More than
     // one, or an unknown, means the directory is not established: nothing positive rests on it, and every relative
@@ -10411,7 +10563,7 @@ function analyzeSegments(
       cwdVerified: cwd !== '\0dynamic' && !cdUnproven,
       // ENVIRONMENT-INPUT CLOSURE: captured HERE, before normalizeSegment strips the assignments, so the producer
       // boundary sees what the command line did to the tool it is about to resolve
-      envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg) },
+      envInputs: { ...state.env.envInputs, ...carriedEnv, ...segmentEnvInputs(seg, true) },
       definedNames: functionNames,
       rawSegment: seg,
       // A HEREDOC IS STANDARD INPUT THE KERNEL CAN READ. `docker build -f - . <<EOF … EOF` writes the whole
@@ -10782,7 +10934,12 @@ function analyzeSegments(
     const assignWords = tokenize(bare);
     if (assignWords.length > 0 && assignWords.every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w))) {
       for (const w of assignWords) {
-        Object.assign(carriedEnv, segmentEnvInputs(w + ' x'));
+        // a literal value becomes known to the stages that follow - where the assignment is certain to have run
+        const vn = w.slice(0, w.indexOf('='));
+        const vv = w.slice(w.indexOf('=') + 1);
+        if (bindingIsProven && !/[$`*?[{~\\]/.test(vv)) shellVars.set(vn, vv);
+        else shellVars.delete(vn);
+        Object.assign(carriedEnv, segmentEnvInputs(w + ' x', true));
         // A STANDALONE `export NAME=value` IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
         // emitted the marker and `export LD_AUDIT=./evil.so; cmd` did not, although it re-points every program
         // for the rest of the shell rather than for one command (exit review 10).
