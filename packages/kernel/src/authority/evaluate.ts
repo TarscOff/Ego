@@ -3969,6 +3969,15 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     for (const c of expandMakeText(trimmed, model.vars).ran) model.parseRan.push(c);
     // GNU make reads `${…}` and `$(…)` as the SAME reference, and the guard saw only the paren form
     if (/\$[({]eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
+    // GNU make >= 4.0 `load FILE` (and `-load`) DLOPENS a shared object at MAKEFILE-PARSE time and calls its setup
+    // function: native code in make's own process, for every goal and before any recipe, regardless of `-n`. It is
+    // the third way a makefile executes at parse time and the only one that is not shell at all, so no
+    // shell-shaped check could have seen it (exit review 10). It is a construct the resolver cannot follow.
+    if (/^-?load\s+\S/.test(trimmed)) {
+      model.unsupported.push(`load directive: ${trimmed}`);
+      current = null;
+      continue;
+    }
     if (/^\.ONESHELL\s*:/.test(trimmed)) {
       // the WHOLE recipe goes to one shell, so a `cd` on one line leaks into the next
       model.oneShell = true;
@@ -4246,7 +4255,17 @@ function resolveGitAmbient(ctx: EvaluationContext, tokens: string[], env: Execut
   // LOCAL scope only. The operator's own global pager, editor or ssh command is their choice and is not part of
   // the repository's attack surface; gating on it would gate every `git status` on every developer machine. What
   // matters is config an agent or a dependency can write INTO THE CHECKOUT.
-  const configPrograms = gitLocalProgramValues(root, verb);
+  const configFailed = { value: false };
+  const configPrograms = gitLocalProgramValues(root, verb, configFailed);
+  if (configFailed.value)
+    return {
+      kind: 'git-ambient',
+      key: `git-config-unreadable:${root}:${verb}`,
+      body: configPrograms.length ? configPrograms : null,
+      bodyEnv: childEnvironment(env, { cwd: root, cwdVerified: env.cwdVerified }),
+      reason: `the git configuration \`git ${verb}\` runs against could not be read in full`,
+      resolution: 'AMBIENT_UNRESOLVED',
+    };
   if (!names.length && configPrograms.length)
     return {
       kind: 'git-ambient',
@@ -4396,12 +4415,18 @@ const EVERY_VERB = (set: ReadonlySet<string>): boolean => set.size === 0;
 
 /** REPOSITORY-LOCAL git config whose VALUE is a command git will run: clean/smudge filters, textconv, fsmonitor
  *  and the like. Local scope only \u2014 these are the keys an agent or a dependency can write into the checkout. */
-function gitLocalProgramValues(root: string, verb: string): string[] {
+function gitLocalProgramValues(root: string, verb: string, failed?: { value: boolean }): string[] {
   const out: string[] = [];
   // `--local` does NOT expand `include.path` in any spelling, so a filter reached through an include escaped the
   // closure entirely. Reading the full config WITH includes and keeping only the entries whose ORIGIN file lies
   // inside the repository gives both: the includes are expanded, and the operator's global settings stay out.
   const dump = git(['config', '--list', '--includes', '--show-origin'], root);
+  // A SUBPROCESS THAT COULD NOT ANSWER IS NOT A CONFIGURATION THAT SAYS NOTHING. `git()` flattens a spawn error, a
+  // timeout and an over-large output into the same `{ ok: false, stdout: '' }` as a repository with no config at
+  // all, and this returned "no programs" for both — so padding a shared config file past 16 MiB made a
+  // `core.fsmonitor` program invisible (exit review 10). `status === null` is the spawn/timeout/ENOBUFS case;
+  // a non-zero status means git ran and refused, which also stops the git command itself.
+  if (dump.status === null && failed) failed.value = true;
   if (!dump.ok || !dump.stdout) return out;
   const repo = canonicalPath(root);
   // every file the repository's OWN config pulls in with `include.path` / `includeIf.<cond>.path`, transitively

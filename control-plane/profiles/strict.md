@@ -26,6 +26,13 @@ budgets:
 narrow:
   - capability: git.local.commit
     verdict: ASK
+  # A COMMIT IS A REAL-WORLD EFFECT THAT THREE CAPABILITIES CAN PRODUCE, and the narrowing was written against one
+  # of them: `git merge --no-ff` and `git cherry-pick` create a commit and write the merged files into the working
+  # tree, and were ALLOW while `git commit` was ASK (exit review 10).
+  - capability: git.local.merge
+    verdict: ASK
+  - capability: git.local.cherry-pick
+    verdict: ASK
   - capability: command.local-mutation
     verdict: ASK
 ---
