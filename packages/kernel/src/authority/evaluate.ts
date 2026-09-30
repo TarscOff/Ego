@@ -149,8 +149,14 @@ const WRAPPERS_WITH_OPERAND = new Set(['flock', 'su', 'runuser']);
 /** two-word runners: the pair is stripped so the real command is what everything downstream sees */
 const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'], ['yarn', 'exec']];
 /** environment assignments that change what a command executes or where governance looks: never silently stripped */
+/** A NAME ON THIS LIST RE-POINTS WHAT A PROGRAM LOADS OR WHERE IT LOOKS. The list is an ENUMERATION, which is a
+ *  shape that is wrong by omission — and it was: `XDG_CONFIG_HOME=/tmp/evil git status` makes git read its
+ *  global configuration, aliases and hooks path from an attacker-chosen directory; `PERL5LIB` is the path twin
+ *  of the `PERL5OPT` already listed; `LD_AUDIT` was in the code and missing from the matcher's own copy of the
+ *  same set (exit review 10). The two copies are now generated from THIS one, so they cannot disagree again.
+ */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES)$/;
 
 /** Options of a governed variable that actually LOAD CODE. `NODE_OPTIONS=--max-old-space-size=4096 npm test` is
  *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
@@ -7232,6 +7238,24 @@ function classifyShellPaths(
       absolute: false,
       opaqueUnread: true,
     });
+/** GIT PATHSPEC MAGIC. `:/control-plane` is REPO-ROOT-RELATIVE — git documents the leading `:/` and the long
+ *  `:(top)` form as exactly that — so a pathspec written this way names the governed directory from anywhere in
+ *  the checkout, and reading it as a literal relative path made `git checkout origin/evil :/control-plane` and
+ *  `git rm -r :/control-plane` ALLOW (exit review 10). `:!` and `:(exclude)` mark an EXCLUSION, which names no
+ *  destination at all. Returns the path the pathspec denotes, or null when it excludes. */
+function pathspecPath(spec: string, repoRoot: string | null): string | null {
+  if (/^:(\(.*exclude.*\)|!|\^)/.test(spec)) return null;
+  const long = /^:\(([^)]*)\)(.*)$/.exec(spec);
+  if (long) {
+    const magic = long[1]!.split(',');
+    if (magic.some((w) => /^(exclude|\^)$/.test(w.trim()))) return null;
+    const rest = long[2]!;
+    return magic.some((w) => w.trim() === 'top') && repoRoot !== null ? `${repoRoot}/${rest}` : rest;
+  }
+  if (spec.startsWith(':/')) return repoRoot === null ? null : `${repoRoot}/${spec.slice(2)}`;
+  return spec;
+}
+
   // `git show <rev>:<path>` READS THAT PATH OUT OF HISTORY. The file need not be in the working tree at all —
   // a `.env` deleted last week is still in every commit that had it — and the operand carries a `<rev>:` prefix
   // that made it look like nothing the path scan recognises, so `git show HEAD:.env` printed a credential file
@@ -7458,7 +7482,7 @@ function classifyShellPaths(
     // unless its own SCRIPT names a file to write, which `w FILE` does (exit review 9)
     (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head) &&
       (editsInPlace(head, tokens) || sedWrittenFiles(rawSeg, ctx, cwd).length > 0)) ||
-    (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv)$/.test(tokens[1] ?? '')) ||
+    (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv|merge-file)$/.test(tokens[1] ?? '')) ||
     (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
@@ -7645,7 +7669,12 @@ function classifyShellPaths(
           absolute: false,
           opaqueUnread: true,
         });
-      if (sub === 'rm' || sub === 'mv') {
+      // `git merge-file A B C` WRITES A IN PLACE — it is plumbing, not the porcelain merge, and `^git\s+merge\b`
+      // matched it because `\b` sits between "merge" and "-" (exit review 10). `-p`/`--stdout` prints instead.
+      if (sub === 'merge-file') {
+        const specs = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        dest = specs.length && !tokens.some((t) => /^(-p|--stdout)$/.test(t)) ? specs[0]! : null;
+      } else if (sub === 'rm' || sub === 'mv') {
         const specs = [...tokens.slice(2).filter((t) => !t.startsWith('-')), ...fileSpecs];
         if (specs.length) {
           gitPathspecs = specs;
@@ -7731,7 +7760,11 @@ function classifyShellPaths(
   // has neither a slash nor a dot, and this shape test rejected it (exit review 8)
   if (!dest && genericOutput && !/^-/.test(genericOutput)) dest = genericOutput;
   if (dest === 'ALL_PATHSPECS') {
-    for (const sp of gitPathspecs) {
+    const psRoot = repoRootFor(ctx, cwd);
+    for (const rawSpec of gitPathspecs) {
+      // a pathspec may carry MAGIC: `:/x` and `:(top)x` are repo-root-relative, `:!x` and `:(exclude)x` exclude
+      const sp = pathspecPath(rawSpec, psRoot === null ? null : psRoot.split(sep).join('/'));
+      if (sp === null) continue;
       if (paths.some((q) => q.raw === sp)) continue;
       const expanded = expandHome(sp, cwd);
       if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: sp, abs: null, glob: false });
@@ -8961,7 +8994,17 @@ function analyzeSegments(
       }
       break;
     }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
+    if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) {
+      Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
+      // A STANDALONE `export NAME=value` IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
+      // emitted the marker and `export LD_AUDIT=./evil.so; cmd` did not, although it re-points every program
+      // for the rest of the shell rather than for one command (exit review 10).
+      const name = bare.slice(0, bare.indexOf('='));
+      if (ENV_INJECT_RE.test(name) && envInjects(name, bare.trim()))
+        hits.push(
+          ...classifyNormalized(table, ctx, compiled, `${MARK}env-inject ${name}`, { ...state, env }),
+        );
+    }
     const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([^\s()<>|&;'"$`]+)\s*\(\s*\)\s*\{)/.exec(seg.trim());
     if (decl && bindingIsProven) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
     // TREE-STATE PROVENANCE: a checkout, reset, stash pop, merge, rebase or worktree switch replaces a

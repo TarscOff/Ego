@@ -54,7 +54,7 @@ matchers:
     command: '(^|\s)((\S*/)?(ego|harness)(\.js)?|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
   - capability: command.env-inject
     tool: Bash
-    command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$)'
+    command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|RUBYLIB|GEM_HOME|GEM_PATH|CLASSPATH|JAVA_HOME|NODE_PATH|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|GLIBC_TUNABLES|OBJC_INSERT_LIBRARIES|LUA_PATH|LUA_CPATH)'
   - capability: command.env-override
     tool: Bash
     command: '^\x00ego\x00env-inject\s+'
@@ -588,7 +588,7 @@ matchers:
   # work and stays out of this.
   - capability: git.local.merge.network
     tool: Bash
-    command: '^git\s+(merge|rebase|cherry-pick|reset)\b[^|;&]*\s(FETCH_HEAD|ORIG_HEAD)(\s|$)'
+    command: '^git\s+(merge(?![-\w])|rebase|cherry-pick|reset)\b[^|;&]*\s(FETCH_HEAD|ORIG_HEAD)(\s|$)'
   # `git stash -u` / `--include-untracked` removes UNTRACKED files from the working tree as well as the tracked
   # ones — content that exists nowhere else, since it was never committed (exit review 8).
   - capability: command.destructive
@@ -700,7 +700,7 @@ matchers:
   # of the container runtime itself is a containment requirement (#26), not a per-invocation prompt.
   - capability: command.script-opaque
     tool: Bash
-    command: '^(docker|docker-compose|podman|podman-compose|nerdctl|lima|colima)(\s+(compose|container|service|stack))?\s+(exec|attach)\b'
+    command: '^(docker|docker-compose|podman|podman-compose|nerdctl|lima|colima)(\s+(compose|container|service|stack))?[^|;&]*\s(exec|attach)\b'
   # A PUSH IS A PUSH IN EVERY SPELLING. The management-group form (`docker image push`), the compose form
   # (`docker compose push`) and buildx's `--push` were not all covered, so the same upload to a shared registry
   # was DENY as `docker push` and ALLOW as `docker image push` (exit review 7).
@@ -725,7 +725,7 @@ matchers:
     # buildx's OWN verbs also publish: `bake --push` builds every target in a bake file and pushes each one, and
     # `--output type=registry` is what `--push` is shorthand FOR. Naming only `--push` covered neither, so an
     # upload to a shared registry reached ALLOW through the two spellings buildx documents (exit review 9).
-    command: '^(docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?(push\b|(build|bake)\b[^|;&]*(--push\b|(--output|-o)[= ][^\s]*type=registry))'
+    command: '^((docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?|docker-compose\s+|podman-compose\s+)[^|;&]*?\s?(push\b|(build|bake)\b[^|;&]*(--push\b|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
   # Handing a registry password on the command line writes it into the shell history and the process table.
   # SCOPED TO THE VERBS THAT TAKE ONE: docker's `-p` is `--publish`, so an unscoped rule turned `docker run -p
   # 8080:80 nginx` — the most ordinary container command there is — into a credential exposure (exit review 8).
