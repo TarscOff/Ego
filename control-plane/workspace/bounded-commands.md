@@ -26,6 +26,10 @@ bounded:
   # `local-function` is the marker the analyzer puts on a call to a function DEFINED IN THE SAME UNIT: the body it
   # runs was handed to the analyzer at the definition, so the call introduces no closure of its own.
   - "\u0000ego\u0000local-function"
+  # `help-probe` is the marker a HELP PROBE normalizes to. It is emitted only where the position proves the tool is
+  # being asked for its manual - the flag is last, not an option's value, after no `--` - so there is no program
+  # behind it to bound (exit review 10).
+  - "\u0000ego\u0000help-probe"
   # `command` is a builtin that names another command; the normalizer hands that command over on its own, so the
   # only form in which this head survives is the LOOKUP `command -v NAME`, which executes nothing (exit review 4)
   - 'command'

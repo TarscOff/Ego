@@ -980,7 +980,74 @@ function operandWrapperBody(tokens: string[], from: number): string | null {
   return null;
 }
 
+/** THE CLIs THAT PRINT HELP BEFORE THEY DO ANYTHING, and the verbs on them that hand their remaining arguments to
+ *  ANOTHER program. `git push --help` opens the manual and transmits nothing; `docker run IMG cmd --help` runs
+ *  `cmd --help` in a container, and `sh -c BODY --help` makes `--help` the shell's `$0`. The first family is a
+ *  probe; the second must never be read as one. */
+const HELP_FIRST_CLIS = /^(git|gh|glab|aws|gcloud|az|kubectl|oc|helm|argocd|flux|terraform|tofu|pulumi|docker|podman|nerdctl)$/;
+const ARGV_CARRYING_VERBS = /^(run|exec|create|start|attach|cp|debug|port-forward|proxy|plugin|kustomize)$/;
+
+/** Returns the head when this segment is a HELP PROBE: the tool is asked for its manual and performs nothing.
+ *
+ *  A refusal of `git push --help` is an absolute deny over an act that changes nothing, which is the one verdict a
+ *  human cannot approve (exit review 10: thirty findings, one cause). But `--help` is an exception that can hide
+ *  the act, so it is a claim about the WHOLE line and is granted only where the position proves it:
+ *    - it is the LAST word, so no other argument follows that the tool could be reading;
+ *    - it is not the VALUE of an option — the word before it is a positional, never an option, because
+ *      `git push -o --help origin main` pushes with a push-option of `--help`;
+ *    - no `--` precedes it, after which everything belongs to another program;
+ *    - the verb is not one that carries its arguments to a container or a cluster;
+ *    - it was written UNQUOTED, so `--description 'run --help first'` is a value and not a flag.
+ *  `-h` is a help flag for git only: for psql and mysql it is `--host`. */
+function helpProbeHead(segment: string): string | null {
+  const t = tokenizeMarked(segment);
+  const words = t.map((x) => x.text);
+  const hi = commandHeadIndex(words);
+  const head = (words[hi] ?? '').replace(/^.*\//, '');
+  // A SHELL'S SYNTAX CHECK PARSES AND EXECUTES NOTHING. `bash -n -c "rm -rf /"` reads the body and stops; it is
+  // how an author verifies a script before trusting it, and reading the body as a command made the verification
+  // carry the body's verdict (exit review 10). `-n` must be an OPTION of the shell itself - before `-c` and before
+  // any operand - or it belongs to the script.
+  if (/^(ba|z|da|k)?sh$/.test(head)) {
+    for (const x of t.slice(hi + 1)) {
+      if (x.quoted || !x.text.startsWith('-') || x.text === '--') break;
+      if (x.text === '--noexec' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(x.text)) return head;
+    }
+    return null;
+  }
+  if (!HELP_FIRST_CLIS.test(head)) return null;
+  const rest = t.slice(hi + 1);
+  if (rest.length === 0) return null;
+  const last = rest[rest.length - 1]!;
+  const isFlag = !last.quoted && (/^(--help|--usage)$/.test(last.text) || (head === 'git' && last.text === '-h'));
+  if (!isFlag) return null;
+  const prev = rest[rest.length - 2];
+  if (prev !== undefined && (prev.text.startsWith('-') || prev.quoted)) return null;
+  if (rest.some((x) => !x.quoted && x.text === '--')) return null;
+  if (/^(docker|podman|nerdctl|kubectl|oc|helm)$/.test(head)) {
+    // the VERB is the first bare word, or the one after a management group: `docker container run` carries its
+    // arguments to a container, `docker context create` and `docker volume create` carry nothing anywhere
+    const bare = rest.filter((x) => !x.quoted && !x.text.startsWith('-')).map((x) => x.text);
+    const verb = /^(container|compose|service|stack|image|builder|buildx)$/.test(bare[0] ?? '') ? bare[1] : bare[0];
+    if (ARGV_CARRYING_VERBS.test(verb ?? '') || ARGV_CARRYING_VERBS.test(bare[0] ?? '')) return null;
+  }
+  return head;
+}
+
+/** What the segment normalizes to. A HELP PROBE normalizes to a marker naming the tool, so nothing about the verb
+ *  it was asked about reaches a matcher; everything else the global options produced (`git config …` for a `-c`,
+ *  env-injection and identity markers) is KEPT, because a probe does not launder those. */
 export function normalizeSegment(segment: string): string[] {
+  const out = normalizeSegmentInner(segment);
+  const probe = helpProbeHead(segment);
+  if (probe === null) return out;
+  return [
+    ...out.filter((n) => n.startsWith(MARK) || /^git (config|alias-override) /.test(n)),
+    `${MARK}help-probe ${probe}`,
+  ];
+}
+
+function normalizeSegmentInner(segment: string): string[] {
   let s = segment.trim();
   // `npx --package=<spec> -c "<benign>"` FETCHES and runs that package; the command after `-c` is a decoy, and
   // every layer below treats `npx` as transparent and `-c` as a carrier, so the acquisition vanished entirely.
@@ -1032,7 +1099,10 @@ export function normalizeSegment(segment: string): string[] {
     for (;;) {
       const m = /^([A-Za-z_][A-Za-z0-9_]*)=(?:'[^']*'|"[^"]*"|\S*)\s+/.exec(s);
       if (!m) return any;
-      if (ENV_INJECT_RE.test(m[1]!) && envInjects(m[1]!, m[0]!)) extra.push(`${MARK}env-inject ${m[1]}`);
+      // `IFS= read -r line` is the idiom of every line loop: the assignment scopes to the `read` builtin alone, and
+      // an IFS that is only ever read by `read` re-points nothing (exit review 10)
+      const ifsForRead = m[1] === 'IFS' && /^read\b/.test(s.slice(m[0].length));
+      if (ENV_INJECT_RE.test(m[1]!) && envInjects(m[1]!, m[0]!) && !ifsForRead) extra.push(`${MARK}env-inject ${m[1]}`);
       if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
       s = s.slice(m[0].length);
       any = true;
@@ -1700,6 +1770,11 @@ function unquoteShellWord(w: string): string {
         continue;
       }
       if (ch === '\\' && quote === '"' && i + 1 < w.length) {
+        // literal before any character but `$`, a backtick, `"`, `\\` and a newline - see the tokenizers
+        if (!/[$`"\\\n]/.test(w[i + 1]!)) {
+          out += ch;
+          continue;
+        }
         out += w[++i]!;
         continue;
       }
@@ -1986,6 +2061,14 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
     if (ch === '\\' && quote !== "'" && i + 1 < s.length) {
+      // INSIDE DOUBLE QUOTES A BACKSLASH ESCAPES ONLY `$`, A BACKTICK, `"`, `\\` AND A NEWLINE (POSIX 2.2.3); before any
+      // other character it is LITERAL. `psql -c "\dt"` hands psql the two characters `\dt`, and dropping the
+      // backslash here delivered `dt` - so a psql metacommand written the way everyone writes it was unreadable
+      // (exit review 10). Outside quotes the backslash is always removed.
+      if (quote === '"' && !/[$`"\\\n]/.test(s[i + 1]!)) {
+        cur += ch;
+        continue;
+      }
       cur += s[++i]!;
       continue;
     }
@@ -2087,6 +2170,14 @@ function tokenize(s: string): string[] {
     const ch = s[i]!;
     // a backslash escape is removed the way the shell removes it (`.ss\h` is `.ssh`), except inside single quotes
     if (ch === '\\' && quote !== "'" && i + 1 < s.length) {
+      // INSIDE DOUBLE QUOTES A BACKSLASH ESCAPES ONLY `$`, A BACKTICK, `"`, `\\` AND A NEWLINE (POSIX 2.2.3); before any
+      // other character it is LITERAL. `psql -c "\dt"` hands psql the two characters `\dt`, and dropping the
+      // backslash here delivered `dt` - so a psql metacommand written the way everyone writes it was unreadable
+      // (exit review 10). Outside quotes the backslash is always removed.
+      if (quote === '"' && !/[$`"\\\n]/.test(s[i + 1]!)) {
+        cur += ch;
+        continue;
+      }
       cur += s[++i]!;
       continue;
     }
@@ -4682,6 +4773,10 @@ function resolveScriptCommand(
   // `docker build`'s is — `bake` was an unknown command and the `RUN git push origin main` in the Dockerfile it
   // selects was never seen (exit review 9). A bake file this kernel cannot read is opacity, not absence.
   const bakeAt = tokens.findIndex((t, i) => i > 0 && t === 'bake' && DOCKER_GROUPS.test(tokens[i - 1] ?? ''));
+  if (/^(docker|podman|nerdctl)$/.test(head) && bakeAt > 0 && tokens.some((t) => t === '--print' || t === '--print=true')) {
+    // `bake --print` PRINTS the resolved configuration as JSON and builds nothing (exit review 10)
+    return { kind: 'shell-script', key: 'bake:print', body: null, reason: 'bake --print renders the configuration and builds nothing', resolution: 'NOT_A_PRODUCER' };
+  }
   if (/^(docker|podman|nerdctl)$/.test(head) && bakeAt > 0) {
     const named = tokens
       .map((t, i) => (t === '-f' || t === '--file' ? tokens[i + 1] : /^(?:--file=|-f)(.+)$/.exec(t)?.[1]))
@@ -5638,7 +5733,10 @@ function resolveScriptCommand(
     // `make run` and its own `make CMD="git push origin main" run` the SAME execution, so the cycle guard
     // stopped the second one and its recipe was never analysed (exit review 8).
     const cliKey = [...cliVars].map(([k, v]) => `${k}=${v}`).sort().join('\u0000');
-    const key = `make:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}:${cliKey}`;
+    // ...AND THE DIRECTORY IT RUNS IN. The key dropped `makeDir` whenever a makefile was resolved, so a recipe
+    // that re-enters make with `-C sub -f ../Makefile all` was the SAME execution as the one that started it and
+    // the cycle guard stopped it - while `./x.sh` inside it is `sub/x.sh`, a different file (exit review 10).
+    const key = `make:${makeDir}:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}:${cliKey}`;
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
@@ -6031,7 +6129,8 @@ const TARGET_ENV_HEADS = new Set([
 const K8S_MUTATING_VERBS = new Set([
   'apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon',
   'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward',
-  'debug', 'certificate', 'proxy', 'auth', 'apply-set', 'wait',
+  'debug', 'certificate', 'proxy', 'auth', 'apply-set',
+  // `wait` is NOT here: it blocks until a condition holds and changes nothing (exit review 10)
 ]);
 /** A VERB IS NOT A MUTATION IN EVERY SUBCOMMAND IT SPELLS. `rollout` restarts and undoes — and it also REPORTS,
  *  with `status` and `history`; `auth` changes nothing at all in the `can-i` and `whoami` forms, which are the
@@ -6119,11 +6218,14 @@ function isDryRun(seg: string): boolean {
   // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
   // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
   return t.some(
-    (w, i) =>
+    (w) =>
       w === '--server-dry-run' ||
+      w === '--dryrun' ||
       w === '--what-if' ||
       w === '--no-act' ||
-      (w === '--dry-run' && !/^(none|false|0|no)$/i.test(t[i + 1] ?? '')) ||
+      // a BARE `--dry-run` is a dry run: kubectl's and helm's flag takes its value only with `=`, so the next word is
+      // a positional (`helm upgrade --dry-run none ./chart` upgrades a release NAMED none, as a dry run)
+      w === '--dry-run' ||
       /^--dry-run=(client|server|true|1|yes)$/i.test(w),
   );
 }
@@ -6214,15 +6316,15 @@ const TARGET_SEVERITY: Record<TargetClass, number> = {
 
 /** Every kubectl verb, so the verb can be found BY NAME rather than by skipping option values. */
 const KUBECTL_VERBS = new Set([
-  ...['get', 'describe', 'logs', 'top', 'explain', 'api-resources', 'api-versions', 'version', 'config', 'cluster-info', 'wait', 'diff', 'events', 'kustomize'],
+  ...['get', 'describe', 'logs', 'top', 'explain', 'api-resources', 'api-versions', 'version', 'config', 'cluster-info', 'wait', 'diff', 'events', 'kustomize', 'completion', 'options'],
   ...['apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon', 'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward', 'debug', 'certificate', 'proxy', 'auth', 'apply-set'],
 ]);
 /** kubectl/helm options that consume the NEXT token; their value must never be mistaken for the verb. */
 const K8S_VALUE_OPTS =
-  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--kube-token|--kube-apiserver|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--warnings-as-errors|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
+  /^(-n|--namespace|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--kube-token|--kube-apiserver|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
 
 const HELM_VERBS = new Set([
-  ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency'],
+  ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency', 'diff'],
   ...['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test', 'repo', 'plugin', 'create', 'package'],
 ]);
 
@@ -6405,6 +6507,8 @@ function resolveContainerTarget(
     // `docker --context production logs app` was not (exit review 10). The same defect as the env-inject list
     // having two copies: one statement, expressed twice, drifting apart.
     ...['image ls', 'image history', 'image save', 'image tree'],
+    // `compose version` and `compose ls` print the plugin's version and the project list: no container is touched
+    ...['compose version', 'compose ls'],
     ...['container ls', 'container port', 'container stats', 'container top', 'container diff'],
     ...['volume ls', 'volume inspect', 'network ls', 'network inspect', 'system info', 'system df', 'system events'],
     ...['context ls', 'context inspect', 'context show', 'builder ls', 'buildx ls', 'buildx inspect'],
@@ -6493,7 +6597,9 @@ function resolveK8sTarget(
   // option's value and the subcommand read as `auth` instead of `can-i` (self-attack on exit review 9).
   const sub = tokens[verbAt + 1];
   const readsOnly =
-    verb !== undefined && sub !== undefined && (K8S_READ_SUBCOMMANDS[verb]?.has(sub) ?? false);
+    (verb !== undefined && sub !== undefined && (K8S_READ_SUBCOMMANDS[verb]?.has(sub) ?? false)) ||
+    // `kubectl set env … --list` PRINTS the environment and sets nothing
+    (verb === 'set' && tokens.includes('--list'));
   const mutating =
     switchesContext || touchesSecrets
       ? true
@@ -6631,7 +6737,12 @@ function resolveDbTarget(
   // written as, so a `;` inside it is visible and the whole statement can be judged
   // `-e` IS mysql's SHORT `--execute`, and only `-c` was read as a short statement flag — so every read-only
   // statement spelled the mysql way was judged as an unrestricted connection (self-attack on exit review 9).
-  const stmtTokens = rawSeg === undefined ? tokens : tokenizeMarked(rawSeg).map((t) => t.text);
+  // A GO-STYLE SINGLE-DASH LONG OPTION IS NOT A CLUSTER. influx spells it `-execute`, and the short-flag scan read it
+  // as `-e -x -e -c ute` and pulled a statement called `ute` out of it - so the read-only test failed on a
+  // statement the operator never wrote (exit review 10). Written with the double dash the scan cannot misread it.
+  const stmtTokens = (rawSeg === undefined ? tokens : tokenizeMarked(rawSeg).map((t) => t.text)).map((t) =>
+    /^-(execute|eval|query|command|init-command|init-file)(=|$)/.test(t) ? `-${t}` : t,
+  );
   // `--init-command` RUNS BEFORE EVERYTHING ELSE, so a read-only `-e` says nothing about what the session does:
   // `mysql -h prod-db --init-command="DROP TABLE users" -e "SHOW TABLES"` drops the table and then lists
   // (exit review 10). Every statement the client will run is collected, and the exception needs ALL of them to
@@ -6654,10 +6765,32 @@ function resolveDbTarget(
       // word is already gone — so `-c 'EXPLAIN SELECT …'` arrives as the bare word `EXPLAIN`. The MATCHER, which
       // sees the raw text, is what tests the rest of the statement for a write clause; both must agree before
       // the act is read as a read.
-      (/^\s*(explain|show|describe)(\s|$)/i.test(q) || /^\s*\\?(d\w*|l|z|sf|ef)\s*$/i.test(q)) &&
-      !WRITES_SOMEWHERE.test(q),
+      // A TRAILING `;` ENDS THE STATEMENT rather than starting another, `SHOW ...` never writes in any dialect (so
+      // the words after it are not verbs: `SHOW CREATE TABLE users`), and a psql metacommand takes an argument
+      // (`\\d users`). Each was refused absolutely - the inspection an operator runs BEFORE touching a database
+      // (exit review 10).
+      ((/^\s*(show|describe|desc)\b/i.test(q) && !/;\s*\S/.test(q)) ||
+        (/^\s*explain\b/i.test(q) && !WRITES_SOMEWHERE.test(q.replace(/;\s*$/, ''))) ||
+        /^\s*\\(d\w*|l|z|sf|ef)(\s+\S+)?\s*$/i.test(q)),
     );
-  const executes = !isProbeInvocation(line) && !readOnlyStatement;
+  // psql's `-l` LISTS THE DATABASES and connects to run nothing else; redis' INFO, PING, DBSIZE and TTL read server
+  // state rather than data
+  const listsOnly = head === 'psql' && tokens.some((t) => t === '-l' || t === '--list');
+  const redisRead =
+    /^(redis-cli|valkey-cli)$/.test(head) &&
+    (() => {
+      const bare: string[] = [];
+      for (let i = 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.startsWith('-')) {
+          if (/^-(h|p|a|n|u|c|d|i|x)$|^--(user|pass|db|askpass|tls-|sni|cacert|cert|key)/.test(t)) i++;
+          continue;
+        }
+        bare.push(t);
+      }
+      return /^(info|ping|dbsize|time|lastsave|ttl|pttl|type|exists|strlen|llen|scard|hlen|zcard)$/i.test(bare[0] ?? '');
+    })();
+  const executes = !isProbeInvocation(line) && !readOnlyStatement && !listsOnly && !redisRead;
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
   const signals: Array<{ cls: TargetClass; target: string }> = [];
@@ -7638,17 +7771,22 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   ];
   // ...AND EVERY ONE OF THEM, not the last. A command may name two destinations — `esbuild --metafile=A
   // --outfile=B` — and taking only the last judged B while A was the governed file (exit review 10).
-  for (const extra of optionValues(tokenize(seg), 'o', OUTPUT_FLAGS)) {
+  // `-o` IS NOT AN OUTPUT FLAG FOR EVERY TOOL: `ls -o` is long format without the group, `grep -o` prints only the
+  // matching part, `make -o FILE` marks a file as very old and `ssh -o` sets an option. Read as a destination, the
+  // NEXT WORD became a write target - `grep -rno .harness/runtime docs` searched for the pattern and was refused as
+  // a write to the runtime directory (exit review 10). Only the long spellings count for these.
+  const shortO = /^(ls|grep|egrep|fgrep|zgrep|rg|ag|ack|make|gmake|ps|ssh|scp|sftp|nm|lsof|column|mount|sudo|find)$/.test(head) ? '' : 'o';
+  for (const extra of optionValues(tokenize(seg), shortO, OUTPUT_FLAGS)) {
     if (!extra || extra.startsWith('-') || /[$`]/.test(extra)) continue;
     const eAbs = canonicalPath(isAbsolute(extra) ? extra : resolve(cwd, extra));
     const h = classifyPath(table, ctx, 'Write', eAbs);
     if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `output flag names ${extra} (${h.via})`, segment: seg });
   }
   const rawOutput =
-    optionValue(tokenize(seg), 'o', OUTPUT_FLAGS) ??
+    optionValue(tokenize(seg), shortO, OUTPUT_FLAGS) ??
     optionValue(
       tokenize(seg).map((t) => t.replace(/^(--[A-Za-z][A-Za-z-]*)(?==|$)/, (f) => f.toLowerCase())),
-      'o',
+      shortO,
       OUTPUT_FLAGS.map((f) => f.toLowerCase()),
     );
   // buildx spells its destination as a CSV of key=value inside the flag's own value: `--output type=local,dest=P`
@@ -7801,6 +7939,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       const inplace = tokens.some((t) => t === '-i' || t === '--inplace' || /^-[a-zA-Z]*i$/.test(t));
       const operands = bareOperands();
       dest = inplace && operands.length ? operands[operands.length - 1]! : null;
+    } else if (head === 'rsync' && tokens.some((t) => t === '--dry-run' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t))) {
+      // `rsync -n` (`--dry-run`) lists what WOULD be transferred and writes nothing
+      dest = null;
     } else if (['cp', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio'].includes(head)) {
       const operands = bareOperands(copyValueOpts(head));
       // `-t DIR` / `--target-directory=DIR` moves the destination off the operand list entirely: every operand is
@@ -7863,7 +8004,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         const specs = tokens.slice(2).filter((t) => !t.startsWith('-'));
         dest = specs.length && !tokens.some((t) => /^(-p|--stdout)$/.test(t)) ? specs[0]! : null;
       } else if (sub === 'rm' || sub === 'mv') {
-        const specs = [...tokens.slice(2).filter((t) => !t.startsWith('-')), ...fileSpecs];
+        // `git rm -n` and `git mv -n` (`--dry-run`) SHOW what would be removed or moved and touch nothing
+        const dryRunGit = tokens.slice(2).some((t) => t === '--dry-run' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t));
+        const specs = dryRunGit ? [] : [...tokens.slice(2).filter((t) => !t.startsWith('-')), ...fileSpecs];
         if (specs.length) {
           gitPathspecs = specs;
           dest = 'ALL_PATHSPECS';
@@ -7903,8 +8046,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         } else dest = null;
       } else dest = null;
     } else if (head === 'patch') {
+      // `patch --dry-run` (and `--check`) reports whether the patch applies and modifies nothing
       // `patch -o FILE` / `patch -oFILE` / `patch --output=FILE` writes FILE instead of the patched originals
-      dest = optionValue(tokens, 'o', ['--output']) ?? 'ALL';
+      dest = tokens.some((t) => t === '--dry-run' || t === '--check') ? null : (optionValue(tokens, 'o', ['--output']) ?? 'ALL');
     } else if (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head)) {
       // A STREAM EDITOR WRITES ITS OPERANDS ONLY IN PLACE. Unconditionally it made every READ of a governed file
       // an absolute deny; never, it let `gawk -i inplace '{print "x"}' .claude/settings.json` rewrite one
@@ -8318,6 +8462,10 @@ function commitBypassFlag(cmdStr: string): boolean {
 function carrierCommandValues(seg: string): string[] {
   const m = tokenizeMarked(seg);
   const out: string[] = [];
+  // `sh -n -c BODY` PARSES the body and executes nothing - a syntax check, the way an author verifies a script
+  // before trusting it (exit review 10). The body is not a command the shell will run.
+  const shellAt = m.findIndex((t) => /^(?:.*\/)?(ba|z|da|k)?sh$/.test(t.text));
+  if (shellAt >= 0 && m.slice(shellAt + 1).some((t) => !t.quoted && (t.text === '--noexec' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t.text)))) return out;
   for (let i = 0; i < m.length; i++) {
     const t = m[i]!.text;
     if ((t === '-c' || t === '-S' || t === '--split-string') && m[i + 1]) out.push(m[i + 1]!.text);
@@ -9054,7 +9202,11 @@ function analyzeSegments(
       for (const h of normHits) hits.push(h);
       // a locked operation carried by any wrapper, launcher or placeholder the normalizer does not know is still found:
       // every suffix of the token list that starts with a governed tool is matched against the locked matchers
-      if (!normHits.some((h) => h.verdict === 'DENY')) {
+      // ...EXCEPT WHERE THE HEAD ONLY PRINTS ITS OPERANDS. `echo kubectl --context production apply -f k8s/` is a
+      // sentence, not a call: `echo`, `printf`, `basename` and their kin never run a word they are handed, so a
+      // governed tool name among their operands is data - which is what the self-documenting `show` target of
+      // every release makefile prints (exit review 10). A wrapper that DOES run its operands is not in this set.
+      if (!normHits.some((h) => h.verdict === 'DENY') && !STRING_OPERAND_HEADS.has(segHead)) {
         const marked = tokenizeMarked(seg);
         for (let k = 1; k < marked.length; k++) {
           if (marked[k]!.quoted) continue; // a verb inside quotes is data
@@ -9100,11 +9252,14 @@ function analyzeSegments(
       // three tokens and `/` was read as a search ROOT — an ordinary code search denied as a recursive read of the
       // filesystem (exit review 5). The pattern's words are taken from the RAW segment, where it is still one word.
       const rawMarked = tokenizeMarked(seg);
-      const rawHead = (rawMarked[0]?.text ?? '').replace(/^.*\//, '');
+      // the head is where the COMMAND starts: `LC_ALL=C grep 'rm -rf /' notes.md` has an assignment at token 0, and
+      // reading that as the head made the search pattern a path (exit review 10)
+      const rawHeadAt = commandHeadIndex(rawMarked.map((t) => t.text));
+      const rawHead = (rawMarked[rawHeadAt]?.text ?? '').replace(/^.*\//, '');
       const patternWords =
         PATTERN_FIRST_HEADS.has(rawHead) &&
         !rawMarked.some((t) => /^-[a-zA-Z]*[ef]$/.test(t.text) || /^--(regexp|file)=/.test(t.text))
-          ? (rawMarked.find((t, i) => i > 0 && !t.text.startsWith('-'))?.text ?? '').split(/\s+/).filter(Boolean)
+          ? (rawMarked.find((t, i) => i > rawHeadAt && !t.text.startsWith('-'))?.text ?? '').split(/\s+/).filter(Boolean)
           : [];
       // A CONTAINER'S PATHS ARE THE IMAGE'S. A Dockerfile RUN line writes inside the image, not on the host, so
       // its path operands are not judged against the workspace; its COMMANDS still are, and so is anything the
@@ -9131,8 +9286,17 @@ function analyzeSegments(
     if (ctx.egoHome) {
       const head = tokenize(seg)[0] ?? '';
       if (WRITE_HEADS.has(head) || WRITE_HEADS.has(head.slice(head.lastIndexOf('/') + 1))) {
-        for (const tok of tokenize(seg).slice(1)) {
+        // A COPY READS ITS SOURCE OPERANDS AND WRITES ONLY ITS LAST, and so does an install or an rsync: `cp
+        // ~/.ego/trust/keys.json /tmp/keys-backup.json` reads a key out of the trust store, which is not tampering
+        // with it. Every operand was judged as a write target (exit review 10). `mv` also REMOVES its source, so it
+        // keeps them all; `ln` links to them and is judged where it is handled above.
+        const opTokens = tokenize(seg).slice(1);
+        const bareIdx = opTokens.map((t, i) => (t.startsWith('-') ? -1 : i)).filter((i) => i >= 0);
+        const copyLike = /^(cp|install|rsync|scp|ditto|gcp)$/.test(head.slice(head.lastIndexOf('/') + 1));
+        const lastBare = bareIdx.length ? bareIdx[bareIdx.length - 1]! : -1;
+        for (const [ti, tok] of opTokens.entries()) {
           if (!tok.includes('/') || /^-/.test(tok)) continue;
+          if (copyLike && bareIdx.length >= 2 && ti !== lastBare && !opTokens.some((t) => /^(-t|--target-directory)/.test(t))) continue;
           const abs = canonicalPath(tok.replace(/^~(?=\/|$)/, homedir()));
           const home = canonicalPath(ctx.egoHome).split(sep).join('/');
           if (underTrustDir(abs.split(sep).join('/'), home)) {
@@ -9180,7 +9344,28 @@ function analyzeSegments(
       hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
     }
     // and the write-ish commands, whose destination is an operand rather than a redirection
-    for (const abs of writtenPathOperands(seg, effectiveCwd)) written.add(canonicalPath(abs));
+    // A SYMLINK CREATED EARLIER IN THIS COMMAND IS A SECOND NAME FOR ITS TARGET. `ln -s Makefile alias && cp evil.mk
+    // alias && make all` writes `Makefile` through `alias`, but the ledger canonicalises a destination at the moment
+    // it is recorded - and `alias` did not exist yet, so it stayed `alias` and `Makefile` looked untouched
+    // (exit review 10). The link and its target are recorded as a pair, and a later write to the link is a write to
+    // the target. Only the pair is recorded here, so `ln -s Makefile alias && make all` is not made stale by the ln.
+    // the pairs that EARLIER segments recorded - taken before this segment adds its own, so the `ln` that creates a
+    // link is not itself a write through it
+    const linkPairs = [...written].filter((w) => w.startsWith('\0link:')).map((w) => w.slice(6).split('\0->') as [string, string]);
+    const lnTokens = tokenize(seg);
+    if ((lnTokens[0] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
+      const lnOps = lnTokens.slice(1).filter((t) => !t.startsWith('-'));
+      if (lnOps.length >= 2) {
+        const linkAbs = canonicalPath(isAbsolute(lnOps[lnOps.length - 1]!) ? lnOps[lnOps.length - 1]! : resolve(effectiveCwd, lnOps[lnOps.length - 1]!));
+        const targetAbs = canonicalPath(isAbsolute(lnOps[0]!) ? lnOps[0]! : resolve(dirname(linkAbs), lnOps[0]!));
+        written.add(`\0link:${linkAbs}\0->${targetAbs}`);
+      }
+    }
+    for (const abs of writtenPathOperands(seg, effectiveCwd)) {
+      const c = canonicalPath(abs);
+      written.add(c);
+      for (const [link, target] of linkPairs) if (link === c && target) written.add(target);
+    }
     // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
     // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect
     if (writesUnenumerably(seg)) written.add('\0any');
