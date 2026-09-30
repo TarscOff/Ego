@@ -314,7 +314,7 @@ in `packages/kernel/test/exit-review-10.test.ts`.
 | **The directory a line runs in is what the earlier segments LEFT, not what they SAY.** | A directory change binds the rest of the line only where the shell applied it in THIS shell, unconditionally: not in a pipeline stage, a background job, a substitution, a subshell, a function body, a branch or a `case` arm, and not when it was `cd -` or `popd`. Doubt is CARRIED to what follows and no positive claim may rest on it. A directory change is recognised by what the shell resolves the word to (`directoryChange()`): `'cd'`, `c\d`, `c""d`, `builtin cd` and `command cd` are the builtin, and a test for the text `cd` saw none of them. |
 | **A parser and a shell read different words.** | The shell removes quoting, expands braces and globs and cuts a rule line at a semicolon BEFORE the word reaches any reader. Every reader must be handed the word the shell will see, or report that it was not. Pinned against `/bin/zsh` and GNU make 3.81, not against a description. |
 | **A reader must be reachable from every carrier — two copies of one list.** | The condition that decides whether a carried body is re-read named `git -C` and `env -C` but not `--chdir`, and demanded whitespace before the word where a quote can stand. `sh -c 'flock l -c "env --chdir=…"'` never re-entered. |
-| **The tool looks where it looks, not where the workspace ends.** | `npm run build` walks up past the registered root; `docker build -f F <url>` runs the REMOTE Dockerfile; `make` runs the recipe after a `;` on a variable line; `[core] hooksPath` moves the hooks. A producer must read what the tool reads, from where the tool looks, and report what it cannot. |
+| **The tool looks where it looks, not where the workspace ends.** | `npm run build` walks up past the registered root; `docker build -f F <url>` runs the REMOTE Dockerfile; a make target-specific variable's value includes its `;` and what follows; `[core] hooksPath` moves the hooks. A producer must read what the tool reads, from where the tool looks, and report what it cannot. |
 | **A write is a write behind a wrapper.** | The freshness ledger read the head of the raw segment, so `env cp evil.mk sub` recorded nothing. It reads the normalized head, as every other reader does; an extraction behind a wrapper is unenumerable too. A symlink is a second name for its target FROM THE NEXT SEGMENT ON — the `ln` that creates it is not a write through it, which is the proportionality half of the same statement. |
 | **Looking is not doing — an absolute DENY over looking removes the gate.** | 77 findings, thirty from one cause (`--help`). The exception is a claim about the WHOLE line: last word, not an option value, no `--`, a verb that carries no argv elsewhere, unquoted. Its mirror is pinned: a NAME or a VALUE that spells `help` is not the flag. |
 | **A reached bound, or a subprocess that could not answer, is not an absence.** | A git configuration too large to list, an awk program past the read bound, a brace nesting past the expander: each is ASK, with the reason, and never the same as "nothing there". |
@@ -332,6 +332,28 @@ in `packages/kernel/test/exit-review-10.test.ts`.
 - **DENY → ASK by design.** A brace nesting past 8 (the expander reports it), an awk program file past the read
   bound, and a `cd` inside a branch, loop or function followed by a relative write. The kernel cannot say which
   word, program or directory it is looking at, so it asks. Each is asserted as `ASK`, not left unpinned.
+
+## Closed after the self-attack on the fixes of exit review 10 (2026-09-30)
+
+121 confirmed (110 unauthorized ALLOW, 11 over-gated DENY), from ten lenses; every one closed, refuted or recorded. By CAUSE:
+
+| Cause | The general statement |
+|---|---|
+| **One reader per dimension — two copies of one list drift.** | Whether a line is a help probe, where a `$( )` ends, how make's command line reads, which directory a command runs in, and which statements of a database client are reads were each decided by two or three pieces of code. They now have one each (`helpProbeHead`, `scanSubstitutionBody`, `parseMakeCommandLine`, `runDirectory`, `isReadStatement`), and the duplicated matcher was deleted rather than corrected. |
+| **A working directory is a SET.** | `cwdTimeline`: a conditional change leaves both possibilities; `&&` holds for the rest of its chain and leaves the earlier directory possible afterwards; `||` runs on failure; a branch, a loop, a function and a case arm are unioned; a subshell is a scope; `cd` is recognised by what the shell resolves the word to. Verified for soundness against bash and zsh, not asserted. |
+| **A strict grammar beats a blocklist.** | A read of a production database is `\d…`, `SHOW …`, `DESCRIBE t [col]`, `EXPLAIN …` without ANALYZE, `-l`, `-V` — and nothing that merely lacks a write verb (`created_at` contains `create`; `\g` ends a statement in mysql without a semicolon; `--exe` is `--execute`). |
+| **A path is stale when it or an ancestor was written.** | Case-folded; through a symlink to a directory; after a glob, a rename, a directory made in the same command, a loop's next iteration, a hard link, `sort -o`, `uniq IN OUT`, `find -exec`, `sed w`. |
+| **Names are families, values are parsed.** | `*_PROXY`, `*_REGISTRY`, `*_INDEX_URL`, `*_ENDPOINT*`; the host of a URL with userinfo (`localhost:80@evil.example`); `NODE_OPTIONS` judged by an allowlist of inert options; every assignment of an `export` list; an assignment behind `then`/`do`/`else`; `GIT_TRACE*` as the write it is. |
+| **A redirection is not an operand, and a quoted `>` is not a redirection.** | `cp x f 2>&1` has the destination `f`; `git commit -m "why > f is refused"` writes nothing. `mysql < file` is judged as the read it is. |
+| **A search tool reads a glob the way the search tool does.** | Braces with a slash inside, backslash escapes, a doubled suffix (`.env.*.local`); a web search is public egress whatever it filters its results to. |
+| **A premise of mine was wrong, and the fix built on it with it.** | See the build log: GNU make's target-specific variable takes the whole tail as its value. |
+
+### Recorded, not closed
+
+- `kustomize build .` where `kustomization.yaml` lists a REMOTE resource fetches it (LOW). The kernel asks only when a URL is on the command line.
+- `cd a b` (zsh's substitution form) and a `popd` with nothing pushed in the same command make the directory UNKNOWN, which is the honest answer and an ASK for what follows it.
+- An `env -C`/`git -C` in play disables the alternative-directory judgement for that segment (the directory it names is judged on its own).
+- `CGO_ENABLED=0 go build` asks: `CGO_*` is in the execution-input list a producer gate reads. Unchanged from before this pass.
 
 ## A validation gate that lives in a temporary directory is not a gate
 

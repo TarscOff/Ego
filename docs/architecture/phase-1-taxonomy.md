@@ -162,14 +162,32 @@ the classifier placed every one of them in classes 1-11. Instances that crossed 
   `case` pattern closing a `$( )`; a `case` header consumed by the splitter, leaving no keyword to count.
 - **2 Wrapper transparency:** a write behind `env`, `command`, `nohup`, `timeout` or an assignment left out of the
   freshness ledger.
-- **3 Producer resolution:** `run: V = 1; git push …` — make cuts the rule line at `;` before asking whether it
-  assigns; `docker build -f F <url>` reading the local file; `npm run build` not searching above the workspace.
+- **3 Producer resolution:** a make target-specific variable whose value contains a `;` cut short (the value includes
+  the tail); `docker build -f F <url>` reading the local file; `npm run build` not searching above the workspace.
 - **5 Verified environment:** `cd -`, `popd`, and a `cd` spelled `'cd'`, `c\d`, `builtin cd` or `command cd`; an
   assignment in front of a command inside `then`/`do`/`else`.
 - **6 Target classification:** `--help` as an option value or an object name (`helm uninstall help`).
 - **9 Path classification:** `.[h]arness`, `~+`, a no-break space, `core.hooksPath` naming a non-conventional
   directory, a wildcard tail (`**/.env*`) in a search tool, a domain that begins with `localhost`.
 - **10 Policy layering:** an overlay matcher a mode can release to ALLOW.
+
+### The self-attack on the fixes (2026-09-30): 121 more, all instances
+
+- **1 Segment structure:** the body of `$( )` ended by a counter that did not know a comment, `${x:-)}`, an ANSI-C string, a
+  nested quote or a `case` subject with a space; the last stage of a pipeline (zsh runs it in the current shell).
+- **2 Wrapper transparency:** `flock --command`, `env -S` with its appended arguments, `env -u X -C`, `env --chd=`, `env -iC…`,
+  `watch '…; …'`, `find -execdir`; a write behind any of them left out of the freshness ledger.
+- **3 Producer resolution:** make's command line (`-o -n`, `-kf`, `--fil`), `$(eval)` and tab lines inside `define`, target-
+  specific `+=`/`override`/`export`, pattern-specific variables, the environment make starts with.
+- **5 Verified environment:** the working directory as a SET; `cd` through a redirection, `!`, `FOO=1`, `noglob`, `builtin --`,
+  a shadowing function, `source`; `test -d x && cd x`; `pushd`/`popd`.
+- **6 Target classification:** `--help` as a redirection target, behind `--`, after a container command; the database read
+  exceptions as a strict grammar; `docker service/compose logs|inspect` twins.
+- **7 Provenance:** the freshness ledger (ancestors, globs, loops, case, hard links, `sort -o`, `uniq IN OUT`, `find -exec`).
+- **9 Path classification:** `cp x f 2>&1`; the hooks directory itself, in another case, a symlink target, an included config; a
+  wildcard search glob with a slash in a brace; `-c core.hooksPath=` with an empty value; a web search limited to `localhost`.
+- **10 Policy layering:** a matcher that duplicated a rule the evaluator already owns, and disagreed with it.
+- **11 Proportionality:** `git tag -l`, `git merge-base` in the advisory mode; `psql -V`; `git stash --all --help`.
 
 ## What is deliberately NOT a class
 

@@ -773,8 +773,8 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   (a write to the governance tree after it was ALLOW); a `cd` inside a `case` arm was unconditional, because the
   splitter consumes the header and leaves no keyword to count; the `)` that ends a `case` pattern closed a `$( )`
   early, so `echo "$(case x in y) git push origin main ;; esac)"` read the push as text (ALLOW); `run: V = 1; git
-  push --force origin main` — GNU make cuts a rule line at `;` BEFORE asking whether it assigns (verified against
-  make 3.81), so the recipe was dropped; a write behind `env`, `command`, `nohup`, `timeout` or an assignment left
+  push --force origin main` — the value of a target-specific variable was cut at its `;`, which dropped the tail that
+  IS the value (this entry's first statement of the fix was wrong, and is corrected below); a write behind `env`, `command`, `nohup`, `timeout` or an assignment left
   the freshness ledger empty; an assignment in front of a command inside `then`/`do`/`else` was not an environment
   input; `docker build -f Dockerfile <url>` read the LOCAL Dockerfile; `npm run build` stopped looking for a
   manifest at the workspace edge, where npm does not; `[core] hooksPath = githooks` moved the hook shims where no
@@ -803,6 +803,48 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   and nothing in these numbers suggests it terminates: the criterion "a fresh review finds no unauthorized ALLOW"
   is a claim about an unbounded set. It is being pursued, because it is the criterion the product owner set, and
   it is reported here as a criterion that may not be reachable by this method.
+
+  **THE FIXES WERE THEN ATTACKED, AS THE PREVIOUS ROUND'S HAD BEEN: 121 CONFIRMED** (110 unauthorized ALLOW — 8 CRITICAL,
+  73 HIGH — and 11 over-gated DENY), from ten lenses and 134 agents, **no lens clean**. `newClasses: 0` again; the
+  number of instances did not move. Recorded by cause in `docs/architecture/phase-1-residuals.md`. The shape of it:
+  the review-10 fixes had each been written to close ONE reader, and this pass found the readers they were written
+  beside. **Two and three readers of one dimension had drifted** — whether a line is a help probe (`isProbeInvocation`
+  and `helpProbeHead` disagreed about `> --help`, `-- --help`, `redis-cli SET k --help`), where a `$( )` ends (three
+  paren counters, none of which knew a comment, a `${x:-)}`, an ANSI-C string or a `case` subject with a space), what
+  make's command line means (`-o -n`, `-kf`, `--fil`), and where `env -u X -C`, `env --chd=` and `git --no-pager -C`
+  run — and each was collapsed into ONE reader. The database read exceptions existed twice, once in TypeScript and
+  once as negative lookaheads in a matcher, and disagreed in both directions; the matcher was deleted.
+
+  **A WORKING DIRECTORY IS A SET.** Eleven findings were the same mistake: tracking `cwd` as one string. `test -d x &&
+  cd x; tee f`, `true || cd sub`, a `cd` in a branch that DOES run, a function that is called, `cd; tee f` (home),
+  `cd dir >/dev/null` (the redirection read as the directory), `! cd`, `FOO=1 cd`, `noglob cd`, `pushd`/`popd` with a
+  stack — each moved the tracked directory wrongly or not at all. `cwdTimeline` now returns, per stage, the directories
+  it MAY start in; a relative path is judged in each and the strongest answer wins; more than one (or an unknown)
+  withdraws every positive claim. It is checked against real bash and zsh over 72 scripts, for SOUNDNESS (the
+  directory a shell ends in is always in the set) and for precision (the ordinary cases stay exact, because a model
+  that always says "maybe" gates ordinary work). The first version of the test found five unsoundness bugs in the
+  first version of the model — `||` after a failed `cd`, `OLDPWD` after a failure, `pushd` whose target may not
+  exist, physical `cd -P link/..`, zsh running the last stage of a pipeline in the current shell.
+
+  **The cross-product found one more that nobody had reported, and it was HIGH:** `cp x governed-file 2>&1` — the
+  destination reader took the last WORD, which was `2>&1`, so the governed file was never seen. Every `cp`, `mv`,
+  `install` and `rm` followed by a redirection had been ALLOW over a governed path. It was found because the new
+  corpus classes used `cp` where the old ones used `tee`, and the "merged redirect" transformation had never met one.
+
+  **A CORRECTION OF MINE, BECAUSE IT CHANGED A FIX.** Commit 7fe322b claimed GNU make cuts a rule line at `;` BEFORE it
+  asks whether the line assigns, "verified against make 3.81". It does not. The value of a target-specific variable
+  includes the semicolon and everything after it, and no recipe is created; my experiment printed the same two lines
+  either way, because `$(V)` expanded in a prerequisite's recipe runs the tail. The fix I made read the tail as a
+  recipe — which over-gated (`x: V = a; git push … ` with `V` never expanded was DENY) and was wrong. The parser now
+  takes the whole tail as the value and reports what it does not model (`+=`, `?=`, `override`, `export`, pattern-
+  specific variables, `$(eval)` inside a `define`). The test that pinned the wrong semantics was rewritten to the right
+  ones and a differential check against make 3.81 is in the notes of that test.
+
+  Every finding of this pass is closed, refuted or recorded (commit cd9fe65): 12 exact-verdict tests, each of which fails
+  against the tree before the fixes; 10 new corpus classes (6,300 generated variants); a differential test for the
+  directory model. The in-repo cross-product now asserts **40,452** combinations across **101** root semantic
+  classes, 379 canonical spellings, 97 transformations, 5,605 producer-carried variants and 103 ordinary commands; the
+  suite is 268 tests and takes about eleven minutes.
 
   **PHASE 1 IS STILL NOT CLOSED.** `INDEPENDENT-AGENT REVIEW` stays IN PROGRESS.
 - INDEPENDENT-AGENT REVIEW: IN PROGRESS — rounds 1–15 plus challenges of the contract (22, 41, 37, 37, 24
