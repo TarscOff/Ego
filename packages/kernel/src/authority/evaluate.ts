@@ -156,7 +156,7 @@ const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'
  *  same set (exit review 10). The two copies are now generated from THIS one, so they cannot disagree again.
  */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|(?:npm|NPM)_config_[A-Za-z_]+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|MONGOSH_[A-Z_]*|REDISCLI_RCFILE|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
 
 /** Options of a governed variable that actually LOAD CODE. `NODE_OPTIONS=--max-old-space-size=4096 npm test` is
  *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
@@ -165,14 +165,30 @@ const ENV_INJECT_RE =
 const NODE_OPTIONS_EXECUTES = /--(require|import|loader|experimental-loader|experimental-vm-modules|cpu-prof-dir|heap-prof-dir|diagnostic-dir|inspect-publish-uid|env-file|conditions)\b|-r\b/;
 /** True when this binding really changes what runs. */
 function envInjects(name: string, assignment: string): boolean {
+  const value0 = assignment.slice(assignment.indexOf('=') + 1).replace(/^['"]|['"]$/g, '');
   if (name === 'NODE_OPTIONS') {
     // node reads `--experimental_loader` and `--experimental-loader` as the SAME option, so the test normalises
-    // the separator before looking (exit review 8)
-    const value = assignment.slice(assignment.indexOf('=') + 1).replace(/_/g, '-');
-    return NODE_OPTIONS_EXECUTES.test(value);
+    // the separator before looking (exit review 8). A LIST OF NAMES THAT LOAD CODE IS WRONG BY OMISSION -
+    // `--inspect=0.0.0.0` opens a debugger port, `--openssl-config` loads a library, `--redirect-warnings=FILE` writes
+    // a file - so what is accepted is a short list of options known to be inert, and everything else injects
+    const value = value0.replace(/_/g, '-');
+    if (NODE_OPTIONS_EXECUTES.test(value)) return true;
+    return !value
+      .split(/\s+/)
+      .filter(Boolean)
+      .every((o) => NODE_OPTIONS_INERT.test(o));
   }
+  // a flags variable is inert unless its value reaches for a linker, a plugin or a wrapper program
+  if (/^(?:RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*RUSTFLAGS)$/.test(name))
+    return /linker|link-arg|wrapper|-Z|plugin|codegen-backend|--config|--emit/.test(value0);
+  // npm reads `npm_config_*` case-insensitively; most settings are harmless (`loglevel`, `color`), and these are not
+  if (/^npm_config_/i.test(name))
+    return /script[-_]shell|^npm_config_shell$|userconfig|globalconfig|prefix|cache|init[-_]module|node[-_]gyp|editor|git$|onload|scripts[-_]prepend|foreground|ignore[-_]scripts|registry|proxy|cafile|ca$|tmp/i.test(name);
   return true;
 }
+/** NODE_OPTIONS members that execute nothing and open nothing */
+const NODE_OPTIONS_INERT =
+  /^--(max-old-space-size|max-semi-space-size|stack-size|stack-trace-limit|enable-source-maps|no-warnings|trace-warnings|trace-deprecation|no-deprecation|throw-deprecation|unhandled-rejections|dns-result-order|openssl-legacy-provider|use-openssl-ca|use-bundled-ca|preserve-symlinks|preserve-symlinks-main|experimental-strip-types|experimental-transform-types|no-experimental-fetch|no-experimental-global-navigator|disable-warning|title|max-http-header-size|abort-on-uncaught-exception|experimental-default-type|no-network-family-autoselection)(=[\w.,:/-]*)?$|^[0-9]+$/;
 
 /** THE SENTINEL THAT MAKES A STATE MARKER UNFORGEABLE.
  *
@@ -196,6 +212,9 @@ const MARK = '\u0000ego\u0000';
 export function externalText(text: string): string {
   return text.includes(MARK) ? text.split(MARK).join('\uFFFDego\uFFFD') : text;
 }
+
+/** identity of each subshell the splitter opens, unique across nested calls */
+let SUBSHELL_SEQ = 0;
 
 /** A `cd` inside a subshell does NOT move the caller's directory, so the analyzer must stop claiming to know it
  *  once the subshell closes. Emitting this marker is how a flat segment list says so: the target carries a `$`, and
@@ -232,10 +251,6 @@ const KEYWORD_PREFIX_RE = /^(if|then|else|elif|while|until|do|!|time|coproc)$/;
 const FUNC_DEF_RE =
   /^(?:function\s+)?[^\s()<>|&;'"$`]+\s*\(\s*\)$|^function\s+[^\s()<>|&;'"$`]+$/;
 
-/** where a `case WORD in` opens, and the `esac` that ends it - used by the scanners that count parentheses */
-const CASE_OPEN_AT_RE = /^case\s+(?:"[^"]*"|'[^']*'|\S+)\s+in(?=[\s;]|$)/;
-const ESAC_AT_RE = /^esac(?=[\s;&|)]|$)/;
-
 /** One stage of a shell unit. A PIPELINE IS AN EXECUTION EDGE, not merely a separator: `echo 'rm -rf /' | bash`
  *  runs the first stage's standard output as the second stage's SCRIPT, and a model that discards the `|` cannot
  *  see that at all — the two stages look unrelated, and the effect crosses its authority floor between them
@@ -258,6 +273,15 @@ export interface ShellStage {
   readonly groupId?: number;
   /** true when the stage sits inside a `case … esac`: the arm that holds it is a branch that may not run */
   readonly inCase?: boolean;
+  /** The operator that separated this stage from the one before it. `&&` and `||` make a stage conditional on the
+   *  earlier one; `;` and a newline start a new chain; `&` says the EARLIER stage ran in the background. */
+  readonly sepBefore?: '&&' | '||' | ';' | '\n' | '&' | '|';
+  /** true when the stage runs in a subshell ( `( … )`, `$( … )`, a backtick span ): nothing it does to the working
+   *  directory reaches the caller */
+  readonly inSubshell?: boolean;
+  /** the subshells this stage sits inside, outermost first. Stages that share an id share a shell, so a `cd` inside
+   *  one is seen by the later stages of the SAME subshell and by nothing outside it. */
+  readonly subshellPath?: readonly number[];
 }
 
 /** The segments of a command, with the pipeline edges between them. */
@@ -269,7 +293,14 @@ export function splitShellPipeline(command: string): ShellStage[] {
     heredocExpanded?: boolean;
     fromProcessSubstitution?: boolean;
     inCase?: boolean;
+    sepBefore?: '&&' | '||' | ';' | '\n' | '&' | '|';
+    inSubshell?: boolean;
+    subshellPath?: readonly number[];
   }> = [];
+  /** the ids of the subshells the scanner is inside right now, outermost first */
+  const subshellIds: number[] = [];
+  /** the operator seen since the last stage was pushed; the next stage carries it */
+  let lastSep: '&&' | '||' | ';' | '\n' | '&' | '|' | undefined;
   let sawProcessSubstitution = false;
   /** set by a `|` split and consumed by the NEXT stage, which is the one that reads the pipe */
   let pendingPipe = false;
@@ -307,10 +338,13 @@ export function splitShellPipeline(command: string): ShellStage[] {
           // keying on the innermost one broke the upstream run at the nested brace (exit review 8)
           ...(groupStack.length ? { groupId: groupStack[0]! } : {}),
           ...(caseDepth > 0 ? { inCase: true } : {}),
+          ...(lastSep !== undefined ? { sepBefore: lastSep } : {}),
+          ...(subshellIds.length ? { inSubshell: true, subshellPath: [...subshellIds] } : {}),
         });
+      if (t) lastSep = undefined;
       sawProcessSubstitution = false;
       if (/^case\s+\S+\s+in(\s|$)/.test(t)) caseDepth++;
-      else if (/^esac\b/.test(t)) caseDepth = Math.max(0, caseDepth - 1);
+      else if (/^esac(?![\w=-])/.test(t)) caseDepth = Math.max(0, caseDepth - 1);
       // WHICH STAGE OPENED THE HEREDOC. Attributing the body to the LAST stage on the line was wrong the moment
       // anything followed the opener: in `bash <<EOF | cat` the body belongs to bash, and giving it to `cat` lost
       // the script entirely (exit review 5).
@@ -376,6 +410,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
     if (!inSingle && !inDouble) {
       if ((ch === '&' && next === '&') || (ch === '|' && next === '|')) {
         push();
+        lastSep = ch === '&' ? '&&' : '||';
         i += 2;
         continue;
       }
@@ -421,6 +456,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       if (ch === ';' || ch === '\n' || (ch === '|' && command[i - 1] !== '>')) {
         const piped = ch === '|';
         push();
+        lastSep = ch === '|' ? '|' : ch === ';' ? ';' : '\n';
         if (ch === '\n' && pendingHeredocs.length) {
           let k = i + 1;
           for (const hd of pendingHeredocs) {
@@ -476,6 +512,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // governed path asked instead of being denied (exit review 4).
       if (ch === '&' && next !== '&' && next !== '>' && command[i - 1] !== '>' && command[i - 1] !== '<') {
         push();
+        lastSep = '&';
         // A BACKGROUND COMMAND IS ITS OWN SUBSHELL, exactly as a pipeline stage is. `cd sub & tee
         // control-plane/permissions/matchers.md` leaves the caller where it was, and the analyzer followed the
         // `cd` out of it — the same defect exit review 4 fixed for the pipe spelling, in the branch beside it
@@ -519,6 +556,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       if (ch === '(' && atCommandStart()) {
         if (subshell === 0) subshellStart = segments.length;
         subshell++;
+        subshellIds.push(++SUBSHELL_SEQ);
         groupStack.push(++groupSeq);
         // a keyword that introduced the group is structure too: pushing `time` or `if` as its own segment made it
         // an unknown command
@@ -529,6 +567,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       if (ch === ')' && subshell > 0) {
         push();
         subshell--;
+        subshellIds.pop();
         groupStack.pop();
         if (subshell === 0 && segments.slice(subshellStart).some((sg) => directoryChange(sg.text) !== null))
           segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
@@ -555,6 +594,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         if (ch === '(') {
           if (subshell === 0) subshellStart = segments.length;
           subshell++;
+          subshellIds.push(++SUBSHELL_SEQ);
         }
         i++;
         continue;
@@ -645,51 +685,19 @@ export function splitShellPipeline(command: string): ShellStage[] {
       }
       if ((ch === '$' || ch === '<' || ch === '>') && next === '(') {
         if (ch === '<' || ch === '>') sawProcessSubstitution = true;
-        // command or process substitution: capture the inner command as its own segment and keep scanning
-        let depth = 1;
-        let j = i + 2;
-        let inner = '';
-        let q: string | null = null;
-        // THE `)` THAT ENDS A `case` PATTERN CLOSES NOTHING. `echo "$(case x in y) git push origin main ;; esac)"`
-        // ended the substitution at the pattern's paren, so the push was read as text outside it and the line was
-        // ALLOW (exit review 10, cross-product). Each open `case` remembers the depth it opened at, and `esac` ends it.
-        const caseAt: number[] = [];
-        while (j < command.length && depth > 0) {
-          const c = command[j]!;
-          // quotes and escapes inside the substitution body never close it
-          if (c === '\\' && q !== "'") {
-            inner += c + (command[j + 1] ?? '');
-            j += 2;
-            continue;
-          }
-          if (!q && /[\s;&|(]/.test(command[j - 1] ?? ' ')) {
-            const kw = CASE_OPEN_AT_RE.exec(command.slice(j, j + 400));
-            if (kw) {
-              caseAt.push(depth);
-              inner += kw[0];
-              j += kw[0].length;
-              continue;
-            }
-            const end = ESAC_AT_RE.exec(command.slice(j, j + 8));
-            if (end && caseAt.length) {
-              caseAt.pop();
-              inner += end[0];
-              j += end[0].length;
-              continue;
-            }
-          }
-          if (q) {
-            if (c === q) q = null;
-          } else if (c === "'" || c === '"') q = c;
-          else if (c === '(') depth++;
-          else if (c === ')' && caseAt.length && caseAt[caseAt.length - 1] === depth) {
-            // a pattern terminator: part of the body, and the depth does not move
-          } else if (c === ')') depth--;
-          if (depth > 0) inner += c;
-          j++;
-        }
+        // command or process substitution: capture the inner command as its own segment and keep scanning. Where it
+        // ENDS is decided by scanSubstitutionBody - quotes, comments, `${…}`, ANSI-C strings and `case` patterns
+        // included - and not by counting parentheses (exit review 10)
+        const close = scanSubstitutionBody(command, i + 2);
+        const inner = command.slice(i + 2, close < 0 ? command.length : close);
+        const j = close < 0 ? command.length : close + 1;
         const innerSegments = splitShellPipeline(inner);
-        for (const s of innerSegments) segments.push(s);
+        {
+          // one shell for the whole substitution body: a `cd` in it reaches the later stages of the body and nothing else
+          const id = ++SUBSHELL_SEQ;
+          for (const s of innerSegments)
+            segments.push({ ...s, inSubshell: true, subshellPath: [...subshellIds, id, ...(s.subshellPath ?? [])] });
+        }
         // A COMMAND SUBSTITUTION RUNS IN A SUBSHELL, so a `cd` in it does not move the caller either — the same
         // rule as `( )`, and without it `echo "$(cd sub && pwd)" && make build` resolved the CALLER's make against
         // sub/ (exit review 4).
@@ -728,7 +736,11 @@ export function splitShellPipeline(command: string): ShellStage[] {
         }
         if (end > i) {
           const backticked = splitShellPipeline(command.slice(i + 1, end).replace(/\\([`$\\])/g, '$1'));
-          for (const s of backticked) segments.push(s);
+          {
+            const id = ++SUBSHELL_SEQ;
+            for (const s of backticked)
+              segments.push({ ...s, inSubshell: true, subshellPath: [...subshellIds, id, ...(s.subshellPath ?? [])] });
+          }
           if (backticked.some((sg) => directoryChange(sg.text) !== null))
             segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
           cur += '$SUBST';
@@ -742,6 +754,209 @@ export function splitShellPipeline(command: string): ShellStage[] {
   }
   push();
   return segments;
+}
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * ONE LEXER FOR THE BODY OF `$( … )`.
+ *
+ * Three scanners counted parentheses for three callers, each with its own idea of what hides one: the splitter knew
+ * quotes and `case`, the heredoc extractor knew neither, and none knew that a `)` can sit inside a comment, a `${…}`
+ * expansion, an ANSI-C string, a nested substitution's own quoting, or a `case` pattern after a subject that contains a
+ * space (exit review 10, self-attack: five findings, one cause). A substitution that ends early leaves the rest of its
+ * body as TEXT, which is how `git push origin main` inside one became invisible. This reads the body the way the
+ * shell does and returns where it really ends.
+ * ------------------------------------------------------------------------------------------------------------- */
+function skipSingleQuoted(t: string, i: number): number {
+  const e = t.indexOf("'", i);
+  return e < 0 ? -1 : e + 1;
+}
+function skipAnsiC(t: string, i: number): number {
+  for (; i < t.length; i++) {
+    if (t[i] === '\\') i++;
+    else if (t[i] === "'") return i + 1;
+  }
+  return -1;
+}
+function skipBacktickSpan(t: string, i: number): number {
+  for (; i < t.length; i++) {
+    if (t[i] === '\\') i++;
+    else if (t[i] === '`') return i + 1;
+  }
+  return -1;
+}
+function skipDoubleQuoted(t: string, i: number): number {
+  while (i < t.length) {
+    const c = t[i]!;
+    if (c === '\\') i += 2;
+    else if (c === '"') return i + 1;
+    else if (c === '`') {
+      i = skipBacktickSpan(t, i + 1);
+      if (i < 0) return -1;
+    } else if (c === '$' && t[i + 1] === '(') {
+      const e = scanSubstitutionBody(t, i + 2);
+      if (e < 0) return -1;
+      i = e + 1;
+    } else if (c === '$' && t[i + 1] === '{') {
+      i = skipParameterExpansion(t, i + 2);
+      if (i < 0) return -1;
+    } else i++;
+  }
+  return -1;
+}
+/** after `${`: to just past the matching `}` */
+function skipParameterExpansion(t: string, i: number): number {
+  while (i < t.length) {
+    const c = t[i]!;
+    if (c === '\\') i += 2;
+    else if (c === '}') return i + 1;
+    else if (c === "'") {
+      i = skipSingleQuoted(t, i + 1);
+      if (i < 0) return -1;
+    } else if (c === '"') {
+      i = skipDoubleQuoted(t, i + 1);
+      if (i < 0) return -1;
+    } else if (c === '`') {
+      i = skipBacktickSpan(t, i + 1);
+      if (i < 0) return -1;
+    } else if (c === '$' && t[i + 1] === '(') {
+      const e = scanSubstitutionBody(t, i + 2);
+      if (e < 0) return -1;
+      i = e + 1;
+    } else if (c === '$' && t[i + 1] === '{') {
+      i = skipParameterExpansion(t, i + 2);
+      if (i < 0) return -1;
+    } else i++;
+  }
+  return -1;
+}
+/** One shell WORD starting at `i`: quotes and expansions inside it are part of it. Returns its end (exclusive). */
+function skipWordAt(t: string, i: number): number {
+  while (i < t.length) {
+    const c = t[i]!;
+    if (/[\s;&|()<>]/.test(c)) return i;
+    if (c === '\\') i += 2;
+    else if (c === "'") {
+      i = skipSingleQuoted(t, i + 1);
+      if (i < 0) return t.length;
+    } else if (c === '"') {
+      i = skipDoubleQuoted(t, i + 1);
+      if (i < 0) return t.length;
+    } else if (c === '`') {
+      i = skipBacktickSpan(t, i + 1);
+      if (i < 0) return t.length;
+    } else if (c === '$' && t[i + 1] === "'") {
+      i = skipAnsiC(t, i + 2);
+      if (i < 0) return t.length;
+    } else if (c === '$' && t[i + 1] === '(') {
+      const e = scanSubstitutionBody(t, i + 2);
+      if (e < 0) return t.length;
+      i = e + 1;
+    } else if (c === '$' && t[i + 1] === '{') {
+      i = skipParameterExpansion(t, i + 2);
+      if (i < 0) return t.length;
+    } else i++;
+  }
+  return i;
+}
+/** `i` is just after `$(`. Returns the index of the `)` that ends the substitution, or -1 when it never does. */
+function scanSubstitutionBody(t: string, i: number): number {
+  let depth = 1;
+  /** open `case`s: the paren depth each opened at, and whether a PATTERN is what the scanner is reading */
+  const cases: Array<{ depth: number; pattern: boolean }> = [];
+  let cmdStart = true;
+  while (i < t.length) {
+    const c = t[i]!;
+    if (c === '\\') {
+      i += 2;
+      cmdStart = false;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`' || c === '$') {
+      // any word that begins with a quote or an expansion is read whole, so nothing inside it is structure
+      const e = skipWordAt(t, i);
+      if (e === i) {
+        i++;
+        continue;
+      }
+      i = e;
+      cmdStart = false;
+      continue;
+    }
+    if (c === '#' && (i === 0 || /[\s;&|(]/.test(t[i - 1]!))) {
+      const nl = t.indexOf('\n', i);
+      i = nl < 0 ? t.length : nl;
+      continue;
+    }
+    const top = cases[cases.length - 1];
+    if (c === '(') {
+      // a pattern may be written `(a|b)`: that paren opens nothing
+      if (top && top.depth === depth && top.pattern) {
+        i++;
+        continue;
+      }
+      depth++;
+      i++;
+      cmdStart = true;
+      continue;
+    }
+    if (c === ')') {
+      if (top && top.depth === depth && top.pattern) {
+        top.pattern = false;
+        i++;
+        cmdStart = true;
+        continue;
+      }
+      depth--;
+      if (depth === 0) return i;
+      i++;
+      cmdStart = false;
+      continue;
+    }
+    if (c === ';') {
+      if ((t[i + 1] === ';' || t[i + 1] === '&') && top && top.depth === depth) {
+        top.pattern = true;
+        i += t[i + 1] === ';' && t[i + 2] === '&' ? 3 : 2;
+      } else i++;
+      cmdStart = true;
+      continue;
+    }
+    if (c === '&' || c === '|' || c === '\n') {
+      i++;
+      cmdStart = true;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      i++;
+      continue;
+    }
+    const e = skipWordAt(t, i);
+    const w = t.slice(i, e);
+    const inPattern = top !== undefined && top.depth === depth && top.pattern;
+    if (cmdStart && !inPattern && w === 'case') {
+      // `case SUBJECT in` - the subject is any word, spaces inside its quotes and expansions included
+      let j = e;
+      while (j < t.length && /\s/.test(t[j]!)) j++;
+      const subjectEnd = skipWordAt(t, j);
+      let k = subjectEnd;
+      while (k < t.length && /\s/.test(t[k]!)) k++;
+      const kwEnd = skipWordAt(t, k);
+      if (subjectEnd > j && t.slice(k, kwEnd) === 'in') {
+        cases.push({ depth, pattern: true });
+        i = kwEnd;
+        cmdStart = false;
+        continue;
+      }
+    }
+    if (cmdStart && !inPattern && w === 'esac' && top && top.depth === depth) {
+      cases.pop();
+      i = e;
+      cmdStart = false;
+      continue;
+    }
+    i = Math.max(e, i + 1);
+    cmdStart = !inPattern && /^(do|then|else|elif|if|while|until|time|!|\{|\})$/.test(w);
+  }
+  return -1;
 }
 
 /** The commands SUBSTITUTED into a text: the inner command of every `$( )` and backtick span outside single
@@ -780,38 +995,18 @@ function substitutionsIn(text: string): string[] {
       continue;
     }
     if (ch === '$' && text[i + 1] === '(') {
-      let depth = 0;
-      let j = i + 1;
-      // the `)` that ends a `case` pattern closes nothing (see the main splitter)
-      const caseAt: number[] = [];
-      for (; j < text.length; j++) {
-        if (/[\s;&|(]/.test(text[j - 1] ?? ' ')) {
-          const kw = CASE_OPEN_AT_RE.exec(text.slice(j, j + 400));
-          if (kw) {
-            caseAt.push(depth);
-            j += kw[0].length - 1;
-            continue;
-          }
-          const end = ESAC_AT_RE.exec(text.slice(j, j + 8));
-          if (end && caseAt.length) {
-            caseAt.pop();
-            j += end[0].length - 1;
-            continue;
-          }
-        }
-        if (text[j] === '(') depth++;
-        else if (text[j] === ')' && caseAt.length && caseAt[caseAt.length - 1] === depth) continue;
-        else if (text[j] === ')' && --depth === 0) break;
-      }
-      out.push(text.slice(i + 2, j));
-      i = j;
+      const close = scanSubstitutionBody(text, i + 2);
+      const end = close < 0 ? text.length : close;
+      out.push(text.slice(i + 2, end));
+      i = end;
       continue;
     }
     if (ch === '`') {
-      const end = text.indexOf('`', i + 1);
-      if (end > i) {
-        out.push(text.slice(i + 1, end));
-        i = end;
+      // POSIX nests backticks by escaping the inner pair, so the closing one is the first UNESCAPED backtick
+      const after = skipBacktickSpan(text, i + 1);
+      if (after > i) {
+        out.push(text.slice(i + 1, after - 1).replace(/\\([`$\\])/g, '$1'));
+        i = after - 1;
       }
     }
   }
@@ -994,7 +1189,7 @@ function splitWords(s: string): string[] {
       continue;
     }
     if (IFS_RE.test(ch)) {
-      if (cur) out.push(cur);
+      if (cur) out.push(cutAtNul(cur));
       cur = '';
       continue;
     }
@@ -1046,6 +1241,82 @@ const ARGV_CARRYING_VERBS = /^(run|exec|create|start|attach|cp|debug|port-forwar
  *    - the verb is not one that carries its arguments to a container or a cluster;
  *    - it was written UNQUOTED, so `--description 'run --help first'` is a value and not a flag.
  *  `-h` is a help flag for git only: for psql and mysql it is `--host`. */
+/** THE OPTIONS EACH CLI PUTS BEFORE ITS VERB, and whether they take a value. The verb is the first bare word, and a
+ *  bare word that is really an option's VALUE (`docker --context production run …`) names the wrong verb. An option this
+ *  table does not know has an arity nobody can tell, so the position of the verb is unknown and nothing that rests on it
+ *  may be granted (exit review 10, self-attack: `docker --context production run alpine ./deploy.sh --help`). */
+const GLOBAL_OPTIONS: Record<string, { value: RegExp; bool: RegExp }> = {
+  kubectl: {
+    value: /^(--context|--cluster|--user|--namespace|-n|--kubeconfig|--server|-s|--token|--as|--as-group|--as-uid|--request-timeout|--certificate-authority|--client-certificate|--client-key|--cache-dir|--username|--password|--tls-server-name|-v|--v|--vmodule|--profile|--profile-output|--log-flush-frequency)$/,
+    bool: /^(--insecure-skip-tls-verify|--warnings-as-errors|--disable-compression|--match-server-version)$/,
+  },
+  helm: {
+    value: /^(--kube-context|--kubeconfig|-n|--namespace|--kube-apiserver|--kube-token|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--registry-config|--repository-cache|--repository-config|--burst-limit)$/,
+    bool: /^(--debug|--kube-insecure-skip-tls-verify)$/,
+  },
+  docker: {
+    value: /^(--context|-c|--config|-H|--host|-l|--log-level|--tlscacert|--tlscert|--tlskey|--connection|--url|--identity)$/,
+    bool: /^(--debug|-D|--tls|--tlsverify)$/,
+  },
+  git: {
+    value: /^(-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)$/,
+    bool: /^(--no-pager|-p|--paginate|-P|--bare|--no-replace-objects|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-optional-locks|--no-lazy-fetch)$/,
+  },
+  aws: {
+    value: /^(--profile|--region|--endpoint-url|--output|--query|--ca-bundle|--cli-connect-timeout|--cli-read-timeout)$/,
+    bool: /^(--debug|--no-verify-ssl|--no-paginate|--no-sign-request|--no-cli-pager|--no-cli-auto-prompt)$/,
+  },
+  gcloud: {
+    value: /^(--project|--account|--configuration|--impersonate-service-account|--billing-project|--verbosity|--format)$/,
+    bool: /^(--quiet|-q|--no-user-output-enabled)$/,
+  },
+};
+GLOBAL_OPTIONS['oc'] = GLOBAL_OPTIONS['kubectl']!;
+GLOBAL_OPTIONS['podman'] = GLOBAL_OPTIONS['docker']!;
+GLOBAL_OPTIONS['nerdctl'] = GLOBAL_OPTIONS['docker']!;
+
+/** The words that follow the command head, with redirections removed. `git push --help 2>&1` is a help request whose
+ *  standard error goes somewhere, and `git push --force origin main > --help` is a push whose OUTPUT FILE is called
+ *  `--help`: in neither is the text after the operator a word of the command. */
+function commandWords(t: ReadonlyArray<{ text: string; quoted: boolean }>): Array<{ text: string; quoted: boolean }> {
+  const out: Array<{ text: string; quoted: boolean }> = [];
+  for (let i = 0; i < t.length; i++) {
+    const x = t[i]!;
+    if (!x.quoted && /^(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)/.test(x.text)) {
+      // a bare operator takes the NEXT word as its target; a glued one (`2>/dev/null`, `>&2`) carries it
+      if (/^(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)$/.test(x.text)) i++;
+      continue;
+    }
+    out.push(x);
+  }
+  return out;
+}
+
+/** Where the VERB is among `rest` (the words after the head), or -1 when an option this table cannot place stands
+ *  in front of it. */
+function verbIndex(head: string, rest: ReadonlyArray<{ text: string; quoted: boolean }>): number {
+  const table = GLOBAL_OPTIONS[head];
+  for (let i = 0; i < rest.length; i++) {
+    const x = rest[i]!;
+    if (x.quoted || !x.text.startsWith('-')) return i;
+    if (x.text.includes('=') || /^-[A-Za-z]./.test(x.text) && x.text.length > 2 && !x.text.startsWith('--') && table?.value.test(x.text.slice(0, 2))) continue; // complete, or a glued short value
+    if (table?.bool.test(x.text)) continue;
+    if (table?.value.test(x.text)) {
+      i++;
+      continue;
+    }
+    return -1;
+  }
+  return -1;
+}
+
+const HELP_FLAG_RE = /^(--help|-help|--usage|-\?)$/;
+/** git flags that take no value, so a help flag after them is not their argument */
+const GIT_BOOLEAN_FLAGS =
+  /^(-a|--all|-u|--include-untracked|-k|--keep-index|-q|--quiet|-f|--force|-n|--dry-run|-v|--verbose|-p|--patch|--force-with-lease|--no-verify|--tags|--delete|-d|-D|--mirror|--prune|--follow-tags|--atomic)$/;
+/** clients whose `--help`, `--version` and `-V` print and exit whatever else is on the line */
+const PROBING_DB_CLIENTS = /^(psql|pg_dump|pg_restore|mysql|mariadb|mysqldump|mongosh|mongo|redis-cli|valkey-cli|clickhouse-client|influx|sqlite3|cqlsh)$/;
+
 function helpProbeHead(segment: string): string | null {
   const t = tokenizeMarked(segment);
   const words = t.map((x) => x.text);
@@ -1054,44 +1325,115 @@ function helpProbeHead(segment: string): string | null {
   // A SHELL'S SYNTAX CHECK PARSES AND EXECUTES NOTHING. `bash -n -c "rm -rf /"` reads the body and stops; it is
   // how an author verifies a script before trusting it, and reading the body as a command made the verification
   // carry the body's verdict (exit review 10). `-n` must be an OPTION of the shell itself - before `-c` and before
-  // any operand - or it belongs to the script.
+  // any operand - or it belongs to the script. An option that takes a value (`--rcfile F`, `-o NAME`, `-O NAME`)
+  // takes the next word with it: `bash --rcfile -n script.sh` sources a file called `-n`.
   if (/^(ba|z|da|k)?sh$/.test(head)) {
-    for (const x of t.slice(hi + 1)) {
+    const rest0 = commandWords(t.slice(hi + 1));
+    for (let i = 0; i < rest0.length; i++) {
+      const x = rest0[i]!;
       if (x.quoted || !x.text.startsWith('-') || x.text === '--') break;
       if (x.text === '--noexec' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(x.text)) return head;
+      if (/^(--rcfile|--init-file|-o|\+o|-O|\+O)$/.test(x.text)) i++;
     }
     return null;
   }
-  if (!HELP_FIRST_CLIS.test(head)) return null;
-  const rest = t.slice(hi + 1);
+  const isDb = PROBING_DB_CLIENTS.test(head);
+  if (!HELP_FIRST_CLIS.test(head) && !isDb) return null;
+  const rest = commandWords(t.slice(hi + 1));
   if (rest.length === 0) return null;
-  const last = rest[rest.length - 1]!;
-  const isFlag = !last.quoted && (/^(--help|--usage)$/.test(last.text) || (head === 'git' && last.text === '-h'));
-  if (!isFlag) return null;
-  const prev = rest[rest.length - 2];
-  if (prev !== undefined && (prev.text.startsWith('-') || prev.quoted)) return null;
+  const bare = (x: { text: string; quoted: boolean }) => !x.quoted && !x.text.startsWith('-');
+  const flagOf = (x: { text: string; quoted: boolean }): boolean =>
+    !x.quoted &&
+    (HELP_FLAG_RE.test(x.text) ||
+      (head === 'git' && x.text === '-h') ||
+      // a version request is a probe too, but ONLY as the last word: `helm upgrade --version 1.4.2` pins a chart
+      (isDb ? /^(--version|-V)$/.test(x.text) : /^(--version|-version)$/.test(x.text)));
+  // (a) the flag DIRECTLY after the head asks the tool itself for its manual, whatever follows it
+  if (flagOf(rest[0]!) && !/^(--version|-version|-V)$/.test(rest[0]!.text)) return head;
   if (rest.some((x) => !x.quoted && x.text === '--')) return null;
-  if (/^(docker|podman|nerdctl|kubectl|oc|helm)$/.test(head)) {
-    // the VERB is the first bare word, or the one after a management group: `docker container run` carries its
-    // arguments to a container, `docker context create` and `docker volume create` carry nothing anywhere
-    const bare = rest.filter((x) => !x.quoted && !x.text.startsWith('-')).map((x) => x.text);
-    const verb = /^(container|compose|service|stack|image|builder|buildx)$/.test(bare[0] ?? '') ? bare[1] : bare[0];
-    if (ARGV_CARRYING_VERBS.test(verb ?? '') || ARGV_CARRYING_VERBS.test(bare[0] ?? '')) return null;
+  const last = rest[rest.length - 1]!;
+  const isFlag = flagOf(last);
+  if (isFlag) {
+    const prev = rest[rest.length - 2];
+    // ...a flag known to take NO value may stand in front of it: `git stash --all --help` asks for the manual
+    if (
+      prev !== undefined &&
+      (prev.quoted || (prev.text.startsWith('-') && !(head === 'git' && GIT_BOOLEAN_FLAGS.test(prev.text))))
+    )
+      return null;
+    if (isDb) {
+      // redis-cli reads its options FIRST and hands everything after the first bare word to the server as the
+      // COMMAND'S arguments: `SET foo --help` stores the string `--help`
+      if (/^(redis-cli|valkey-cli)$/.test(head)) {
+        const VALUE = /^(-h|-p|-a|-n|-u|-s|-r|-i|-d|-D|--user|--pass|--sni|--cacert|--cacertdir|--cert|--key)$/;
+        for (let i = 0; i < rest.length - 1; i++) {
+          const x = rest[i]!;
+          if (!x.quoted && x.text.startsWith('-')) {
+            if (VALUE.test(x.text)) i++;
+            continue;
+          }
+          return null;
+        }
+      }
+      return head;
+    }
+    // the verb must be findable: an option this table cannot place in front of it leaves the position unknown
+    const vi = verbIndex(head, rest);
+    if (vi < 0 && rest.length > 1) return null;
+    const verb = vi >= 0 && vi < rest.length - 1 ? rest[vi]!.text : undefined;
+    if (/^(docker|podman|nerdctl|kubectl|oc|helm)$/.test(head)) {
+      // the VERB is the first bare word, or the one after a management group: `docker container run` carries its
+      // arguments to a container, `docker context create` and `docker volume create` carry nothing anywhere
+      const barePath = rest.slice(Math.max(vi, 0), -1).filter(bare).map((x) => x.text);
+      const v2 = /^(container|compose|service|stack|image|builder|buildx)$/.test(barePath[0] ?? '') ? barePath[1] : barePath[0];
+      // ...and it carries them only if there IS something to carry: `docker run --help` and `docker service create
+      // --help` have no operand between the verb and the flag, so nothing is handed to a container
+      const operands = barePath.length - (/^(container|compose|service|stack|image|builder|buildx)$/.test(barePath[0] ?? '') ? 2 : 1);
+      if ((ARGV_CARRYING_VERBS.test(v2 ?? '') || ARGV_CARRYING_VERBS.test(barePath[0] ?? '')) && operands > 0) return null;
+    }
+    // git verbs that RUN a command they were given: `git bisect run ./x --help` runs ./x
+    if (head === 'git' && /^(bisect|submodule|filter-branch|rebase|difftool|mergetool|daemon|worktree|stash|instaweb)$/.test(verb ?? '')) {
+      const after = rest.slice(vi + 1, -1).filter(bare).map((x) => x.text);
+      if (verb === 'bisect' && after.includes('run')) return null;
+      if (verb === 'submodule' && after.includes('foreach')) return null;
+    }
+    return head;
   }
-  return head;
+  // (c) `help` as the LAST word is a pseudo-command of the tools that document it there
+  const l = last;
+  if (
+    !l.quoted &&
+    l.text === 'help' &&
+    rest.length > 1 &&
+    /^(aws|gcloud|az|terraform|tofu|pulumi|docker|podman|nerdctl|git|gh|glab)$/.test(head) &&
+    rest.slice(0, -1).every((x) => bare(x))
+  )
+    return head;
+  return null;
 }
 
 /** What the segment normalizes to. A HELP PROBE normalizes to a marker naming the tool, so nothing about the verb
  *  it was asked about reaches a matcher; everything else the global options produced (`git config …` for a `-c`,
- *  env-injection and identity markers) is KEPT, because a probe does not launder those. */
+ *  env-injection and identity markers) is KEPT, because a probe does not launder those. The question is asked of
+ *  EACH normalized command, not of the segment as written: `flock l git push --help` carries the probe behind an
+ *  operand the raw head cannot see. */
 export function normalizeSegment(segment: string): string[] {
   const out = normalizeSegmentInner(segment);
+  // THE QUESTION IS ASKED OF THE SEGMENT AS WRITTEN. The normalized commands have lost their quoting, and quoting is
+  // what says that `'note -a --help'` is one word and a message, not a flag; a wrapper that carries an OPERAND
+  // (`flock l git push --help`) is skipped by commandHeadIndex instead.
   const probe = helpProbeHead(segment);
   if (probe === null) return out;
   return [
     ...out.filter((n) => n.startsWith(MARK) || /^git (config|alias-override) /.test(n)),
     `${MARK}help-probe ${probe}`,
   ];
+}
+
+/** words joined back into a command line; an EMPTY word stays as `''`, because `git config core.hooksPath ''` is a write
+ *  and `git config core.hooksPath` is a read (exit review 10) */
+function joinWords(words: readonly string[]): string {
+  return words.map((w) => (w === '' ? "''" : w)).join(' ');
 }
 
 function normalizeSegmentInner(segment: string): string[] {
@@ -1237,11 +1579,32 @@ function normalizeSegmentInner(segment: string): string[] {
         }
         // `env -S '<command>'` / `--split-string=<command>` re-splits its argument into a command line and runs it,
         // exactly like `bash -c`: the whole string is the command, not an opaque option value
-        if (t === 'env' && (tok === '-S' || tok === '--split-string' || tok.startsWith('-S') || tok.startsWith('--split-string='))) {
-          const value = tok === '-S' || tok === '--split-string' ? (tokens[idx + 1] ?? '') : tok.startsWith('--split-string=') ? tok.slice('--split-string='.length) : tok.slice(2);
+        const splitCluster = t === 'env' ? /^-[0-9A-Za-z]*S/.exec(tok) : null;
+        const splitLong = t === 'env' && tok.startsWith('--s') && 'split-string'.startsWith(tok.slice(2).split('=')[0]!);
+        if (t === 'env' && (splitCluster !== null || splitLong)) {
+          // `-S` in a cluster (`-iS`, `-vS`), glued (`-S'cmd'`), or an abbreviation of --split-string (`--spl`)
+          let value: string;
+          let used = 1;
+          if (splitLong) {
+            if (tok.includes('=')) value = tok.slice(tok.indexOf('=') + 1);
+            else {
+              value = tokens[idx + 1] ?? '';
+              used = 2;
+            }
+          } else {
+            const glued = tok.slice(splitCluster![0].length);
+            if (glued) value = glued;
+            else {
+              value = tokens[idx + 1] ?? '';
+              used = 2;
+            }
+          }
           // the split value is env's OWN argv: leading -u/-C/-i/-0 options and VAR=val assignments precede the command,
-          // so re-parse it through the env wrapper again rather than treating its first token as the command head
-          return [...extra, ...splitShellSegments('env ' + value).flatMap(normalizeSegment)];
+          // so re-parse it through the env wrapper again rather than treating its first token as the command head.
+          // ...AND ENV APPENDS ITS OWN REMAINING ARGUMENTS to what the string split into: `env -S 'tee' FILE` writes FILE,
+          // `env -S 'psql' -h prod-db -c 'DROP TABLE users'` connects there (exit review 10)
+          const rest = tokens.slice(idx + used);
+          return [...extra, ...splitShellSegments('env ' + value + (rest.length ? ' ' + requote(rest) : '')).flatMap(normalizeSegment)];
         }
         if (tok.startsWith('-')) {
           idx++;
@@ -1253,6 +1616,13 @@ function normalizeSegmentInner(segment: string): string[] {
           continue;
         }
         break;
+      }
+      // `watch`'s argument - and `sem`'s, and a sandbox's default-shell one - is a SHELL STRING, run by `sh -c`: what
+      // follows the first `;` or `&&` in `watch 'git status; git push origin main'` is a command of its own, and
+      // reading the string as one command by its first word judged `git status` and nothing else (exit review 10)
+      if ((t === 'watch' || t === 'sem') && idx < tokens.length && !tokens.some((x) => x === '-x' || x === '--exec')) {
+        const shellString = tokens.slice(idx).join(' ');
+        if (/[;&|<>$`(]|\n/.test(shellString)) return [...extra, ...splitShellSegments(shellString).flatMap(normalizeSegment)];
       }
       continue;
     }
@@ -1368,7 +1738,16 @@ function expandGitAbbreviations(tokens: string[]): string[] {
 /** Rejoins argv tokens into a command string, re-quoting any token that carries whitespace or a shell operator, so a
  *  carried `sh -c "git push"` keeps its body as one token when the payload is re-tokenized. */
 function requote(tokens: string[]): string {
-  return tokens.map((t) => (/[\s;&|<>$`"']/.test(t) ? `'${t.replace(/'/g, `'\\''`)}'` : t)).join(' ');
+  return tokens.map((t) => (t === '' ? "''" : /[\s;&|<>$`"']/.test(t) ? `'${t.replace(/'/g, `'\\''`)}'` : t)).join(' ');
+}
+
+/** A command line with its REDIRECTIONS taken out. `cp x control-plane/permissions/matchers.md 2>&1` has three operands
+ *  and one redirection, and a reader that took the last WORD as the destination saw `2>&1` and never the file
+ *  (exit review 10, cross-product: the merged-redirect transformation, against a class that used `cp`). The targets
+ *  of the redirections themselves are read by redirectionTargets. */
+function withoutRedirections(text: string): string {
+  const words = commandWords(tokenizeMarked(text)).map((x) => x.text);
+  return requote(words);
 }
 
 /** `find … -exec CMD {} \;` / `-execdir` / `-ok` / `-okdir` / `fd -x|--exec CMD` / `-delete`: the payload runs, so it is classified. */
@@ -1384,8 +1763,20 @@ function findPayloads(rest: string[]): string[] {
         let j = i + 1;
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '\\;' && rest[j] !== '+')
           cmd.push(rest[j++]!);
-        // `{}` stands for a match under the search root: the root is the most specific path the kernel can see
-        if (cmd.length) out.push(requote(cmd.map((c) => (c === '{}' ? searchRoot : c))));
+        // `{}` stands for a match under the search root: the root is the most specific path the kernel can see.
+        // `-execdir` and `-okdir` run the payload IN THE DIRECTORY OF EACH MATCH, which is somewhere inside the search
+        // root: its relative operands are judged under the root, which is governed wherever any of its files is
+        const inMatchDir = t === '-execdir' || t === '-okdir';
+        if (cmd.length)
+          out.push(
+            requote(
+              cmd.map((c, k) =>
+                c === '{}' ? searchRoot
+                : inMatchDir && k > 0 && !c.startsWith('-') && !c.startsWith('/') && !c.includes('=') ? `${searchRoot.replace(/\/$/, '')}/${c}`
+                : c,
+              ),
+            ),
+          );
         i = j;
       } else if (t === '-delete') {
         // predicates narrow a deletion: only a search root that is itself a protected tree is judged as deleting it
@@ -1500,7 +1891,7 @@ function normalizeTail(rest: string[]): string[] {
   const payloads = findPayloads(rest);
   if (payloads.length) {
     // the carrier itself stays classified (find/fd/parallel are read-only listings); every payload is judged on its own
-    return [rest.join(' '), ...payloads.flatMap((p) => splitShellSegments(p).flatMap(normalizeSegment))];
+    return [joinWords(rest), ...payloads.flatMap((p) => splitShellSegments(p).flatMap(normalizeSegment))];
   }
 
   if (head === 'sudo' || head === 'doas') {
@@ -1523,9 +1914,9 @@ function normalizeTail(rest: string[]): string[] {
     // became `bash -c git push origin main`, whose inline program is the single token `git` (exit review 6). The
     // privilege tool itself keeps its head, as it must, so `command.privileged` still asks.
     const after = rest.slice(i);
-    return [rest.join(' '), ...(after.length ? normalizeSegment(requote(after)) : [])];
+    return [joinWords(rest), ...(after.length ? normalizeSegment(requote(after)) : [])];
   }
-  return [rest.join(' ')];
+  return [joinWords(rest)];
 }
 
 /** git / gh / glab global options that may precede the subcommand; the option's argument is consumed with it. */
@@ -1675,7 +2066,9 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
               value,
             )
           )
-            extra.push(`git config ${value.replace('=', ' ')}`);
+            // an EMPTY value is a value: `-c core.hooksPath=` switches every hook off, and `git config core.hooksPath` with
+            // nothing after it is a read - so the empty string is written as the empty string (exit review 10)
+            extra.push(`git config ${value.replace('=', ' ')}${/=$/.test(value) ? " ''" : ''}`);
         }
         i += eq > 0 ? 1 : 2;
         continue;
@@ -1746,34 +2139,140 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
 }
 
 /** Output redirection targets of a segment (`> f`, `>> f`, `2> f`, `&> f`), quotes removed; heredocs and fd dups excluded. */
-export function redirectionTargets(segment: string): string[] {
+function scanRedirections(segment: string): { writes: string[]; reads: string[] } {
   const out: string[] = [];
-  // a redirection operator glued to the preceding word (`echo x>file`, `printf y>>file`) is still a redirect to the
-  // shell: separate it so the anchored scan below sees it. Do not touch fd digits (`2>`), `&>`, `>>`, or `->`/`=>`.
+  const reads: string[] = [];
   // a backslash-newline continuation is erased by the shell before it opens the file, so erase it first too
-  const joined = segment.replace(/\\\r?\n/g, '');
-  const unglued = joined.replace(/([^ \t\n\r&|<>])(<>|>{1,2})/g, '$1 $2');
-  // a target is a run of quoted and unquoted chunks: `"control-plane"/permissions/x`, `control-plan\e/x`, 'a b'/c
-  // `>&WORD` IS A FILE REDIRECT WHENEVER WORD IS NOT A FILE DESCRIPTOR. bash treats `>&log` exactly like `&>log`
-  // and sends BOTH streams to that file, so `echo x >& .git/hooks/pre-commit` writes the hook — and it was not
-  // read as a write at all, because the `&` was not part of the operator (exit review 4). The operator is now
-  // captured so that a numeric target — `2>&1`, `>&-` — can be told apart as the fd duplication it is.
-  // THE SEPARATORS ARE THE SHELL'S, NOT JAVASCRIPT'S. `\s` also matches U+00A0 and its Unicode siblings, which
-  // no POSIX shell treats as IFS — so a target containing one was TRUNCATED at it, and
-  // `echo x > control-plane/<U+00A0>evil.md` was read as a write to the bare directory `control-plane/`, which
-  // the glob `control-plane/**` does not match (exit review 10).
-  const re = /(?:^|[ \t\n\r])(\d?<>|\d?>>?&?\|?|&>>?\|?)[ \t\n\r]*((?:"[^"]*"|'[^']*'|\\.|[^ \t\n\r;&|])+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(unglued))) {
-    const target = unquoteShellWord(m[2]!);
-    if (m[1]!.endsWith('&') && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
+  const t = segment.replace(/\\\r?\n/g, '');
+  // THE SCAN IS QUOTE-AWARE. A `>` inside a quoted argument is text - `git commit -m "docs: why > control-plane/x.md is
+  // refused"` writes nothing - and a regex over the whole segment could not tell (exit review 10). Quotes, escapes,
+  // substitutions and process substitutions are skipped as the units they are; the operator is recognised only at
+  // the top level, where the shell would see it.
+  const isIfs = (c: string): boolean => c === ' ' || c === '\t' || c === '\n';
+  let i = 0;
+  while (i < t.length) {
+    const c = t[i]!;
+    if (c === '\\') {
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      const e = skipSingleQuoted(t, i + 1);
+      i = e < 0 ? t.length : e;
+      continue;
+    }
+    if (c === '"') {
+      const e = skipDoubleQuoted(t, i + 1);
+      i = e < 0 ? t.length : e;
+      continue;
+    }
+    if (c === '`') {
+      const e = skipBacktickSpan(t, i + 1);
+      i = e < 0 ? t.length : e;
+      continue;
+    }
+    if (c === '$') {
+      if (t[i + 1] === "'") {
+        const e = skipAnsiC(t, i + 2);
+        i = e < 0 ? t.length : e;
+      } else if (t[i + 1] === '(') {
+        const e = scanSubstitutionBody(t, i + 2);
+        i = e < 0 ? t.length : e + 1;
+      } else if (t[i + 1] === '{') {
+        const e = skipParameterExpansion(t, i + 2);
+        i = e < 0 ? t.length : e;
+      } else i++;
+      continue;
+    }
+    if ((c === '<' || c === '>') && t[i + 1] === '(') {
+      const e = scanSubstitutionBody(t, i + 2);
+      i = e < 0 ? t.length : e + 1;
+      continue;
+    }
+    // an INPUT redirection reads a file: `mysql </tmp/payload` feeds it a script. (`<<` and `<<<` carry text, `<(` a command.)
+    if (c === '<' && t[i + 1] !== '<' && t[i + 1] !== '(' && t[i + 1] !== '>' && t[i + 1] !== '&') {
+      let k = i + 1;
+      while (k < t.length && isIfs(t[k]!)) k++;
+      const st = k;
+      while (k < t.length && !isIfs(t[k]!) && t[k] !== ';' && t[k] !== '&' && t[k] !== '|') {
+        const d = t[k]!;
+        if (d === '\\') k += 2;
+        else if (d === "'") {
+          const e = skipSingleQuoted(t, k + 1);
+          k = e < 0 ? t.length : e;
+        } else if (d === '"') {
+          const e = skipDoubleQuoted(t, k + 1);
+          k = e < 0 ? t.length : e;
+        } else k++;
+      }
+      const w = t.slice(st, Math.min(k, t.length));
+      if (w) {
+        const src = unquoteShellWord(w);
+        if (!src.startsWith('&') && !isDevPath(src)) reads.push(src);
+      }
+      i = Math.max(k, i + 1);
+      continue;
+    }
+    // the operator: `>`, `>>`, `>|`, `>&`, `&>`, `&>>`, `<>` (a leading descriptor digit belongs to the previous word)
+    let j = -1;
+    let dup = false;
+    if (c === '>') {
+      j = i + 1;
+      if (t[j] === '>') j++;
+      if (t[j] === '&') {
+        dup = true;
+        j++;
+      } else if (t[j] === '|') j++;
+    } else if (c === '&' && t[i + 1] === '>') {
+      j = i + 2;
+      if (t[j] === '>') j++;
+      if (t[j] === '|') j++;
+    } else if (c === '<' && t[i + 1] === '>') j = i + 2;
+    if (j < 0) {
+      i++;
+      continue;
+    }
+    while (j < t.length && isIfs(t[j]!)) j++;
+    // the target word: quoted and unquoted chunks, up to the shell's own separators
+    const start = j;
+    while (j < t.length && !isIfs(t[j]!) && t[j] !== ';' && t[j] !== '&' && t[j] !== '|') {
+      const d = t[j]!;
+      if (d === '\\') j += 2;
+      else if (d === "'") {
+        const e = skipSingleQuoted(t, j + 1);
+        j = e < 0 ? t.length : e;
+      } else if (d === '"') {
+        const e = skipDoubleQuoted(t, j + 1);
+        j = e < 0 ? t.length : e;
+      } else if (d === '$' && t[j + 1] === "'") {
+        const e = skipAnsiC(t, j + 2);
+        j = e < 0 ? t.length : e;
+      } else if (d === '$' && t[j + 1] === '(') {
+        const e = scanSubstitutionBody(t, j + 2);
+        j = e < 0 ? t.length : e + 1;
+      } else j++;
+    }
+    const word = t.slice(start, Math.min(j, t.length));
+    i = Math.max(j, i + 1);
+    if (!word) continue;
+    const target = unquoteShellWord(word);
+    if (dup && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
     if (target.startsWith('&')) continue;
-    // real device sinks are not writes to a governed path — but only after `..` is resolved away, so that
+    // real device sinks are not writes to a governed path - but only after `..` is resolved away, so that
     // `/dev/../etc/x` is judged as `/etc/x` (round 13)
     if (isDevPath(target)) continue;
     out.push(target);
   }
-  return out;
+  return { writes: out, reads };
+}
+
+export function redirectionTargets(segment: string): string[] {
+  return scanRedirections(segment).writes;
+}
+
+/** the files an input redirection (`< FILE`) reads */
+function redirectionSources(segment: string): string[] {
+  return scanRedirections(segment).reads;
 }
 
 /** `/dev/tcp/HOST/PORT` and `/dev/udp/HOST/PORT` ARE NOT FILES. bash intercepts the pathname inside its own
@@ -1838,7 +2337,7 @@ function unquoteShellWord(w: string): string {
     }
     out += ch;
   }
-  return out;
+  return cutAtNul(out);
 }
 
 /** Like tokenize, but records whether each token contained a quote (quoted words are data, not command heads). */
@@ -2101,7 +2600,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
   let quote: string | null = null;
   let wasQuoted = false;
   const flush = () => {
-    if (cur || wasQuoted) out.push({ text: cur, quoted: wasQuoted });
+    if (cur || wasQuoted) out.push({ text: cutAtNul(cur), quoted: wasQuoted });
     cur = '';
     wasQuoted = false;
   };
@@ -2189,7 +2688,9 @@ function decodeAnsiC(b: string): string {
       }
     } else out += c;
   }
-  return out;
+  // a NUL produced by an escape is marked, not kept: the analyzer's own markers begin with a real NUL, so cutting at
+  // every NUL would cut those, while a NUL the USER wrote (`$'\\0'`, `\\x00`) is what truncates a word
+  return out.replace(/\0/g, NUL_CUT);
 }
 /** Consume a `$'...'` ANSI-C literal starting at s[i] (which is `$`); returns the decoded word and the index of the
  *  closing quote, or null if s[i] does not start an ANSI-C quote. */
@@ -2210,31 +2711,303 @@ function ansiCAt(s: string, i: number): { text: string; end: number } | null {
 }
 
 /** WHICH DIRECTORY CHANGE THIS SEGMENT IS, however its head is spelled. `'cd' control-plane`, `c\d control-plane`,
- *  `c""d …`, `builtin cd …` and `command cd …` are all the builtin - the shell removes the quoting and the wrapper
- *  before it looks the word up - and a test written against the text `cd` saw none of them, so the working
- *  directory never moved and `tee permissions/matchers.md` was resolved against the wrong one: a write to the
- *  governance tree at ALLOW (exit review 10, cross-product). Position is the one the parse reached, not the first
- *  token that happens to spell it. */
-function directoryChange(text: string): { verb: 'cd' | 'pushd' | 'popd'; args: string[] } | null {
-  const t = tokenize(expandBraces(text));
+ *  `c""d …`, `builtin cd …`, `command cd …`, `FOO=1 cd …`, `! cd …`, `noglob cd …` and `while cd …; do` are all the
+ *  builtin - the shell removes the quoting, the assignment and the keyword before it looks the word up - and a test
+ *  written against the text `cd` saw none of them, so the working directory never moved and `tee
+ *  permissions/matchers.md` was resolved against the wrong one: a write to the governance tree at ALLOW (exit
+ *  review 10). Position is the one the parse reached, not the first token that happens to spell it. Redirections are
+ *  not arguments: `cd control-plane >/dev/null` changes to `control-plane`. */
+function directoryChange(
+  text: string,
+): { verb: 'cd' | 'pushd' | 'popd'; args: string[]; bypassesFunctions: boolean; viaCommand: boolean } | null {
+  const t = commandWords(tokenizeMarked(expandBraces(text))).map((x) => x.text);
   let i = 0;
+  let bypass = false;
+  let viaCommand = false;
   for (;;) {
     const w = t[i];
-    if (w === 'builtin' || w === 'time') i++;
-    // `command -v cd` and `-V` only DESCRIBE the name; `command cd` and `command -p cd` run it
-    else if (w === 'command') {
+    if (w === undefined) return null;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_KEYWORDS.has(w) || w === 'noglob' || w === 'nocorrect') i++;
+    else if (w === 'builtin') {
+      bypass = true;
+      i++;
+      if (t[i] === '--') i++;
+    } else if (w === 'command') {
+      // `command -v cd` and `-V` only DESCRIBE the name; `command cd` and `command -p cd` run it - in bash. zsh's
+      // `command` looks for an EXTERNAL program, where `cd` changes only its own process
+      bypass = true;
+      viaCommand = true;
       i++;
       while (t[i] === '-p' || t[i] === '--') i++;
     } else break;
   }
   const verb = t[i];
-  return verb === 'cd' || verb === 'pushd' || verb === 'popd' ? { verb, args: t.slice(i + 1) } : null;
+  return verb === 'cd' || verb === 'pushd' || verb === 'popd'
+    ? { verb, args: t.slice(i + 1), bypassesFunctions: bypass, viaCommand }
+    : null;
+}
+
+/** WHERE EACH STAGE OF A UNIT RUNS - as a SET, because a shell that has met a conditional `cd` is in more than one
+ *  place at once as far as anything reading the text can tell.
+ *
+ *  A working directory tracked as one string was wrong in a dozen ways that all came from pretending the answer is
+ *  single: `test -d x && cd x; tee f`, `true || cd sub; tee f`, a `cd` in a branch that DOES run, a function that is
+ *  called, `cd; tee f` (home), `cd dir >/dev/null`, `pushd`/`popd` with a stack (exit review 10, self-attack: eleven
+ *  findings). This returns, for every stage, the directories it MAY start in; the first is the one the rest of the
+ *  kernel resolves against, and more than one - or an unknown - means nothing positive may rest on the directory,
+ *  while every relative path is judged in EACH of them and the strongest answer wins.
+ *
+ *  What does not reach the caller is ignored outright: a stage in a pipeline, a background job, a subshell, a
+ *  command or process substitution. What may not run (a branch, a case arm, the right of `||`, a function body) is
+ *  UNIONED. What runs only if the stage before it succeeded (`&&`) holds for the rest of its chain and leaves the
+ *  earlier directory possible afterwards, because the chain may have stopped. Proven by a differential test against
+ *  bash and zsh (`exit-review-10.test.ts`): whatever directory a real shell ends in is in the modelled set. */
+export const CWD_UNKNOWN = '\0dynamic';
+export interface CwdPoint {
+  /** the directories this stage may start in, primary first; never contains CWD_UNKNOWN */
+  dirs: string[];
+  /** true when the directory could not be established at all */
+  unknown: boolean;
+  /** true when THIS stage is a directory change whose target could not be resolved */
+  dynamicCd: boolean;
+}
+export function cwdTimeline(
+  stages: readonly ShellStage[],
+  start: string,
+  startVerified = true,
+  readScript?: (abs: string) => string | null,
+): CwdPoint[] {
+  const out: CwdPoint[] = [];
+  // THE COMMON CASE COSTS NOTHING: a unit with no word that could change the directory keeps the one it started in.
+  // Quoting, escapes and braces are stripped first, so `'cd'`, `c\\d` and `c{d,d}` do not slip past the test.
+  const mayChange = stages.some((st) => {
+    const flat = (st.text.includes('{') ? expandBraces(st.text) : st.text).replace(/['"\\]/g, '');
+    return /(^|[^A-Za-z0-9_./-])(cd|pushd|popd|source|eval|chdir)($|[^A-Za-z0-9_-])|^\s*\.\s/.test(flat) || flat.startsWith(FUNCTION_DEF_PREFIX);
+  });
+  if (!mayChange) {
+    const dirs = startVerified ? [start] : [start];
+    return stages.map(() => ({ dirs: [...dirs], unknown: !startVerified, dynamicCd: false }));
+  }
+  const union = (a: Set<string>, b: Set<string>): Set<string> => new Set([...a, ...b]);
+  let now = new Set<string>(startVerified ? [start] : [start, CWD_UNKNOWN]);
+  let extra = new Set<string>();
+  let oldpwd: Set<string> | null = null;
+  const stack: Array<Set<string>> = [];
+  let condDepth = 0;
+  let fnDepth = 0;
+  const shadowed = new Set<string>();
+  const isMarker = (x: ShellStage) => x.text.startsWith(MARK);
+  const nextReal = (from: number): ShellStage | undefined => {
+    for (let j = from + 1; j < stages.length; j++) if (!isMarker(stages[j]!)) return stages[j];
+    return undefined;
+  };
+  const resolveTarget = (operand: string, base: string, physical: boolean): string[] => {
+    if (base === CWD_UNKNOWN) return [CWD_UNKNOWN];
+    const expanded = expandHome(operand, base);
+    if (expanded === null || /[$`*?[{]/.test(expanded)) return [CWD_UNKNOWN];
+    const logical = canonicalPath(isAbsolute(expanded) ? expanded : resolve(base, expanded));
+    if (!/(^|\/)\.\.(\/|$)/.test(expanded)) return [logical];
+    // `..` AFTER A SYMLINK goes two places: LOGICAL (the default) applies it to the text, PHYSICAL (-P, `set -P`, zsh's
+    // chase_dots) follows the link first. Which one the shell uses can be changed by an earlier line, so unless the
+    // command says `-P` or `-L` itself, both are possible
+    let cur = isAbsolute(expanded) ? '/' : base;
+    for (const part of expanded.split('/')) {
+      if (part === '' || part === '.') continue;
+      try {
+        cur = part === '..' ? dirname(realpathSync(cur)) : realpathSync(join(cur, part));
+      } catch {
+        cur = part === '..' ? dirname(cur) : join(cur, part);
+      }
+    }
+    return physical ? [cur] : cur === logical ? [logical] : [logical, cur];
+  };
+  const scopes: Array<{ id: number; now: Set<string>; extra: Set<string>; oldpwd: Set<string> | null; stack: Array<Set<string>>; stackAmbiguous: boolean; mayStop: boolean }> = [];
+  let stackAmbiguous = false;
+  /** whether an earlier stage of the CURRENT `&&` chain could have failed, ending the chain before the stage after it */
+  let mayStop = false;
+  for (let i = 0; i < stages.length; i++) {
+    const st = stages[i]!;
+    const text = expandBraces(st.text).trim();
+    if (st.text.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
+      fnDepth++;
+      const name = st.text.slice(FUNCTION_DEF_PREFIX.length + 1);
+      if (name === 'cd' || name === 'pushd' || name === 'popd') shadowed.add(name);
+      out.push({ dirs: [...now].filter((d) => d !== CWD_UNKNOWN), unknown: now.has(CWD_UNKNOWN), dynamicCd: false });
+      continue;
+    }
+    if (st.text === FUNCTION_BODY_END) {
+      fnDepth = Math.max(0, fnDepth - 1);
+      out.push({ dirs: [...now].filter((d) => d !== CWD_UNKNOWN), unknown: now.has(CWD_UNKNOWN), dynamicCd: false });
+      continue;
+    }
+    if (st.text.startsWith(`${FUNCTION_UNBIND} `)) {
+      shadowed.delete(st.text.slice(FUNCTION_UNBIND.length + 1));
+    }
+    if (isMarker(st)) {
+      out.push({ dirs: [...now].filter((d) => d !== CWD_UNKNOWN), unknown: now.has(CWD_UNKNOWN), dynamicCd: false });
+      continue;
+    }
+    // SUBSHELL SCOPES. Stages that share a subshell id share a shell: a `cd` inside is seen by the later stages of that
+    // subshell and by nothing outside it, so the state is saved on the way in and put back on the way out
+    const path = st.subshellPath ?? [];
+    while (scopes.length && !path.includes(scopes[scopes.length - 1]!.id)) {
+      const sc = scopes.pop()!;
+      now = sc.now;
+      extra = sc.extra;
+      oldpwd = sc.oldpwd;
+      stack.length = 0;
+      stack.push(...sc.stack);
+      stackAmbiguous = sc.stackAmbiguous;
+      mayStop = sc.mayStop;
+    }
+    for (const id of path)
+      if (!scopes.some((sc) => sc.id === id))
+        scopes.push({ id, now, extra, oldpwd, stack: [...stack], stackAmbiguous, mayStop });
+    // a new chain: what an earlier chain left possible joins the state
+    const sep = st.sepBefore;
+    const chainStart = i === 0 || sep === undefined || sep === ';' || sep === '\n' || sep === '&';
+    if (chainStart && extra.size) {
+      now = union(now, extra);
+      extra = new Set();
+    }
+    if (chainStart) mayStop = false;
+    const point: CwdPoint = { dirs: [...now].filter((d) => d !== CWD_UNKNOWN), unknown: now.has(CWD_UNKNOWN), dynamicCd: false };
+    out.push(point);
+
+    const next = nextReal(i);
+    // a stage that FEEDS a pipe, runs in the background or sits in a subshell cannot reach the caller. The LAST stage
+    // of a pipeline can: bash forks it, zsh does not, so it is conditional rather than inert
+    const inert = next?.pipedFromPrevious === true || next?.sepBefore === '&';
+    const lastOfPipeline = st.pipedFromPrevious && !inert;
+    const dc = directoryChange(text);
+    // a `source FILE` or an `eval` may change the directory in ways read from another file, or not at all
+    const head = commandWords(tokenizeMarked(text)).map((x) => x.text);
+    let hi = 0;
+    while (hi < head.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(head[hi]!) || PREFIX_KEYWORDS.has(head[hi]!))) hi++;
+    const headWord = head[hi];
+    let targets: Set<string> | null = null;
+    let certain = true; // every resolved target exists now
+    let conditional =
+      fnDepth > 0 ||
+      condDepth > 0 ||
+      st.inCase === true ||
+      lastOfPipeline ||
+      sep === '||' ||
+      dc?.viaCommand === true ||
+      (dc !== null && !dc.bypassesFunctions && shadowed.has(dc.verb));
+    // the right of `||` runs when the left FAILED - and a failed `cd` is what `extra` holds
+    if (sep === '||' && extra.size) {
+      now = union(now, extra);
+      extra = new Set();
+    }
+    if (!inert && dc !== null) {
+      const shadow = !dc.bypassesFunctions && shadowed.has(dc.verb);
+      if (shadow) {
+        // a function of that name answers: the builtin runs only if its body calls it, and those calls are stages of
+        // their own (inside the body, hence conditional)
+        targets = new Set(now);
+      } else {
+        const optionsEnded = dc.args.indexOf('--');
+        const opts = dc.args.filter((a, k) => a.startsWith('-') && a !== '-' && (optionsEnded < 0 || k < optionsEnded) && a !== '--');
+        const operands = dc.args.filter((a, k) => !(a.startsWith('-') && a !== '-' && (optionsEnded < 0 || k < optionsEnded)) && a !== '--');
+        const physical = opts.some((o) => /^-[a-zA-Z]*P/.test(o));
+        const t = new Set<string>();
+        let quietUnknown = false;
+        if (dc.verb === 'popd') {
+          const popped = operands.length === 0 && !stackAmbiguous ? stack.pop() : undefined;
+          if (popped) for (const d of popped) t.add(d);
+          else {
+            // a `popd` with nothing pushed in THIS command pops what an earlier one left: the directory is not known,
+            // and that is a fact about what follows, not a question about the `popd` itself
+            t.add(CWD_UNKNOWN);
+            quietUnknown = true;
+          }
+        } else if (operands.length === 0) {
+          // no operand: `cd` goes HOME; `pushd` swaps the top two, which is not modelled
+          if (dc.verb === 'cd') t.add(canonicalPath(homedir()));
+          else t.add(CWD_UNKNOWN);
+        } else if (operands.length === 1 && operands[0] === '-') {
+          if (dc.verb === 'cd' && oldpwd) for (const d of oldpwd) t.add(d);
+          else t.add(CWD_UNKNOWN);
+        } else if (operands.length === 1) {
+          for (const b of now) for (const r of resolveTarget(operands[0]!, b, physical)) t.add(r);
+        } else t.add(CWD_UNKNOWN); // zsh's two-word substitution form, bash's error
+        targets = t;
+        for (const d of t) {
+          if (d === CWD_UNKNOWN && !quietUnknown) point.dynamicCd = true;
+          else if (!directoryExists(d)) certain = false;
+        }
+        // a `pushd` whose target may not exist may not push either, and then the stack is not what it looks like
+        if (dc.verb === 'pushd') {
+          if (certain) stack.push(new Set(now));
+          else stackAmbiguous = true;
+        }
+      }
+    } else if (!inert && (headWord === 'source' || headWord === '.')) {
+      // the file may change the directory; what it does is read where it can be, and unknown where it cannot
+      const file = head[hi + 1];
+      const t = new Set<string>(now);
+      const text0 = file !== undefined && readScript && !/[$`*?[{]/.test(file) ? readScript(isAbsolute(file) ? file : resolve([...now][0] === CWD_UNKNOWN ? start : [...now][0]!, file)) : null;
+      if (text0 === null) t.add(CWD_UNKNOWN);
+      else {
+        for (const sub of splitShellPipeline(text0)) {
+          const sdc = directoryChange(sub.text);
+          if (!sdc) continue;
+          const ops = sdc.args.filter((a) => !a.startsWith('-'));
+          if (ops.length === 1 && ops[0] !== '-') for (const b of now) for (const r of resolveTarget(ops[0]!, b, false)) t.add(r);
+          else t.add(CWD_UNKNOWN);
+        }
+      }
+      targets = t;
+      conditional = true;
+    } else if (!inert && headWord === 'eval') {
+      targets = new Set([...now, CWD_UNKNOWN]);
+      conditional = true;
+    }
+    if (targets !== null) {
+      const before = now;
+      if (conditional || sep === '||') {
+        now = union(now, targets);
+      } else if (sep === '&&') {
+        // runs only if the chain has held so far; the rest of the chain runs in the target, and the directory before
+        // it stays possible for whatever follows the chain - if the chain COULD have stopped before it, or this change
+        // could itself fail
+        if (mayStop || !certain) extra = union(extra, before);
+        now = targets;
+      } else {
+        now = targets;
+        if (!certain) extra = union(extra, before);
+      }
+      // OLDPWD is set only when the change SUCCEEDED, so one that may have failed leaves the earlier value possible
+      oldpwd = (conditional || !certain) && oldpwd ? union(oldpwd, before) : before;
+      if (targets.has(CWD_UNKNOWN) && !conditional && sep !== '&&') now = new Set(targets);
+    }
+    // a stage that is not a change to a directory that certainly exists can fail, and a chain that fails stops
+    if (!(targets !== null && certain && !conditional && !inert && !targets.has(CWD_UNKNOWN))) mayStop = true;
+    // keywords that open a branch: the condition itself ran (above, unconditionally); the body may not
+    const kw = /^(?:(?:time|!)\s+(?:-\S+\s+)*)*(if|while|until|for|case|select)\b/.exec(text);
+    const kwEnd = /^(fi|done|esac)(?![\w=-])/.test(text);
+    if (kw) condDepth++;
+    else if (kwEnd) condDepth = Math.max(0, condDepth - 1);
+  }
+  return out;
+}
+
+/** A C string ends at its first NUL, and a command's arguments are C strings: `touch $'control-plane/x\0/../../y'`
+ *  hands touch the word `control-plane/x`. Kept whole, path normalisation collapsed `x<NUL>/..` and saw the harmless
+ *  `y` (exit review 10). */
+const NUL_CUT = '\uE000';
+function cutAtNul(w: string): string {
+  const k = w.indexOf(NUL_CUT);
+  return k < 0 ? w : w.slice(0, k);
 }
 
 function tokenize(s: string): string[] {
   const out: string[] = [];
   let cur = '';
   let quote: string | null = null;
+  // a QUOTED EMPTY WORD is still a word: `git config core.hooksPath ''` has three arguments (exit review 10)
+  let wasQuoted = false;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
     // a backslash escape is removed the way the shell removes it (`.ss\h` is `.ssh`), except inside single quotes
@@ -2263,16 +3036,18 @@ function tokenize(s: string): string[] {
     }
     if (ch === "'" || ch === '"') {
       quote = ch;
+      wasQuoted = true;
       continue;
     }
     if (IFS_RE.test(ch)) {
-      if (cur) out.push(cur);
+      if (cur || wasQuoted) out.push(cutAtNul(cur));
       cur = '';
+      wasQuoted = false;
       continue;
     }
     cur += ch;
   }
-  if (cur) out.push(cur);
+  if (cur || wasQuoted) out.push(cutAtNul(cur));
   return out;
 }
 
@@ -2334,7 +3109,9 @@ export function globToRegExp(glob: string): RegExp {
     const ch = glob[i]!;
     if (ch === '*') {
       if (glob[i + 1] === '*') {
-        re += glob[i + 2] === '/' ? '(?:.*/)?' : '.*';
+        // `.` does not match a line terminator, and a file name may hold one (CR, LF, U+2028, U+2029): every
+        // `dir/**` rule was blind to a file whose name contained one (exit review 10)
+        re += glob[i + 2] === '/' ? '(?:[\\s\\S]*/)?' : '[\\s\\S]*';
         i += glob[i + 2] === '/' ? 2 : 1;
       } else re += '[^/]*';
     } else if (ch === '?') re += '[^/]';
@@ -2463,7 +3240,7 @@ function editsInPlace(head: string, tokens: string[]): boolean {
  *  Every review before this one looked for a separator the shell honours and EGO does not. This is the mirror:
  *  a separator EGO INVENTS, which shortens a governed path into an ungoverned one. A carriage return is included
  *  because a CRLF file reaches the splitter with the `\r` still attached to the last word. */
-const IFS_RE = /[ \t\n\r]/;
+const IFS_RE = /[ \t\n]/;
 
 const WRITE_HEADS = new Set([
   'cp',
@@ -2562,38 +3339,63 @@ const copyValueOpts = (head: string): RegExp | undefined => VALUE_OPTS_BY_HEAD[h
 const GIT_HOOK_FILE_RE =
   /^(?:applypatch-msg|pre-applypatch|post-applypatch|pre-commit|pre-merge-commit|prepare-commit-msg|commit-msg|post-commit|pre-rebase|post-checkout|post-merge|pre-push|pre-receive|update|proc-receive|post-receive|post-update|reference-transaction|push-to-checkout|pre-auto-gc|post-rewrite|sendemail-validate|fsmonitor-watchman|p4-changelist|p4-prepare-changelist|p4-post-changelist|p4-pre-submit|post-index-change)$/;
 
-const hooksDirCache = new WeakMap<object, string[]>();
+const hooksDirCache = new WeakMap<object, { dirs: string[]; files: string[] }>();
 
-/** THE HOOKS DIRECTORIES THIS REPOSITORY CONFIGURES, apart from `.git/hooks`. EGO's shims live wherever
- *  `core.hooksPath` points, and a path rule can name only the conventional places (`.githooks`, `.husky`):
- *  `[core] hooksPath = githooks` made `githooks/pre-commit` an ordinary workspace file, so a Write replaced the
- *  secret scan the hook exists to run (exit review 10). The value is read from the repository's own config text as
- *  well as from git, because a checkout git cannot open is still one whose config file says where hooks live. */
-function configuredHooksDirs(ctx: EvaluationContext): string[] {
+/** THE HOOKS DIRECTORIES THIS REPOSITORY CONFIGURES, apart from `.git/hooks`, and the files that decide where they
+ *  are. EGO's shims live wherever `core.hooksPath` points, and a path rule can name only the conventional places
+ *  (`.githooks`, `.husky`): `[core] hooksPath = githooks` made `githooks/pre-commit` an ordinary workspace file, so a
+ *  Write replaced the secret scan the hook exists to run (exit review 10). The value is read from the repository's own
+ *  config text as well as from git, because a checkout git cannot open is still one whose config file says where hooks
+ *  live. Also protected: a file the config INCLUDES (it can set `core.hooksPath` itself) and the TARGET of a hook that
+ *  is a symlink (writing the target rewrites the hook). */
+function configuredHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: string[] } {
   const cached = hooksDirCache.get(ctx);
   if (cached) return cached;
-  const out = new Set<string>();
+  const dirs = new Set<string>();
+  const files = new Set<string>();
   for (const root of ctx.repoRoots) {
     const values: string[] = [];
     try {
       const text = readFileSync(join(root, '.git', 'config'), 'utf8');
-      let inCore = false;
+      let section = '';
       for (const line of text.split(/\r?\n/)) {
-        const section = /^\s*\[([^\]]+)\]/.exec(line);
-        if (section) inCore = section[1]!.trim().toLowerCase() === 'core';
-        const m = inCore ? /^\s*hookspath\s*=\s*(.*?)\s*$/i.exec(line) : null;
-        if (m) values.push(m[1]!.replace(/^"(.*)"$/, '$1'));
+        const sec = /^\s*\[([^\]]+)\]/.exec(line);
+        if (sec) section = sec[1]!.trim().toLowerCase();
+        const hp = section === 'core' ? /^\s*hookspath\s*=\s*(.*?)\s*$/i.exec(line) : null;
+        if (hp) values.push(hp[1]!.replace(/^"(.*)"$/, '$1'));
+        const inc = /^(?:include|includeif\b.*)$/.test(section) ? /^\s*path\s*=\s*(.*?)\s*$/i.exec(line) : null;
+        if (inc) {
+          const f = inc[1]!.replace(/^"(.*)"$/, '$1');
+          files.add(canonicalPath(f.startsWith('~/') ? join(homedir(), f.slice(2)) : isAbsolute(f) ? f : resolve(root, '.git', f)).split(sep).join('/'));
+        }
       }
     } catch {
       /* no readable config: git is asked below */
     }
     const viaGit = gitConfigGet(root, 'core.hooksPath');
     if (viaGit) values.push(viaGit);
-    for (const v of values) if (v) out.add(canonicalPath(resolveHooksPath(root, v)).split(sep).join('/'));
+    for (const v of values) {
+      if (!v) continue;
+      const d = canonicalPath(resolveHooksPath(root, v)).split(sep).join('/');
+      dirs.add(d);
+      // a hook that is a symlink is its target, wherever the target lives
+      try {
+        for (const e of readdirSync(d)) {
+          try {
+            const real = realpathSync(join(d, e)).split(sep).join('/');
+            if (!real.startsWith(d + '/')) files.add(real);
+          } catch {
+            /* a dangling link: nothing to protect yet */
+          }
+        }
+      } catch {
+        /* the directory does not exist yet */
+      }
+    }
   }
-  const dirs = [...out];
-  hooksDirCache.set(ctx, dirs);
-  return dirs;
+  const out = { dirs: [...dirs], files: [...files] };
+  hooksDirCache.set(ctx, out);
+  return out;
 }
 
 /** The names a credential file is given. A wildcard cannot be classified as a path, so it is asked of these. */
@@ -2604,6 +3406,12 @@ const SECRET_FILE_NAMES: readonly string[] = [
   '.env.production',
   '.env.staging',
   '.env.test',
+  '.env.prod',
+  '.env.dev',
+  '.env.development.local',
+  '.env.production.local',
+  '.env.staging.local',
+  '.env.test.local',
   '.envrc',
   '.npmrc',
   '.netrc',
@@ -2699,18 +3507,26 @@ export function classifyPath(
   // ...and the directory `core.hooksPath` names, wherever it is: a rule cannot list a place the repository chose
   if (tool !== 'Read' && 'fs.hook-config.write' in table.capabilities) {
     const posix = canonicalPath(abs).split(sep).join('/');
-    for (const dir of configuredHooksDirs(ctx)) {
+    const folded = foldName(posix);
+    const hooks = configuredHooksDirs(ctx);
+    const roots = ctx.repoRoots.map((r) => canonicalPath(r).split(sep).join('/'));
+    const hit = (via: string): CapabilityHit => ({
+      capability: 'fs.hook-config.write',
+      verdict: verdictFor(table, ctx, 'fs.hook-config.write'),
+      via,
+      absolute: isAbsoluteCap(table, 'fs.hook-config.write'),
+    });
+    if (hooks.files.some((f) => foldName(f) === folded))
+      return hit('a file that decides where git looks for hooks, or a hook that is a symlink to it');
+    for (const dir of hooks.dirs) {
+      const fd = foldName(dir);
       // a hooks path that IS the work tree (`.`) would make every file a hook: there only the hook names count
-      const roots = ctx.repoRoots.map((r) => canonicalPath(r).split(sep).join('/'));
-      const wholeTree = roots.some((r) => r === dir || r.startsWith(dir + '/'));
-      const under = posix.startsWith(dir + '/');
-      if (under && (!wholeTree || GIT_HOOK_FILE_RE.test(posix.slice(dir.length + 1))))
-        return {
-          capability: 'fs.hook-config.write',
-          verdict: verdictFor(table, ctx, 'fs.hook-config.write'),
-          via: `the hooks directory core.hooksPath names (${dir})`,
-          absolute: isAbsoluteCap(table, 'fs.hook-config.write'),
-        };
+      const wholeTree = roots.some((r) => foldName(r) === fd || foldName(r).startsWith(fd + '/'));
+      // the directory ITSELF counts: renaming or removing it switches every hook off, and `cp x githooks/` names it
+      const isDir = folded === fd;
+      const under = folded.startsWith(fd + '/');
+      if ((isDir && !wholeTree) || (under && (!wholeTree || GIT_HOOK_FILE_RE.test(posix.slice(dir.length + 1)))))
+        return hit(`the hooks directory core.hooksPath names (${dir})`);
     }
   }
   const inside = insideRoots(abs, ctx);
@@ -3129,8 +3945,35 @@ const TREE_CHANGING =
  *  explicit-endpoint matcher never saw them (exit review 10). The concern here is not code, it is destination,
  *  which is why it is tested separately and on the segment as written. A default endpoint, and localhost, are
  *  the ordinary cases and stay out. */
-const ENDPOINT_ENV_RE =
-  /(^|[\s;&|])(npm_config_registry|NPM_CONFIG_REGISTRY|yarn_registry|YARN_REGISTRY|PIP_INDEX_URL|PIP_EXTRA_INDEX_URL|UV_INDEX_URL|GOPROXY|GEM_SOURCE|NUGET_SOURCE|DOCKER_REGISTRY|HELM_REPOSITORY_CONFIG|https_proxy|http_proxy|HTTPS_PROXY|HTTP_PROXY|ALL_PROXY|all_proxy|GIT_PROXY_COMMAND|npm_config_proxy|COMPOSER_REPOSITORIES|CARGO_REGISTRIES_[A-Za-z0-9_]+_INDEX)=(?!(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\]|registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|proxy\.golang\.org|crates\.io|rubygems\.org|repo1\.maven\.org)([:/\s]|$))\S/;
+const ENDPOINT_ENV_NAME =
+  /^(?:(?:npm|NPM)_config_(?:[A-Za-z_@:.-]*registry|[A-Za-z_]*proxy)|YARN_[A-Z_]*(?:REGISTRY|PROXY)[A-Z_]*|(?:PIP|UV|POETRY)_[A-Z_]*(?:INDEX|PROXY|FIND_LINKS)[A-Z_]*|GOPROXY|GONOSUMDB|GOSUMDB|GEM_SOURCE|NUGET_[A-Z_]*SOURCE|DOCKER_REGISTRY|HELM_REPOSITORY_CONFIG|(?:HTTPS?|ALL|FTP)_PROXY|GIT_PROXY_COMMAND|COMPOSER_REPOSITORIES|CARGO_REGISTRIES_[A-Z0-9_]+_INDEX|CARGO_HTTP_PROXY|[A-Z0-9_]*(?:_PROXY|_REGISTRY|_MIRROR|_INDEX_URL|_ENDPOINT(?:_URL)?))$/i;
+const DEFAULT_ENDPOINT_HOSTS = new Set([
+  'localhost', '127.0.0.1', '::1', 'registry.npmjs.org', 'registry.yarnpkg.com', 'pypi.org', 'files.pythonhosted.org',
+  'proxy.golang.org', 'sum.golang.org', 'crates.io', 'index.crates.io', 'rubygems.org', 'repo1.maven.org',
+]);
+/** The first assignment on this segment - or in a command it carries, quoted or not - that points a package manager, a
+ *  proxy-aware client or a registry-aware tool at a host that is not a default one. The HOST is parsed, userinfo
+ *  included: `localhost:80@evil.example` is evil.example. null when there is none. */
+function endpointEnvHit(seg: string): string | null {
+  for (const text of [seg, ...carrierCommandValues(seg)]) {
+    for (const m of text.matchAll(/(?:^|[\s;&|'"(])([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|[^\s;&|'"]*)/g)) {
+      const name = m[1]!;
+      if (!ENDPOINT_ENV_NAME.test(name)) continue;
+      const value = m[2]!.replace(/^['"]|['"]$/g, '');
+      if (!value) continue;
+      const bad = value
+        .split(/[,|\s]+/)
+        .filter(Boolean)
+        .some((e) => {
+          if (/^(direct|off)$/i.test(e)) return false;
+          const h = endpointHost(e).toLowerCase();
+          return !(DEFAULT_ENDPOINT_HOSTS.has(h) || h.endsWith('.localhost'));
+        });
+      if (bad) return `${name}=${value}`;
+    }
+  }
+  return null;
+}
 
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
@@ -3370,12 +4213,49 @@ function directoryExists(abs: string): boolean {
 
 /** Destination operands of the write-ish commands, resolved against `cwd`. Feeds the A4 freshness ledger so that
  *  `cp evil.mk Makefile && make build` can no longer be judged from the Makefile that was replaced. */
+const LEDGER_ANY = '\0any';
 function writtenPathOperands(segment: string, cwd: string): string[] {
-  const tokens = tokenize(segment);
-  const head = tokens[0] ?? '';
-  const operands = tokens.slice(1).filter((t) => !t.startsWith('-') && !t.includes('='));
+  const tokens = tokenize(withoutRedirections(segment));
+  const hi = commandHeadIndex(tokens);
+  const head = tokens[hi] ?? '';
+  const operands = tokens.slice(hi + 1).filter((t) => !t.startsWith('-') && !t.includes('='));
   const out: string[] = [];
   const abs = (t: string): string => (isAbsolute(t) ? t : resolve(cwd, t));
+  // A WRITE THIS LEDGER CANNOT ENUMERATE is a wildcard, and pretending otherwise is how a makefile replaced by `cp
+  // evil/* .` looked untouched: a glob or bracket in an operand of a writer, `find … -exec`, `xargs` running a writer,
+  // and the tools that name an output file as an OPERAND (exit review 10, self-attack)
+  if (
+    /^(cp|mv|install|ginstall|rsync|ln|tee|touch|truncate|scp|ditto)$/.test(head) &&
+    tokens.slice(hi + 1).some((t) => !t.startsWith('-') && /[*?[{]/.test(t))
+  )
+    return [LEDGER_ANY];
+  if (head === 'find' && tokens.some((t) => /^-(exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls|delete)$/.test(t))) return [LEDGER_ANY];
+  if (head === 'xargs' && tokens.slice(hi + 1).some((t) => /^(cp|mv|tee|install|ln|rsync|sed|dd|truncate|touch|curl|wget|tar|unzip|sh|bash|zsh|perl|python3?|node|ruby)$/.test(t))) return [LEDGER_ANY];
+  if (head === 'sort') {
+    for (const [i, t] of tokens.entries()) {
+      if (t === '-o' && tokens[i + 1]) out.push(abs(tokens[i + 1]!));
+      else if (t.startsWith('--output=')) out.push(abs(t.slice(9)));
+      else if (/^-o./.test(t)) out.push(abs(t.slice(2)));
+    }
+    return out;
+  }
+  if (head === 'uniq' && operands.length >= 2) return [abs(operands[1]!)];
+  if (head === 'curl') {
+    for (const [i, t] of tokens.entries()) {
+      if ((t === '-o' || t === '--output') && tokens[i + 1]) out.push(abs(tokens[i + 1]!));
+      else if (t.startsWith('--output=')) out.push(abs(t.slice(9)));
+      else if (t === '-O' || t === '--remote-name' || t === '--remote-name-all' || t === '--output-dir') return [LEDGER_ANY];
+    }
+    return out;
+  }
+  if (head === 'wget') {
+    for (const [i, t] of tokens.entries()) {
+      if ((t === '-O' || t === '--output-document') && tokens[i + 1]) out.push(abs(tokens[i + 1]!));
+      else if (t.startsWith('--output-document=')) out.push(abs(t.slice(18)));
+      else if (t === '-P' || t === '--directory-prefix' || t === '-r' || t === '--recursive') return [LEDGER_ANY];
+    }
+    return out.length ? out : [LEDGER_ANY];
+  }
   if (head === 'git' && /^(checkout|restore|clone)$/.test(operands[0] ?? '')) {
     // `--` IS OPTIONAL, AND GIT SAYS SO. `git checkout HEAD~1 control-plane/permissions/matchers.md` overwrites
     // that file from an arbitrary tree-ish exactly as the `--` spelling does, and `git checkout origin/evil
@@ -3393,7 +4273,16 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
       const treeish = rest.length > 1 && !/[/.]/.test(rest[0]!) ? 1 : 0;
       out.push(...rest.slice(treeish).map(abs));
     }
-  } else if (/^(cp|mv|install|rsync|ln)$/.test(head) && operands.length >= 2) {
+  } else if (/^(cp|mv|install|ginstall|rsync|ln)$/.test(head) && tokens.some((t) => t === '-t' || t.startsWith('--target-directory'))) {
+    // `-t DIR SRC…` writes DIR/basename(SRC); the LAST operand is a source, not the destination
+    const ti = tokens.findIndex((t) => t === '-t' || t.startsWith('--target-directory'));
+    const dirArg = tokens[ti]!.includes('=') ? tokens[ti]!.slice(tokens[ti]!.indexOf('=') + 1) : tokens[ti + 1];
+    if (dirArg) {
+      const dir = abs(dirArg);
+      out.push(dir);
+      for (const src of operands.filter((o) => o !== dirArg)) out.push(`${dir}/${src.slice(src.lastIndexOf('/') + 1)}`);
+    }
+  } else if (/^(cp|mv|install|ginstall|rsync|ln)$/.test(head) && operands.length >= 2) {
     // `cp SRC DIR` WRITES `DIR/basename(SRC)`, not DIR. The ledger recorded the destination operand verbatim,
     // so `cp evil/Makefile sub && make -C sub all` marked `sub` written and left `sub/Makefile` — the file the
     // next command reads — looking fresh (exit review 10). When the destination is an existing DIRECTORY, every
@@ -3427,7 +4316,7 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   // whatever the tool is, so the rule is about the FLAG, not about an enumerated list of tools.
   for (const [i, t] of tokens.entries()) {
     const eq = OUTPUT_FLAG_RE.exec(t);
-    if (eq?.[2]) out.push(abs(eq[2]));
+    if (eq?.[1]) out.push(abs(eq[1]));
     else if (eq && tokens[i + 1] && !tokens[i + 1]!.startsWith('-')) out.push(abs(tokens[i + 1]!));
     // buildx writes to the host with `--output type=local,dest=PATH` (and `-o` with the same value shape)
     const bx = /(?:^|,)dest=([^,\s]+)/.exec(t);
@@ -3987,6 +4876,137 @@ function makeLogicalLines(text: string): string[] {
  * is the safe direction — classifying only the last textually-visible recipe made `make ENV=prod build` ALLOW
  * while make executed the other branch (challenge 5, finding 15).
  */
+/** A MAKE COMMAND LINE, READ THE WAY GNU MAKE'S OWN OPTION PARSER READS IT. Short options cluster and the last letter
+ *  that takes a value takes the next word (`-kf other.mk`, `-sC sub`), long options may be abbreviated to any unique
+ *  prefix (`--dir=sub`, `--fil x`), `-o`/`-W`/`-I` take a value that can look like a flag (`-o -n`), and `--` ends the
+ *  options. The three scans this replaces (goals, `-C`/`-f`, and the dry-run/probe flags) each read a different
+ *  subset of this and disagreed (exit review 10, self-attack: nine findings). */
+interface MakeCommandLine {
+  dirs: string[];
+  files: string[];
+  goals: string[];
+  assignments: Array<[string, string]>;
+  dryRun: boolean;
+  question: boolean;
+  probe: boolean;
+  envOverrides: boolean;
+  /** an option this parser does not know: the command line cannot be read with confidence */
+  unknown: string | null;
+  /** -E / --eval: makefile text supplied on the command line */
+  injected: boolean;
+}
+const MAKE_LONG_OPTIONS: Array<{ name: string; value: 'none' | 'required' | 'optional-number'; effect?: string }> = [
+  { name: 'directory', value: 'required', effect: 'dir' },
+  { name: 'file', value: 'required', effect: 'file' },
+  { name: 'makefile', value: 'required', effect: 'file' },
+  { name: 'include-dir', value: 'required' },
+  { name: 'old-file', value: 'required' },
+  { name: 'assume-old', value: 'required' },
+  { name: 'new-file', value: 'required' },
+  { name: 'assume-new', value: 'required' },
+  { name: 'what-if', value: 'required' },
+  { name: 'jobs', value: 'optional-number' },
+  { name: 'load-average', value: 'optional-number' },
+  { name: 'max-load', value: 'optional-number' },
+  { name: 'just-print', value: 'none', effect: 'dry' },
+  { name: 'dry-run', value: 'none', effect: 'dry' },
+  { name: 'recon', value: 'none', effect: 'dry' },
+  { name: 'question', value: 'none', effect: 'question' },
+  { name: 'environment-overrides', value: 'none', effect: 'env' },
+  { name: 'version', value: 'none', effect: 'probe' },
+  { name: 'help', value: 'none', effect: 'probe' },
+  { name: 'eval', value: 'required', effect: 'inject' },
+  { name: 'always-make', value: 'none' },
+  { name: 'debug', value: 'optional-number' },
+  { name: 'ignore-errors', value: 'none' },
+  { name: 'keep-going', value: 'none' },
+  { name: 'print-data-base', value: 'none' },
+  { name: 'no-builtin-rules', value: 'none' },
+  { name: 'no-builtin-variables', value: 'none' },
+  { name: 'silent', value: 'none' },
+  { name: 'quiet', value: 'none' },
+  { name: 'no-keep-going', value: 'none' },
+  { name: 'stop', value: 'none' },
+  { name: 'touch', value: 'none' },
+  { name: 'print-directory', value: 'none' },
+  { name: 'no-print-directory', value: 'none' },
+  { name: 'warn-undefined-variables', value: 'none' },
+  { name: 'check-symlink-times', value: 'none' },
+  { name: 'no-silent', value: 'none' },
+  { name: 'trace', value: 'none' },
+  { name: 'output-sync', value: 'optional-number' },
+  { name: 'shuffle', value: 'optional-number' },
+];
+function parseMakeCommandLine(words: string[]): MakeCommandLine {
+  const out: MakeCommandLine = {
+    dirs: [], files: [], goals: [], assignments: [], dryRun: false, question: false, probe: false,
+    envOverrides: false, unknown: null, injected: false,
+  };
+  const SHORT_VALUE = new Set(['C', 'f', 'I', 'o', 'W', 'E']);
+  const SHORT_OPTIONAL_NUMBER = new Set(['j', 'l']);
+  const SHORT_FLAGS = new Set(['b', 'm', 'B', 'd', 'e', 'h', 'i', 'k', 'L', 'n', 'p', 'q', 'r', 'R', 's', 'S', 't', 'v', 'w', 'O']);
+  let optionsEnded = false;
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]!;
+    if (!optionsEnded && w === '--') {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && w.startsWith('--')) {
+      const eq = w.indexOf('=');
+      const name = w.slice(2, eq < 0 ? undefined : eq);
+      const hits = MAKE_LONG_OPTIONS.filter((o) => o.name === name);
+      const cands = hits.length ? hits : MAKE_LONG_OPTIONS.filter((o) => o.name.startsWith(name));
+      if (cands.length === 0 || (cands.length > 1 && new Set(cands.map((c) => `${c.value}:${c.effect ?? ''}`)).size > 1)) {
+        out.unknown = w;
+        continue;
+      }
+      const o = cands[0]!;
+      let value: string | undefined = eq >= 0 ? w.slice(eq + 1) : undefined;
+      if (o.value === 'required' && value === undefined) value = words[++i];
+      else if (o.value === 'optional-number' && value === undefined && /^\d+(\.\d+)?$/.test(words[i + 1] ?? '')) value = words[++i];
+      if (o.effect === 'dir' && value) out.dirs.push(value);
+      else if (o.effect === 'file' && value) out.files.push(value);
+      else if (o.effect === 'dry') out.dryRun = true;
+      else if (o.effect === 'question') out.question = true;
+      else if (o.effect === 'env') out.envOverrides = true;
+      else if (o.effect === 'probe') out.probe = true;
+      else if (o.effect === 'inject') out.injected = true;
+      continue;
+    }
+    if (!optionsEnded && w.startsWith('-') && w.length > 1) {
+      for (let k = 1; k < w.length; k++) {
+        const c = w[k]!;
+        if (SHORT_VALUE.has(c) || SHORT_OPTIONAL_NUMBER.has(c)) {
+          const glued = w.slice(k + 1);
+          let value: string | undefined = glued || undefined;
+          if (value === undefined) {
+            if (SHORT_VALUE.has(c)) value = words[++i];
+            else if (/^\d+(\.\d+)?$/.test(words[i + 1] ?? '')) value = words[++i];
+          }
+          if (c === 'C' && value) out.dirs.push(value);
+          else if (c === 'f' && value) out.files.push(value);
+          else if (c === 'E') out.injected = true;
+          break;
+        }
+        if (!SHORT_FLAGS.has(c)) {
+          out.unknown = w;
+          break;
+        }
+        if (c === 'n') out.dryRun = true;
+        else if (c === 'q') out.question = true;
+        else if (c === 'e') out.envOverrides = true;
+        else if (c === 'h' || c === 'v') out.probe = true;
+      }
+      continue;
+    }
+    const eq = w.indexOf('=');
+    if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(w.slice(0, eq))) out.assignments.push([w.slice(0, eq), w.slice(eq + 1)]);
+    else out.goals.push(w.replace(/^(?:\.\/+)+/, ''));
+  }
+  return out;
+}
+
 function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth = 0): MakeFileModel {
   const model: MakeFileModel = {
     rules: new Map(),
@@ -4030,6 +5050,25 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   // sees an EMPTY recipe and reports the target fully resolved — its own gap becoming a positive claim.
   let prefix = '\t';
   for (const line of lines) {
+    // A `define` BODY IS A VALUE, AND ITS LINES ARE READ AS ONE BEFORE ANYTHING ELSE. A tab-led line inside it is the
+    // normal way to write a canned recipe, and the recipe-prefix test below took it for a recipe line of the
+    // PREVIOUS rule: the variable came out empty and `$(CMD)` expanded to nothing. A `$(eval …)` inside the body
+    // defines a rule when the variable is expanded, which no line-by-line reading sees (exit review 10, self-attack).
+    if (inDefine !== null) {
+      const t = line.trim();
+      if (/^endef\b/.test(t)) {
+        const prior = model.vars.get(inDefine.name);
+        if (!(inDefine.conditional && prior !== undefined))
+          model.vars.set(inDefine.name, inDefine.lines.join('\n').trim());
+        if (inDefine.override) model.overridden.add(inDefine.name);
+        if (inDefine.exported) model.exported.set(inDefine.name, inDefine.lines.join('\n').trim());
+        inDefine = null;
+      } else {
+        if (/\$[({]eval\b/.test(t)) model.unsupported.push(`$(eval) inside define ${inDefine.name}: ${t}`);
+        inDefine.lines.push(t);
+      }
+      continue;
+    }
     // a line that starts with the CURRENT recipe prefix is a recipe line, whatever it says: a tab-indented
     // `.RECIPEPREFIX` is a command make hands to the shell, and reading it as a directive changed the prefix so
     // every remaining recipe line of that target became invisible (exit review 5)
@@ -4052,19 +5091,6 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // `define NAME` … `endef` holds a variable's VALUE, not live makefile text. The lines between were fed
     // through the ordinary loop, so an assignment written inside a help text overwrote a live variable and the
     // recipe was analysed with the wrong one (exit review 8).
-    if (inDefine !== null) {
-      if (/^endef\b/.test(trimmed)) {
-        // the body IS the variable's value: `override define CMD` / `git push origin main` / `endef` is the
-        // multi-line spelling of an override, and recording only the `=` forms left it invisible (exit review 8)
-        const prior = model.vars.get(inDefine.name);
-        if (!(inDefine.conditional && prior !== undefined))
-          model.vars.set(inDefine.name, inDefine.lines.join('\n').trim());
-        if (inDefine.override) model.overridden.add(inDefine.name);
-        if (inDefine.exported) model.exported.set(inDefine.name, inDefine.lines.join('\n').trim());
-        inDefine = null;
-      } else inDefine.lines.push(trimmed);
-      continue;
-    }
     const defOpen = /^((?:override\s+|export\s+)*)define\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(::?=|[+?!]=|=)?\s*$/.exec(trimmed);
     if (defOpen) {
       inDefine = {
@@ -4312,7 +5338,10 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     // a rule: `targets [: | ::] prereqs [; recipe]`. A target or prerequisite list built from a variable is
     // recorded as unsupported rather than parsed as a literal name.
-    const rule = /^([^:=#]+?)\s*::?(?!=)\s*([^;]*)(?:;(.*))?$/.exec(line);
+    // GNU make strips the COMMENT before it looks for the `;` that starts a one-line recipe, so in `deploy: ## Deploy;
+    // never run git push by hand` the text after the semicolon is prose (exit review 10, self-attack)
+    const ruleLine = line.replace(/(^|[^\\])#.*$/, '$1');
+    const rule = /^([^:=#]+?)\s*::?(?!=)\s*([^;]*)(?:;(.*))?$/.exec(ruleLine);
     // ONLY A TAB MARKS A RECIPE. GNU make accepts a rule line indented with SPACES, and rejecting every
     // whitespace-led line made `  deploy:` invisible: `make deploy` force-pushed under a proven-absent claim
     // (exit review 7).
@@ -4322,20 +5351,31 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       // -f app` overrides DOCKER for that target's recipes, and it was parsed as a rule whose prerequisites are
       // the words of the assignment — so the recipe `$(DOCKER)` was expanded with the GLOBAL value and the
       // production command it really runs was never seen (exit review 7).
-      const tsv = /^(?:override\s+|export\s+)*([A-Za-z_][A-Za-z0-9_.]*)\s*(?:::?|[+?!])?=\s*(.*)$/.exec(rule[2]!.trim());
+      // THE WHOLE TAIL IS THE VALUE. In GNU make 3.81 a target-specific assignment takes everything after the operator
+      // - a `;` and what follows it included - and creates no recipe: `run: V = true; echo X` gives V the value
+      // `true; echo X`, which runs only where `$(V)` is expanded. (An earlier revision of this parser read the tail as a
+      // recipe on the strength of an experiment that could not tell the two apart; both print the same lines.)
+      const whole = (rule[3] !== undefined ? `${rule[2]};${rule[3]}` : rule[2]!).trim();
+      const tsv = /^((?:override\s+|export\s+|private\s+)*)([A-Za-z_][A-Za-z0-9_.]*)\s*(::?:?=|[+?!]=|=)\s*(.*)$/.exec(whole);
       if (tsv) {
+        // what this parser does not model is REPORTED, not approximated: an appending or conditional assignment, a
+        // keyword in front of it, or a PATTERN-specific variable each change what the recipe expands to in ways a plain
+        // replacement gets wrong in BOTH directions
+        const op = tsv[3]!;
+        const unmodelled =
+          tsv[1]!.trim() !== '' ? `a target-specific assignment with ${tsv[1]!.trim()}` :
+          /^[+?!]=$/.test(op) ? `a target-specific ${op} assignment` :
+          targets.some((t) => t.includes('%')) ? 'a pattern-specific variable' : null;
         for (const t of targets) {
           const m = model.targetVars.get(t) ?? new Map<string, string>();
-          m.set(tsv[1]!, tsv[2]!);
+          m.set(tsv[2]!, tsv[4]!);
           model.targetVars.set(t, m);
+          if (unmodelled) model.unsupportedFor.set(t, [...(model.unsupportedFor.get(t) ?? []), `${unmodelled}: ${whole}`]);
         }
-        // A SEMICOLON ENDS THE ASSIGNMENT AND STARTS A RECIPE, and GNU make cuts the line there BEFORE it asks whether
-        // it is a variable assignment (verified against make 3.81: `run: V = true; echo X` sets V to `true` and RUNS
-        // `echo X`). Taking the whole tail as the value dropped the recipe: `run: V = 1; git push --force origin
-        // main` was ALLOW (exit review 10, cross-product).
-        if (!(rule[3] && rule[3].trim())) continue;
+        if (unmodelled && targets.some((t) => t.includes('%'))) model.unsupported.push(`${unmodelled}: ${whole}`);
+        continue;
       }
-      const prereqs = tsv ? [] : rule[2]!.trim().split(/\s+/).filter(Boolean);
+      const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
       // A target that can build something NO LITERAL RULE DEFINES makes "this goal has no rule, so nothing runs"
       // false. A `%` pattern is one; so are `.DEFAULT`, which make runs for any goal with no rule of its own, and
       // an old-style SUFFIX rule like `.c.o:` — both reached ALLOW by proving a target absent that make in fact
@@ -4923,8 +5963,20 @@ function resolveScriptCommand(
   //  anything, and no later resolution in the same unit can be proven fresh. Enumerating writer commands would be
   //  the same losing game as enumerating shell spellings — `node -e`, `python -c`, `git checkout -- f`, a build
   //  step that regenerates its own makefile, all write files without being "write commands".
+  // A PATH IS STALE WHEN IT OR ANY ANCESTOR WAS WRITTEN: `mv evil sub` replaces everything under `sub`, `cp x n` where n
+  // does not exist yet may be creating a directory, and a link to a directory makes its whole tree a second name. The
+  // comparison is case-folded because the filesystem is (`cp evil.mk MAKEFILE` writes `Makefile` on APFS).
   const stale = (...paths: string[]): boolean =>
-    written.has('\0any') || paths.some((p) => written.has(canonicalPath(p)));
+    written.has('\0any') ||
+    paths.some((p) => {
+      const c = foldName(canonicalPath(p));
+      for (const w of written) {
+        if (w.startsWith('\0')) continue;
+        const f = foldName(w);
+        if (c === f || c.startsWith(f + '/')) return true;
+      }
+      return false;
+    });
 
   // A3 — a semantic conclusion drawn from a RELATIVE path is only trustworthy when the directory it is relative to
   // has been proven. Absence of proof is not proof.
@@ -5517,15 +6569,6 @@ function resolveScriptCommand(
     // (the head is resolved by the normalizer, which strips wrappers; `nice -n 10 make deploy` reaches here as
     //  `make deploy` — but a wrapper the normalizer does NOT strip would leave `head` wrong, which is why the
     //  producer cross-product carries every wrapper transformation)
-    const MAKE_ARG_OPTS = new Set([
-      '-C', '--directory', '-f', '--file', '--makefile', '-o', '--old-file', '-W', '--what-if', '-I',
-      '--include-dir',
-    ]);
-    // `-j`, `--jobs`, `-l` and `--load-average` take an OPTIONAL argument, and make decides by LOOKING at it:
-    // `make -j build` builds `build`, `make -j4 build` too. Treating the argument as mandatory swallowed the
-    // target name, so the analyzer resolved the DEFAULT goal and reported on a recipe nobody asked for
-    // (exit review 5).
-    const MAKE_OPTIONAL_NUMBER_OPTS = new Set(['-j', '--jobs', '-l', '--load-average']);
     const targets: string[] = [];
     const cliRebinds: string[] = [];
     const cliInputs: string[] = [];
@@ -5551,42 +6594,29 @@ function resolveScriptCommand(
     // The normalized text IS the command in that case, and it is what the producer was invoked on.
     const rawMarked = makeAt >= 0 ? allRawMarked.slice(makeAt) : tokenizeMarked(norm);
     const rawTokens = rawMarked.map((t) => t.text);
-    for (const t of rawTokens) {
-      if (t.startsWith('-') || !/^[A-Za-z_][A-Za-z0-9_.]*=/.test(t)) continue;
-      cliVars.set(t.slice(0, t.indexOf('=')), t.slice(t.indexOf('=') + 1));
+    // ONE READER FOR THE COMMAND LINE: clusters, abbreviations, options that take a value, and `--` (see
+    // parseMakeCommandLine). Nine self-attack findings came from three scans that each knew a different subset.
+    const cl = parseMakeCommandLine(rawTokens);
+    for (const [k, v] of cl.assignments) {
+      // a command-line assignment OVERRIDES every assignment of that name in the makefile, so the recipe does
+      // not expand to what the file says (exit review 5); make takes execution inputs in this position too
+      if (/^(SHELL|\.SHELLFLAGS|PATH)$/.test(k)) cliRebinds.push(`${k}=${v}`);
+      else if (EXECUTION_ENV_INPUTS.test(k)) cliInputs.push(`${k}=${v}`);
+      if (!cliVars.has(k)) cliVars.set(k, v);
     }
-
+    // successive -C are CUMULATIVE in make: `make -C a -C b` enters a, then a/b (challenge 5, finding 17)
     let makeDir = cwd;
-    const makeFiles: string[] = []; // every -f/--file/--makefile: make reads them ALL, not just the last
-    for (let i = 1; i < rawTokens.length; i++) {
-      const t = rawTokens[i]!;
-      if (t.startsWith('-')) {
-        const dirEq = /^(?:--directory=|-C)(.+)$/.exec(t);
-        const fileEq = /^(?:--file=|--makefile=|-f)(.+)$/.exec(t);
-        // successive -C are CUMULATIVE in make: `make -C a -C b` enters a, then a/b (challenge 5, finding 17)
-        if ((t === '-C' || t === '--directory') && rawTokens[i + 1]) makeDir = resolve(makeDir, rawTokens[i + 1]!);
-        else if (dirEq) makeDir = resolve(makeDir, dirEq[1]!);
-        if ((t === '-f' || t === '--file' || t === '--makefile') && rawTokens[i + 1]) makeFiles.push(rawTokens[i + 1]!);
-        else if (fileEq) makeFiles.push(fileEq[1]!);
-        if (MAKE_ARG_OPTS.has(t)) i++;
-        else if (MAKE_OPTIONAL_NUMBER_OPTS.has(t) && /^\d+(\.\d+)?$/.test(rawTokens[i + 1] ?? '')) i++;
-        continue;
+    for (const d of cl.dirs) makeDir = resolve(makeDir, d);
+    const makeFiles: string[] = cl.files; // every -f/--file/--makefile: make reads them ALL, not just the last
+    targets.push(...cl.goals);
+    // the environment make was STARTED with: `V='git push …' make x` gives the recipe a `V` the makefile may never
+    // assign, and with `-e` it beats the makefile's own assignment (exit review 10, self-attack)
+    const makeEnvVars: Array<[string, string]> = [];
+    if (makeAt > 0)
+      for (const t of allRawMarked.slice(0, makeAt)) {
+        const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(t.text);
+        if (m) makeEnvVars.push([m[1]!, m[2]!]);
       }
-      if (t.includes('=')) {
-        // a command-line variable assignment is not a target — but make takes execution inputs in this position
-        // too, and the leading-assignment capture cannot see them (challenge 8, finding 2)
-        if (/^(SHELL|\.SHELLFLAGS|PATH)=/.test(t)) cliRebinds.push(t);
-        else if (EXECUTION_ENV_INPUTS.test(t.slice(0, t.indexOf('=')))) cliInputs.push(t);
-        // a command-line assignment OVERRIDES every assignment of that name in the makefile, so the recipe does
-        // not expand to what the file says (exit review 5)
-        if (!cliVars.has(t.slice(0, t.indexOf('=')))) cliVars.set(t.slice(0, t.indexOf('=')), t.slice(t.indexOf('=') + 1));
-        continue;
-
-      }
-      // `make ./deploy` BUILDS THE TARGET `deploy`: make canonicalises a goal's leading `./` away, so a goal
-      // spelled that way found no rule and the DEFAULT goal was resolved instead (exit review 9).
-      targets.push(t.replace(/^(?:\.\/+)+/, ''));
-    }
     // THE QUOTING IS ONLY IN THE RAW SEGMENT. Normalization de-quotes, so `make V="git push origin main" run`
     // reaches the scan above as five bare words: the override kept only `git`, and `push origin main` became
     // three TARGETS. That laundered a governed command through a makefile variable (exit review 5). The raw
@@ -5597,7 +6627,16 @@ function resolveScriptCommand(
     // a recipe an attacker supplies (exit review 2).
     // `-E'deploy: ; CMD'` is GLUED, like every other short option, and the guard matched only the detached and
     // `=` forms (exit review 8)
-    if (makeFiles.includes('-') || tokens.some((t) => /^(-E|--eval)(=|$)/.test(t) || /^-E./.test(t)))
+    if (cl.unknown !== null)
+      return {
+        kind: 'make-target',
+        key: `make:option:${norm}`,
+        body: null,
+        reason: `an option this resolver does not know (${cl.unknown}) leaves the command line unread`,
+        resolution: 'DYNAMIC',
+        unresolved: [{ what: 'body', where: 'make command line', why: `unknown option ${cl.unknown}` }],
+      };
+    if (cl.injected || makeFiles.includes('-') || tokens.some((t) => /^(-E|--eval)(=|$)/.test(t) || /^-E./.test(t)))
       return {
         kind: 'make-target',
         key: `make:injected:${norm}`,
@@ -5721,6 +6760,18 @@ function resolveScriptCommand(
       merged.pendingIncludes.push(...m.pendingIncludes);
       if (!merged.firstTarget) merged.firstTarget = m.firstTarget;
     }
+    for (const [k, v] of makeEnvVars) {
+      if (cliVars.has(k)) continue; // the command line beats the environment
+      if (cl.envOverrides && !merged.overridden.has(k)) merged.vars.set(k, v);
+      else {
+        // without -e the environment is the DEFAULT the makefile's `?=` leaves alone and its own `=` replaces; which of
+        // the two happens is the makefile's business, so both values are walked
+        const into = merged.altVars.get(k) ?? new Set<string>();
+        into.add(v);
+        merged.altVars.set(k, into);
+        if (!merged.vars.has(k)) merged.vars.set(k, v);
+      }
+    }
     // ...AND SO DOES AN OPTIONAL INCLUDE THAT WAS NOT THERE. `-include gen.mk` is skipped when the file is
     // missing, which is the whole point of the spelling — but "missing" is a claim about NOW, and `printf
     // 'x:\n\tgit push origin main\n' > gen.mk && make x` writes it first (exit review 9).
@@ -5745,7 +6796,7 @@ function resolveScriptCommand(
     // whole producer resolve to nothing — found immediately by the producer cross-product
     // make's OWN probe flags, read from the segment AS WRITTEN: `make ship NOTE="see --version output"` puts the
     // word inside a quoted VALUE, and a token scan saw it as make's option (exit review 8).
-    if (tokenizeMarked(env.rawSegment ?? tokens.join(' ')).some((t) => !t.quoted && /^(--version|--help)$/.test(t.text)))
+    if (cl.probe)
       return { kind: 'make-target', key: `make:probe`, body: null, reason: 'a version or help probe selects no goal', resolution: 'NOT_A_PRODUCER' };
     // A DRY RUN PRINTS THE RECIPE AND DOES NOT RUN IT. `make -n deploy` is exactly how an operator INSPECTS a
     // target before trusting it, and reading the inspection as the execution made looking at a recipe carry that
@@ -5754,27 +6805,11 @@ function resolveScriptCommand(
     // make expands a line before printing it and a `$(shell …)` inside it runs either way.
     // The short flag is read only inside a cluster of make's ARGUMENT-LESS options: in `-fn` the `n` is the name
     // of a makefile, not the dry run.
-    const MAKE_FLAG_CLUSTER = /^-[BdeiknpqrstvwLRS]+$/;
     // ...AND SO ARE MAKE'S OWN FLAGS. Read from the whole raw segment, the `-n` of `nice -n 10 make deploy` is
     // a make flag containing `n` — so every command wrapped in `nice` was read as a DRY RUN and its recipe was
     // never carried. A wrapper's options belong to the wrapper (self-attack on exit review 9).
-    const makeFlags = rawMarked.filter((t) => !t.quoted);
-    const dryRun = makeFlags.some(
-      (t) =>
-        /^(--just-print|--dry-run|--recon)$/.test(t.text) ||
-        (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('n')),
-    );
-    // `make -q` IS QUESTION MODE: it runs NOTHING AT ALL and reports up-to-dateness in its exit status. It does
-    // not even print the recipe, so it is weaker than `-n`, and it resolved the target's body as if it were
-    // going to execute it — `make -q run` on a recipe with `git push origin main` was an absolute deny over a
-    // command that answers a question (exit review 9).
-    // ...BUT IT STILL PARSES THE MAKEFILE, and a `:=` assignment holding `$(shell …)` is expanded at parse
-    // time, so that command runs. Returning before the body dropped those, and `make -q all` on a makefile with
-    // `X := $(shell git push --force origin main)` force-pushed at ALLOW — verified against GNU make 3.81. The
-    // `-n` path had this right all along; only the `-q` path I added dropped them (self-attack).
-    const questionMode = makeFlags.some(
-      (t) => /^--question$/.test(t.text) || (MAKE_FLAG_CLUSTER.test(t.text) && t.text.includes('q')),
-    );
+    const dryRun = cl.dryRun;
+    const questionMode = cl.question;
     // make's `+` prefix runs a line under `-n`, `-t` AND `-q` alike, so question mode suppresses recipes on
     // exactly the same terms a dry run does — and, like a dry run, it leaves the parse-time expansions alone.
     const noRecipes = dryRun || questionMode;
@@ -5944,7 +6979,9 @@ function resolveScriptCommand(
     // ...AND THE DIRECTORY IT RUNS IN. The key dropped `makeDir` whenever a makefile was resolved, so a recipe
     // that re-enters make with `-C sub -f ../Makefile all` was the SAME execution as the one that started it and
     // the cycle guard stopped it - while `./x.sh` inside it is `sub/x.sh`, a different file (exit review 10).
-    const key = `make:${makeDir}:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}:${cliKey}`;
+    // the dry-run and question state is part of the identity: under `-n` only the `+` and `$(MAKE)` lines run, and a real
+    // `make x` reached from one of them (`env -u MAKEFLAGS make x`) must not be skipped as a repeat of the dry one
+    const key = `make:${makeDir}:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}:${cliKey}:${noRecipes ? 'norecipes' : 'run'}`;
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
@@ -6324,7 +7361,7 @@ const TARGET_ENV_RE =
   // RESOLVER but not here, so the assignment was stripped as noise and never re-attached: the engine survived
   // only while the assignment happened to stay leading in the raw segment. Inside an `if`, a loop body, a `trap`
   // or a herestring it did not, and a shell on a production daemon asked (exit review 6, generated cross-product).
-  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER)$/;
+  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER|LIQUIBASE_COMMAND_URL|LIQUIBASE_URL|DBMATE_DATABASE_URL|PRISMA_DATABASE_URL|TYPEORM_URL|SEQUELIZE_URL|POSTGRES_URL|POSTGRES_HOST|MONGODB_HOST)$/;
 const TARGET_ENV_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
   'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
@@ -6360,82 +7397,53 @@ const HELM_MUTATING_VERBS = new Set([
 /** A COMMAND THAT ASKS FOR HELP, OR REPORTS A VERSION, CONNECTS TO NOTHING. It is the first thing anyone runs
  *  against an unfamiliar tool and the last thing that should be refused outright (exit review 9). Read from the
  *  RAW tokens, so a `--help` inside a quoted SQL statement or a search pattern is not one. */
-/** ANY SIGN OF A WRITE, ANYWHERE IN A STATEMENT. A read-only exception has to be a claim about the WHOLE
- *  statement, and a blocklist of word-bounded SQL verbs was neither:
- *    - `EXPLAIN ANALYSE …` EXECUTES what it wraps, and PostgreSQL accepts the British spelling as an exact
- *      synonym of ANALYZE — the list knew only one of the two, so terminating every backend connection to a
- *      production database read as a query plan;
- *    - `show dbs; db.dropDatabase()` puts the write AFTER a reader, and only the first statement was inspected;
- *    - `\b` never matches inside an identifier, so `dropDatabase` and `deleteMany` — the way every driver
- *      spells it — passed a list containing `drop` and `delete`.
- *  So: a statement separator disqualifies it outright, and the verbs are matched as SUBSTRINGS of an
- *  identifier as well as words (self-attack on exit review 9). */
-const WRITES_SOMEWHERE =
-  /;|\b(analyse|analyze)\b|(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|vacuum|reindex|cluster|call|merge|rename|refresh|shutdown|detach|attach|lock|flush|kill|import|restore|replace|upsert|remove|destroy|purge|expire|rewrite|repair|optimi[sz]e|set[A-Z_])/i;
-
-/** Options whose VALUE is the next token on the surfaces these exceptions serve. A probe flag sitting in that
- *  position is not a probe: `helm upgrade --description --help` sets the release description to the string
- *  `--help` and performs the upgrade, and `kubectl apply --field-manager --help` names the field manager
- *  (exit review 10). Both were read as requests for documentation against a PRODUCTION cluster. */
-const VALUE_OPT_BEFORE_PROBE =
-  /^(--description|--field-manager|--context|--kube-context|--namespace|--kubeconfig|--server|--user|--username|--password|--token|--cluster|--as|--as-group|--output|-o|--filename|-f|--selector|-l|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|--set-json|--post-renderer|--timeout|--history-max|--atomic-timeout|--profile|--region|--endpoint-url|--cli-input-json|--query|--message|-m|--file|--config|--log-file|--comment|--reason|--annotation|--label|--name|-n|--revision|--wait-timeout|--suffix|--prefix|--template|--format|--filter|--project|--account|--impersonate-service-account|--subscription|--resource-group|-g)$/;
-
 function isProbeInvocation(seg: string): boolean {
-  const t = tokenizeMarked(seg).filter((x) => !x.quoted).map((x) => x.text);
-  return t.some((w, i) => {
-    // a probe flag in an option's VALUE position is that option's value, not a probe
-    if (i > 0 && VALUE_OPT_BEFORE_PROBE.test(t[i - 1] ?? '')) return false;
-    if (/^(--help|-help|--usage|-\?)$/.test(w)) return true;
-    // `--version` IS ALSO AN OPTION THAT TAKES A VALUE. `helm upgrade --install acme acme/web --version 1.4.2`
-    // pins a chart version and installs it; read as a probe it reached ALLOW against a production cluster.
-    // A probe's `--version` is the last word, or is followed by another option (self-attack on exit review 9).
-    // ...and the normalizer moves a leading assignment to the END of the line so the environment input stays
-    // visible, so `PGHOST=prod-db psql --version` arrives as `psql --version PGHOST=prod-db`: the word after
-    // `--version` is an ASSIGNMENT, not its value (self-attack, second order).
-    if (/^(--version|-version)$/.test(w)) {
-      const next = t[i + 1];
-      return next === undefined || next.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(next);
-    }
-    // ...and a bare `help` is a PSEUDO-COMMAND OF THE TOOLS THAT DOCUMENT IT THERE, not any trailing word.
-    // `aws ec2 terminate-instances help` opens the manual; `kubectl --context production delete deployment help`
-    // deletes a deployment CALLED help, and `helm uninstall help` uninstalls a release called help. There is no
-    // syntactic difference between the two, so the tools that put `help` LAST are named and the ones that put it
-    // FIRST — kubectl, helm — are not (exit review 10).
-    const head = (t[commandHeadIndex(t)] ?? '').replace(/^.*\//, '');
-    return (
-      w === 'help' &&
-      i > 0 &&
-      i === t.length - 1 &&
-      /^(aws|gcloud|az|terraform|tofu|pulumi|docker|podman|nerdctl|git|gh|glab|npm|pnpm|yarn|cargo|go|dotnet|brew)$/.test(head)
-    );
-  });
+  // ONE READER. This used to keep its own list of flags and of options-with-values, and the two copies drifted:
+  // `git push --force origin main > --help` (a redirection TARGET), `kubectl delete pod x -- --help` and
+  // `redis-cli SET foo --help` were probes here and not there (exit review 10, self-attack).
+  return helpProbeHead(seg) !== null;
 }
 /** A DRY RUN PERFORMS THE ACT'S CHECKS AND NOT THE ACT. `kubectl apply --dry-run=client`, `helm upgrade
  *  --dry-run`, `git push --dry-run` and `aws … --dry-run` are how an operator finds out what WOULD happen, and
  *  each was refused absolutely (exit review 9). The gate that remains is the ordinary one: a dry run against a
  *  production target still reaches it, and a human can still say no. */
+/** flags that take no value, so the word after them is a new word: what may stand in front of a dry-run flag */
+const BOOLEAN_BEFORE_DRY_RUN =
+  /^(--force|-f|--wait|--atomic|--install|-i|--overwrite|--server-side|--prune|--recursive|-R|--all|-A|--record|--save-config|--show-managed-fields|--skip-crds|--no-hooks|--debug|--create-namespace|--dependency-update|--reuse-values|--reset-values|--cascade|--ignore-not-found|--wait-for-jobs|--enable-helm|--delete|--recursive|--quiet|-q|--verbose)$/;
+
 function isDryRun(seg: string): boolean {
-  const t = tokenizeMarked(seg)
+  const t = commandWords(tokenizeMarked(seg))
     .filter((x) => !x.quoted)
-    .map((x) => x.text)
-    // a dry-run flag in an option's VALUE position is that option's value, not a dry run
-    .filter((w, i, a) => !(i > 0 && VALUE_OPT_BEFORE_PROBE.test(a[i - 1] ?? '')));
+    .map((x) => x.text);
+  // nothing after a `--` belongs to the tool's own flags
+  const dd = t.indexOf('--');
+  const words = dd >= 0 ? t.slice(0, dd) : t;
   // `--dry-run=none` IS NOT A DRY RUN. It is the EXPLICIT spelling of "really do it": kubectl documents none as
   // the default, and helm's own help says `--dry-run=none` executes the operation normally and persists
   // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
   // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
   // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
-  return t.some(
-    (w) =>
-      w === '--server-dry-run' ||
-      w === '--dryrun' ||
-      w === '--what-if' ||
-      w === '--no-act' ||
-      // a BARE `--dry-run` is a dry run: kubectl's and helm's flag takes its value only with `=`, so the next word is
-      // a positional (`helm upgrade --dry-run none ./chart` upgrades a release NAMED none, as a dry run)
-      w === '--dry-run' ||
-      /^--dry-run=(client|server|true|1|yes)$/i.test(w),
-  );
+  return words.some((w, i) => {
+    if (
+      !(
+        w === '--server-dry-run' ||
+        w === '--dryrun' ||
+        w === '--what-if' ||
+        w === '--no-act' ||
+        // a BARE `--dry-run` is a dry run: kubectl's and helm's flag takes its value only with `=`, so the next word is
+        // a positional (`helm upgrade --dry-run none ./chart` upgrades a release NAMED none, as a dry run)
+        w === '--dry-run' ||
+        /^--dry-run=(client|server|true|1|yes)$/i.test(w)
+      )
+    )
+      return false;
+    // A FLAG IN AN OPTION'S VALUE POSITION IS THAT OPTION'S VALUE. Which options take one is not knowable for every
+    // tool, so the word before must be a positional, a complete `--opt=value`, or an option known to take none
+    // (`kubectl set env deploy/x A=1 --field-manager --dry-run` names a field manager)
+    const prev = words[i - 1];
+    if (prev === undefined || !prev.startsWith('-') || prev.includes('=')) return true;
+    return BOOLEAN_BEFORE_DRY_RUN.test(prev);
+  });
 }
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
 const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
@@ -6718,11 +7726,14 @@ function resolveContainerTarget(
     // `compose version` and `compose ls` print the plugin's version and the project list: no container is touched
     ...['compose version', 'compose ls'],
     ...['container ls', 'container port', 'container stats', 'container top', 'container diff'],
-    ...['volume ls', 'volume inspect', 'network ls', 'network inspect', 'system info', 'system df', 'system events'],
-    ...['context ls', 'context inspect', 'context show', 'builder ls', 'buildx ls', 'buildx inspect'],
-    ...['node ls', 'node inspect', 'service ls', 'service inspect', 'service logs', 'service ps'],
-    ...['stack ls', 'stack ps', 'stack services', 'secret ls', 'secret inspect', 'config ls', 'config inspect'],
-    ...['plugin ls', 'plugin inspect', 'compose ls', 'compose ps', 'compose logs', 'compose config', 'compose images', 'compose top'],
+    // `inspect` and `logs` are NOT here for ANY group (exit review 10, self-attack): a service spec, a config payload, a
+    // secret's metadata, a volume's options and a compose project's output are the same credentials-and-mounts the
+    // one-word `inspect`/`logs` print, and listing only the ones someone remembered left their twins ALLOW
+    ...['volume ls', 'network ls', 'system info', 'system df', 'system events'],
+    ...['context ls', 'context inspect', 'context show', 'builder ls', 'buildx ls'],
+    ...['node ls', 'service ls', 'service ps'],
+    ...['stack ls', 'stack ps', 'stack services', 'secret ls', 'config ls'],
+    ...['plugin ls', 'compose ls', 'compose ps', 'compose images', 'compose top'],
   ]);
   const groups = new Set(['image', 'container', 'volume', 'network', 'system', 'context', 'builder', 'buildx', 'node', 'service', 'stack', 'secret', 'config', 'plugin', 'trust', 'swarm', 'compose', 'manifest', 'checkpoint']);
   // A SIGNAL'S TARGET IS A VALUE, NOT A SUFFIX. The filter dropped every positional that the target string
@@ -6807,7 +7818,10 @@ function resolveK8sTarget(
   const readsOnly =
     (verb !== undefined && sub !== undefined && (K8S_READ_SUBCOMMANDS[verb]?.has(sub) ?? false)) ||
     // `kubectl set env … --list` PRINTS the environment and sets nothing
-    (verb === 'set' && tokens.includes('--list'));
+    (verb === 'set' &&
+      tokens[tokens.length - 1] === '--list' &&
+      !(tokens[tokens.length - 2] ?? '-').startsWith('-') &&
+      !tokens.includes('--'));
   const mutating =
     switchesContext || touchesSecrets
       ? true
@@ -6925,6 +7939,75 @@ function looksLikeDbTarget(t: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z0-9-]*(:\d+)?(\/\S*)?$/.test(t) && !/\.(sql|js|py|rb|json|txt)$/i.test(t);
 }
 
+/** Every statement a database client will RUN, from any flag it accepts - including the abbreviations its option
+ *  parser accepts (`mysql --exe`, `psql --comm`) - and whether any came from a FILE, which nobody has read. */
+function dbStatements(tokens: string[]): { statements: string[]; fromFile: boolean } {
+  const LONGS = ['command', 'execute', 'eval', 'query', 'init-command', 'defaults-command', 'file', 'init-file', 'queries-file', 'execute-file'];
+  const FILES = new Set(['file', 'init-file', 'queries-file', 'execute-file']);
+  const statements: string[] = [];
+  let fromFile = false;
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t.startsWith('--') && t.length > 3) {
+      const eq = t.indexOf('=');
+      const name = t.slice(2, eq < 0 ? undefined : eq);
+      // an EXACT name is never ambiguous: `--execute` is not an abbreviation of `--execute-file`
+      const hit = LONGS.includes(name) ? [name] : LONGS.filter((l) => l.startsWith(name));
+      if (hit.length) {
+        // an ambiguous abbreviation is refused by the client, so ANY candidate that reads a file counts as one
+        const value = eq >= 0 ? t.slice(eq + 1) : tokens[i + 1];
+        if (hit.some((l) => FILES.has(l))) fromFile = true;
+        if (hit.some((l) => !FILES.has(l)) && value !== undefined) statements.push(value);
+        if (eq < 0) i++;
+        continue;
+      }
+    }
+  }
+  statements.push(...optionValues(tokens, 'c', []), ...optionValues(tokens, 'e', []));
+  if (optionValues(tokens, 'f', []).length) fromFile = true;
+  // the Go-style single-dash spellings were normalised to the double-dash ones by the caller
+  return { statements: [...new Set(statements)], fromFile };
+}
+
+/** A statement that is a READ of schema, plan or server state - by a strict grammar, not by the absence of words.
+ *  A blocklist of write verbs is wrong by omission (`created_at` contains `create`; `\g` ends a statement in mysql
+ *  without a semicolon), so what is accepted is described positively and everything else is not a read. */
+function isReadStatement(q: string): boolean {
+  const s0 = q.trim().replace(/;\s*$/, '');
+  if (s0 === '' || /;/.test(s0)) return false;
+  // psql metacommands: the whole statement, one optional argument, nothing that chains (`\g`, `\gexec`, `\;`, `\!`)
+  if (s0.startsWith('\\')) return /^\\(?:d[a-zA-Z+]{0,3}|l\+?|z|sf|ef|conninfo)(?:\s+[\w."*?$-]+)?$/.test(s0);
+  // nothing else may carry a backslash: mysql's `\g`, `\G`, `\!` and `\.` send, run a shell or source a file
+  if (/\\/.test(s0)) return false;
+  if (/^show\s+[\w\s.,'"%=-]+$/i.test(s0)) return true;
+  // DESCRIBE takes a table and, at most, one column; `DESCRIBE ANALYZE <select>` runs the select
+  const d = /^(?:describe|desc)\s+([\w.`"]+)(?:\s+([\w`"%]+))?$/i.exec(s0);
+  if (d) return !/^(analy[sz]e|format|extended|partitions)$/i.test(d[2] ?? '') || d[2] === undefined;
+  // EXPLAIN prints a plan and runs nothing - unless ANALYZE, in any spelling and any option list, says otherwise
+  if (/^explain\b/i.test(s0)) return !/analy[sz]e/i.test(s0) && !/^explain\s*\(/i.test(s0);
+  return false;
+}
+
+/** redis' INFO, PING, DBSIZE and TTL read server state rather than data - and only when every option on the line is
+ *  one whose meaning is known, since a mode flag (`--eval`, `--pipe`, `--scan`, `-x`) makes the first bare word
+ *  something else. `redis-cli -c DEL k` has `-c` (cluster mode) and DELETES. */
+function redisReadOnly(tokens: string[]): boolean {
+  const VALUE = /^(-h|-p|-a|-n|-u|-s|-r|-i|-d|-D|--user|--pass|--sni|--cacert|--cacertdir|--cert|--key|--tls-ciphers|--tls-ciphersuites)$/;
+  const BOOL = /^(-c|-e|-2|-3|-4|-6|--tls|--askpass|--no-auth-warning|--insecure|--raw|--no-raw|--csv|--json|--quoted-json)$/;
+  const bare: string[] = [];
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (!t.startsWith('-')) {
+      bare.push(t);
+      continue;
+    }
+    if (VALUE.test(t)) i++;
+    else if (BOOL.test(t) || (t.includes('=') && VALUE.test(t.slice(0, t.indexOf('='))))) continue;
+    else return false;
+  }
+  return /^(info|ping|dbsize|time|lastsave|ttl|pttl|type|exists|strlen|llen|scard|hlen|zcard)$/i.test(bare[0] ?? '');
+}
+
 function resolveDbTarget(
   tokens: string[],
   targets: LocalTargets,
@@ -6955,49 +8038,18 @@ function resolveDbTarget(
   // `mysql -h prod-db --init-command="DROP TABLE users" -e "SHOW TABLES"` drops the table and then lists
   // (exit review 10). Every statement the client will run is collected, and the exception needs ALL of them to
   // be read-only.
-  const statements = [
-    ...optionValues(stmtTokens, 'c', ['--command', '--eval', '--query']),
-    ...optionValues(stmtTokens, 'e', ['--execute']),
-    ...optionValues(stmtTokens, '', ['--init-command', '--init-file', '--defaults-command']),
-  ];
+  const { statements, fromFile } = dbStatements(stmtTokens);
   const readOnlyStatement =
-    statements.length > 0 &&
-    statements.every((q) =>
-      // METADATA AND PLANS ONLY. `EXPLAIN`, `SHOW` and psql's `\d` describe the schema and the plan; `SELECT`
-      // reads production ROWS, which is a different question and stays where it was.
-      // A METACOMMAND IS THE WHOLE STATEMENT, and it is matched as such. Written as a PREFIX — `\\?d\w*` —
-      // the optional backslash let `db.dropDatabase()` match as psql's `\d`, so the single worst thing a
-      // production database client can be told to do read as a schema listing. Caught by the corpus the moment
-      // it was written, which is what the corpus is for.
-      // ...and the statement reaching THIS reader is the normalized one, where the quoting that made it a single
-      // word is already gone — so `-c 'EXPLAIN SELECT …'` arrives as the bare word `EXPLAIN`. The MATCHER, which
-      // sees the raw text, is what tests the rest of the statement for a write clause; both must agree before
-      // the act is read as a read.
-      // A TRAILING `;` ENDS THE STATEMENT rather than starting another, `SHOW ...` never writes in any dialect (so
-      // the words after it are not verbs: `SHOW CREATE TABLE users`), and a psql metacommand takes an argument
-      // (`\\d users`). Each was refused absolutely - the inspection an operator runs BEFORE touching a database
-      // (exit review 10).
-      ((/^\s*(show|describe|desc)\b/i.test(q) && !/;\s*\S/.test(q)) ||
-        (/^\s*explain\b/i.test(q) && !WRITES_SOMEWHERE.test(q.replace(/;\s*$/, ''))) ||
-        /^\s*\\(d\w*|l|z|sf|ef)(\s+\S+)?\s*$/i.test(q)),
-    );
-  // psql's `-l` LISTS THE DATABASES and connects to run nothing else; redis' INFO, PING, DBSIZE and TTL read server
-  // state rather than data
-  const listsOnly = head === 'psql' && tokens.some((t) => t === '-l' || t === '--list');
-  const redisRead =
-    /^(redis-cli|valkey-cli)$/.test(head) &&
-    (() => {
-      const bare: string[] = [];
-      for (let i = 1; i < tokens.length; i++) {
-        const t = tokens[i]!;
-        if (t.startsWith('-')) {
-          if (/^-(h|p|a|n|u|c|d|i|x)$|^--(user|pass|db|askpass|tls-|sni|cacert|cert|key)/.test(t)) i++;
-          continue;
-        }
-        bare.push(t);
-      }
-      return /^(info|ping|dbsize|time|lastsave|ttl|pttl|type|exists|strlen|llen|scard|hlen|zcard)$/i.test(bare[0] ?? '');
-    })();
+    statements.length > 0 && !fromFile && statements.every((q) => isReadStatement(q));
+  // psql's `-l` LISTS THE DATABASES and connects to run nothing else - and only when it is a FLAG: in `psql -U -l -c
+  // 'drop table t'` the `-l` is the user NAME, and a statement anywhere on the line makes the exception moot
+  const PSQL_VALUE_SHORT = /^-[cdfFhLoPpRTUv]$/;
+  const listsOnly =
+    head === 'psql' &&
+    statements.length === 0 &&
+    !fromFile &&
+    tokens.some((t, i) => (t === '-l' || t === '--list') && !(i > 0 && PSQL_VALUE_SHORT.test(tokens[i - 1] ?? '')));
+  const redisRead = /^(redis-cli|valkey-cli)$/.test(head) && redisReadOnly(tokens);
   const executes = !isProbeInvocation(line) && !readOnlyStatement && !listsOnly && !redisRead;
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
@@ -7656,7 +8708,10 @@ function classifyShellPaths(
   rawSeg: string = seg,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
-  const tokens = tokenize(seg);
+  // operands are read with the redirections taken out (`cp x f 2>&1`: the destination is `f`); the regex tests below keep
+  // the whole segment, because `mysql < file` is exactly what they look for
+  const bare = withoutRedirections(seg);
+  const tokens = tokenize(bare);
   const head0 = tokens[0] ?? '';
   const head = head0.slice(head0.lastIndexOf('/') + 1);
   if (!head || head.startsWith('$')) return hits;
@@ -7664,7 +8719,7 @@ function classifyShellPaths(
   // operand as a filesystem read made `dirname -- "$0"` — the first line of a real husky hook — ask, and with it
   // every commit in that repository (exit review 4).
   if (STRING_OPERAND_HEADS.has(head)) return hits;
-  const paths = pathTokens(seg, cwd).filter((p) => !patternWords.includes(p.raw));
+  const paths = pathTokens(bare, cwd).filter((p) => !patternWords.includes(p.raw));
   // a container bind mount hands the host path to the container: the SOURCE is read and written, whatever the
   // command inside the container then does. Resolving it as a path beats guessing at its spelling with a regex.
   // A KNOWN, ALLOW-classed command whose OPERAND names a program the class does not bound is not really known:
@@ -8667,6 +9722,105 @@ function commitBypassFlag(cmdStr: string): boolean {
 
 /** The command strings carried in a quoted `env -S`/`--split-string`/`-c` value, whose inner quoting is preserved so a
  *  carried `git commit` can be scanned the same way as a top-level one. */
+/** WHERE A COMMAND RUNS BECAUSE OF ITS OWN OPTIONS: `env -C DIR`, `env --chdir=DIR`, `git -C DIR`, through whatever
+ *  wrappers stand in front of it. One reader, with the option parsers the tools really have:
+ *    - env: `-u NAME` takes a value, clusters (`-iC dir`, `-iCdir`), unique abbreviations of the long options
+ *      (`--chd=`, `--ch=`), and `-S STRING`, which is a command line of its own that env splits and runs;
+ *    - git: a global option either takes a value (`-C`, `-c`, `--git-dir`, …) or does not (`--no-pager`, `--bare`, …),
+ *      and one this table does not know leaves the verb's position - and so the directory - unknown.
+ *  Three regexes had been doing this job, each assuming every option is one token and every word is spelled plainly
+ *  (exit review 10, self-attack: seven findings). Returns null when the command names no directory. */
+const RUN_DIR_HEADS: ReadonlySet<string> = new Set(['env', 'git']);
+function runDirectory(seg: string, base: string): { dir: string; known: boolean } | null {
+  let words = commandWords(tokenizeMarked(expandBraces(seg.trim()))).map((x) => x.text);
+  let dir = base;
+  let found = false;
+  let known = true;
+  for (let guard = 0; guard < 8; guard++) {
+    const hi = commandHeadIndex(words, RUN_DIR_HEADS);
+    const head = (words[hi] ?? '').replace(/^.*\//, '');
+    if (head === 'env') {
+      let i = hi + 1;
+      let next: string[] | null = null;
+      const LONG = ['ignore-environment', 'null', 'unset', 'chdir', 'split-string', 'debug', 'argv0', 'default-signal', 'ignore-signal', 'block-signal', 'list-signal-handling', 'help', 'version'];
+      const VALUED_LONG = new Set(['unset', 'chdir', 'split-string', 'argv0', 'default-signal', 'ignore-signal', 'block-signal']);
+      for (; i < words.length; i++) {
+        const w = words[i]!;
+        if (w === '--') {
+          i++;
+          break;
+        }
+        if (!w.startsWith('-') || w === '-') break;
+        const takeValue = (glued: string): string | undefined => (glued !== '' ? glued : words[++i]);
+        if (w.startsWith('--')) {
+          const eq = w.indexOf('=');
+          const name = w.slice(2, eq < 0 ? undefined : eq);
+          const cands = LONG.filter((l) => l === name || l.startsWith(name));
+          const l = cands.includes(name) ? name : cands.length === 1 ? cands[0]! : null;
+          if (!l) {
+            known = false;
+            continue;
+          }
+          const v = VALUED_LONG.has(l) ? (eq >= 0 ? w.slice(eq + 1) : words[++i]) : undefined;
+          if (l === 'chdir' && v !== undefined) {
+            dir = isAbsolute(v) ? v : resolve(dir, v);
+            found = true;
+          } else if (l === 'split-string' && v !== undefined) {
+            next = [...tokenize(v), ...words.slice(i + 1)];
+            i = words.length;
+          }
+          continue;
+        }
+        // a cluster of short options: `-i`, `-0`, `-v` take nothing; `-u`, `-C`, `-S`, `-a` take a value, glued or next
+        for (let k = 1; k < w.length; k++) {
+          const c = w[k]!;
+          if (c === 'C' || c === 'S' || c === 'u' || c === 'a') {
+            const v = takeValue(w.slice(k + 1));
+            if (c === 'C' && v !== undefined) {
+              dir = isAbsolute(v) ? v : resolve(dir, v);
+              found = true;
+            } else if (c === 'S' && v !== undefined) {
+              next = [...tokenize(v), ...words.slice(i + 1)];
+              i = words.length;
+            }
+            break;
+          }
+          if (!/[i0vx]/.test(c)) known = false;
+        }
+        if (next) break;
+      }
+      // a `-S` string is env's OWN argv - its options, assignments and command - so it is read as `env` again
+      words = next ? ['env', ...next] : words.slice(i);
+      // env's own remaining words: assignments precede the command
+      while (words.length && words[0] !== 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) words = words.slice(1);
+      continue;
+    }
+    if (head === 'git') {
+      let i = hi + 1;
+      const t = GLOBAL_OPTIONS['git']!;
+      for (; i < words.length; i++) {
+        const w = words[i]!;
+        if (!w.startsWith('-')) break;
+        if (w === '-C' || /^-C./.test(w)) {
+          const v = w === '-C' ? words[++i] : w.slice(2);
+          if (v !== undefined) {
+            dir = isAbsolute(v) ? v : resolve(dir, v);
+            found = true;
+          }
+        } else if (w.includes('=') || t.bool.test(w) || /^--(exec-path|list-cmds|html-path|man-path|info-path)/.test(w)) continue;
+        else if (t.value.test(w)) i++;
+        else {
+          known = false;
+          break;
+        }
+      }
+      return found ? { dir, known } : null;
+    }
+    break;
+  }
+  return found ? { dir, known } : null;
+}
+
 function carrierCommandValues(seg: string): string[] {
   const m = tokenizeMarked(seg);
   const out: string[] = [];
@@ -8674,11 +9828,24 @@ function carrierCommandValues(seg: string): string[] {
   // before trusting it (exit review 10). The body is not a command the shell will run.
   const shellAt = m.findIndex((t) => /^(?:.*\/)?(ba|z|da|k)?sh$/.test(t.text));
   if (shellAt >= 0 && m.slice(shellAt + 1).some((t) => !t.quoted && (t.text === '--noexec' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t.text)))) return out;
+  const words = m.map((x) => x.text);
+  // the wrappers that take their command as an option value: `flock LOCK -c BODY`, `--command BODY`, `--comm=BODY`, `-xc BODY`
+  const wi = words.findIndex((w) => /^(?:.*\/)?(flock|su|runuser)$/.test(w));
+  if (wi >= 0) {
+    const body = operandWrapperBody(words, wi);
+    if (body !== null) out.push(body);
+  }
   for (let i = 0; i < m.length; i++) {
     const t = m[i]!.text;
     if ((t === '-c' || t === '-S' || t === '--split-string') && m[i + 1]) out.push(m[i + 1]!.text);
     else if (t.startsWith('--split-string=')) out.push(t.slice('--split-string='.length));
     else if (t.startsWith('-S') && t.length > 2 && !t.startsWith('--')) out.push(t.slice(2));
+    // `-iS`, `-vS` and the abbreviations of --split-string: env's option parser accepts all of them
+    else if (/^-[0-9A-Za-z]+S$/.test(t) && m[i + 1]) out.push(m[i + 1]!.text);
+    else if (t.startsWith('--s') && t.length > 3 && 'split-string'.startsWith(t.slice(2).split('=')[0]!)) {
+      if (t.includes('=')) out.push(t.slice(t.indexOf('=') + 1));
+      else if (m[i + 1]) out.push(m[i + 1]!.text);
+    }
   }
   return out;
 }
@@ -8707,10 +9874,24 @@ function carriedShellBodies(seg: string): string[] {
 /** WHERE THE COMMAND ACTUALLY STARTS. `FOO=bar awk …`, `sudo git …`, `timeout 5 sed …` and `command awk …` are
  *  all the same invocation as the bare one; a carrier anchored at token 0 sees none of them, which the producer
  *  cross-product finds the moment such a carrier is added. */
-function commandHeadIndex(t: readonly string[]): number {
+function commandHeadIndex(t: readonly string[], stopAt?: ReadonlySet<string>): number {
   let i = 0;
   while (i < t.length) {
     const w = t[i]!;
+    // a caller that wants to read a wrapper's OWN options (env -C) stops at it instead of looking through it
+    if (stopAt?.has(w)) break;
+    // `flock [-nsxuo] [-w SECS] [-E N] LOCKFILE COMMAND` - the lock file is an operand of the wrapper, and the command
+    // follows it (the `-c CMD` spelling is a carrier and is read as one)
+    if (w === 'flock' && !t.slice(i).some((x) => /^(-[a-zA-Z]*c|--command)/.test(x))) {
+      i++;
+      while (i < t.length && t[i]!.startsWith('-')) {
+        const opt = t[i]!;
+        i++;
+        if (/^(-w|--timeout|-E|--conflict-exit-code)$/.test(opt)) i++;
+      }
+      i++; // the lock file
+      continue;
+    }
     if (
       /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) ||
       WRAPPERS.has(w) ||
@@ -9010,9 +10191,7 @@ function analyzeSegments(
   /** names DEFINED AS FUNCTIONS in this unit: their bodies are handed over at the definition, so a call to one
    *  adds no closure. An `alias` body is NOT handed over and keeps its binding gap. */
   const functionNames = new Set<string>();
-  const startCwd = state.env.cwdVerified ? state.env.cwd : '\0dynamic';
-  let cwd = startCwd;
-  // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b`
+  // each UNIT is one shell invocation; `cd a && b` inside a unit still moves the directory for `b` (cwdTimeline)
   // EVERY unit is split into the commands it runs, HERE, whatever the isolation. A producer's contract is to
   // resolve WHICH lines execute and hand them over verbatim — `scriptSegments` emits whole lines — so turning a
   // line into commands is the analyzer's job. Splitting only the isolated shells meant a script body's line was
@@ -9027,7 +10206,7 @@ function analyzeSegments(
     : [splitShellPipeline(segments.join('\n'))];
   for (const unit of units) {
     if (isolatedShells) {
-      cwd = startCwd; // a fresh shell per recipe line / per pre|main|post script
+      // a fresh shell per recipe line / per pre|main|post script: its timeline starts from the caller's directory
       carriedEnv = {};
       rebound = null;
       definedNames.clear();
@@ -9040,13 +10219,49 @@ function analyzeSegments(
     // ALLOW, through an organization-locked deny and through absolute core denies for psql and the cloud CLIs
     // (exit review 8). A binding is trusted only where it is UNCONDITIONAL.
     let condDepth = 0;
-    /** the previous working directory, for `cd -` and `popd`: one deep, and deeper leaves the context unproven */
-    let cdPrev: string | null = null;
     /** how deep inside a function BODY this segment sits: its bindings are the function's, not the caller's */
     let fnBodyDepth = 0;
-    /** set once a directory change could not be proven; every LATER segment resolves relative paths unverified */
-    let cdDoubtCarried = false;
     const stages = unit;
+    const timeline = cwdTimeline(stages, state.env.cwd, state.env.cwdVerified, (abs) => readInsideWorkspace(ctx, abs));
+    /** the symlink pairs earlier segments recorded, refreshed at each stage */
+    let linkPairsNow: Array<[string, string]> = [];
+    /** EVERY write goes through here: the path, the same path reached through a symlink made earlier in this command
+     *  (or through a linked ANCESTOR directory), and - since a hard link is a second name the path cannot reveal - a
+     *  wildcard when the file being replaced has more than one. */
+    const recordWrite = (raw: string): void => {
+      const c = canonicalPath(raw);
+      written.add(c);
+      for (const [link, target] of linkPairsNow)
+        if (target && (c === link || c.startsWith(link + '/'))) written.add(target + c.slice(link.length));
+      try {
+        if (statSync(c).nlink > 1 && statSync(c).isFile()) written.add('\0any');
+      } catch {
+        /* not there yet: nothing to alias */
+      }
+    };
+    // A LOOP RUNS ITS BODY AGAIN, so what a later iteration writes is what an earlier one read: `for i in 1 2; do make
+    // all; cp evil.mk Makefile; done` runs the replaced makefile on its second pass. The writes of every loop body are
+    // recorded before the loop starts, which makes anything it resolves inside stale (exit review 10, self-attack).
+    for (let li = 0; li < stages.length; li++) {
+      const lt = expandBraces(stages[li]!.text).trim();
+      if (!/^(?:(?:time|!)\s+)*(for|while|until|select)\b/.test(lt)) continue;
+      let depth = 0;
+      for (let lj = li; lj < stages.length; lj++) {
+        const body = expandBraces(stages[lj]!.text).trim();
+        if (/^(?:(?:time|!)\s+)*(for|while|until|select)\b/.test(body)) depth++;
+        if (/^done\b/.test(body) && --depth === 0) break;
+        if (lj === li) continue;
+        const dirs = (timeline[lj]?.dirs.length ? timeline[lj]!.dirs : [state.env.cwd]) as string[];
+        for (const n of new Set([body, ...normalizeSegment(body)])) {
+          for (const d of dirs) for (const w of writtenPathOperands(n, d)) { if (w === LEDGER_ANY) written.add('\0any'); else recordWrite(w); }
+          if (writesUnenumerably(n)) written.add('\0any');
+        }
+        for (const t of redirectionTargets(body)) {
+          if (/[$`*?[{]/.test(t)) written.add('\0any');
+          else for (const d of dirs) recordWrite(isAbsolute(t) ? t : resolve(d, t));
+        }
+      }
+    }
     // the stage whose standard output the NEXT piped stage will read. A GROUP writes the CONCATENATION of what
     // its commands write, so this is a LIST: `{ echo 'git push origin main'; echo ls; } | sh` feeds the shell
     // both lines, and keeping only the last stage lost the first (exit review 7).
@@ -9088,11 +10303,24 @@ function analyzeSegments(
       );
     // an endpoint named by the environment points the whole command somewhere else, and the normalizer strips
     // the assignment because its value is not a program — so it is read here, from the segment as written
-    if (ENDPOINT_ENV_RE.test(seg))
+    // GIT'S TRACE VARIABLES APPEND TO ANY PATH THEY NAME: `GIT_TRACE2_EVENT=.harness/runtime/state.json git log` turns a
+    // read into a write of governed state. A value that is a descriptor or a boolean goes to standard error (exit review 10)
+    for (const text of [seg, ...carrierCommandValues(seg)])
+      for (const m of text.matchAll(/(?:^|[\s;&|'"(])(GIT_TRACE[A-Z0-9_]*)=('[^']*'|"[^"]*"|[^\s;&|'"]*)/g)) {
+        const v = m[2]!.replace(/^['"]|['"]$/g, '');
+        if (!v || /^(0|1|2|3|4|5|6|7|8|9|true|false|yes|no|on|off)$/i.test(v)) continue;
+        const traceBase = timeline[stageIndex]?.dirs[0] ?? state.env.cwd;
+        const target = expandHome(v, traceBase);
+        if (target === null || /[$`*?[{]/.test(target)) continue;
+        const h = classifyPath(table, ctx, 'Write', isAbsolute(target) ? target : resolve(traceBase, target));
+        hits.push({ ...h, via: `${m[1]} appends to ${v} (${h.via})`, segment: seg });
+      }
+    const endpointHit = endpointEnvHit(seg);
+    if (endpointHit !== null)
       hits.push({
         capability: 'command.network-tool',
         verdict: verdictFor(table, ctx, 'command.network-tool'),
-        via: `an endpoint is named by the environment: ${ENDPOINT_ENV_RE.exec(seg)?.[2] ?? ''}`,
+        via: `an endpoint is named by the environment: ${endpointHit}`,
         segment: seg,
         absolute: false,
       });
@@ -9102,10 +10330,7 @@ function analyzeSegments(
     const cdTrimmed = seg.trim();
     // The subshell's working directory is RESTORED here, and a restore is state rather than a command: classifying
     // the marker made every ordinary `( cd docs && ls )` ask as an unknown command (exit review 4).
-    if (cdTrimmed === SUBSHELL_CWD_RESTORE) {
-      cwd = '\0dynamic';
-      continue;
-    }
+    if (cdTrimmed === SUBSHELL_CWD_RESTORE) continue; // the timeline already ignored the stages this marker closed
     if (cdTrimmed === HEREDOC_UNTERMINATED) {
       hits.push(
         opaqueHit(table, ctx, seg, 'a heredoc delimiter never arrived, so the rest of this command was read as its body'),
@@ -9141,82 +10366,22 @@ function analyzeSegments(
       const functionsToo = !args.some((a) => /^-[a-zA-Z]*v$/.test(a)) || args.some((a) => /^-[a-zA-Z]*f$/.test(a));
       if (functionsToo) for (const a of args) if (!a.startsWith('-')) functionNames.delete(a);
     }
-    // A DIRECTORY CHANGE THE SHELL RUNS IN A SUBSHELL, OR IN A BRANCH THAT MAY NOT RUN, BINDS NOTHING OUTSIDE IT.
-    // `bindingIsProven` already says exactly that, and the function definitions use it — the cwd tracker did not,
-    // so `f() { cd sub; }; tee control-plane/permissions/matchers.md`, `cd sub & tee …`, `true | cd sub; tee …`
-    // and a `cd` inside an `if` or a `case` branch all moved the working directory for the rest of the line. The
-    // governed path was then resolved under `sub/`, where no rule matches it (exit review 10, five spellings).
-    // The conservative answer is to keep the OUTER directory — that is where the governed paths are — and to
-    // stop asserting the context, so nothing positive rests on it.
-    const dirChange = directoryChange(cdTrimmed);
-    const cdTokens = dirChange !== null && dirChange.verb !== 'popd' ? dirChange.args : null;
-    // THE DOUBT IS RECORDED, NOT ANNOUNCED. Not applying the change is the fix; emitting a hit on top of it made
-    // `popd >/dev/null` — a line in every shell function that saves its directory — ASK for no effect at all.
-    // Clearing `cwdVerified` is the conservative part: nothing POSITIVE may then rest on the directory, while a
-    // command that changes nothing keeps its verdict.
-    // ...AND IT ATTACHES TO WHAT COMES AFTER, NOT TO THE SEGMENT THAT RAISED IT. `popd` resolves no path of its
-    // own, so marking ITS environment unverified made the context-unverified opacity fire on the `popd` itself.
-    // The flag is carried forward instead, which is where a relative path could actually be misread.
-    const cdUnproven = cdDoubtCarried;
-    if (cdTokens && !bindingIsProven) cdDoubtCarried = true;
-    // `cd -` RETURNS TO THE PREVIOUS DIRECTORY and `popd` pops the stack. Both were filtered out as options or
-    // not recognised at all, so the tracker believed it was still in `sub` and resolved every later relative
-    // path under it (exit review 10). A one-deep record of the previous directory covers both, and anything
-    // deeper leaves the context unproven rather than guessed.
-    if (bindingIsProven && dirChange?.verb === 'popd') {
-      if (cdPrev !== null) {
-        const back = cdPrev;
-        cdPrev = cwd === '\0dynamic' ? null : cwd;
-        cwd = back;
-      } else cdDoubtCarried = true;
-    }
-    const cdArgs =
-      cdTokens && bindingIsProven ? cdTokens.filter((a) => a !== '--' && !a.startsWith('-')) : null;
-    if (cdTokens && bindingIsProven && cdTokens.includes('-') && !cdArgs?.length) {
-      if (cdPrev !== null) {
-        const back = cdPrev;
-        cdPrev = cwd === '\0dynamic' ? null : cwd;
-        cwd = back;
-      } else cdDoubtCarried = true;
-    }
-    if (cdArgs && cdArgs.length) {
-      cdPrev = cwd === '\0dynamic' ? null : cwd;
-      const target = expandHome(cdArgs[cdArgs.length - 1]!, cwd === '\0dynamic' ? state.env.cwd : cwd);
-      const base = cwd === '\0dynamic' ? state.env.cwd : cwd;
-      const logical = target === null ? null : isAbsolute(target) ? target : resolve(base, target);
-      let resolvedCd = target === null || /[$`*?]/.test(target) ? null : canonicalPath(logical!);
-      // `cd` is LOGICAL by default and PHYSICAL under -P: after a symlinked component, a `..` segment goes to two
-      // different directories. EGO resolves physically, so where the two disagree the context is not proven and
-      // every relative conclusion below it is downgraded rather than asserted (challenge 5, finding 19).
-      if (
-        resolvedCd !== null &&
-        logical !== null &&
-        /(^|\/)\.\.(\/|$)/.test(target!) &&
-        !cdTokens!.some((t) => /^-[a-zA-Z]*P/.test(t)) &&
-        resolve(logical) !== resolvedCd
-      )
-        resolvedCd = null;
-      // NOTE on a `cd` into a directory that does not exist (challenge 4, finding 3): with `&&` the cd failing
-      // means nothing after it runs, so assuming it succeeded is safe; with `;` the rest runs in the ORIGINAL
-      // directory, which EGO would then misattribute. Distinguishing them needs the separator, which segment
-      // splitting discards. Requiring the directory to exist was tried and rejected: it broke `mkdir -p x && cd x`
-      // and every `cd src && …` in a checkout EGO has not materialised. Recorded as a residual limitation rather
-      // than fixed by making ordinary development ask.
-      cwd = resolvedCd ?? '\0dynamic';
-      if (cwd === '\0dynamic')
-        hits.push({
-          capability: 'command.unknown',
-          verdict: verdictFor(table, ctx, 'command.unknown'),
-          via: resolvedCd === null ? 'cd to a dynamic directory' : `cd to ${resolvedCd}, which does not exist`,
-          segment: seg,
-          absolute: false,
-        });
-      // NO `continue` HERE, and none may be added (challenge 5, finding 1). Recognising a segment's HEAD must never
-      // remove that segment from the rest of the pipeline: `cd . > ~/.ssh/authorized_keys` truncates the file, and
-      // while this branch skipped ahead the redirection scan below never saw it, so an absolute core deny reached
-      // ALLOW. Tracking the directory is a side effect of walking the segment, never a substitute for analysing it.
-      // `cd`/`pushd`/`popd` with no redirection are classified as read-only shell structure by matchers.md.
-    }
+    // THE WORKING DIRECTORY COMES FROM THE TIMELINE (cwdTimeline), a set that says where this stage MAY run. More than
+    // one, or an unknown, means the directory is not established: nothing positive rests on it, and every relative
+    // path below is judged in each of them.
+    linkPairsNow = [...written].filter((w) => w.startsWith('\0link:')).map((w) => w.slice(6).split('\0->') as [string, string]);
+    const point = timeline[stageIndex] ?? { dirs: [state.env.cwd], unknown: false, dynamicCd: false };
+    const cwd = point.dirs[0] ?? CWD_UNKNOWN;
+    const altDirs = point.dirs.slice(1);
+    const cdUnproven = point.dirs.length > 1 || point.unknown;
+    if (point.dynamicCd)
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: 'cd to a directory that cannot be resolved',
+        segment: seg,
+        absolute: false,
+      });
     // `git commit` hook bypass: --no-verify, or a short-flag cluster containing `n` (`-n`, `-nm`, `-nam`, `-vn`).
     // Scanned on quote-aware tokens so a `-n` inside the `-m` message (a quoted token) is never a false positive. The
     // command carried in a quoted `env -S`/`--split-string`/`bash|sh -c` value is scanned too (its inner quoting is
@@ -9265,40 +10430,12 @@ function analyzeSegments(
     // context — ordinary review commands, asking for no reason.
     // `-C` GLUES ITS VALUE like every other short option: `env -C.harness/runtime tee pin.json` names that
     // directory, and requiring whitespace after the letter missed it (self-attack on exit review 9).
-    const envChdir = /(^|\s)env\s+(?:-\S+\s+)*?(?:-C\s*|--chdir[= ])(\S+)/.exec(seg.trim());
-    if (envChdir) {
-      const target = expandHome(envChdir[2]!);
-      if (target !== null && !/[$`*?]/.test(target)) {
+    const runDir = runDirectory(seg, effectiveCwd);
+    if (runDir !== null) {
+      const target = expandHome(runDir.dir);
+      if (target !== null && !/[$`*?[{]/.test(target) && runDir.known) {
         env.cwd = isAbsolute(target) ? target : resolve(effectiveCwd, target);
         env.cwdVerified = env.cwdVerified && directoryExists(env.cwd) && repoRootFor(ctx, env.cwd) !== null;
-      } else env.cwdVerified = false;
-    }
-    // ...AND A SHELL KEYWORD OR A WRAPPER MAY STAND IN FRONT OF IT. Anchored at `^git`, the extraction missed
-    // `while git -C control-plane checkout …; do break; done` and every other structural position, so the
-    // command ran in a directory the path classification never heard about. The normalized text is no help
-    // here — the normalizer has ALREADY STRIPPED the `-C` by then, which is the whole reason this reads the
-    // segment as written — so the head is found the way every other carrier finds it: by skipping the wrappers
-    // and keywords in the TOKEN stream (self-attack on exit review 9). Successive `-C` are CUMULATIVE in git,
-    // exactly as they are in make and tar.
-    const gitDir = ((): string | null => {
-      const t = tokenizeMarked(seg.trim()).filter((x) => !x.quoted).map((x) => x.text);
-      const gi = commandHeadIndex(t);
-      if (!/^(?:.*\/)?git$/.test(t[gi] ?? '')) return null;
-      let dir: string | null = null;
-      for (let i = gi + 1; i < t.length; i++) {
-        const w = t[i]!;
-        if (!w.startsWith('-')) break; // the verb: `-C` is a GLOBAL option and comes before it
-        const v = w === '-C' || w === '--work-tree' ? t[++i] : /^(?:--work-tree=|-C)(.+)$/.exec(w)?.[1];
-        if (v !== undefined && v !== null) dir = dir === null || isAbsolute(v) ? v : `${dir}/${v}`;
-        else if (/^(-c|--[a-z-]+|-[a-z])$/.test(w) && !w.includes('=')) i++; // its value, not the verb
-      }
-      return dir;
-    })();
-    if (gitDir !== null) {
-      const target = expandHome(gitDir);
-      if (target !== null && !/[$`*?]/.test(target)) {
-        env.cwd = isAbsolute(target) ? target : resolve(effectiveCwd, target);
-        env.cwdVerified = env.cwdVerified && directoryExists(env.cwd);
       } else env.cwdVerified = false;
     }
     const carried = execCarriedCommand(seg);
@@ -9340,22 +10477,20 @@ function analyzeSegments(
       // braces literal at this level and the inner shell expands them, so `git commit -m x -{n..n}` only looks
       // like a hook bypass once it has been through the same expansion the inner shell performs
       const body = expandBraces(rawBody);
-      if (
-        splitShellPipeline(body).length > 1 ||
-        awkShellCommands(body, ctx, env.cwd).length > 0 ||
-        sedShellCommands(body, ctx, env.cwd).length > 0 ||
-        sedWrittenFiles(body, ctx, env.cwd).length > 0 ||
-        gitPagerCommands(body).length > 0 ||
-        gitConfigCommands(body).length > 0 ||
-        redirectionTargets(body).length > 0 ||
-        // the LONG spelling too: the condition is a list of the readers that work on the segment as written, and
-        // it named only the short `-C` — so `flock /tmp/l -c "env --chdir=.harness/runtime tee pin.json"` never
-        // re-entered, and the chdir reader this condition exists to serve never saw the body (exit review 10)
-        // ...and the word may follow a QUOTE or a paren, not only a space: `sh -c 'flock l -c "env --chdir=…"'` puts it
-        // right behind the inner double quote, where the boundary the first version demanded never matched
-        /(^|[\s"'(;&|`])(git|env)\s+(?:-\S+\s+)*(-C(\s|=|\S)|--chdir(\s|=))/.test(body) ||
-        commitBypassFlag(body)
-      )
+      // the condition is asked of the body AND of every body IT carries: `bash -c "flock l --command 'cd d && tee f'"` has
+      // nothing to re-read at the first level and everything at the second
+      const needsReentry = (b: string, depth = 0): boolean =>
+        splitShellPipeline(b).length > 1 ||
+        awkShellCommands(b, ctx, env.cwd).length > 0 ||
+        sedShellCommands(b, ctx, env.cwd).length > 0 ||
+        sedWrittenFiles(b, ctx, env.cwd).length > 0 ||
+        gitPagerCommands(b).length > 0 ||
+        gitConfigCommands(b).length > 0 ||
+        redirectionTargets(b).length > 0 ||
+        runDirectory(b, env.cwd) !== null ||
+        commitBypassFlag(b) ||
+        (depth < 4 && carrierCommandValues(b).some((x) => needsReentry(expandBraces(x), depth + 1)));
+      if (needsReentry(body))
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
     }
@@ -9486,17 +10621,20 @@ function analyzeSegments(
       // HEAD~1 permissions/matchers.md` and `env -C control-plane tee permissions/matchers.md` rewrote the
       // policy that decides every later verdict, at ALLOW, while the same act with the path spelled out whole
       // was an absolute deny (exit review 9). One directory, one meaning, for producers and paths alike.
-      for (const h of classifyShellPaths(
-        table,
-        ctx,
-        norm,
-        env.cwd,
-        patternWords,
-        env.containerPaths === true,
-        written,
-        seg,
-      ))
-        hits.push(h);
+      // ...IN EVERY DIRECTORY THE SHELL MAY BE IN. With a conditional `cd` behind it the segment's relative paths mean
+      // different files, and the strongest answer wins; a `-C` in play (env.cwd moved) already names the directory
+      for (const dir of env.cwd === effectiveCwd ? [env.cwd, ...altDirs] : [env.cwd])
+        for (const h of classifyShellPaths(
+          table,
+          ctx,
+          norm,
+          dir,
+          patternWords,
+          env.containerPaths === true,
+          written,
+          seg,
+        ))
+          hits.push(h);
     }
     // shell writes whose target token resolves under the EGO home trust stores are trust tampering wherever EGO_HOME is
     if (ctx.egoHome) {
@@ -9506,7 +10644,7 @@ function analyzeSegments(
         // ~/.ego/trust/keys.json /tmp/keys-backup.json` reads a key out of the trust store, which is not tampering
         // with it. Every operand was judged as a write target (exit review 10). `mv` also REMOVES its source, so it
         // keeps them all; `ln` links to them and is judged where it is handled above.
-        const opTokens = tokenize(seg).slice(1);
+        const opTokens = tokenize(withoutRedirections(seg)).slice(1);
         const bareIdx = opTokens.map((t, i) => (t.startsWith('-') ? -1 : i)).filter((i) => i >= 0);
         const copyLike = /^(cp|install|rsync|scp|ditto|gcp)$/.test(head.slice(head.lastIndexOf('/') + 1));
         const lastBare = bareIdx.length ? bareIdx[bareIdx.length - 1]! : -1;
@@ -9534,9 +10672,14 @@ function analyzeSegments(
     // The normalized forms are the command as that inner shell sees it — braces already expanded — so the
     // targets are collected from the segment AND from every normalization of it (self-attack on exit review 9).
     const redirTargets = new Set(redirectionTargets(seg));
-    for (const n of normalizeSegment(seg)) for (const t of redirectionTargets(n)) redirTargets.add(t);
-    for (const target of redirTargets) {
-      const expanded = expandHome(target, effectiveCwd);
+    // ...but only the normalizations that UNWRAPPED something. For an ordinary command the normalized form is the same
+    // words with their quoting removed, and a `>` that was quoted in `git commit -m "why > control-plane/x.md is
+    // refused"` looks like an operator there (exit review 10)
+    const dequoted = tokenize(seg).join(' ');
+    for (const n of normalizeSegment(seg))
+      if (n !== dequoted) for (const t of redirectionTargets(n)) redirTargets.add(t);
+    for (const target of redirTargets) for (const baseDir of [effectiveCwd, ...altDirs]) {
+      const expanded = expandHome(target, baseDir);
       // THE WHOLE METACHARACTER SET, not four fifths of it. Every other glob test in this file uses `[*?[{]`;
       // this one omitted the BRACKET, so `.[h]arness/runtime/decisions/d1.json` — a POSIX bracket expression
       // that both zsh and bash expand to the real directory — was resolved as a literal path that will never
@@ -9545,6 +10688,7 @@ function analyzeSegments(
       // (exit review 10). The operand readers had it right all along, which is why `cp x [c]ontrol-plane/...`
       // reported a glob destination while the redirection form did not.
       if (expanded === null || /[$`*?[{]/.test(expanded)) {
+        written.add('\0any'); // a file nobody can name was written
         hits.push({
           capability: 'command.unknown',
           verdict: verdictFor(table, ctx, 'command.unknown'),
@@ -9554,11 +10698,30 @@ function analyzeSegments(
         });
         continue;
       }
-      const abs = isAbsolute(expanded) ? expanded : resolve(effectiveCwd, expanded);
-      written.add(canonicalPath(abs)); // A4: a later unit resolving THIS file is now stale
+      const abs = isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
+      recordWrite(abs); // A4: a later unit resolving THIS file is now stale
       const h = classifyPath(table, ctx, 'Write', abs);
       hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
     }
+    // ...and what an input redirection READS is judged like any file the command names: `mysql < /tmp/payload` feeds the
+    // client a script, `cat < ~/.ssh/id_rsa` prints a key
+    for (const src of redirectionSources(seg))
+      for (const baseDir of [effectiveCwd, ...altDirs]) {
+        const expanded = expandHome(src, baseDir);
+        if (expanded === null || /[$`*?[{]/.test(expanded)) {
+          hits.push({
+            capability: 'command.unknown',
+            verdict: verdictFor(table, ctx, 'command.unknown'),
+            via: 'input redirection from a dynamic path',
+            segment: seg,
+            absolute: false,
+          });
+          continue;
+        }
+        const r = classifyPath(table, ctx, 'Read', isAbsolute(expanded) ? expanded : resolve(baseDir, expanded));
+        if (r.via.startsWith('matcher path') || r.capability.startsWith('fs.credential') || r.capability === 'fs.outside-workspace.read')
+          hits.push({ ...r, via: `input redirection < ${src} (${r.via})`, segment: seg });
+      }
     // and the write-ish commands, whose destination is an operand rather than a redirection
     // A SYMLINK CREATED EARLIER IN THIS COMMAND IS A SECOND NAME FOR ITS TARGET. `ln -s Makefile alias && cp evil.mk
     // alias && make all` writes `Makefile` through `alias`, but the ledger canonicalises a destination at the moment
@@ -9567,26 +10730,32 @@ function analyzeSegments(
     // the target. Only the pair is recorded here, so `ln -s Makefile alias && make all` is not made stale by the ln.
     // the pairs that EARLIER segments recorded - taken before this segment adds its own, so the `ln` that creates a
     // link is not itself a write through it
-    const linkPairs = [...written].filter((w) => w.startsWith('\0link:')).map((w) => w.slice(6).split('\0->') as [string, string]);
+    linkPairsNow = [...written].filter((w) => w.startsWith('\0link:')).map((w) => w.slice(6).split('\0->') as [string, string]);
     // THE WRITER IS FOUND WHERE THE COMMAND STARTS, not at the first word. `env cp evil/plan.mk sub && make -C sub
     // -f plan.mk` copies through a wrapper, and reading the raw head left the ledger empty, so the makefile the
     // next command read looked untouched (exit review 10, cross-product: every wrapper the corpus knows).
     for (const n of new Set([seg, ...normalizeSegment(seg)])) {
       const lnTokens = tokenize(n);
-      if ((lnTokens[0] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
-        const lnOps = lnTokens.slice(1).filter((t) => !t.startsWith('-'));
+      const lh = commandHeadIndex(lnTokens);
+      if ((lnTokens[lh] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
+        const lnOps = lnTokens.slice(lh + 1).filter((t) => !t.startsWith('-'));
         if (lnOps.length >= 2) {
           const linkAbs = canonicalPath(isAbsolute(lnOps[lnOps.length - 1]!) ? lnOps[lnOps.length - 1]! : resolve(effectiveCwd, lnOps[lnOps.length - 1]!));
           const targetAbs = canonicalPath(isAbsolute(lnOps[0]!) ? lnOps[0]! : resolve(dirname(linkAbs), lnOps[0]!));
           written.add(`\0link:${linkAbs}\0->${targetAbs}`);
         }
       }
-      for (const abs of writtenPathOperands(n, effectiveCwd)) {
-        const c = canonicalPath(abs);
-        written.add(c);
-        for (const [link, target] of linkPairs) if (link === c && target) written.add(target);
+      for (const dir of [effectiveCwd, ...altDirs]) {
+        for (const w of writtenPathOperands(n, dir)) {
+          if (w === LEDGER_ANY) written.add('\0any');
+          else recordWrite(w);
+        }
       }
     }
+    // a sed script's `w FILE` writes it whatever the operands say - read from the segment AS WRITTEN, where the script
+    // is still one quoted word
+    for (const dir of [effectiveCwd, ...altDirs])
+      for (const f of sedWrittenFiles(seg, ctx, dir)) recordWrite(isAbsolute(f) ? f : resolve(dir, f));
     // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
     // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect
     if ([seg, ...normalizeSegment(seg)].some(writesUnenumerably)) written.add('\0any');
@@ -9607,16 +10776,22 @@ function analyzeSegments(
       }
       break;
     }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=\S*\s*$/.test(bare)) {
-      Object.assign(carriedEnv, segmentEnvInputs(bare + ' x'));
-      // A STANDALONE `export NAME=value` IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
-      // emitted the marker and `export LD_AUDIT=./evil.so; cmd` did not, although it re-points every program
-      // for the rest of the shell rather than for one command (exit review 10).
-      const name = bare.slice(0, bare.indexOf('='));
-      if (ENV_INJECT_RE.test(name) && envInjects(name, bare.trim()))
-        hits.push(
-          ...classifyNormalized(table, ctx, compiled, `${MARK}env-inject ${name}`, { ...state, env }),
-        );
+    // EVERY WORD of a standalone assignment list is an assignment, quoted or not: `export A=1 PGHOST=prod-db`,
+    // `export "PGHOST=prod-db"` and `declare -x A=1 B=2` each carry more than the one unquoted word the test accepted
+    // (exit review 10, self-attack)
+    const assignWords = tokenize(bare);
+    if (assignWords.length > 0 && assignWords.every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w))) {
+      for (const w of assignWords) {
+        Object.assign(carriedEnv, segmentEnvInputs(w + ' x'));
+        // A STANDALONE `export NAME=value` IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
+        // emitted the marker and `export LD_AUDIT=./evil.so; cmd` did not, although it re-points every program
+        // for the rest of the shell rather than for one command (exit review 10).
+        const name = w.slice(0, w.indexOf('='));
+        if (ENV_INJECT_RE.test(name) && envInjects(name, w))
+          hits.push(
+            ...classifyNormalized(table, ctx, compiled, `${MARK}env-inject ${name}`, { ...state, env }),
+          );
+      }
     }
     const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([^\s()<>|&;'"$`]+)\s*\(\s*\)\s*\{)/.exec(seg.trim());
     if (decl && bindingIsProven) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
@@ -9751,8 +10926,17 @@ export function evaluate(
     // the raw string meant an absolute pattern (`/Users/me/.ssh/*`), a `../` pattern or a `~/` pattern could
     // never match the home prefix, so the guard was inert on the one operand it was written for: `Glob` with
     // `path: ~/.ssh` was DENY and `Glob` with `pattern: ~/.ssh/*` — the byte-identical reach — was ALLOW.
-    const reach = tool === 'Glob' ? pattern : glob;
-    if (reach) {
+    const reach0 = tool === 'Glob' ? pattern : glob;
+    // A GLOB IS READ THE WAY THE SEARCH TOOL READS IT: braces are alternatives that may hold a slash (`{.env,src/x}`),
+    // and a backslash escapes (`.en\\v` is `.env`) - so each alternative is classified on its own, unescaped
+    // (exit review 10, self-attack)
+    const reaches = reach0
+      ? expandBraces(reach0)
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((r) => unquoteShellWord(r))
+      : [];
+    for (const reach of reaches) {
       // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
       // written as `~/.ssh/**` does not match a string that still ends in a slash
       const cut = reach.search(/[*?[{]/);
@@ -9818,7 +11002,8 @@ export function evaluate(
       abs === home ||
       home.startsWith(abs + '/') ||
       abs === '/' ||
-      globCouldReachCredentials(abs + '/' + reach)
+      reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
+      (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
     )
       hits.push({
         capability: 'fs.credential-store.read',
@@ -9860,18 +11045,12 @@ export function evaluate(
     else {
       // A search carries no url, but it is still public network egress. It reached ALLOW even in HIGH_ASSURANCE,
       // where `network.public-read` is DENY and egress control is a required containment control (challenge
-      // finding 9). A search restricted to local domains is localhost traffic.
+      // finding 9). `allowed_domains` only FILTERS WHICH RESULTS COME BACK: the query text is still sent to the search
+      // provider over the public internet, so a search "limited to localhost" is not localhost traffic (exit review 10)
       const domains = Array.isArray(req.input['allowed_domains'])
         ? (req.input['allowed_domains'] as unknown[]).map(String)
         : [];
-      // A LOCAL DOMAIN IS THE WHOLE NAME, not a prefix of it: `localhost.attacker.example` and `127.0.0.1.evil.test` begin
-      // with the local spellings and are public hosts (exit review 10)
-      const local =
-        domains.length > 0 &&
-        domains.every((dm) =>
-          /^(?:localhost|[^.\s]+\.localhost|127(?:\.\d{1,3}){3}|::1|\[::1\])(?::\d+)?$/i.test(dm.trim()),
-        );
-      const capability = local ? 'network.localhost' : 'network.public-read';
+      const capability = 'network.public-read';
       hits = [
         {
           capability,

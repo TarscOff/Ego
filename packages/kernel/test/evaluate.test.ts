@@ -203,9 +203,11 @@ test('structured tool surface: nothing falls through to ALLOW, and every write p
     }).verdict,
     'DENY',
   );
+  // `allowed_domains` FILTERS THE RESULTS; the query text still goes to the search provider, so a search "limited to
+  // localhost" is public egress like any other (exit review 10)
   assert.equal(
     go('WebSearch', { query: 'x', allowed_domains: ['localhost:3000'] }).decisive?.capability,
-    'network.localhost',
+    'network.public-read',
   );
 
   // ordinary structured work is untouched

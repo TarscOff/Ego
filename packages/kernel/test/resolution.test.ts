@@ -223,15 +223,17 @@ test('A3 context verification is earned: an unproven base cannot support a posit
   );
   assert.notEqual(foreign.verdict, 'ALLOW', 'a conclusion drawn outside the workspace is not proven');
   // a `..` after a symlinked component resolves to two different directories logically and physically
-  const linked = workspace({ 'real/Makefile': 'build:\n\ttsc -p .\n' });
-  symlinkSync(join(linked, 'real'), join(linked, 'link'));
+  // (the link must point somewhere its parent is NOT the link's own: `link -> deep/inner` makes `link/..` the root
+  // logically and `deep` physically)
+  const linked = workspace({ 'deep/Makefile': 'build:\n\ttsc -p .\n', 'deep/inner/keep': 'x' });
+  symlinkSync(join(linked, 'deep', 'inner'), join(linked, 'link'));
   assert.notEqual(
     run('cd link/.. && make build', linked).verdict,
     'ALLOW',
     'logical and physical cd disagree here, so the base is not proven',
   );
   // -P says physically, which is what EGO resolves, so it stays proven
-  assert.equal(run('cd -P link && make build', linked).verdict, 'ALLOW');
+  assert.equal(run('cd -P link/.. && make build', linked).verdict, 'ALLOW');
 });
 
 test('A7.5 doctor truth: a status EGO authored is never reported as something EGO verified', () => {

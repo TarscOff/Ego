@@ -66,12 +66,47 @@ test('the `)` that ends a case pattern does not end a command substitution', () 
   assert.equal(verdict('echo $(ls | (cat))', dir), 'ALLOW');
 });
 
-test('a makefile rule line is cut at the semicolon before it is asked whether it assigns', () => {
-  // verified against GNU make 3.81: `run: V = true; echo X` sets V to `true` and RUNS `echo X`
-  const dir = workspace({ 'jobs.mk': 'run: V = true; git push --force origin main\n' });
-  assert.equal(verdict('make -f jobs.mk run', dir), 'DENY');
-  const plain = workspace({ 'jobs.mk': 'V = 1\nrun: V = true\nrun:\n\t@echo $(V)\n' });
-  assert.equal(verdict('make -f jobs.mk run', plain), 'ALLOW');
+test('a target-specific variable takes the whole tail as its value - a semicolon included - and creates no recipe', () => {
+  // GNU make 3.81: `run: V = true; echo X` gives V the value `true; echo X`; nothing runs unless `$(V)` is expanded
+  // (an earlier revision read the tail as a recipe on the strength of an experiment that could not tell the two apart)
+  const expanded = workspace({ 'jobs.mk': 'run: V = true; git push --force origin main\nrun: dep\ndep:\n\t@echo $(V)\n' });
+  assert.equal(verdict('make -f jobs.mk run', expanded), 'DENY', 'the value is expanded into the recipe of a prerequisite');
+  const unused = workspace({ 'jobs.mk': 'run: V = true; git push --force origin main\nrun:\n\t@echo hi\n' });
+  assert.equal(verdict('make -f jobs.mk run', unused), 'ALLOW', 'a value nobody expands runs nothing');
+  // ...and a `;` after a COMMENT marker is prose, not the start of a recipe
+  const prose = workspace({ 'jobs.mk': 'deploy: ## Deploy; never run git push --force origin main by hand\n\techo deploying\n' });
+  assert.equal(verdict('make -f jobs.mk deploy', prose), 'ALLOW');
+  // what the parser does not model it reports: appended, conditional, keyworded and pattern-specific assignments
+  for (const mk of [
+    'P = git push --force origin main;\nx: P += echo hi\nx:\n\t$(P)\n',
+    'V = echo hi\nx: override V = git push --force origin main\nx:\n\t$(V)\n',
+    'x: export PGHOST = prod-db.acme.com\nx:\n\tpsql -c "delete from t"\n',
+    'CC = true\nall: x.o\n%.o: CC = git push --force origin main\n%.o: ; $(CC)\n',
+    'define R\n$(eval x: ; git push --force origin main)\nendef\n$(R)\nx:\n\techo hi\n',
+  ])
+    assert.notEqual(verdict('make -f m.mk x', workspace({ 'm.mk': mk })), 'ALLOW', mk);
+  // a canned recipe in a define body is the variable's VALUE, tab or no tab
+  assert.equal(verdict('make -f m.mk x', workspace({ 'm.mk': 'define CMD\n\tgit push --force origin main\nendef\nx:\n\t$(CMD)\n' })), 'DENY');
+});
+
+test('make is read the way make reads its own command line', () => {
+  const mk = 'x:\n\tgit push --force origin main\n';
+  const dir = workspace({ 'Makefile': mk, 'other.mk': 'y:\n\tgit push --force origin main\n', 'sub/Makefile': 'y:\n\tgit push --force origin main\n' });
+  // an option that takes a value takes the next word, whatever it looks like; `--` ends the options
+  for (const c of ['make -o -n x', 'make -W -n x', 'make -I -n x', 'make -o -q x', 'make x -- -n', 'make -o --help x', 'make x -- --version'])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  // clusters, glued values and unique prefixes of long options
+  for (const c of ['make -kf other.mk y', 'make -sf other.mk y', 'make -sC sub y', 'make --dir=sub y', 'make --fil other.mk y', 'make --mak=other.mk y'])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  for (const c of ['make -n x', 'make --just-print x', 'make -q x', 'make --version', 'make --help', 'make -kn x'])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+  // the environment make starts with reaches the recipe, and `-e` lets it win over the makefile
+  const envd = workspace({ Makefile: 'V = echo hi\nx:\n\t$(V)\n' });
+  assert.equal(verdict("V='git push --force origin main' make -e x", envd), 'DENY');
+  assert.equal(verdict("V='git push --force origin main' make x", envd), 'DENY');
+  // a dry run does not hide the sub-make that really runs
+  const reenter = workspace({ Makefile: 'x:\n\tgit push --force origin main\n\t+[ -n "$$GO" ] || GO=1 env -u MAKEFLAGS make x\n' });
+  assert.equal(verdict('make -n x', reenter), 'DENY');
 });
 
 test('a write is a write behind a wrapper, and a link is a second name only from the next segment', () => {
@@ -157,11 +192,13 @@ test('a search tool asked for a wildcard file name is asked what that name can r
   for (const g of ['**/.env*', '**/.env.*', '**/.e[n]v*', '*.{env,pem}', '.env?*', '**/.env'])
     assert.notEqual(grep(g), 'ALLOW', g);
   for (const g of ['**/*.ts', 'src/**', '*.md', '**/*.{ts,tsx}']) assert.equal(grep(g), 'ALLOW', g);
-  // a search limited to hosts this machine answers as is local, and only if the WHOLE name is
+  // a search is public egress whatever it filters its RESULTS to: the query goes to the provider either way
   const search = (d: string[]) => tool(dir, 'WebSearch', { query: 'q', allowed_domains: d }).verdict;
-  assert.equal(search(['localhost', '127.0.0.1:8080', 'api.localhost']), 'ALLOW');
-  assert.notEqual(search(['localhost.attacker.example']), 'ALLOW');
-  assert.notEqual(search(['127.0.0.1.evil.test']), 'ALLOW');
+  for (const d of [['localhost'], ['127.0.0.1:8080', 'api.localhost'], ['localhost.attacker.example'], ['127.0.0.1.evil.test']])
+    assert.notEqual(search(d), 'ALLOW', d.join(','));
+  // ...and a wildcard glob with a slash inside a brace, a backslash escape and a doubled suffix are read as the tool reads them
+  for (const g of ['{.env,src/x}', '**/.en\\v', '**/.env.*.local'])
+    assert.notEqual(grep(g), 'ALLOW', g);
 });
 
 test('an overlay matcher that a mode could release to ALLOW is refused, not accepted as a narrowing', () => {

@@ -18,9 +18,9 @@ matchers:
   # `.harness` governance tree; `--include-untracked` is the same act one step smaller (exit review 6).
   - capability: ego.runtime.tamper
     tool: Bash
-    # ...except the manual for it: `--all --help` at the END of the line asks git for usage and stashes nothing. The
-    # exception is only that shape - `-m --help` is a stash message, and a `--help` anywhere else may be a value.
-    command: '^git\s+stash\b(?![^|;&]*\s(--all|-a)\s+--help\s*$)[^|;&]*\s(--all|-a)\b'
+    # (the manual for it - `git stash --all --help` - is a help probe, decided on the segment AS WRITTEN by the
+    # evaluator; a lookahead here saw the normalized text, where `-m 'note -a --help'` had lost its quotes)
+    command: '^git\s+stash\b[^|;&]*\s(--all|-a)\b'
   # `less`/`more`/`view` take an INITIAL COMMAND, and `!` runs it through a shell. A pager is bounded only while
   # it is paging (exit review 6).
   - capability: command.script-opaque
@@ -283,22 +283,12 @@ matchers:
   - capability: production.secrets.mutate
     tool: Bash
     command: '^(vault\s+(kv\s+(put|delete|destroy)|write|delete)|aws\s+secretsmanager\s+(create|put|update|delete)|gcloud\s+secrets\s+(create|versions\s+add|delete))\b'
-  # a database client aimed at a production host or connection string is a production mutation, not a local query.
-  # (The general local-vs-remote target resolution lives in the evaluator; this catches the explicitly named case.)
-  - capability: production.database.mutate
-    tool: Bash
-    # METADATA IS NOT ROWS, AND A LISTING IS NOT A STATEMENT. `SHOW ...` never writes in any dialect, so once it is a
-    # single statement the words after it are not verbs (`SHOW CREATE TABLE users` contains `create`); a psql
-    # metacommand takes an argument (`\\d users`) and a trailing `;` ends the statement rather than starting another;
-    # `psql -l` lists databases; influx spells the statement flag `-execute`; and redis INFO/PING/DBSIZE/TTL and their
-    # kin read server state, not data (exit review 10). Reading production ROWS - `SELECT` - is NOT here: the policy
-    # names production database MUTATION as absolute, and whether a human may approve a production read is a product
-    # decision recorded as open in the residuals.
-    # A VERSION PROBE OPENS NO CONNECTION, and a statement that is ENTIRELY read-only is a read. `psql -h prod-db
-    # -U ro -c 'EXPLAIN SELECT …'` is how an operator inspects a plan, and it was an absolute deny — the one
-    # verdict nobody can approve — so there was no way to look at production at all (exit review 9). One write
-    # clause anywhere in the statement and the whole thing acts again.
-    command: '^(?!psql\b[^|;&]*\s(-l|--list)(\s|$))(?!(?:redis-cli|valkey-cli)\b(?:\s+-{1,2}[A-Za-z-]+(?:\s+[^\s-]\S*)?)*\s+(?:info|ping|dbsize|time|lastsave|ttl|pttl|type|exists|strlen|llen|scard|hlen|zcard)(?:\s|$))(psql|mysql|mariadb|mysqladmin|mysqlsh|mongosh|mongo|redis-cli|valkey-cli|clickhouse(-client|\s+client)|cqlsh|influx|pg_dump|pg_dumpall|pg_restore|pgbench|createdb|dropdb|mysqldump|mysqlpump|mongodump|mongorestore)\b(?![^|;&]*\s(--help|-help|--usage)(\s|$))(?![^|;&]*\s(--version|-version)\s*(\||;|&|$))(?!\s+(?:-\S+\s+|\S+\s+)*?(-c|--command|-e|-execute|--execute|--eval|--query)(=|\s+)(?:(?:show|describe|desc)\b(?![^;]*;\s*\S)|(?:explain|\\d\w*|\\l|\\z|\\sf|\\ef)\b(?![\s\S]*(;\s*\S|\b(analyse|analyze)\b|insert|update|delete|drop|truncate|alter|create|grant|revoke|copy|vacuum|reindex|cluster|call|merge|rename|refresh|shutdown|detach|attach|lock|flush|kill|import|restore|replace|upsert|remove|destroy|purge))))(?=[^|;&]*(-h\s*\S*(prod|production)\S*|--host[= ]\S*(prod|production)\S*|://[^\s/]*(prod|production)[^\s/]*))'
+  # A DATABASE CLIENT AIMED AT A PRODUCTION HOST IS CLASSIFIED BY THE EVALUATOR'S TARGET MODEL, AND ONLY THERE. A matcher
+  # for "the explicitly named case" used to live here, with its own copy of every read-only exception (`-l`, INFO/PING,
+  # `SHOW`, `EXPLAIN`, `--version`) written as negative lookaheads - a second reader of a dimension the evaluator
+  # already reads, and the two disagreed in both directions (`-U -l`, `--exe`, `show tables\gdelete`, `-c DEL`; exit
+  # review 10, self-attack). The target model is complete for the case the matcher covered (a host, a `--host=`, a
+  # connection URI, `PGHOST`), so the matcher was removed rather than corrected.
   # --- destructive roots (absolute) ---
   - capability: fs.destructive-root
     tool: Bash
@@ -711,12 +701,20 @@ matchers:
   - capability: git.local.stash
     tool: Bash
     command: '^git\s+stash\b'
+  # LISTING TAGS IS NOT MAKING ONE, and the exception is a claim about the WHOLE command: `git tag`, `git tag -l`,
+  # `--contains X` and their kin, with NO flag that creates, signs, annotates or deletes anywhere on the line. A
+  # bare positional (`git tag v1`) is a creation and stays where it was (exit review 10)
+  - capability: git.local.status
+    tool: Bash
+    command: '^git\s+tag(?=\s*$|\s+(-l|--list|-n\d*|--contains|--no-contains|--merged|--no-merged|--points-at|-v|--verify|--sort|--format)\b)(?![^|;&]*\s(-m|-F|-a|-s|-u|-f|--message|--file|--annotate|--sign|--force|-d|--delete)\b)'
   - capability: git.local.tag
     tool: Bash
     command: '^git\s+tag\b'
+  # `merge-base`, `merge-tree` and `merge-file` are not merges: `\b` matches before a hyphen, so the plumbing that only
+  # COMPUTES (or writes one named file, which the path rules judge) was denied wherever a merge is (exit review 10)
   - capability: git.local.merge
     tool: Bash
-    command: '^git\s+merge\b'
+    command: '^git\s+merge(?![-\w])'
   # A REVERT OR A CHERRY-PICK REWRITES WHATEVER THE NAMED COMMIT TOUCHED — a repository-determined set the command
   # line does not enumerate, which may include the commit that hardened the control plane. It was ALLOW, while
   # every other route to those same files is an absolute deny (exit review 7). It stays a normal, approvable act:
@@ -776,7 +774,7 @@ matchers:
   # again one command earlier (exit review 10).
   - capability: command.privileged
     tool: Bash
-    command: '^(docker|podman|nerdctl)\s+volume\s+create\b[^|;&]*--opt[= ]\s*device=(/|~|\$HOME)'
+    command: '^(docker|podman|nerdctl)\s+volume\s+create\b[^|;&]*(--opt|-o)[= ]\s*device=(/|~|\$HOME)'
   # helm PLUGINS are arbitrary programs installed into helm and run by it.
   - capability: command.network-tool
     tool: Bash
@@ -799,7 +797,7 @@ matchers:
     # buildx's OWN verbs also publish: `bake --push` builds every target in a bake file and pushes each one, and
     # `--output type=registry` is what `--push` is shorthand FOR. Naming only `--push` covered neither, so an
     # upload to a shared registry reached ALLOW through the two spellings buildx documents (exit review 9).
-    command: '^((docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?|docker-compose\s+|podman-compose\s+)[^|;&]*?\s?(push\b|(build|bake)\b[^|;&]*(--push\b|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
+    command: '^((docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?|docker-compose\s+|podman-compose\s+)[^|;&]*?\s?(push\b|publish\b|imagetools\s+create\b|(build|bake)\b[^|;&]*(--push\b|--cache-to[= ][^\s]*type=registry|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
   # Handing a registry password on the command line writes it into the shell history and the process table.
   # SCOPED TO THE VERBS THAT TAKE ONE: docker's `-p` is `--publish`, so an unscoped rule turned `docker run -p
   # 8080:80 nginx` — the most ordinary container command there is — into a credential exposure (exit review 8).
@@ -836,13 +834,13 @@ matchers:
   # groups were enumerated and this one was not (exit review 10).
   - capability: container.prune
     tool: Bash
-    command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\sdown\b[^|;&]*\s(-v|--volumes|--rmi(=|\s+)all)(\s|$)'
+    command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\s(down\b[^|;&]*\s(-[a-zA-Z]*v[a-zA-Z0-9]*|--volumes|--rmi(=|\s+)all)|rm\b)(\s|$)'
   - capability: container.prune
     tool: Bash
     # ...AND THE LEGACY TOP-LEVEL VERBS. `docker rm -f c1` and `docker rmi img` are the spellings most people
     # type, and the rule enumerated only the `<group> <verb>` pairs — so they fell through to the blanket
     # container ALLOW (exit review 10). The management group is optional for every verb docker has.
-    command: '^(docker|podman|nerdctl)\s+((volume|network|secret|config|builder|buildx|system|image|container)\s+(rm|remove|prune)|(rm|rmi|prune)\b)'
+    command: '^(docker|podman|nerdctl)\s+((volume|network|secret|config|builder|buildx|system|image|container)\s+(rm|remove|prune|reset)|(rm|rmi|prune)\b)'
   - capability: container.prune
     tool: Bash
     command: '^(docker|podman)\s+(system\s+prune|image\s+prune|volume\s+prune|container\s+prune)\b'

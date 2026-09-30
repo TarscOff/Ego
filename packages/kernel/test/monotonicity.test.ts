@@ -94,12 +94,17 @@ test('PROPERTY: an effect keeps its authority however its options are permuted',
 test('PROPERTY: a subshell does not carry its working directory back out', () => {
   // `( cd /tmp && … )` moves nothing for the caller. Consuming the parentheses made the subshell's own commands
   // classifiable; it must not also make the analyzer claim a directory the caller never entered.
-  const dir = workspace({ 'run.sh': '#!/bin/sh\necho ok\n' });
-  assert.notEqual(
+  const dir = workspace({ 'run.sh': '#!/bin/sh\ngit push origin main\n' });
+  // the script is the WORKSPACE's, and it is an absolute deny: resolved through /tmp it would not be found at all
+  assert.equal(
     verdict('( cd /tmp && echo x ) && ./run.sh', dir),
-    'ALLOW',
+    'DENY',
     'a relative path was resolved through a directory the subshell left behind',
   );
+  // ...while inside the subshell the change DOES apply to what follows it there
+  const inner = workspace({ 'sub/run.sh': '#!/bin/sh\ngit push origin main\n', 'run.sh': '#!/bin/sh\necho ok\n' });
+  assert.equal(verdict('( cd sub && ./run.sh )', inner), 'DENY');
+  assert.equal(verdict('echo $(cd sub && ./run.sh)', inner), 'DENY');
 });
 
 test('PROPERTY: every tool the target model knows reaches the target model', () => {
