@@ -28,7 +28,14 @@ export type Role =
   /** a command line or code the tool evaluates */
   | 'code'
   /** a directory the tool changes into before it does anything else */
-  | 'chdir';
+  | 'chdir'
+  /** a configuration file the tool loads: a script one is a program, a data one is a program when it NAMES one (plugins, hooks) */
+  | 'config'
+  /** a module the tool imports, named by a PATH (`./fmt.js`, `/abs/x.mjs`, `x.cjs`): a program. A bare package name is resolved from
+   *  the installed dependencies, whose closure is not this table's business */
+  | 'modulePath'
+  /** a Python module the interpreter imports by NAME: from the working directory first, so a file of that name there is what runs */
+  | 'pythonModule';
 
 export interface ToolTable {
   grammar: Grammar;
@@ -40,6 +47,12 @@ export interface ToolTable {
 }
 
 export interface ToolEffects {
+  /** which table read the command (`tar`, `go`, `git archive`...) */
+  key: string;
+  /** configuration files named on the command line */
+  configs: string[];
+  /** Python modules named on the command line, to be looked up beside the command */
+  pythonModules: string[];
   writes: string[];
   writeDirs: string[];
   reads: string[];
@@ -218,6 +231,46 @@ const CC_ROLES: Record<string, Role> = {
   'fprofile-generate': 'writeDir',
 };
 
+// ---- linters and formatters that LOAD what their options name ----------------------------------------------------------------------
+// These are in the bounded vocabulary because they execute nothing they were not named for - and a formatter, a parser, a plugin, a
+// configuration or an init hook named on the command line IS something they were named for (independent review 11, RC-RUN rows).
+const ESLINT_GRAMMAR = gnu([
+  '-c|--config:v', '--no-config-lookup', '--no-eslintrc', '--env:v', '--ext:v', '--global:v', '--parser:v', '--parser-options:v', '--resolve-plugins-relative-to:v',
+  '--plugin:v', '--rule:v', '--rulesdir:v', '--fix', '--fix-dry-run', '--fix-type:v', '--ignore-path:v', '--no-ignore', '--ignore-pattern:v', '--stdin',
+  '--stdin-filename:v', '-o|--output-file:v', '-f|--format:v', '--color', '--no-color', '--max-warnings:v', '--quiet', '--debug', '--cache',
+  '--cache-location:v', '--cache-strategy:v', '--no-inline-config', '--report-unused-disable-directives', '--exit-on-fatal-error', '--no-warn-ignored',
+  '--init', '--inspect-config', '--flag:v', '--concurrency:v', '--stats', '--pass-on-no-patterns', '-h|--help', '-v|--version', '--print-config:v', '--no-error-on-unmatched-pattern',
+]);
+const ESLINT_ROLES: Record<string, Role> = {
+  config: 'config',
+  format: 'modulePath',
+  parser: 'modulePath',
+  plugin: 'modulePath',
+  rulesdir: 'program',
+  'output-file': 'write',
+  'cache-location': 'write',
+};
+const PRETTIER_GRAMMAR = gnu([
+  '--config:v', '--config-precedence:v', '--no-config', '--ignore-path:v', '--plugin:v', '-w|--write', '-c|--check', '-l|--list-different', '--cache',
+  '--cache-location:v', '--cache-strategy:v', '--log-level:v', '--stdin-filepath:v', '--parser:v', '--no-editorconfig', '--no-error-on-unmatched-pattern',
+  '--ignore-unknown|-u', '--with-node-modules', '--find-config-path:v', '--file-info:v', '--support-info', '--color', '--no-color', '--insert-pragma',
+  '--require-pragma', '--tab-width:v', '--use-tabs', '--print-width:v', '--no-semi', '--single-quote', '--trailing-comma:v', '--end-of-line:v', '-h|--help', '-v|--version',
+]);
+const PRETTIER_ROLES: Record<string, Role> = { config: 'config', plugin: 'modulePath', parser: 'modulePath', 'cache-location': 'write' };
+const PYLINT_GRAMMAR = gnu([
+  '--rcfile:v', '--init-hook:v', '--load-plugins:v', '-j|--jobs:v', '--ignore:v', '--ignore-patterns:v', '--ignore-paths:v', '-d|--disable:v', '-e|--enable:v',
+  '-f|--output-format:v', '-r|--reports:v', '-s|--score:v', '--msg-template:v', '--fail-under:v', '--fail-on:v', '--max-line-length:v', '--py-version:v',
+  '--persistent:v', '--recursive:v', '-v|--verbose', '-E|--errors-only', '--generate-rcfile', '--list-msgs', '--help-msg:v', '--from-stdin', '--output:v', '--confidence:v',
+  '--ignored-modules:v', '--extension-pkg-allow-list:v', '--suggestion-mode:v', '--clear-cache-post-run:v', '--bad-names:v', '-h|--help', '--version',
+]);
+const PYLINT_ROLES: Record<string, Role> = { rcfile: 'config', 'init-hook': 'code', 'load-plugins': 'pythonModule', output: 'write' };
+// `python -m MOD` imports MOD from the working directory FIRST, so a file called MOD.py there is the program that runs
+const PYTHON_GRAMMAR = gnu(
+  ['-B', '-b', '-d', '-E', '-i', '-I', '-O', '-P', '-q', '-s', '-S', '-u', '-v', '-V|--version', '-x', '-h|-?|--help', '-W:v', '-X:v', '--check-hash-based-pycs:v', '-c:c', '-m:c'],
+  { stopAtOperand: true },
+);
+const PYTHON_ROLES: Record<string, Role> = { m: 'pythonModule' };
+
 // ---- git subcommands that write, and the options that name where --------------------------------------------------------------
 const GIT_CHECKOUT_INDEX = gnu(['-a|--all', '-f|--force', '-n|--no-create', '-q|--quiet', '-u|--index', '--prefix:v', '--stage:v', '--temp', '-z', '--stdin', '--ignore-skip-worktree-bits']);
 const GIT_ARCHIVE = gnu(['-l|--list', '-v|--verbose', '--format:v', '-0', '-1', '-2', '-3', '-4', '-5', '-6', '-7', '-8', '-9', '--worktree-attributes', '--mtime:v', '-o|--output:v', '--remote:v', '--exec:v', '--prefix:v', '--add-file:v', '--add-virtual-file:v']);
@@ -240,6 +293,10 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
   sed: { grammar: SED_GRAMMAR, roles: {}, complete: true },
   go: { grammar: GO_GRAMMAR, roles: GO_ROLES },
   cc: { grammar: CC_GRAMMAR, roles: CC_ROLES },
+  eslint: { grammar: ESLINT_GRAMMAR, roles: ESLINT_ROLES },
+  prettier: { grammar: PRETTIER_GRAMMAR, roles: PRETTIER_ROLES },
+  pylint: { grammar: PYLINT_GRAMMAR, roles: PYLINT_ROLES },
+  python: { grammar: PYTHON_GRAMMAR, roles: PYTHON_ROLES },
   'git checkout-index': { grammar: GIT_CHECKOUT_INDEX, roles: { prefix: 'writeDir' } },
   'git archive': { grammar: GIT_ARCHIVE, roles: { output: 'write', exec: 'program', 'add-file': 'read' } },
   'git bundle': { grammar: GIT_BUNDLE, roles: {} },
@@ -260,6 +317,8 @@ export function toolTableFor(head: string, argv: readonly string[]): { key: stri
   if (base === 'tar' || base === 'gtar' || base === 'bsdtar') return { key: 'tar', table: TOOL_TABLES['tar']!, from: 1 };
   if (base === 'sort' || base === 'gsort') return { key: 'sort', table: TOOL_TABLES['sort']!, from: 1 };
   if (base === 'sed' || base === 'gsed') return { key: 'sed', table: TOOL_TABLES['sed']!, from: 1 };
+  if (base === 'eslint' || base === 'prettier' || base === 'pylint') return { key: base, table: TOOL_TABLES[base]!, from: 1 };
+  if (/^(python|python2|python3|pypy|pypy3)(\.\d+)?$/.test(base)) return { key: 'python', table: TOOL_TABLES['python']!, from: 1 };
   if (base === 'go') {
     const sub = argv[1];
     return sub !== undefined && /^(build|install|test|run|vet|list|generate|get|clean|env|doc|fix|fmt|mod|work|tool|version|bug)$/.test(sub)
@@ -285,7 +344,7 @@ export function toolEffects(head: string, argv: readonly string[]): ToolEffects 
   // `go test -args ...` hands the rest to the test binary: they are its options, not go's
   const stop = found.key === 'go' ? argv.findIndex((w, i) => i >= found.from && (w === '-args' || w === '--args')) : -1;
   const parsed = parseOptions(found.table.grammar, stop < 0 ? argv : argv.slice(0, stop), found.from);
-  const out: ToolEffects = { writes: [], writeDirs: [], reads: [], programs: [], code: [], chdirs: [], parsed };
+  const out: ToolEffects = { key: found.key, configs: [], pythonModules: [], writes: [], writeDirs: [], reads: [], programs: [], code: [], chdirs: [], parsed };
   for (const o of parsed.options) {
     if (o.value === null) continue;
     for (const name of [o.name, ...(o.candidates ?? [])]) {
@@ -316,6 +375,17 @@ function bucket(out: ToolEffects, role: Role, v: string): void {
       break;
     case 'programPath':
       if (/[\\/]/.test(v) || /^\.+$/.test(v)) out.programs.push(v);
+      break;
+    case 'modulePath':
+      // a path (relative, absolute, home) or a script file name; a bare package name or a built-in (`stylish`) is not one
+      if (/^(\.{1,2}\/|\/|~\/)/.test(v) || /\.(c|m)?[jt]s$|\.py$|\.rb$/.test(v)) out.programs.push(v);
+      break;
+    case 'config':
+      out.configs.push(v);
+      break;
+    case 'pythonModule':
+      // `pkg.mod` is looked up as `pkg`; `a,b` (pylint's plugin list) is two names
+      for (const name of v.split(',')) if (name.trim()) out.pythonModules.push(name.trim().split('.')[0]!);
       break;
     case 'code':
       out.code.push(v);

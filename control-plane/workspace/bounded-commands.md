@@ -363,6 +363,8 @@ discovers_content:
   - 'ninja'
   - 'node --test'
   - 'go test'
+  - 'bun test'
+  - 'deno test'
   - 'cargo test'
   - 'dotnet test'
   - 'swift test'

@@ -8,7 +8,7 @@ import { git, gitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
 import { peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
-import { has, lastOf, parseOptions } from './options.ts';
+import { has, isOn, lastOf, parseOptions, valueReadings } from './options.ts';
 import { SHELL_GRAMMAR, expandLongOptions, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
@@ -3717,6 +3717,9 @@ function editsInPlace(head: string, tokens: string[]): boolean {
     return tokens.some((t, i) =>
       /^(-i|--include)$/.test(t) ? tokens[i + 1] === 'inplace' : /^(-i|--include=)inplace$/.test(t),
     );
+  // sed's `-i` is read by sed's own option parser (tools.ts): `-i`, `-i.bak`, `-ni`, `-Ei`, `-s -i`, `--in-place[=SUFFIX]` and any
+  // unique prefix of it, wherever among the operands it stands - GNU sed permutes, so `sed 's/a/b/' -i f` edits f
+  if (/^(sed|gsed)$/.test(head)) return sedProgram(tokens, 1).inPlace;
   // `-i`, `-i.bak` (the backup suffix is glued to it), or the letter inside a cluster of flags that take no
   // argument. The cluster is spelled out rather than `[A-Za-z]*` because perl's `-Ilib` names an include PATH
   // and a loose test read the `i` of `lib` as the in-place flag.
@@ -4962,26 +4965,33 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
             }
           })()
         : text;
-    // `plugins` and the rest always name a package the tool imports. `extends` is the exception: a value in the
-    // tool's OWN namespace (`eslint:recommended`) is built in and loads nothing, so flagging it would gate the
-    // most ordinary configuration there is.
-    // JSON writes `"plugins": ["x"]`, YAML writes `plugins:` then a list on the following lines. Requiring a
-    // bracket on the same line saw only the JSON shape (decision challenge, finding 6).
-    // JSON writes `"plugins": [...]`, YAML writes `plugins:` then a list, INI and TOML write `plugins = ...`.
-    // Requiring a colon saw only the first two, so `mypy.ini` with `plugins = evil.py` read as plain data.
-    if (
-      /(^|["\s])(plugins|presets|preset|require|requires|loader|transform)["\s]*[:=]\s*(\[|\{|["']|\S|\r?\n\s*-)/m.test(
-        scope,
-      )
-    )
-      return f;
-    const ext = /["\s]extends["\s]*[:=]\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
-    if (ext) {
-      const values = [...ext[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
-      if (values.some((v) => !v.startsWith(`${tool}:`))) return f;
-    }
+    if (configTextNamesCode(scope, tool)) return f;
   }
   return null;
+}
+
+/** Whether the TEXT of a data configuration makes its tool import or run something.
+ *  `plugins` and the rest always name a package the tool imports. `extends` is the exception: a value in the
+ *  tool's OWN namespace (`eslint:recommended`) is built in and loads nothing, so flagging it would gate the
+ *  most ordinary configuration there is.
+ *  JSON writes `"plugins": ["x"]`, YAML writes `plugins:` then a list on the following lines. Requiring a
+ *  bracket on the same line saw only the JSON shape (decision challenge, finding 6).
+ *  JSON writes `"plugins": [...]`, YAML writes `plugins:` then a list, INI and TOML write `plugins = ...`.
+ *  Requiring a colon saw only the first two, so `mypy.ini` with `plugins = evil.py` read as plain data.
+ *  pylint's own keys are `load-plugins` and `init-hook`: the second one is Python SOURCE the tool executes before it reads a file. */
+function configTextNamesCode(scope: string, tool: string): boolean {
+  if (
+    /(^|["\s])(plugins|presets|preset|require|requires|loader|transform|load[-_]plugins|init[-_]hook)["\s]*[:=]\s*(\[|\{|["']|\S|\r?\n\s*-)/m.test(
+      scope,
+    )
+  )
+    return true;
+  const ext = /["\s]extends["\s]*[:=]\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
+  if (ext) {
+    const values = [...ext[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    if (values.some((v) => !v.startsWith(`${tool}:`))) return true;
+  }
+  return false;
 }
 
 /** Operations that replace repository content wholesale. Listed by what they DO, not by spelling: each one swaps
@@ -5292,6 +5302,10 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   // link (`cp evil.mk d/../Makefile` replaces the Makefile beside the link's TARGET), and the ledger is a set of names
   // later reads are compared against - recording both can only make a later read more careful, never less
   const abs = (t: string): string[] => pathCandidates(cwd, t).paths;
+  // THE MODELLED TOOLS' OWN TABLE (tools.ts) names what they write: the same reading the verdict uses, so a file the verdict
+  // judged as written is a file the ledger will not call fresh
+  const tableWrites = toolEffects(head, tokens);
+  if (tableWrites !== null) for (const w of [...tableWrites.writes, ...tableWrites.writeDirs]) if (!/[$`]/.test(w) && !discardWord(cwd, w)) out.push(...abs(w));
   // A WRITE THIS LEDGER CANNOT ENUMERATE is a wildcard, and pretending otherwise is how a makefile replaced by `cp
   // evil/* .` looked untouched: a glob or bracket in an operand of a writer, `find … -exec`, `xargs` running a writer,
   // and the tools that name an output file as an OPERAND (exit review 10, self-attack)
@@ -7503,7 +7517,11 @@ function resolveScriptCommand(
     };
   }
   // package manager scripts
-  if (head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') {
+  // `bun test` IS BUN'S OWN TEST RUNNER, not the package script called `test`: unlike npm, pnpm and yarn - where `test` is an alias
+  // of `run test` - a bun BUILT-IN wins over a script of the same name, so reading `bun test` as the manifest's `"test": "echo ok"`
+  // resolved a body that never runs while the runner executed every `*.test.ts` the repository holds (independent review 11,
+  // r11-214). The built-in is not this producer's: it falls to the vocabulary, which says it discovers content it was never shown.
+  if ((head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') && !(head === 'bun' && tokens[1] === 'test')) {
     // A workspace/prefix/filter selector changes WHICH manifest the script comes from. EGO does not model the
     // workspace graph, so reading the root manifest would be a confident wrong answer.
     // `--ws` IS `--workspaces`, `-ws` is the single-dash spelling npm accepts for it, and `--workspaces=true`
@@ -9263,7 +9281,10 @@ function optionValues(tokens: string[], short: string, longs: string[]): string[
     // `h` inside `-url=jdbc:postgresql://localhost:5432/app` reads as `-h` and invents a host (round 14)
     if (!/^-[A-Za-z0-9]*$/.test(t.slice(0, at))) continue;
     const glued = t.slice(at + 1);
-    if (glued) out.push(glued);
+    // `-o=file` IS THE FILE `file` TO A GO TOOL (the flag package) AND THE FILE `=file` TO A GNU ONE: this reader does not know which
+    // tool it is reading, so both are values, and a destination judged only as `=file` was a write nobody looked at
+    // (independent review 11, r11-212)
+    if (glued) out.push(...valueReadings(glued));
     else if (tokens[i + 1] !== undefined) out.push(tokens[i + 1]!);
   }
   return out;
@@ -12150,6 +12171,40 @@ function classifyShellPaths(
         absolute: false,
         opaqueUnread: true,
       });
+    const runs = (why: string): void => {
+      hits.push({
+        capability: 'command.script-opaque',
+        verdict: verdictFor(table, ctx, 'command.script-opaque'),
+        via: why,
+        segment: seg,
+        absolute: false,
+        opaqueUnread: true,
+      });
+    };
+    // code the command line carries (`pylint --init-hook "…"`) is run by the tool before it reads a file
+    for (const c of effects.code) runs(`the option value ${c} is code the command runs`);
+    // a CONFIGURATION named on the command line: a script one is a program; a data one is read here, because the lookup the
+    // closure rule makes for the files a tool FINDS never sees the one it is TOLD (`prettier --config ./evil.json`, whose
+    // `plugins` entry runs ./pl.js - independent review 11, r11-208)
+    for (const c of effects.configs) {
+      if (/[$`*?]/.test(c)) continue;
+      if (/\.(c|m)?[jt]s$|\.py$|\.rb$/.test(c)) runs(`the configuration ${c} is a script the command runs`);
+      else {
+        const text = readWordFile(ctx, cwd, c);
+        if (text === null) runs(`the configuration ${c} could not be read, so it cannot be shown to name no code`);
+        else if (configTextNamesCode(text, head)) runs(`the configuration ${c} names code the command loads`);
+      }
+    }
+    // `python -m MOD` and `pylint --load-plugins=MOD` import MOD from the working directory FIRST: a file of that name there
+    // is the program that runs, whatever the module is called in the standard library (`python3 -m venv` with a venv.py beside
+    // it, r11-209). Isolated mode (-I) and -P leave the working directory off the path.
+    if (effects.pythonModules.length && !(effects.key === 'python' && (isOn(effects.parsed, 'I') || isOn(effects.parsed, 'P'))))
+      for (const mod of effects.pythonModules) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(mod)) continue;
+        // (the candidate names go through the one path resolver, like every other word the evaluator opens)
+        const local = [`${mod}.py`, `${mod}/__init__.py`, `${mod}.so`, `${mod}.pyd`].find((f) => ((o) => o !== null && fileExists(o))(openedPath(cwd, f)));
+        if (local !== undefined) runs(`the module ${mod} is imported from the working directory first, where ${local} is what runs`);
+      }
     for (const w of [...effects.writes, ...effects.writeDirs]) {
       if (!w || /[$`]/.test(w) || discardWord(cwd, w, old)) continue;
       extraDests.add(w);

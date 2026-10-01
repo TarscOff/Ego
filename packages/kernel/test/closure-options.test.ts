@@ -10,7 +10,8 @@
 //           `go build -o=`, `sort --o=`, `gcc -MF` and the rest all name a file, and the file is judged.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { workspace, verdict } from './support/corpus.ts';
+import { ctx, table, workspace, verdict } from './support/corpus.ts';
+import { evaluate } from '../src/authority/evaluate.ts';
 import { peelCarriers } from '../src/authority/carriers.ts';
 import { has, isOn, parseOptions, valuesOf } from '../src/authority/options.ts';
 import { scanSedScript } from '../src/authority/sed.ts';
@@ -567,4 +568,107 @@ test('RC-WRT: what git writes to the file system is a column of its table - chec
   // writing OUTSIDE the governed trees is the ordinary work it was
   for (const c of ['git checkout-index --prefix=/tmp/export/ -a', 'git archive -o /tmp/x.tar HEAD', 'git format-patch -o /tmp/patches -1', 'git config --file /tmp/x --get user.name', 'git bundle create /tmp/x.bundle HEAD'])
     assert.notEqual(verdict(c, dir), 'DENY', c);
+});
+
+// ------------------------------------------------------------------------------------------------------------------------------
+// the runners the bounded vocabulary trusts: an option that NAMES what they load is something they were named for
+// ------------------------------------------------------------------------------------------------------------------------------
+
+test('a bounded runner or compiler is bounded only while its options name nothing it would load: a linker, a formatter, a parser, a plugin, a configuration, an init hook, a module beside it', () => {
+  const dir = workspace({
+    'evil-ld': '#!/bin/sh\ngit push --force origin main\n',
+    'a.c': 'int main(){}',
+    'fmt.js': 'require("child_process").execSync("git push origin main")',
+    'par.js': 'x',
+    'a.js': 'x',
+    'x.py': 'pass',
+    'evil.json': '{"plugins":["./pl.js"]}',
+    'evil.rc': '[MASTER]\ninit-hook=import os\n',
+    'plain.json': '{"semi":false}',
+    '.prettierrc': '{"semi":false}',
+    'eslint.config.json': '{"rules":{}}',
+    'pl.js': 'require("child_process").execSync("git push origin main")',
+    'venv.py': 'import os\nos.system("git push origin main")',
+    'black.py': 'import os',
+    'evil.py': 'import os',
+    'a.test.ts': 'import {execSync} from "child_process"; execSync("git push origin main")',
+    'package.json': '{"scripts":{"test":"echo ok"}}',
+  });
+  // a program the compiler runs in the linker's place
+  for (const c of [
+    'clang --ld-path=./evil-ld a.c -o a.out',
+    'clang --ld-path=./ld.sh x.c',
+    'gcc -fuse-ld=./evil-ld a.c',
+    'gcc -fuse-ld=/abs/path/evil-ld a.c',
+    'gcc -fuse-ld=bin/evil-ld a.c',
+    'gcc -B./evil a.c',
+    'gcc -B ./evil a.c',
+    'gcc -wrapper ./w a.c',
+    'gcc -specs=./s a.c',
+    'gcc -fplugin=./p.so a.c',
+  ])
+    assert.notEqual(verdict(c, dir), 'ALLOW', c);
+  // a formatter, parser, plugin, rule directory or configuration NAMED by a path on the command line
+  for (const c of [
+    'eslint --no-config-lookup -f ./fmt.js a.js',
+    'eslint --format ./fmt.js a.js',
+    'eslint --format=./fmt.js a.js',
+    'eslint -f ../fmt.js a.js',
+    'eslint --no-config-lookup --parser ./par.js a.js',
+    'eslint --parser=./par.js a.js',
+    'eslint --plugin ./pl.js a.js',
+    'eslint --rulesdir ./rules a.js',
+    'eslint -c ./cfg.js a.js',
+    'eslint --config ./eslint.config.mjs',
+    'eslint -c evil.json a.js',
+    'eslint --config=evil.json a.js',
+    'prettier --config ./evil.json a.js',
+    'prettier --config=./evil.json a.js',
+    'prettier --config evil.json a.js',
+    'prettier --plugin ./pl.js a.js',
+    'prettier --plugin=./pl.js a.js',
+    'prettier --config ./cfg.cjs a.js',
+    'prettier --config missing.json a.js',
+    "pylint --init-hook \"import os; os.system('git push origin main')\" x.py",
+    'pylint --init-hook="import os" x.py',
+    'pylint --load-plugins=evil x.py',
+    'pylint --load-plugins a,evil x.py',
+    'pylint --rcfile evil.rc x.py',
+    'pylint --rcfile=evil.rc x.py',
+  ])
+    assert.notEqual(verdict(c, dir), 'ALLOW', c);
+  // `python -m MOD` imports MOD from the working directory FIRST
+  for (const c of ['python3 -m venv .venv', 'python3 -m black .', 'python3.11 -m venv .venv', 'python -m venv .venv', 'python3 -Bm venv .venv', 'python3 -u -m venv .venv'])
+    assert.notEqual(verdict(c, dir), 'ALLOW', c);
+  // bun's test runner runs every test file; it is not the package script of the same name
+  for (const c of ['bun test', 'bun test --coverage', 'bun test a.test.ts']) assert.notEqual(verdict(c, dir), 'ALLOW', c);
+  // ...while the ordinary uses of every one of them stay what they were
+  for (const c of [
+    'clang a.c -o a.out',
+    'gcc -fuse-ld=lld a.c',
+    'gcc -fuse-ld=gold a.c',
+    'gcc -O2 -Wall -c a.c',
+    'eslint -f json a.js',
+    'eslint --format stylish a.js',
+    'eslint --parser @typescript-eslint/parser a.js',
+    'eslint -c eslint.config.json a.js',
+    'eslint a.js',
+    'prettier --check .',
+    'prettier --config .prettierrc a.js',
+    'prettier --config plain.json a.js',
+    'prettier a.js',
+    'pylint x.py',
+    'pylint --load-plugins=pylint_django x.py',
+    'pylint -E x.py',
+    'bun run test',
+  ])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+  // isolated mode (-I) and -P leave the working directory off the module path, so nothing there is imported (the line still asks on
+  // other grounds: the build matcher knows `python3 -m venv` and not the flags in front of it)
+  const why = (c: string): string[] => evaluate(table, ctx(dir), { tool: 'Bash', input: { command: c } }).hits.map((h) => h.via);
+  for (const c of ['python3 -I -m venv .venv', 'python3 -P -m venv .venv']) assert.ok(!why(c).some((v) => v.includes('imported from the working directory')), c);
+  assert.ok(why('python3 -m venv .venv').some((v) => v.includes('imported from the working directory')));
+  // a module that is NOT beside the command is the standard library's
+  assert.equal(verdict('python3 -m venv .venv', workspace()), 'ALLOW');
+  assert.equal(verdict('python3 -m venv .venv', workspace({ venv: '' })), 'ALLOW');
 });
