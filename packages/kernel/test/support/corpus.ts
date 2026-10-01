@@ -702,6 +702,47 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   },
   {
     family: 'db',
+    // THE CLIENT IS KNOWN AND ITS OPERAND IS NOT BOUNDED (independent audit of 2026-10-01, item 5; exit review 11 #102,
+    // #130, #131). A database client handed a program, a file to write outside its database, or native code is not
+    // the plain client, and each client reads its own channels by a grammar: an option from its own list, a command from
+    // its read-only list, a statement made only of what stays inside. One representative per client and channel; the
+    // transformations carry them through every wrapper.
+    id: 'a database client that runs a program, writes a file outside its database or loads native code',
+    floor: 'ASK',
+    cases: [
+      `sqlite3 :memory: "select writefile('.git/hooks/pre-commit', 'x')"`,
+      `sqlite3 app.db '.sh cmd'`,
+      `sqlite3 app.db "attach database 'other.db' as o"`,
+      `psql -o '|cmd' -c 'select 1'`,
+      `psql -c '\\o |cmd'`,
+      `psql -c '\\e'`,
+      `PSQLRC=rc.sql psql -c 'select 1'`,
+      `psql -c "copy t to '/tmp/out'"`,
+      `psql -c "select pg_read_file('/etc/hostname')"`,
+      `mysql -e 'pager cmd; select 1'`,
+      `mysql --defaults-extra-file=extra.cnf -e 'select 1'`,
+      `mysql -e "select 1 into outfile '/tmp/out'"`,
+      `mongosh --eval 'const r = require; r("fs")'`,
+      `mongosh --eval 'db.users.find({$where: "sleep(1000)"})'`,
+      `redis-cli module load lib.so`,
+      `redis-cli config set dir /tmp`,
+      `clickhouse-client -q "select * from file('/etc/hostname')"`,
+    ],
+  },
+  {
+    family: 'db',
+    // against a production host the same escape is not the read the plain-SELECT decision covers
+    id: 'a program-valued option or escape on a production database client',
+    floor: 'DENY',
+    cases: [
+      `psql -h prod-db.acme.com -U ro -c 'select 1' -o '|cmd'`,
+      `mysql -h prod-db.acme.com -e 'select 1' --pager=cmd`,
+      `mongosh prod-mongo:27017 --eval 'require("fs")'`,
+      `redis-cli -h prod-cache.acme.com module load lib.so`,
+    ],
+  },
+  {
+    family: 'db',
     // a read-only exception must be a claim about the WHOLE statement
     id: 'a write smuggled past a read-only statement exception',
     floor: 'DENY',
@@ -1638,6 +1679,31 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
   go: ['go version', 'go build ./...', 'go test ./...', 'go vet ./...', 'gofmt -l .', 'go mod tidy', 'go mod download'],
   rust: ['cargo --version', 'cargo build', 'cargo build --release', 'cargo test', 'cargo clippy', 'cargo fmt --check', 'rustc --version'],
   jvm: ['java -version', 'mvn -v', 'mvn -q compile', 'mvn test', 'gradle --version', './gradlew build', './gradlew test', 'javac -version'],
+  // A DATABASE CLIENT AGAINST A LOCAL DEVELOPMENT DATABASE IS ORDINARY WORK, and the grammar that reads its channels
+  // (dbClientEscape) must not turn the everyday statement into a question: reads, DML and DDL, a table listing, a file
+  // in the workspace written by name, the client's own inert options.
+  database: [
+    'psql -c "select 1"',
+    'psql -h localhost -U app -d app -c "select count(*) from users"',
+    'psql -c "\\dt"',
+    'psql -c "insert into t values (1)"',
+    'psql -o out.txt -c "select 1"',
+    'psql -c "\\copy users to \'users.csv\' csv header"',
+    'mysql -e "show tables"',
+    'mysql -h 127.0.0.1 -P 3306 -uroot -psecret app -e "select 1"',
+    'mysql --batch --skip-column-names -e "select count(*) from t"',
+    'sqlite3 app.db "select count(*) from users"',
+    'sqlite3 app.db .tables',
+    'sqlite3 app.db ".schema users"',
+    'sqlite3 app.db "update t set name = upper(name) where id < 10"',
+    'sqlite3 -json app.db "select * from t"',
+    'redis-cli get foo',
+    'redis-cli set foo bar',
+    "redis-cli --scan --pattern 'user:*'",
+    'mongosh --eval "db.users.find()"',
+    `mongosh --eval 'db.users.insertOne({name: "a"})'`,
+    'clickhouse-client -q "select 1"',
+  ],
   // the shapes exit review 4 found gated for no reason; each is now proven to execute nothing it is not named for
   pipelines: ['ls -la | grep x', 'git diff | head -20', 'cat package.json | jq .name', 'echo hi | wc -l'],
   structure: [
