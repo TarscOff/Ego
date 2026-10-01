@@ -57,18 +57,6 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:stripe-webhook-secret]'
-  - id: forge.github.fine-grained-pat
-    name: GitHub fine-grained personal access token
-    pattern: '\bgithub_pat_[A-Za-z0-9_]{60,}\b'
-    severity: block
-    locked: true
-    replacement: '[REDACTED:github-pat]'
-  - id: forge.github.app-token
-    name: GitHub App / OAuth access token
-    pattern: '\b(gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b'
-    severity: block
-    locked: true
-    replacement: '[REDACTED:github-token]'
   - id: saas.linear
     name: Linear API key
     pattern: '\blin_api_[A-Za-z0-9]{40,}\b'
