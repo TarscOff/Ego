@@ -141,7 +141,7 @@ test('init → doctor → check → hooks → status on a fresh repository', asy
   const explain = await run(['explain', 'capability', 'production.deploy'], dir, env);
   assert.match(explain.out, /absolute core deny/);
   const caps = await run(['capabilities', 'forge'], dir, env);
-  assert.match(caps.out, /DENY {2}forge\.pr\.merge \[organization\]/);
+  assert.match(caps.out, /DENY {2}forge\.pr\.merge \| EXTERNAL_EFFECT \| lock ADMIN_GOVERNED \| ceiling ASK/);
   const ctx = await run(['context', 'explain'], dir, env);
   assert.match(ctx.out, /LOADED .*AGENTS.md/);
   const later = await run(['task', 'open'], dir, env);

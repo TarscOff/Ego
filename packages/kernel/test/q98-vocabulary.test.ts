@@ -1421,7 +1421,7 @@ test('C3 `ego capabilities`, `ego explain capability` and `ego doctor` print the
   assert.doesNotMatch(ex.out, LEGACY_NAME);
   const hard = await cli(p, ['explain', 'capability', 'production.deploy']);
   assert.match(hard.out, /lock tier HARD_LOCK/);
-  assert.match(hard.out, /HARD_LOCK capability: no organization policy/);
+  assert.match(hard.out, /HARD_LOCK capability \(an absolute core deny\): no organization policy/);
   const tgt = await cli(p, ['explain', 'capability', 'k8s.local.apply']);
   assert.match(tgt.out, /effect class LOCAL_WORKSPACE/);
   assert.match(tgt.out, /target rule: .*k8s_local_contexts/);

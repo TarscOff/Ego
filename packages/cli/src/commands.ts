@@ -394,7 +394,7 @@ function explain(
     );
   if (c.lock === 'absolute')
     lines.push(
-      'This is a HARD_LOCK capability: no organization policy, profile, overlay, grant, mode, skill, issue, task approval or model can widen it.',
+      'This is a HARD_LOCK capability (an absolute core deny): no organization policy, profile, overlay, grant, mode, skill, issue, task approval or model can widen it.',
     );
   else if (c.lock === 'admin-governed')
     lines.push(
