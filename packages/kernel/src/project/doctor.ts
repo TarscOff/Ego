@@ -315,6 +315,31 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       for (const g of surface.targets)
         add('authority', `target-dependent (${g.kind})`, 'INFO', `${g.capabilities.join(', ')}: ${g.rule}`, false);
     }
+    // the local-development registry: what a person declared local, and what the registry refused to take
+    const lt = cache.table.localTargets;
+    const declared = lt.declared.map((d) => `${d.kind}:${d.name} (${d.layer})`);
+    add(
+      'policy',
+      'local targets',
+      'INFO',
+      declared.length
+        ? `${declared.length} declared on top of the kernel default: ${declared.join(', ')}`
+        : 'kernel default only (declare more with `ego init --local-target <kind>:<name>`)',
+      false,
+    );
+    if (lt.ignored.length)
+      add(
+        'policy',
+        'local targets ignored',
+        'NOT SATISFIED',
+        lt.ignored
+          .map(
+            (i) =>
+              `${i.kind === 'file' ? 'file' : `${i.kind}:${i.name}`} from the ${i.layer} (${i.file}): ${i.reason}`,
+          )
+          .join('; '),
+        false,
+      );
   }
   const manifest = readGeneratedManifest(root);
   if (!manifest) add('generated', 'artifacts', 'NOT SATISFIED', 'no generated manifest; run `ego init`');

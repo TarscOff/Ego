@@ -488,6 +488,12 @@ matchers:
   - capability: ego.mcp-trust.edit
     tool: Write
     path: '.harness/mcp-trust.md'
+  # THE PROJECT'S LOCAL-TARGET REGISTRY: it is an overlay that can only WIDEN (a declared target turns a refusal into an
+  # allowed operation), so unlike `.harness/permissions.md` an agent does not write it without a human seeing the write.
+  # The organization's copy is already `policies/organization/**`.
+  - capability: ego.local-targets.edit
+    tool: Write
+    path: '.harness/local-targets.md'
   # `.mcp.json` names the COMMAND each MCP server is started with, so writing it is writing what the host will
   # execute — the same surface as a hook entry (decision challenge, finding 20).
   - capability: fs.hook-config.write

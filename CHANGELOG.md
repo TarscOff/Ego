@@ -40,6 +40,21 @@ discipline of decision Q84 (authority changes are never patch releases).
   An operand is `core`, `current`, `proposed` (the layer files as they are in the working tree, before a human accepts
   them: the review `ego init` asks for), or the path of a policy cache or table file, including one written by an
   earlier release. `--fail-on-widening` exits 1 when anything widens. It only reads.
+- **The local-development target registry has project and organization layers, and `ego init` proposes and adopts
+  targets** (Q98 sections 1, 7 and 8). `control-plane/workspace/local-targets.md` said a project or an organization may
+  add targets it owns while the compiler read exactly one file. `.harness/local-targets.md` and
+  `policies/organization/local-targets.md` may now add kube contexts, database hosts, container contexts and production
+  markers; a layer never removes a marker and never declares a production-marked name local (ignored, with a diagnostic
+  in `ego doctor`). Declaring a target local is a widening: it never applies from the working tree, and takes effect
+  when a human runs `ego init` and accepts it. Each declaration is local for one family of tools only. The compiled
+  table and its hash carry the merged targets, and `diffAuthorityTables` reports `local-target-added` (MAJOR).
+  `ego init` detects local-development surfaces from repository files only and prints proposals;
+  `--local-target <kube|db|container>:<name>` (repeatable, a human act refused from an agent shell) adopts them,
+  `--no-local-targets` declines, and the AUTHORITY DIFF is printed after any change. A new capability
+  `ego.local-targets.edit` (ASK) guards `.harness/local-targets.md`.
+- **An ASK on an operation that leaves this machine presents what is being approved** (Q98 section 8): action, target
+  service or repository or resource, branch / cluster / database / tool, a bounded secret-masked summary, why it asks,
+  and how reversible it is (`authority/approval.ts`). Durable tasks do not exist before phase 2, so the task line says so.
 
 ### Changed (authority — MAJOR under Q84)
 - **A session grant lifts only a capability whose effect stays on this machine** (Q98 section 4 / issue #16 sections

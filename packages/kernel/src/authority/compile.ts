@@ -4,6 +4,11 @@
 import { basename } from 'node:path';
 import { sha256Canonical } from '../util/hash.ts';
 import {
+  diffLocalTargets,
+  mergeLocalTargets,
+  type LocalTargetsLayerDoc,
+} from '../control-plane/local-targets.ts';
+import {
   ControlPlaneValidationError,
   VERDICT_RANK,
   type CapabilityDoc,
@@ -126,6 +131,8 @@ export interface CompileOptions {
   overlayMatchers?: CompiledMatcher[];
   /** heads the ORGANIZATION declares bounded, on top of the kernel's vocabulary (see LAYER_FILES) */
   organizationBounded?: string[];
+  /** the organization's and the project's local-targets files, read (see `control-plane/local-targets.ts`) */
+  localTargetLayers?: LocalTargetsLayerDoc[];
   /** project root used to relativize layer file paths so the table hash never depends on the checkout location */
   projectRoot?: string;
 }
@@ -354,9 +361,11 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       discoversConfig: [...cp.boundedCommands.discoversConfig].sort(),
     },
     localTargets: {
+      // the kernel's default with the layers' additions merged in: a layer can add a local target and a production
+      // marker and can take nothing away, and the merged result is what the table hash covers
+      ...mergeLocalTargets(cp.localTargets, opts.localTargetLayers ?? []),
       k8sLocalContexts: [...cp.localTargets.k8sLocalContexts].sort(),
       dbLocalHosts: [...cp.localTargets.dbLocalHosts].sort(),
-      productionMarkers: [...cp.localTargets.productionMarkers].sort(),
       file: rel(opts.projectRoot ?? '', cp.localTargets.file),
     },
   };
@@ -390,7 +399,11 @@ export interface AuthorityChange {
     | 'sanitizer-weakened'
     | 'grants-widened'
     | 'grants-narrowed'
-    | 'protection-removed';
+    | 'protection-removed'
+    | 'local-target-added'
+    | 'local-target-removed'
+    | 'production-marker-added'
+    | 'production-marker-removed';
   /** profile/mode cell where a verdict change was observed (first one found); absent for table-wide changes */
   cell?: string;
   from?: Verdict;
@@ -547,6 +560,22 @@ export function diffAuthorityTables(
         detail: `locked detector ${id} lowered from block to warn`,
       });
   }
+  // THE LOCAL-DEVELOPMENT REGISTRY IS AUTHORITY. Declaring a target local turns a refusal into an allowed
+  // operation without changing a single capability verdict, so a diff that compared verdicts alone reported the
+  // widening as no change at all. Both the human gate (`tableWidenings`) and this diff read the same function.
+  for (const c of diffLocalTargets(prev.localTargets, next.localTargets))
+    push({
+      capability: '*',
+      kind: (
+        {
+          'target-added': 'local-target-added',
+          'target-removed': 'local-target-removed',
+          'marker-added': 'production-marker-added',
+          'marker-removed': 'production-marker-removed',
+        } as const
+      )[c.kind],
+      detail: c.detail,
+    });
   for (const [k, y] of prevByKey)
     if (!nextByKey.has(k)) push({ capability: y.capability, kind: 'matcher-removed', detail: k });
   for (const p of Object.keys(next.profiles).sort()) {
@@ -584,7 +613,9 @@ export function classifyAuthorityChanges(
       c.kind === 'lock-changed' ||
       c.kind === 'sanitizer-weakened' ||
       c.kind === 'grants-widened' ||
-      c.kind === 'protection-removed'
+      c.kind === 'protection-removed' ||
+      c.kind === 'local-target-added' ||
+      c.kind === 'production-marker-removed'
     )
       level = 'major';
     if (c.kind === 'added' && c.to === 'ALLOW') level = 'major';
@@ -620,14 +651,20 @@ export function isWideningChange(c: AuthorityChange, next: CompiledAuthorityTabl
       return c.fromLock !== undefined && c.toLock !== undefined && LOCK_RANK[c.toLock] < LOCK_RANK[c.fromLock];
     case 'matcher-added':
       return next.effective[c.capability] === 'ALLOW';
+    // (declaring a target local, or removing a production marker, turns a refusal into an allowed operation without
+    // changing a single capability verdict: it is a widening even though no cell moves)
     case 'matcher-removed':
     case 'matcher-repartitioned':
     case 'sanitizer-weakened':
     case 'grants-widened':
     case 'protection-removed':
+    case 'local-target-added':
+    case 'production-marker-removed':
       return true;
     case 'grants-narrowed':
     case 'budget-changed':
+    case 'local-target-removed':
+    case 'production-marker-added':
       return false;
   }
 }

@@ -11,6 +11,13 @@ import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } f
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
+import {
+  containerLocalPatterns,
+  dbClientLocalPatterns,
+  declareHint,
+  hasProductionMarker,
+  kubeLocalPatterns,
+} from '../control-plane/local-targets.ts';
 
 export interface EvaluationContext {
   profile: string;
@@ -47,6 +54,9 @@ export interface CapabilityHit {
   effectOf?: string;
   /** opacity that means "something WILL run that could not be read", as opposed to "the target does not exist" */
   opaqueUnread?: boolean;
+  /** WHERE a Kubernetes, database or container operation lands, as the target resolver classified it. The hit carried
+   *  this only inside its `via` sentence, which is for a person; the approval presentation reads it from here */
+  target?: { cls: TargetClass; name: string };
 }
 
 export interface Evaluation {
@@ -8696,11 +8706,6 @@ function matchesAnyGlob(name: string, patterns: string[]): boolean {
   return patterns.some((p) => globToRegExp(p.toLowerCase()).test(n));
 }
 
-function hasProductionMarker(name: string, markers: string[]): boolean {
-  const n = name.toLowerCase();
-  return markers.some((m) => new RegExp(`(^|[^a-z0-9])${m.toLowerCase()}([^a-z0-9]|$)`).test(n));
-}
-
 function classifyTargetName(
   name: string,
   localPatterns: string[],
@@ -8712,13 +8717,11 @@ function classifyTargetName(
   return 'EXTERNAL';
 }
 
-/** The five names in `k8s_local_contexts` that are the CONTAINER RUNTIME's own words for the local daemon.
- *  Kubernetes has no such convention: a kubeconfig context called `default` is whatever the operator's file
- *  says, and `kubectl --context default apply -f evil.yaml` was read as local because the container list and the
- *  Kubernetes list are one file (exit review 7). */
-const CONTAINER_ONLY_LOCAL = new Set(['default', 'unix', 'npipe', 'rootless', 'desktop-windows']);
-const k8sContexts = (targets: LocalTargets): string[] =>
-  targets.k8sLocalContexts.filter((c) => !CONTAINER_ONLY_LOCAL.has(c));
+// WHAT IS LOCAL FOR WHICH FAMILY OF TOOLS is answered by the registry (`control-plane/local-targets.ts`), once: the
+// kernel's default plus whatever a project or an organization declared, kept apart per family. A kube context a team
+// declares is local for kubectl and helm and not for docker; the five container-runtime names in the kernel's list
+// (`default`, `unix`, ...) are local for the container tools and not for Kubernetes (exit review 7).
+const k8sContexts = kubeLocalPatterns;
 
 /** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
 /** docker/podman global options that consume the next token, so their value is not the subcommand. */
@@ -8747,7 +8750,7 @@ function resolveContainerTarget(
       // (endpointHost cuts the authority at the first `/`, `?` or `#`, so a fragment cannot fake the host)
       signals.push({ cls: 'LOCAL', target: `${kind} ${v}` });
     else if (isOpaqueTarget(v)) signals.push({ cls: 'UNCLASSIFIED', target: `${kind} ${v}` });
-    else signals.push({ cls: classifyTargetName(v, targets.k8sLocalContexts, targets), target: `${kind} ${v}` });
+    else signals.push({ cls: classifyTargetName(v, containerLocalPatterns(targets), targets), target: `${kind} ${v}` });
   };
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
@@ -10424,7 +10427,7 @@ function resolveDbTarget(
     // ...and a host written as a URL is its HOSTNAME. `influx --host http://localhost:8086` is localhost; read
     // whole, the scheme and port made the string match no local pattern and the local dev server was denied.
     const name = /^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? endpointHost(v) : v;
-    signals.push({ cls: classifyTargetName(name, targets.dbLocalHosts, targets), target: `${kind} ${v}` });
+    signals.push({ cls: classifyTargetName(name, dbClientLocalPatterns(targets), targets), target: `${kind} ${v}` });
   };
 
   // THE CLIENT READS THE ENVIRONMENT WHEN NO HOST IS ON THE LINE. libpq reads `PGHOST`, mysql reads `MYSQL_HOST`,
@@ -10707,9 +10710,10 @@ function retargetLocalCapability(
     via:
       resolved.cls === 'UNCLASSIFIED'
         ? `${resolved.target} could not be resolved to a declared local development target (${targets.file})`
-        : `target ${resolved.target} is ${resolved.cls}, not a declared local development target (${targets.file})`,
+        : `target ${resolved.target} is ${resolved.cls}, not a declared local development target (${targets.file})${resolved.cls === 'EXTERNAL' ? declareHint(kind === 'k8s' ? 'kube' : kind, resolved.target) : ''}`,
     segment: norm,
     absolute: isAbsoluteCap(table, capability),
+    target: { cls: resolved.cls, name: resolved.target },
   };
 }
 

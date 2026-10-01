@@ -251,6 +251,33 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     ],
   },
   {
+    // THE PROJECT'S LOCAL-TARGET REGISTRY WIDENS, so an agent does not write it unseen: a declared cluster or database
+    // turns refusals into allowed operations once a human accepts the file (Q98 section 7).
+    family: 'ego',
+    id: "the project's local-target registry written",
+    floor: 'ASK',
+    cases: [
+      "echo \"  - 'team-dev'\" >> .harness/local-targets.md",
+      'printf x > .harness/local-targets.md',
+      'sed -i s/a/b/ .harness/local-targets.md',
+      'tee .harness/local-targets.md < /dev/null',
+      'cp /tmp/targets.md .harness/local-targets.md',
+      'mv /tmp/targets.md .harness/local-targets.md',
+      'dd if=/tmp/targets.md of=.harness/local-targets.md',
+    ],
+  },
+  {
+    family: 'ego',
+    id: "the organization's local-target registry written",
+    floor: 'DENY',
+    cases: [
+      "echo \"  - 'team-dev'\" >> policies/organization/local-targets.md",
+      'sed -i s/a/b/ policies/organization/local-targets.md',
+      'cp /tmp/targets.md policies/organization/local-targets.md',
+      'tee policies/organization/local-targets.md < /dev/null',
+    ],
+  },
+  {
     family: 'ego',
     id: 'a second name for a governed file',
     floor: 'DENY',

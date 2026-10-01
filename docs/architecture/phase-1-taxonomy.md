@@ -90,7 +90,8 @@ UNCLASSIFIED, for Kubernetes contexts, container runtimes (`--context`, `-H`, `D
 databases (flag, URI and positional forms), and cloud CLIs. A bare positional that the tool itself resolves locally
 — `psql prod`, `mongosh prod` — is local, and treating it as remote would be a false gate, not a safeguard.
 
-*Enforced in* `classifyTargetName`, `resolveK8sTarget`, `resolveContainerTarget`, `control-plane/workspace/local-targets.md`.
+*Enforced in* `classifyTargetName`, `resolveK8sTarget`, `resolveContainerTarget`, `control-plane/workspace/local-targets.md`
+and its project and organization layers (`control-plane/local-targets.ts`: `mergeLocalTargets` and the per-family readers).
 *Asserted by* the `production`, `db`, `container` and `k8s` corpus classes.
 *Instances that crossed a floor:* docker's global options displacing the subcommand, so `docker --tls exec`
 reached ALLOW; `image` treated as a read verb although it is a management GROUP whose members mutate; and the

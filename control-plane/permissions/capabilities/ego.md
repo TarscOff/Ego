@@ -24,6 +24,7 @@ Human decision gates have no capability that opens them: answering a decision is
 - [x] `ego.pin.change` — `upgrade` and `rollback` change the project pin.
 - [x] `ego.skills.install` — install or update external skills from configured sources.
 - [x] `ego.mcp-trust.edit` — edit `.harness/mcp-trust.md`.
+- [x] `ego.local-targets.edit` — edit `.harness/local-targets.md`, the project's declaration of which clusters, databases and container contexts are local development targets. Declaring one is a widening: nothing in the file applies until a human runs `ego init` and accepts it, so the write asks first.
 
 ## Denied
 
