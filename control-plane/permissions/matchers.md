@@ -20,7 +20,9 @@ matchers:
     tool: Bash
     # (the manual for it - `git stash --all --help` - is a help probe, decided on the segment AS WRITTEN by the
     # evaluator; a lookahead here saw the normalized text, where `-m 'note -a --help'` had lost its quotes)
-    command: '^git\s+stash\b[^|;&]*\s(--all|-a)\b'
+    # (only the forms that STASH take `--all`: `git stash list --all` and `show --all` list and print what is already
+    # stashed, and `stash list -a` was an absolute deny for looking at the stash - review 11, #197)
+    command: '^git\s+stash\b(?!\s+(list|show|apply|pop|drop|clear|branch|create|store)\b)[^|;&]*\s(--all|-a)\b'
   # `less`/`more`/`view` take an INITIAL COMMAND, and `!` runs it through a shell. A pager is bounded only while
   # it is paging (exit review 6).
   - capability: command.script-opaque
@@ -87,12 +89,12 @@ matchers:
     # runtime state OUT — a read — and the rule matched the path in any position, so an absolute deny fell on
     # the act of LOOKING at the state EGO itself publishes (exit review 9). For the copying verbs the governed
     # path must therefore be past the first operand; every other verb here writes wherever it is pointed.
-    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?(?!\s+-m\s+py_compile\b)|node(?!\s+(--check|-c)\s))\b[^|;&]*|>>?[^|;&]*)\.harness/(runtime|generated|hooks)(/|\b)'
+    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?(?!\s+-m\s+(py_compile\b|json\.tool(\s+[^\s|;&<>]+)?\s*([|;&<>]|$)))|node(?!\s+(--check|-c)\s))\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*)\.harness/(runtime|generated|hooks)(/|\b)'
   - capability: ego.runtime.tamper
     tool: Bash
     # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST, exactly as for the runtime tree above: `cp
     # .harness/harness.md /tmp/copy.md` reads the charter out (self-attack on exit review 9).
-    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b[^|;&]*|>>?[^|;&]*)\.harness/harness\.md'
+    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*)\.harness/harness\.md'
   - capability: ego.launcher.invoke-nested
     tool: Bash
     # `claude --version` PRINTS A VERSION and starts no session; the rule exists for a NESTED SESSION, which is what
@@ -135,7 +137,7 @@ matchers:
     tool: Bash
     # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST, as for the runtime tree: `cp ~/.ego/trust/keys.json
     # /tmp/keys-backup.json` reads a key out of the trust store, which is not tampering with it (exit review 10).
-    command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod|cp\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*)\b.*\.ego/(trust|index|releases|runtimes)/'
+    command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod|cp\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*)\b(?:[^|;&<]|<<<?|<\()*\.ego/(trust|index|releases|runtimes)/'
   # --- git remote (ADMIN_GOVERNED) ---
   # `--no-verify` ON A PUSH SKIPS THE PRE-PUSH HOOK, which is EGO's own repository-side gate for this very verb. It
   # sits ABOVE the push rules because matching is first-match-wins: below them the flag was read as the push it
@@ -143,19 +145,19 @@ matchers:
   # `git commit` into an ASK (Q98 follow-up 1, tier marking).
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+push\b.*\s--no-verify\b'
+    command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$)).*\s--no-verify\b'
   - capability: git.remote.push.force
     tool: Bash
     command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$)).*(\s--force(-with-lease)?\b|\s-f\b|\s\+)'
   - capability: git.remote.tag.delete
     tool: Bash
-    command: '^git\s+push\b.*(--delete|\s:refs/tags/|\s:[A-Za-z0-9._/-]*tag)'
+    command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$)).*(--delete|\s:refs/tags/|\s:[A-Za-z0-9._/-]*tag)'
   - capability: git.remote.branch.delete
     tool: Bash
-    command: '^git\s+push\b.*(--delete\b|\s:[A-Za-z0-9._/-]+)'
+    command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$)).*(--delete\b|\s:[A-Za-z0-9._/-]+)'
   - capability: git.remote.tag.push
     tool: Bash
-    command: '^git\s+push\b.*(--tags\b|\srefs/tags/)'
+    command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$)).*(--tags\b|\srefs/tags/)'
   - capability: git.remote.push
     tool: Bash
     # `--dry-run` CONTACTS THE REMOTE AND CHANGES NOTHING: it is how an author checks what a push WOULD do, and
@@ -163,7 +165,7 @@ matchers:
     command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$))'
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+commit\b.*\s--no-verify\b'
+    command: '^git\s+commit\b(?![^|;&]*\s--dry-run(\s|$)).*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(merge|pull|rebase|cherry-pick|revert|am)\b.*\s--no-verify\b'
@@ -456,10 +458,20 @@ matchers:
     path: '~/.git-credentials'
   - capability: fs.credential-store.write
     tool: Bash
-    command: '(^|\s)(\b(tee|cp|mv|install|ln|dd|rsync|sed\s+-i|perl\s+-p?i|truncate|chmod|chown|rm|ssh-keygen|ssh-add|ssh-copy-id|gpg\s+--import|gcloud\s+auth|az\s+login|kubectl\s+config|npm\s+(login|adduser|config\s+set|set))\b|>>?)[^|;&]*(~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud|config/gh|azure|docker/config\.json|gnupg|git-credentials)\b'
+    command: '(^|\s)(\b(cp|install|ln|rsync)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(tee|mv|dd|sed\s+-i|perl\s+-p?i|truncate|chmod|chown|rm|ssh-keygen|ssh-add|ssh-copy-id|gpg\s+--import|gcloud\s+auth|az\s+login|kubectl\s+config|npm\s+(login|adduser|config\s+set|set))\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud|config/gh|azure|docker/config\.json|gnupg|git-credentials)\b'
+  # `aws configure get|list|list-profiles` PRINT configuration and write nothing; only `configure`, `set`, `import`, `sso`
+  # and the like write ~/.aws. A key that IS a credential (`get aws_secret_access_key`) is a credential READ, which is the
+  # capability that says so - not the absolute refusal of writing the store, which `aws configure get region` was
+  # (review 11, #183).
+  - capability: fs.credential-store.read
+    tool: Bash
+    command: '^aws\s+configure\s+get\b[^|;&]*\s(\S*\.)?(aws_)?(secret_access_key|session_token|access_key_id)(\s|$)'
+  - capability: command.read-only
+    tool: Bash
+    command: '^aws\s+configure\s+(get|list|list-profiles)\b'
   - capability: fs.credential-store.write
     tool: Bash
-    command: '^(aws\s+configure\b|gcloud\s+auth\s+(login|activate-service-account)|az\s+login|gh\s+auth\s+login|glab\s+auth\s+login|npm\s+(login|adduser)|docker\s+login|vault\s+login)'
+    command: '^(aws\s+configure\b(?!\s+(get|list|list-profiles)\b)|gcloud\s+auth\s+(login|activate-service-account)|az\s+login|gh\s+auth\s+login|glab\s+auth\s+login|npm\s+(login|adduser)|docker\s+login|vault\s+login)'
   - capability: fs.credential-store.read
     tool: Bash
     command: '(~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud|config/gh|azure|docker/config\.json|gnupg|git-credentials)\b'
@@ -597,10 +609,10 @@ matchers:
     path: '**/.git'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(\b(cp|mv|ln|install)\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*|\b(chmod|chown|rm|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b[^|;&]*|>>?[^|;&]*)(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
+    command: '(^|\s)(\b(cp|mv|ln|install)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(chmod|chown|rm|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
   - capability: fs.git-internals.write
     tool: Bash
-    command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(^|\s|/)\.git/'
+    command: '(^|\s)(\b(cp|ln|install)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(chmod|chown|rm|mv|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(^|\s|/)\.git/'
   - capability: fs.generated.write
     tool: Write
     path: 'policies/generated/**'
@@ -654,10 +666,13 @@ matchers:
   - capability: git.alias.inline
     tool: Bash
     command: '^git\b[^|;&]*(\s|=|\"|\x27)ext::'
-  # --ext-diff and --textconv run the externally configured program rather than git's own diff
+  # --ext-diff and --textconv run the externally configured program rather than git's own diff. (`--textconv` is what
+  # `git diff`, `log`, `show` and `blame` do by themselves - git documents it as the default for them - so the flag adds
+  # nothing there; a program the repository CONFIGURES for it is judged as part of the verb's closure either way. On any
+  # other verb it turns the filter on. Review 11, #140.)
   - capability: git.alias.inline
     tool: Bash
-    command: '^git\b[^|;&]*\s--(ext-diff|textconv)\b'
+    command: '^git\b(?:[^|;&]*\s--ext-diff\b|\s+(?!(?:diff|log|show|blame|whatchanged|annotate)\b)[^|;&]*\s--textconv\b)'
   # `git <verb> --output=PATH` writes PATH with no other governance on it. ADDITIVE: this describes what the
   # command also DOES, not what it IS — `git clone --template=evil -o up URL` must still be judged as a hook
   # install, and letting a write-destination matcher win first-match turned that DENY into ALLOW (exit review 2).
@@ -1046,7 +1061,7 @@ matchers:
     tool: Bash
     # (`rsync` is a send only when an operand names a remote — it contains a colon; the colon is not followed by a word
     # boundary in `host:/srv/`, which the old `(…|rsync\b.*:)\b` form required, so a remote ABSOLUTE path was not matched)
-    command: '^((scp|sftp|ssh|nc|ncat|telnet)\b|rsync\b.*:)'
+    command: '^((scp|sftp|ssh|nc|ncat|telnet|ssh-copy-id|ssh-keyscan)(?![\w-])|rsync\b.*:)'
   # A RECURSIVE DELETE OF A DERIVED DIRECTORY DESTROYS NOTHING THAT CANNOT BE REGENERATED. `rm -rf node_modules`
   # is the single most routine recovery command in JavaScript development, and `dist`, `target`, `__pycache__`
   # and their siblings are build output by convention in their ecosystems — an install or a build puts every one
