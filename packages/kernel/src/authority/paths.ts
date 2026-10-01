@@ -30,6 +30,7 @@
 import { homedir, userInfo } from 'node:os';
 import { readlinkSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { chargeWork } from './work-bound.ts';
 
 /** How many links one path resolution may follow before it is read as a loop (Linux stops at 40). */
 export const MAX_LINK_HOPS = 40;
@@ -81,8 +82,25 @@ export function canonicalPath(p: string): string {
   return out;
 }
 
-/** `budget` is shared by the whole resolution, as the kernel's own limit is: a farm of links cannot make it exponential. */
+/** `budget` is shared by the whole resolution, as the kernel's own limit is: a farm of links cannot make it exponential.
+ *
+ *  EVERY LEVEL OF THE WALK IS REMEMBERED, not only the path it was asked about (closure audit 2026-10-01, wave 3, "time"). A
+ *  name that does not exist is walked up to its nearest existing ancestor, one failed `realpath` and one failed `readlink`
+ *  per level, and a command that moves into a directory that is not there three hundred times (`cd a; cd a; …`) asks about
+ *  paths that are each one level deeper than the last: the answer for the parent was already known, and asking again made
+ *  the whole command quadratic in syscalls (ten seconds for two thousand `cd`). An answer is kept only when the walk
+ *  followed no link, because a link spends the shared budget and the answer then depends on how much was left. */
 function canonicalWalk(abs: string, budget: { left: number }): string {
+  const known = cache?.get(abs);
+  if (known !== undefined) return known;
+  const before = budget.left;
+  const out = canonicalWalkUncached(abs, budget);
+  if (budget.left === before) cache?.set(abs, out);
+  return out;
+}
+
+function canonicalWalkUncached(abs: string, budget: { left: number }): string {
+  chargeWork(WALK_STEP_COST);
   try {
     return realpathSync(abs);
   } catch {
@@ -102,6 +120,11 @@ function canonicalWalk(abs: string, budget: { left: number }): string {
     return walkComponents(isAbsolute(target) ? sep : dirname(here), target, budget);
   }
 }
+
+/** a disk question asked while deciding is paid for in the same units as text scanned (work-bound.ts): a few syscalls */
+const WALK_STEP_COST = 30;
+/** reading one word as a path: the fixed part of the work, before the text of the word and the directories are counted */
+const PATH_READ_COST = 200;
 
 /**
  * Walks `path` one component at a time from `from`, the way the kernel resolves it: a symlink is followed where it
@@ -398,6 +421,9 @@ export function pathCandidates(
   options: { whole?: boolean; literal?: boolean } = {},
 ): PathCandidates {
   const dirs = directoriesOf(cwds);
+  // every word is read in every directory the shell may be in, as written and trimmed, lexically and physically: that product
+  // is the cost, and it is paid before the reading (work-bound.ts)
+  chargeWork(PATH_READ_COST + word.length * dirs.length);
   // the word as written, and as a tool that trims it would read it
   const trimmed = hostTrim(word);
   const note: { uncertain: string | null } = { uncertain: null };

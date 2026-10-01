@@ -4,7 +4,7 @@ import { lstatSync, readFileSync, readdirSync, realpathSync, statSync, type Dire
 import { dirname, isAbsolute, join, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
-import { git, gitConfigGet } from '../util/git.ts';
+import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
@@ -25,6 +25,7 @@ import {
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
+import { WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 import {
@@ -34,6 +35,24 @@ import {
   hasProductionMarker,
   kubeLocalPatterns,
 } from '../control-plane/local-targets.ts';
+
+/** A PROCESS SPAWNED WHILE DECIDING IS PAID FOR IN THE SAME UNITS AS TEXT SCANNED (work-bound.ts): it costs milliseconds, not
+ *  characters, so its price is flat. Every spawn the evaluator makes goes through these two. */
+const SPAWN_COST = 100_000;
+const STAGE_COST = 500;
+const PATH_JUDGE_COST = 400;
+/** The longest single command (one stage of a pipeline or list, quoting included) that is read. The longest command in the test
+ *  corpus is 190 characters and the longest line of any script in this repository is 122; this is two orders of magnitude over
+ *  both, and small enough that a pattern which is quadratic on its input (there may be one we have not found) finishes. */
+const MAX_STAGE_CHARS = 32_768;
+function git(args: string[], cwd: string, opts?: Parameters<typeof spawnGit>[2]): ReturnType<typeof spawnGit> {
+  chargeWork(SPAWN_COST);
+  return spawnGit(args, cwd, opts);
+}
+function gitConfigGet(cwd: string, key: string): string | null {
+  chargeWork(SPAWN_COST);
+  return spawnGitConfigGet(cwd, key);
+}
 
 export interface EvaluationContext {
   profile: string;
@@ -407,6 +426,7 @@ export interface ShellStage {
 
 /** The segments of a command, with the pipeline edges between them. */
 export function splitShellPipeline(command: string): ShellStage[] {
+  chargeWork(command.length);
   const segments: Array<{
     text: string;
     pipedFromPrevious: boolean;
@@ -714,16 +734,23 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // ...AND ONLY THERE: `echo $(true)#x` and `echo a\ #b` are one word (a `)` that closes a substitution, or an escaped
       // space, does not end it), as is `#` inside `${x:- #}` and after a non-IFS space such as U+00A0 (exit review 11). The
       // separators are the shell's - space, tab, newline and the operators - not JavaScript's `\s`.
-      const prevCh = i === 0 ? '' : command[i - 1]!;
-      let backslashes = 0;
-      for (let b = i - 2; b >= 0 && command[b] === '\\'; b--) backslashes++;
-      const escapedPrev = backslashes % 2 === 1;
-      const openParam = cur.lastIndexOf('${') > cur.lastIndexOf('}');
-      const afterSubst = prevCh === ')' && (cur.endsWith('$SUBST') || cur.endsWith('$ARITH'));
-      if (ch === '#' && (i === 0 || (/[ \t\n;&|()]/.test(prevCh) && !escapedPrev && !afterSubst)) && !openParam) {
-        const nl = command.indexOf('\n', i);
-        i = nl < 0 ? command.length : nl; // the newline itself still separates the commands
-        continue;
+      // (ASKED ONLY AT A `#`. These four questions scan backwards - over the word so far, over a run of backslashes - and
+      // they were answered for EVERY character, which made a single long word quadratic: sixty thousand characters took a
+      // second, a hundred and twenty thousand four, in the splitter alone - closure audit 2026-10-01, wave 3, "time")
+      // (and the cheap test first: a `#` in the middle of a word - `a#a#a#` - is not a comment whatever `cur` holds, so the scan
+      // of `cur` is not made for it)
+      if (ch === '#' && (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!))) {
+        const prevCh = i === 0 ? '' : command[i - 1]!;
+        let backslashes = 0;
+        for (let b = i - 2; b >= 0 && command[b] === '\\'; b--) backslashes++;
+        const escapedPrev = backslashes % 2 === 1;
+        const afterSubst = prevCh === ')' && (cur.endsWith('$SUBST') || cur.endsWith('$ARITH'));
+        const openParam = cur.lastIndexOf('${') > cur.lastIndexOf('}');
+        if ((i === 0 || (!escapedPrev && !afterSubst)) && !openParam) {
+          const nl = command.indexOf('\n', i);
+          i = nl < 0 ? command.length : nl; // the newline itself still separates the commands
+          continue;
+        }
       }
       // A SUBSHELL AND A BRACE GROUP ARE SHELL STRUCTURE, NOT COMMANDS. Their delimiters were kept inside the
       // segment, so the head became `(` and every anchored matcher missed: `( chmod 777 /etc/passwd )` was
@@ -1666,6 +1693,7 @@ function joinWords(words: readonly string[]): string {
 }
 
 function normalizeSegmentInner(segment: string): string[] {
+  chargeWork(segment.length);
   let s = segment.trim();
   // `npx --package=<spec> -c "<benign>"` FETCHES and runs that package; the command after `-c` is a decoy, and
   // every layer below treats `npx` as transparent and `-c` as a carrier, so the acquisition vanished entirely.
@@ -2916,6 +2944,7 @@ export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
  *  or backtick that is unquoted or inside double quotes. Single quotes and a backslash keep a `$` literal. The text of
  *  such a word is NOT what the program receives, which is the one fact a reader of a statement operand needs. */
 function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expands: boolean }> {
+  chargeWork(s.length);
   const out: Array<{ text: string; quoted: boolean; expands: boolean }> = [];
   let cur = '';
   let quote: string | null = null;
@@ -3472,6 +3501,9 @@ export function cwdTimeline(
       dynamicCd: false,
       old: oldpwd === null || oldpwd.has(CWD_UNKNOWN) ? [] : [...oldpwd],
     };
+    // every stage carries a copy of the set of directories it may run in, and every later reader walks it: the set and the
+    // length of its members are what this stage costs, so a command that keeps moving somewhere new pays for it
+    chargeWork(STAGE_COST + point.dirs.reduce((n, d) => n + d.length, 0));
     out.push(point);
 
     // a stage that FEEDS a pipe, runs in the background or sits in a subshell cannot reach the caller - and that is a
@@ -3607,6 +3639,7 @@ export function cwdTimeline(
  *  and the path reader (which expands a tilde to the home directory the process started with) would judge the wrong file.
  *  The tilde at the start of a word is therefore replaced by the value the line gave HOME - a value this kernel cannot read
  *  is a word that asks (see where the assignment is recorded). */
+const VAR_REF = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/y;
 function substituteKnownVars(text: string, vars: ReadonlyMap<string, string>): string {
   const tildeIsHome = vars.has('HOME') && text.includes('~');
   if (vars.size === 0 || (!text.includes('$') && !tildeIsHome)) return text;
@@ -3629,7 +3662,9 @@ function substituteKnownVars(text: string, vars: ReadonlyMap<string, string>): s
       continue;
     }
     if (c === '$' && !q) {
-      const m = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/.exec(text.slice(i));
+      // (sticky, at `i`: a `slice(i)` copied the rest of the text for every `$`, which is quadratic in a long command)
+      VAR_REF.lastIndex = i;
+      const m = VAR_REF.exec(text);
       const name = m?.[1] ?? m?.[2];
       if (m && name !== undefined && vars.has(name)) {
         out += vars.get(name)!;
@@ -3652,6 +3687,7 @@ function cutAtNul(w: string): string {
 }
 
 function tokenize(s: string): string[] {
+  chargeWork(s.length);
   const out: string[] = [];
   let cur = '';
   let quote: string | null = null;
@@ -4130,6 +4166,8 @@ function classifyResolved(
   tool: 'Read' | 'Write' | 'Edit',
   abs: string,
 ): CapabilityHit {
+  // a path is tested against every path rule of the table (a few hundred globs): that is the work, and it is paid first
+  chargeWork(PATH_JUDGE_COST + abs.length);
   if (tool !== 'Read' && ctx.egoHome && 'ego.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
@@ -11929,7 +11967,10 @@ function classifyNormalized(
   let outer: CapabilityHit | null = null;
   const additive: CapabilityHit[] = [];
   const subject = forgeApiSubject(ctx, norm, state.env);
+  // every matcher is an unanchored-or-anchored scan of the subject: the price is paid per TEST, before it runs
+  const testCost = 2 + (subject.length >> 3);
   for (const { m, re } of compiled) {
+    chargeWork(testCost);
     if (re.test(subject)) {
       // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
       // Letting one win first-match terminated classification of the rest: `git clone --template=evil -o up URL`
@@ -12206,9 +12247,10 @@ function pathValueOf(raw: string): string {
 function pathTokens(segment: string, cwd: string, old?: readonly string[]): PathEntry[] {
   const out: PathEntry[] = [];
   const home = canonicalPath(homedir()).split(sep).join('/');
-  const cwdIsSensitive =
-    canonicalPath(cwd).split(sep).join('/') === home ||
-    CREDENTIAL_DIRS.some((d) => canonicalPath(cwd).split(sep).join('/').startsWith(`${home}/${d}`));
+  // (read once: asked inside the `some` below it was one canonicalisation and one split-and-join of the whole working directory
+  // per credential directory, for every stage - quadratic in the depth of a directory a long command had moved into)
+  const cwdPosix = canonicalPath(cwd).split(sep).join('/');
+  const cwdIsSensitive = cwdPosix === home || CREDENTIAL_DIRS.some((d) => cwdPosix.startsWith(`${home}/${d}`));
   const allTokens = tokenize(segment);
   const head0 = (allTokens[0] ?? '').replace(/^.*\//, '');
   // A SEARCH PATTERN IS DATA. `grep 'rm -rf /' notes.md` searches for that text; reading the pattern as the
@@ -13609,6 +13651,8 @@ function sedScripts(
   const t = tokenize(seg);
   const i = commandHeadIndex(t);
   if (!/^(sed|gsed)$/.test((t[i] ?? '').replace(/^.*\//, ''))) return null;
+  // the three scans below (`w`, `e`, the substitution flag) read the script again each, and five callers ask: paid for here
+  chargeWork(seg.length * 4);
   // the script is every `-e`/`--expression` value, or — when none was given — the first bare operand
   const texts: string[] = [];
   const unread: string[] = [];
@@ -13659,8 +13703,7 @@ function sedShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
     for (const line of script.split('\n'))
       // an address may select the lines: a line number, `$`, a range, or a `/regex/`. `e` then takes the REST
       // of the line as the command.
-      for (const m of line.matchAll(/(?:^|;)\s*(?:\/(?:\\.|[^/])*\/|[0-9$,~+]+)?\s*!?\s*e[ \t]+([^\n]+)/g))
-        out.push(m[1]!.trim());
+      for (const m of line.matchAll(SED_E_COMMAND)) out.push(m[1]!.trim());
   return out;
 }
 
@@ -13678,14 +13721,75 @@ function sedWrittenFiles(seg: string, ctx?: EvaluationContext, cwd?: string): st
       // AN ADDRESS MAY BE A RANGE, AND A COMMAND MAY SIT IN A BRACED BLOCK. `1,/x/w FILE` and `1{w FILE\n}` are
       // both ordinary sed, and an address pattern that allowed only ONE line number or ONE regex matched
       // neither, so the destination went unread (self-attack on exit review 9).
-      for (const m of line.matchAll(
-        /(?:^|[;{])\s*(?:(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+)(?:\s*,\s*(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+))?)?\s*!?\s*\{?\s*[wW][ \t]+([^\n;}]+)/g,
-      ))
-        out.push(m[1]!.trim());
+      for (const m of line.matchAll(SED_W_COMMAND)) out.push(m[1]!.trim());
       // the `w` FLAG of a substitution, which comes after the closing delimiter and its other flags
-      for (const m of line.matchAll(/s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpiImMe0-9]*w[ \t]+([^\n]+)/g))
-        out.push(m[2]!.trim());
+      out.push(...sedSubstitutionWriteFiles(line));
     }
+  return out;
+}
+
+/** THE SED SCRIPT SCANNERS ARE LINEAR, BY CONSTRUCTION (closure audit 2026-10-01, wave 3, "time"). The scan for `w FILE` was
+ *  `(?:^|[;{])\s*ADDR?\s*!?\s*\{?\s*[wW]…` — four adjacent `\s*` — over an address whose body was `(?:\\.|[^/])*`, where a
+ *  backslash is matched by BOTH alternatives. On a script of 700 spaces it backtracked for 66-105 s (the hook gives 30), and
+ *  a deny that arrives after the hook has timed out is a deny that was never applied (exit review 11, r11-243); on a run of
+ *  backslashes the address was exponential. Two rules keep every pattern below linear: a whitespace run is consumed by
+ *  exactly ONE quantifier (each `\s*` follows a token that must be present), and an alternation never has two ways to
+ *  match the same character (`[^/\\]` beside `\\.`, so a backslash is only ever the start of a pair). */
+const SED_ADDRESS = String.raw`(?:\/(?:\\.|[^/\\])*\/|\$|[0-9~+]+)`;
+/** `[addr[,addr]][!]`, each token followed by the whitespace that may trail it and by nothing else */
+const SED_ADDRESSES = String.raw`(?:${SED_ADDRESS}\s*(?:,\s*${SED_ADDRESS}\s*)?)?(?:!\s*)?`;
+/** the `w`/`W` command: FILE runs to the end of the line, which is what sed documents (a `;` after it is part of the name,
+ *  but the scan stops at `;` and `}` so that an over-read never names a file the script does not write) */
+const SED_W_COMMAND = new RegExp(String.raw`(?:^|[;{])\s*${SED_ADDRESSES}(?:\{\s*)?[wW][ \t]+([^\n;}]+)`, 'g');
+/** the `e` command, which runs the REST of the line as a shell command */
+const SED_E_COMMAND = new RegExp(String.raw`(?:^|[;{])\s*${SED_ADDRESSES}e[ \t]+([^\n]+)`, 'g');
+
+/** The files an `s/x/y/w FILE` flag writes, found in ONE pass. A delimiter's closing occurrence is the next one that is not
+ *  escaped, and whether a position is escaped is a property of the backslash run in front of it — so the unescaped positions
+ *  of every character are collected once, and each `s` on the line is answered by two lookups instead of a re-scan (the
+ *  scan from every `s` was quadratic on a script of many distinct delimiters). */
+function sedSubstitutionWriteFiles(line: string): string[] {
+  const out: string[] = [];
+  if (!line.includes('w')) return out;
+  const unescaped = new Map<string, number[]>();
+  let run = 0;
+  for (let q = 0; q < line.length; q++) {
+    const c = line[q]!;
+    if (c === '\\') {
+      run++;
+      continue;
+    }
+    // (an `s` command's own delimiter can be escaped only by an odd run of backslashes in front of it)
+    if (run % 2 === 0) {
+      const list = unescaped.get(c);
+      if (list) list.push(q);
+      else unescaped.set(c, [q]);
+    }
+    run = 0;
+  }
+  const after = (list: number[], from: number): number => {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid]! < from) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const flags = /[gpiImMe0-9]*w[ \t]+([^\n]+)/y;
+  for (let i = line.indexOf('s'); i >= 0 && i + 1 < line.length; i = line.indexOf('s', i + 1)) {
+    const delim = line[i + 1]!;
+    if (delim === '\\') continue;
+    const list = unescaped.get(delim);
+    if (!list) continue;
+    const k = after(list, i + 2);
+    const close = list[k + 1];
+    if (close === undefined) continue;
+    flags.lastIndex = close + 1;
+    const m = flags.exec(line);
+    if (m) out.push(m[1]!.trim());
+  }
   return out;
 }
 
@@ -13844,7 +13948,27 @@ function analyzeSegments(
    *  per recipe line, and npm runs pre/main/post as separate processes (challenge 4, findings 4, 19, 26, 33). */
   isolatedShells = false,
 ): CapabilityHit[] {
+  // WHAT WAS FOUND BEFORE THE BOUND WAS REACHED IS KEPT. The bound (work-bound.ts) ends the analysis, and it ends it with a
+  // verdict that is never weaker than what had already been seen: a DENY found in an earlier stage stays a DENY, and the
+  // unread rest asks. The hits are collected into an array this function owns, so the exception can be caught here.
   const hits: CapabilityHit[] = [];
+  try {
+    return analyzeSegmentsInto(hits, table, ctx, compiled, segments, state, isolatedShells);
+  } catch (e) {
+    if (!(e instanceof WorkBoundExceeded)) throw e;
+    return [...hits, unknownHit(table, ctx, e.message)];
+  }
+}
+
+function analyzeSegmentsInto(
+  hits: CapabilityHit[],
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  compiled: Array<{ m: CompiledMatcher; re: RegExp }>,
+  segments: string[],
+  state: EffectState,
+  isolatedShells: boolean,
+): CapabilityHit[] {
   // THE SECOND LOCK ON MARKER FORGERY. Every string that reaches this function came from OUTSIDE the analyzer —
   // the tool's command, a carried shell body, a literal piped into an interpreter, a script line, a make recipe,
   // a manifest script, a hook body — and the markers are injected BELOW this point, by `splitShellPipeline` and
@@ -13952,6 +14076,19 @@ function analyzeSegments(
     let upstreamGroup: number | undefined;
     let upstreamBody: { body: string; expanded: boolean } | null = null;
     for (const [stageIndex, stage] of stages.entries()) {
+    // a stage is paid for before it is read: its text, and the fixed work every stage costs (a timeline lookup, a dozen scans)
+    chargeWork(STAGE_COST + stage.text.length);
+    // ONE COMMAND THAT IS LARGER THAN ANY COMMAND ANYONE WRITES IS NOT READ. Its neighbours still are: a push that follows a
+    // hundred kilobytes of padding is classified as the push it is, and this stage asks instead of being scanned by several
+    // hundred patterns, any one of which may be superlinear on text built to make it so (work-bound.ts)
+    if (stage.text.length > MAX_STAGE_CHARS) {
+      hits.push({
+        ...unknownHit(table, ctx, `a command of ${stage.text.length} characters is too large to classify within the bound`),
+        segment: stage.text.slice(0, 120),
+      });
+      written.add('\0any');
+      continue;
+    }
     // BRACE EXPANSION HAPPENS HERE, ONCE, BEFORE ANY READER SEES THE SEGMENT — matchers, the redirection target
     // scan, pathTokens, the short-flag cluster reader and every producer. The shell does it ahead of everything
     // else, so a reader given the unexpanded text is reading a word that will never exist (exit review 9).
@@ -14879,7 +15016,26 @@ function searchToolHits(
 export function evaluate(table: CompiledAuthorityTable, ctx: EvaluationContext, req: ToolRequest): Evaluation {
   // ONE VIEW OF THE FILESYSTEM PER DECISION: every canonicalisation inside this call shares a cache that is gone when it
   // returns (see withPathCache), so a physical walk costs each link once and a link made between two calls is seen
-  return withPathCache(() => evaluateRequest(table, ctx, req));
+  return withPathCache(() => withWorkBound(() => evaluateRequest(table, ctx, req)));
+}
+
+/** `classifyCommand`, UNDER THE BOUND. A command that costs more than the bound allows - or nests deeper than the stack
+ *  allows - is not classified: it ASKS, and says why. An exception was the old answer to the second (the host reads it as
+ *  a refusal, which is safe but says nothing a person can act on) and a hook that ran past its time was the old answer to
+ *  the first (which is not safe at all: the host lets the call run). */
+function classifyBounded(table: CompiledAuthorityTable, ctx: EvaluationContext, command: string): CapabilityHit[] {
+  try {
+    return classifyCommand(table, ctx, command);
+  } catch (e) {
+    const why =
+      e instanceof WorkBoundExceeded
+        ? e.message
+        : e instanceof RangeError
+          ? 'too deeply nested to classify within the bound'
+          : null;
+    if (why === null) throw e;
+    return [unknownHit(table, ctx, why)];
+  }
 }
 
 function evaluateRequest(table: CompiledAuthorityTable, ctx: EvaluationContext, req: ToolRequest): Evaluation {
@@ -14899,7 +15055,7 @@ function evaluateRequest(table: CompiledAuthorityTable, ctx: EvaluationContext, 
   if (tool === 'Bash' || tool === 'shell') {
     const command = text('command');
     if (command === null) hits = [notText('command')];
-    else if (command !== undefined) hits = classifyCommand(table, ctx, command);
+    else if (command !== undefined) hits = classifyBounded(table, ctx, command);
   } else if (tool === 'Read') {
     const p = text('file_path');
     if (p === null) hits = [notText('file_path')];
@@ -15032,7 +15188,7 @@ function evaluateRequest(table: CompiledAuthorityTable, ctx: EvaluationContext, 
         const v = input[k];
         if (isShell) {
           const line = k === 'argv' ? argvToCommandLine(v) : (k === 'cmd' || k === 'script') && typeof v === 'string' ? v : null;
-          if (line) hits.push(...classifyCommand(table, ctx, line));
+          if (line) hits.push(...classifyBounded(table, ctx, line));
         } else if ((readsPath || editsPath) && PATH_KEYS.has(k) && typeof v === 'string' && v) {
           hits.push(...toolPathHits(table, ctx, readsPath ? 'Read' : tool === 'Write' ? 'Write' : 'Edit', v));
         }

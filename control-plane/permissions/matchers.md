@@ -87,12 +87,12 @@ matchers:
     # runtime state OUT — a read — and the rule matched the path in any position, so an absolute deny fell on
     # the act of LOOKING at the state EGO itself publishes (exit review 9). For the copying verbs the governed
     # path must therefore be past the first operand; every other verb here writes wherever it is pointed.
-    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?(?!\s+-m\s+py_compile\b)|node(?!\s+(--check|-c)\s))\b[^|;&]*|>>?[^|;&]*)\.harness/(runtime|generated|hooks)(/|\b)'
+    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s[^|;&]*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?(?!\s+-m\s+py_compile\b)|node(?!\s+(--check|-c)\s))\b[^|;&]*|>>?[^|;&]*)\.harness/(runtime|generated|hooks)(/|\b)'
   - capability: ego.runtime.tamper
     tool: Bash
     # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST, exactly as for the runtime tree above: `cp
     # .harness/harness.md /tmp/copy.md` reads the charter out (self-attack on exit review 9).
-    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b[^|;&]*|>>?[^|;&]*)\.harness/harness\.md'
+    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s[^|;&]*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b[^|;&]*|>>?[^|;&]*)\.harness/harness\.md'
   - capability: ego.launcher.invoke-nested
     tool: Bash
     # `claude --version` PRINTS A VERSION and starts no session; the rule exists for a NESTED SESSION, which is what
@@ -135,7 +135,7 @@ matchers:
     tool: Bash
     # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST, as for the runtime tree: `cp ~/.ego/trust/keys.json
     # /tmp/keys-backup.json` reads a key out of the trust store, which is not tampering with it (exit review 10).
-    command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod|cp\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*)\b.*\.ego/(trust|index|releases|runtimes)/'
+    command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod)\b.*\.ego/(trust|index|releases|runtimes)/|(^|\s)cp\b\s+(?:-\S+\s+)*\S+\s.*\.ego/(trust|index|releases|runtimes)/'
   # --- git remote (ADMIN_GOVERNED) ---
   # `--no-verify` ON A PUSH SKIPS THE PRE-PUSH HOOK, which is EGO's own repository-side gate for this very verb. It
   # sits ABOVE the push rules because matching is first-match-wins: below them the flag was read as the push it
@@ -597,7 +597,7 @@ matchers:
     path: '**/.git'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(\b(cp|mv|ln|install)\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*|\b(chmod|chown|rm|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b[^|;&]*|>>?[^|;&]*)(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
+    command: '(^|\s)(\b(cp|mv|ln|install)\b\s+(?:-\S+\s+)*\S+\s[^|;&]*|\b(chmod|chown|rm|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b[^|;&]*|>>?[^|;&]*)(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
   - capability: fs.git-internals.write
     tool: Bash
     command: '(^|\s)(\b(chmod|chown|rm|mv|cp|ln|install|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b|>>?)[^|;&]*(^|\s|/)\.git/'
@@ -897,7 +897,7 @@ matchers:
     # buildx's OWN verbs also publish: `bake --push` builds every target in a bake file and pushes each one, and
     # `--output type=registry` is what `--push` is shorthand FOR. Naming only `--push` covered neither, so an
     # upload to a shared registry reached ALLOW through the two spellings buildx documents (exit review 9).
-    command: '^((docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?|docker-compose\s+|podman-compose\s+)[^|;&]*?\s?(push\b|publish\b|imagetools\s+create\b|(build|bake)\b[^|;&]*(--push\b|--cache-to[= ][^\s]*type=registry|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
+    command: '^((docker|podman|nerdctl)\s|docker-compose\s|podman-compose\s)[^|;&]*?(push\b|publish\b|imagetools\s+create\b|(build|bake)\b[^|;&]*(--push\b|--cache-to[= ][^\s]*type=registry|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
   # Handing a registry password on the command line writes it into the shell history and the process table.
   # SCOPED TO THE VERBS THAT TAKE ONE: docker's `-p` is `--publish`, so an unscoped rule turned `docker run -p
   # 8080:80 nginx` — the most ordinary container command there is — into a credential exposure (exit review 8).
@@ -984,7 +984,7 @@ matchers:
   # reads it just as surely as `cat` would (round 14)
   - capability: fs.credential-store.read
     tool: Bash
-    command: '^(docker|podman|nerdctl)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|[^:\s]*\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
+    command: '^(docker|podman|nerdctl)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
   # `nerdctl` is containerd's docker-compatible client: the same flags, the same `--context`, the same effects.
   # It is enrolled in the target RESOLVER and was missing here, so nothing classified it and its target was never
   # resolved — found by the property that pins these two lists together (exit review 7).
@@ -1190,7 +1190,7 @@ matchers:
     tool: Bash
     # a pipe on EITHER side of a quoted string inside an awk program is a shell command (`"cmd" | getline`,
     # `print | "cmd"`); sed's `e` command and the s///e flag execute their result; `w` writes a file
-    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|\|\s*&?\s*getline|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|(^|[;{''"\s])[0-9$,~+]*\s*e[\s;}]|s(.)(?:(?!\3).)*\3(?:(?!\3).)*\3[a-z]*e)'
+    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|\|\s*&?\s*getline|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|(^|[;{''"\s])(?:[0-9$,~+]+\s*)?e[\s;}]|s(.)(?:(?!\3).)*\3(?:(?!\3).)*\3[a-z]*e)'
   # sed's `e` FLAG on a substitution executes the result, with ANY delimiter (`s|x|id|e`, `s#x#id#e`).
   # A dedicated matcher keeps the backreference unambiguous.
   - capability: command.interpreter-inline
@@ -1202,7 +1202,7 @@ matchers:
   # each of those is a program EGO never read (exit review 8).
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(sed|gsed)\b[\s\S]*(^|[;{''"\s])[0-9$,~+/^]*\s*e\s+\S'
+    command: '^(sed|gsed)\b[\s\S]*(^|[;{''"\s])(?:[0-9$,~+/^]+\s*)?e\s+\S'
   - capability: command.interpreter-script
     tool: Bash
     command: '^(awk|gawk|mawk|nawk|sed|gsed)\b[^|;&]*\s(-f|--file|--source)(=|\s)'
@@ -1295,7 +1295,7 @@ matchers:
   # ordinary scripts are written, and both asked (exit review 4).
   - capability: command.read-only
     tool: Bash
-    command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|cd|pushd|popd|for|while|until|case|esac|done|fi|then|else|elif|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`]*(?:\s*(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null|<\s*(?![~/])(?!\S*\.\.)[\w.@/-]+))*\s*$'
+    command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|cd|pushd|popd|for|while|until|case|esac|done|fi|then|else|elif|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`]*(?:(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null|<\s*(?![~/])(?!\S*\.\.)[\w.@/-]+)\s*)*$'
   - capability: command.read-only
     tool: Bash
     command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history|dirname|basename|sleep|seq|nproc|realpath|readlink|mktemp|tr|cmp|comm|expr|exit|test|read|gsed|gawk|shellcheck|printenv|sha1sum|sha256sum|shasum|md5sum|cksum|tput|hostname|getconf|locale|column|paste|join|fold|rev|nl|tac|numfmt|timeout\s+\d)\b|\[\s|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+(--version|version)\b|env(?:\s+(?:-[iu0]\S*|[A-Za-z_][A-Za-z0-9_]*=\S*))*\s*$)'
