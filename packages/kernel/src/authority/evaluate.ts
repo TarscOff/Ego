@@ -1294,8 +1294,10 @@ GLOBAL_OPTIONS['nerdctl'] = GLOBAL_OPTIONS['docker']!;
 /** The words that follow the command head, with redirections removed. `git push --help 2>&1` is a help request whose
  *  standard error goes somewhere, and `git push --force origin main > --help` is a push whose OUTPUT FILE is called
  *  `--help`: in neither is the text after the operator a word of the command. */
-function commandWords(t: ReadonlyArray<{ text: string; quoted: boolean }>): Array<{ text: string; quoted: boolean }> {
-  const out: Array<{ text: string; quoted: boolean }> = [];
+function commandWords(
+  t: ReadonlyArray<{ text: string; quoted: boolean; expands?: boolean }>,
+): Array<{ text: string; quoted: boolean; expands?: boolean }> {
+  const out: Array<{ text: string; quoted: boolean; expands?: boolean }> = [];
   const OP = /(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)/;
   for (let i = 0; i < t.length; i++) {
     const x = t[i]!;
@@ -2663,16 +2665,23 @@ export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
   return out;
 }
 
-function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
-  const out: Array<{ text: string; quoted: boolean }> = [];
+/** `expands` is true when the shell will substitute something into the word at run time: a `$name`, `${…}`, `$(…)`
+ *  or backtick that is unquoted or inside double quotes. Single quotes and a backslash keep a `$` literal. The text of
+ *  such a word is NOT what the program receives, which is the one fact a reader of a statement operand needs. */
+function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expands: boolean }> {
+  const out: Array<{ text: string; quoted: boolean; expands: boolean }> = [];
   let cur = '';
   let quote: string | null = null;
   let wasQuoted = false;
+  let expands = false;
   const flush = () => {
-    if (cur || wasQuoted) out.push({ text: cutAtNul(cur), quoted: wasQuoted });
+    if (cur || wasQuoted) out.push({ text: cutAtNul(cur), quoted: wasQuoted, expands });
     cur = '';
     wasQuoted = false;
+    expands = false;
   };
+  const substitutes = (at: number): boolean =>
+    s[at] === '`' || (s[at] === '$' && /[A-Za-z_{(0-9@*#?$!-]/.test(s[at + 1] ?? ''));
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
     if (ch === '\\' && quote !== "'" && i + 1 < s.length) {
@@ -2689,7 +2698,10 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
     }
     if (quote) {
       if (ch === quote) quote = null;
-      else cur += ch;
+      else {
+        if (quote === '"' && substitutes(i)) expands = true;
+        cur += ch;
+      }
       continue;
     }
     if (ch === '$' && s[i + 1] === '"' && !quote) continue;
@@ -2709,6 +2721,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean }> {
       flush();
       continue;
     }
+    if (substitutes(i)) expands = true;
     cur += ch;
   }
   flush();
@@ -8271,6 +8284,421 @@ function isReadStatement(q: string): boolean {
   return isPlainSelect(s0);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// WHAT A DATABASE CLIENT MAY BE ASKED TO DO BESIDES TALK TO ITS DATABASE.
+//
+// A client is a known class: `db.local.query` is ALLOW because a statement against a development database is
+// ordinary work. But every client also carries channels that leave the database - an output option that names a
+// program, a meta-command that writes a file, a SQL function that reads one, a startup file, a module that loads
+// native code - and a class that does not bound its operands is not known (the fourth rule of the contract). The
+// earlier fixes each closed one SPELLING of one channel (`.shell`, `\!`, `COPY … PROGRAM`) and left its siblings
+// open: sqlite3 accepts any unambiguous PREFIX of a dot-command, psql pipes its output from five places, and
+// `writefile()` put an executable git hook on disk at ALLOW (exit review 11, #102 and #130).
+//
+// So this is ONE reader, and it is a grammar: what is positively known to be harmless is ordinary - an option from
+// the client's own list of inert options, a dot-command from a short read-only list, a statement made only of
+// words and calls the client is known to run inside the database - and everything else is opaque. A file the
+// client will WRITE is not refused here but handed back, so the path rules judge it as what it resolves to.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** a word of the command line as the shell will deliver it, and whether the shell fills something into it */
+interface DbWord {
+  text: string;
+  quoted: boolean;
+  expands: boolean;
+}
+interface DbEscape {
+  /** why this invocation makes the client run something nobody read (each one becomes command.script-opaque) */
+  opaque: string[];
+  /** files the client writes: judged by the path rules, like an output flag */
+  writes: string[];
+  /** the statement texts the client will run, so a caller can set them aside from a redirection test */
+  statements: string[];
+}
+
+/** The options of one client, in the grammar its parser really has. */
+interface DbOptionSpec {
+  /** long options that take a value */
+  value: readonly string[];
+  /** long options that take none */
+  flag: readonly string[];
+  /** short letters that take a value (glued or as the next word) */
+  shortValue: string;
+  /** short letters that take none */
+  shortFlag: string;
+  /** Go/sqlite style: `-name` is the long option `name` */
+  singleDash?: boolean;
+  /** GNU style: any unambiguous prefix of a long option is that option */
+  abbreviate?: boolean;
+  /** a short letter's long name, so one name is judged however it was spelled */
+  alias?: Readonly<Record<string, string>>;
+  /** the first word that is not an option ends them (redis-cli: the rest is the command) */
+  stopAtPositional?: boolean;
+}
+interface DbOption {
+  name: string;
+  value: DbWord | null;
+}
+interface DbArgs {
+  options: DbOption[];
+  positional: DbWord[];
+  /** the words that are not an option this client has */
+  unknown: string[];
+}
+
+function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
+  const out: DbArgs = { options: [], positional: [], unknown: [] };
+  const longs = [...spec.value, ...spec.flag];
+  const takesValue = new Set(spec.value);
+  const resolve = (name: string): string | null => {
+    if (longs.includes(name)) return name;
+    if (!spec.abbreviate) return null;
+    // an abbreviation must name ONE option: the client refuses an ambiguous one, and so does this
+    const hits = longs.filter((l) => l.startsWith(name));
+    return hits.length === 1 ? hits[0]! : null;
+  };
+  const synthetic = (text: string): DbWord => ({ text, quoted: true, expands: false });
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]!;
+    const t = w.text;
+    if (t === '--') {
+      out.positional.push(...args.slice(i + 1));
+      break;
+    }
+    if (!t.startsWith('-') || t === '-') {
+      out.positional.push(w);
+      if (spec.stopAtPositional) {
+        out.positional.push(...args.slice(i + 1));
+        break;
+      }
+      continue;
+    }
+    const whole = t.replace(/^--?/, '');
+    const eq = whole.indexOf('=');
+    const bare = eq < 0 ? whole : whole.slice(0, eq);
+    const glued = eq < 0 ? null : whole.slice(eq + 1);
+    const takeValue = (name: string): void => {
+      if (glued !== null) out.options.push({ name, value: { text: glued, quoted: w.quoted, expands: w.expands } });
+      else if (args[i + 1] !== undefined) out.options.push({ name, value: args[++i]! });
+      else out.options.push({ name, value: null });
+    };
+    // `--name` and, for Go-style parsers, `-name`
+    const asLong = t.startsWith('--') || spec.singleDash === true ? resolve(bare) : null;
+    if (asLong !== null && (t.startsWith('--') || bare.length > 1)) {
+      if (takesValue.has(asLong)) takeValue(asLong);
+      else out.options.push({ name: asLong, value: glued === null ? null : synthetic(glued) });
+      continue;
+    }
+    if (t.startsWith('--')) {
+      out.unknown.push(t);
+      continue;
+    }
+    // a cluster of short letters, the first valued one taking the rest of the word (or the next word)
+    let consumed = false;
+    for (let k = 1; k < t.length && !consumed; k++) {
+      const c = t[k]!;
+      const name = spec.alias?.[c] ?? c;
+      if (spec.shortValue.includes(c)) {
+        const rest = t.slice(k + 1);
+        if (rest !== '') out.options.push({ name, value: { text: rest.replace(/^=/, ''), quoted: w.quoted, expands: w.expands } });
+        else if (args[i + 1] !== undefined) out.options.push({ name, value: args[++i]! });
+        else out.options.push({ name, value: null });
+        consumed = true;
+      } else if (spec.shortFlag.includes(c)) out.options.push({ name, value: null });
+      else {
+        out.unknown.push(t);
+        consumed = true;
+      }
+    }
+  }
+  return out;
+}
+
+/** The functions an ordinary SQLite statement may call: everything the engine itself documents as a pure function,
+ *  on top of the list every SELECT shares. The shell's own additions - `readfile`, `writefile`, `edit`, `fsdir`,
+ *  `lsdir`, `zipfile`, `load_extension` - are deliberately NOT here: they are the way a statement leaves the
+ *  database, and a name nobody listed is not known to stay inside it. */
+const SQLITE_PURE_FUNCTIONS = new Set([
+  ...SELECT_PURE_FUNCTIONS,
+  ...(
+    'sqlite_version sqlite_source_id sqlite_compileoption_used sqlite_compileoption_get sqlite_offset typeof printf iif ' +
+    'likely unlikely likelihood unicode quote soundex randomblob zeroblob last_insert_rowid changes total_changes total ' +
+    'julianday unixepoch strftime timediff like glob match regexp acosh asinh atanh cosh sinh tanh pow ' +
+    'json_group_array json_group_object json_each json_tree json_patch json_remove json_replace json_set json_insert ' +
+    'json_quote jsonb jsonb_array jsonb_extract jsonb_insert jsonb_object jsonb_patch jsonb_remove jsonb_replace jsonb_set ' +
+    'jsonb_group_array jsonb_group_object jsonb_each jsonb_tree'
+  ).split(' '),
+]);
+/** Words that precede a parenthesis in SQLite's grammar without being a call. */
+const SQLITE_PAREN_WORDS = new Set(
+  'as values default check unique key primary foreign conflict set returning limit offset is materialized'.split(' '),
+);
+/** A word after which a NAME stands, so the parenthesis behind the name opens a column list and calls nothing. */
+const SQLITE_NAMES_FOLLOW = new Set(['table', 'index', 'view', 'trigger', 'into', 'references', 'exists']);
+/** The pragmas that read the schema or the engine, or set a mode of THIS database. `temp_store_directory` and
+ *  `data_store_directory` name a directory the engine writes into; `writable_schema` and `schema_version` damage it. */
+const SQLITE_PRAGMA_OK = new Set(
+  (
+    'table_info table_xinfo table_list index_list index_info index_xinfo foreign_key_list foreign_key_check foreign_keys ' +
+    'integrity_check quick_check database_list collation_list compile_options function_list module_list pragma_list ' +
+    'encoding user_version application_id page_count page_size freelist_count journal_mode synchronous cache_size ' +
+    'busy_timeout case_sensitive_like defer_foreign_keys ignore_check_constraints recursive_triggers read_uncommitted ' +
+    'secure_delete auto_vacuum wal_autocheckpoint wal_checkpoint optimize analysis_limit max_page_count mmap_size ' +
+    'locking_mode query_only trusted_schema temp_store'
+  ).split(' '),
+);
+/** The dot-commands that read the schema or set how output looks, and nothing else. They are matched by their WHOLE
+ *  name: sqlite3 takes any unambiguous prefix, so `.sh` is `.shell` and `.ou` is `.output`, and a prefix of a name on
+ *  this list is a prefix of the command that runs a program or writes a file as well. */
+const SQLITE_DOT_OK = new Set(
+  (
+    'tables schema indexes databases dump fullschema dbinfo show help version quit exit headers header mode nullvalue ' +
+    'separator width timer bail changes echo eqp explain stats'
+  ).split(' '),
+);
+
+type SqlTok = { k: 'word' | 'quoted' | 'str' | 'num' | 'sysvar' | 'param' | 'op'; v: string };
+
+/** SQLite's lexical set. A comment is refused (it can hide the rest of a statement from this reader and not from the
+ *  engine), and so is any character this lexer does not know. */
+function lexSqlite(q: string): SqlTok[] | null {
+  const toks: SqlTok[] = [];
+  const OPS = ['->>', '->', '<=', '>=', '<>', '!=', '==', '||', '<<', '>>'];
+  let i = 0;
+  while (i < q.length) {
+    const c = q[i]!;
+    if (/\s/.test(c)) {
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      let j = i + 1;
+      for (;;) {
+        if (j >= q.length) return null;
+        if (q[j] === c) {
+          if (q[j + 1] === c) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      toks.push({ k: c === "'" ? 'str' : 'quoted', v: q.slice(i, j + 1) });
+      i = j + 1;
+      continue;
+    }
+    if (c === '[') {
+      const j = q.indexOf(']', i + 1);
+      if (j < 0) return null;
+      toks.push({ k: 'quoted', v: q.slice(i, j + 1) });
+      i = j + 1;
+      continue;
+    }
+    if ((c === '-' && q[i + 1] === '-') || (c === '/' && q[i + 1] === '*')) return null;
+    const rest = q.slice(i);
+    const num = /^(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/.exec(rest);
+    if (num) {
+      if (/^[A-Za-z_]/.test(q[i + num[0].length] ?? '')) return null;
+      toks.push({ k: 'num', v: num[0] });
+      i += num[0].length;
+      continue;
+    }
+    const word = /^[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*/.exec(rest);
+    if (word) {
+      toks.push({ k: 'word', v: word[0] });
+      i += word[0].length;
+      continue;
+    }
+    const param = /^[?:@$][A-Za-z0-9_]*/.exec(rest);
+    if (param) {
+      toks.push({ k: 'param', v: param[0] });
+      i += param[0].length;
+      continue;
+    }
+    const op = OPS.find((o) => rest.startsWith(o)) ?? (/^[=<>+\-*/%,.();&|~]/.test(c) ? c : undefined);
+    if (op === undefined) return null;
+    toks.push({ k: 'op', v: op });
+    i += op.length;
+  }
+  return toks;
+}
+
+const wordOf = (t: SqlTok | undefined): string => (t?.k === 'word' ? t.v.toLowerCase() : '');
+
+/** The name of the first call in `toks` that is not on `pure`, or null. A name in a position where the grammar expects
+ *  a NAME (`insert into t (a, b)`, `create index i on t (a)`, `with c (x) as (…)`) is not a call. */
+function firstUnlistedCall(toks: readonly SqlTok[], pure: ReadonlySet<string>, indexName: boolean): string | null {
+  for (let n = 0; n < toks.length; n++) {
+    const t = toks[n]!;
+    const next = toks[n + 1];
+    if (!(next?.k === 'op' && next.v === '(')) continue;
+    if (t.k !== 'word' && t.k !== 'quoted') continue;
+    // a qualified name (`main.t (`) is judged from where the whole name starts
+    let s = n;
+    while (toks[s - 1]?.k === 'op' && toks[s - 1]!.v === '.' && (toks[s - 2]?.k === 'word' || toks[s - 2]?.k === 'quoted')) s -= 2;
+    const before = wordOf(toks[s - 1]);
+    if (SQLITE_NAMES_FOLLOW.has(before) || (indexName && before === 'on')) continue;
+    // `name (cols) AS (…)` declares a common table expression
+    let depth = 0;
+    let close = -1;
+    for (let m = n + 1; m < toks.length; m++) {
+      if (toks[m]!.k === 'op' && toks[m]!.v === '(') depth++;
+      else if (toks[m]!.k === 'op' && toks[m]!.v === ')' && --depth === 0) {
+        close = m;
+        break;
+      }
+    }
+    if (close >= 0 && wordOf(toks[close + 1]) === 'as') {
+      const after = toks[close + 2];
+      if ((after?.k === 'op' && after.v === '(') || /^(materialized|not)$/.test(wordOf(after))) continue;
+    }
+    if (t.k === 'quoted' || s !== n) return t.v;
+    const w = t.v.toLowerCase();
+    if (pure.has(w) || (w.startsWith('pragma_') && SQLITE_PRAGMA_OK.has(w.slice(7)))) continue;
+    if (SELECT_PAREN_WORDS.has(w) || SQLITE_PAREN_WORDS.has(w) || parenWordInPosition(w, toks[n - 1])) continue;
+    return t.v;
+  }
+  return null;
+}
+
+/** Why a SQLite statement is not ordinary work, or null when it is. */
+function sqliteStatementProblem(toks: readonly SqlTok[]): string | null {
+  let t = toks;
+  let first = wordOf(t[0]);
+  if (first === 'explain') {
+    t = t.slice(wordOf(t[1]) === 'query' && wordOf(t[2]) === 'plan' ? 3 : 1);
+    first = wordOf(t[0]);
+  }
+  const START = 'select values with insert replace update delete begin commit end rollback savepoint release analyze reindex pragma vacuum create drop alter';
+  if (!START.split(' ').includes(first)) return `the statement begins with ${t[0]?.v ?? 'nothing'}, which is not ordinary DML or DDL`;
+  let indexName = false;
+  if (first === 'create') {
+    let i = 1;
+    if (/^(temp|temporary)$/.test(wordOf(t[i]))) i++;
+    if (wordOf(t[i]) === 'unique') i++;
+    const what = wordOf(t[i]);
+    // a virtual table names a module, and a module can read a file or load code
+    if (!/^(table|view|trigger|index)$/.test(what)) return `CREATE ${t[i]?.v ?? ''} is not ordinary DDL`;
+    indexName = what === 'index';
+  } else if (first === 'drop' && !/^(table|view|trigger|index)$/.test(wordOf(t[1]))) return 'DROP of something that is not a table, view, trigger or index';
+  else if (first === 'alter' && wordOf(t[1]) !== 'table') return 'ALTER of something that is not a table';
+  else if (first === 'vacuum' && t.some((x) => wordOf(x) === 'into')) return 'VACUUM INTO writes a new database file';
+  else if (first === 'pragma') {
+    // `pragma [schema.]name [= value | (value)]`
+    const at = t[2]?.k === 'op' && t[2].v === '.' ? 3 : 1;
+    const name = wordOf(t[at]);
+    if (!SQLITE_PRAGMA_OK.has(name)) return `PRAGMA ${t[at]?.v ?? ''} is not on the list of pragmas that stay inside the database`;
+    // the pragma's name is followed by its argument in parentheses, which is not a call
+    t = t.slice(at + 1);
+  }
+  const call = firstUnlistedCall(t, SQLITE_PURE_FUNCTIONS, indexName);
+  return call === null ? null : `the statement calls ${call}, which is not a function the engine is known to run inside the database`;
+}
+
+/** Why a script of SQL text and dot-commands is not ordinary work, or null when it is. A line that starts with a dot is
+ *  a dot-command wherever it stands, so the text is judged line by line first. */
+function sqliteScriptProblem(text: string): string | null {
+  const sql: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('.')) {
+      const m = /^\.(\S*)\s*(.*)$/.exec(trimmed)!;
+      if (!SQLITE_DOT_OK.has(m[1]!)) return `the dot-command .${m[1]} is not on the list of read-only ones`;
+      if (!/^[\w\s.%*?:,=+'"-]*$/.test(m[2]!)) return `the arguments of .${m[1]} name more than a pattern`;
+      continue;
+    }
+    sql.push(line);
+  }
+  const body = sql.join('\n').trim();
+  if (body === '') return null;
+  const toks = lexSqlite(body);
+  if (toks === null) return 'the SQL carries a comment or a character this reader does not know';
+  const statements: SqlTok[][] = [[]];
+  for (const t of toks) {
+    if (t.k === 'op' && t.v === ';') statements.push([]);
+    else statements[statements.length - 1]!.push(t);
+  }
+  for (const st of statements) {
+    if (st.length === 0) continue;
+    const why = sqliteStatementProblem(st);
+    if (why !== null) return why;
+  }
+  return null;
+}
+
+const SQLITE_OPTIONS: DbOptionSpec = {
+  value: ['cmd', 'init', 'newline', 'separator', 'nullvalue', 'vfs', 'escape', 'hexkey', 'key', 'textkey', 'maxsize', 'nonce', 'screen-width'],
+  flag: [
+    'append', 'ascii', 'bail', 'batch', 'box', 'column', 'csv', 'deserialize', 'echo', 'header', 'noheader', 'html', 'interactive',
+    'json', 'line', 'list', 'markdown', 'quote', 'readonly', 'safe', 'stats', 'table', 'tabs', 'version', 'help', 'zip', 'nofollow',
+    'memtrace', 'pcachetrace', 'vfstrace', 'no-rowid-in-view', 'errorstop',
+  ],
+  shortValue: '',
+  shortFlag: '',
+  singleDash: true,
+};
+
+function sqliteEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = { opaque: [], writes: [], statements: [] };
+  // sqlite3 takes `--name` for `-name`, and `-A`/`-lookaside`/`-pagecache` take values this parser does not model
+  const normalised = args.map((w) => (w.text.startsWith('--') && w.text.length > 2 ? { ...w, text: w.text.slice(1) } : w));
+  const dashA = normalised.findIndex((w) => w.text === '-A' || w.text === '-lookaside' || w.text === '-pagecache');
+  if (dashA >= 0) out.opaque.push(`${normalised[dashA]!.text} runs an archive command or takes arguments this reader does not model`);
+  const parsed = parseDbArgs(dashA >= 0 ? normalised.slice(0, dashA) : normalised, SQLITE_OPTIONS);
+  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows`);
+  for (const o of parsed.options) {
+    if (o.name === 'init') out.opaque.push('-init names a script of dot-commands the client runs first');
+    else if (o.name === 'nonce') out.opaque.push('-nonce suspends safe mode');
+    else if (o.name === 'cmd' && o.value !== null) {
+      const why = statementProblem(o.value, sqliteScriptProblem);
+      if (why !== null) out.opaque.push(why);
+      out.statements.push(o.value.text);
+    }
+  }
+  const [file, ...sql] = parsed.positional;
+  for (const w of sql) {
+    const why = statementProblem(w, sqliteScriptProblem);
+    if (why !== null) out.opaque.push(why);
+    out.statements.push(w.text);
+  }
+  // the database file is opened for writing unless the client was told otherwise: it is a file the command WRITES
+  if (file !== undefined && !file.expands) {
+    const path = file.text.replace(/^file:(\/\/[^/]*)?/, '').replace(/\?.*$/, '');
+    if (path !== '' && path !== ':memory:' && !file.text.startsWith('file::memory:') && !parsed.options.some((o) => o.name === 'readonly'))
+      out.writes.push(path);
+  }
+  return out;
+}
+
+/** A statement the shell fills in at run time is a statement nobody read. */
+function statementProblem(w: DbWord, judge: (text: string) => string | null): string | null {
+  if (w.expands) return 'the statement is built at run time, so the text the client runs is not the text on the command line';
+  return judge(w.text);
+}
+
+/** The words of a segment as the reader wants them: redirections taken out, and each word's expansion mark kept. When
+ *  the segment as written does not hold the client (a wrapper was unwrapped into a synthesized form), the normalized
+ *  text is read instead, and a `$` or a backtick in it is an expansion. */
+function dbWordsOf(
+  client: string,
+  raw: ReadonlyArray<{ text: string; quoted: boolean; expands?: boolean }>,
+  normalized: string,
+): DbWord[] {
+  const own = commandWords(raw).map((w) => ({ text: w.text, quoted: w.quoted, expands: w.expands === true }));
+  if (own.some((w) => w.text.replace(/^.*\//, '') === client)) return own;
+  return commandWords(tokenizeMarked(normalized)).map((w) => ({ text: w.text, quoted: w.quoted, expands: /[$`]/.test(w.text) }));
+}
+
+/** The reader. `client` is the head the caller classified; `words` are the segment's words as the shell delivers them. */
+function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
+  const at = words.findIndex((w) => w.text.replace(/^.*\//, '') === client);
+  if (at < 0) return { opaque: [], writes: [], statements: [] };
+  const args = words.slice(at + 1);
+  if (client === 'sqlite3') return sqliteEscape(args);
+  return { opaque: [], writes: [], statements: [] };
+}
+
 /** redis' INFO, PING, DBSIZE and TTL read server state rather than data - and only when every option on the line is
  *  one whose meaning is known, since a mode flag (`--eval`, `--pipe`, `--scan`, `-x`) makes the first bare word
  *  something else. `redis-cli -c DEL k` has `-c` (cluster mode) and DELETES. */
@@ -9078,6 +9506,32 @@ function classifyShellPaths(
     }
     unquotedSeg = kept.join(' ');
   }
+  // THE CLIENT'S OTHER CHANNELS - a program, a file it writes, native code - are read by ONE grammar (dbClientEscape)
+  // rather than found by their spelling. A statement the reader recognised is set aside from the redirection test
+  // below, for the same reason a statement flag's value is: `where id < 10` is a comparison, not `< file`.
+  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
+  if (dbEscape !== null && dbEscape.statements.length > 0)
+    unquotedSeg = rawWords
+      .filter((w) => !dbEscape.statements.includes(w.text))
+      .map((w) => w.text)
+      .join(' ');
+  if (dbEscape !== null)
+    for (const why of dbEscape.opaque)
+      hits.push({
+        capability: 'command.script-opaque',
+        verdict: verdictFor(table, ctx, 'command.script-opaque'),
+        via: `the client is handed something that leaves its database: ${why}`,
+        segment: seg,
+        absolute: false,
+        opaqueUnread: true,
+      });
+  if (dbEscape !== null)
+    for (const dest of dbEscape.writes) {
+      const expanded = expandHome(dest, cwd);
+      if (expanded === null || /[$`]/.test(expanded)) continue;
+      const w = classifyPath(table, ctx, 'Write', canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)));
+      if (w.verdict !== 'ALLOW') hits.push({ ...w, via: `the client writes ${dest} (${w.via})`, segment: seg });
+    }
   if (DB_CLIENT_HEADS.has(head) && (DB_EXECUTES_UNREAD.test(seg) || /\s<\s*\S/.test(' ' + unquotedSeg) || redisReadsScript))
     hits.push({
       capability: 'command.script-opaque',
