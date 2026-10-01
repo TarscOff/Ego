@@ -1,7 +1,8 @@
 // Commands executed by the runtime that governs a project (or by the global runtime outside a project). Every
 // command answers with the response contract: what happened, current state, what next, one suggested phrase.
 import { join } from 'node:path';
-import { parseFlags, flagString, type CliIo } from './io.ts';
+import { readSync } from 'node:fs';
+import { parseFlags, flagString, flagValues, type CliIo } from './io.ts';
 import { initProject } from '../../kernel/src/project/init.ts';
 import { runDoctor, formatDoctor } from '../../kernel/src/project/doctor.ts';
 import { runCheck, formatCheck } from '../../kernel/src/project/check.ts';
@@ -100,7 +101,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
     case 'help':
       return help(io, project, positional);
     case 'init':
-      return init(io, flags);
+      return init(io, flags, rest);
     case 'doctor': {
       const hostFlag = flagString(flags, 'host');
       if (hostFlag !== undefined && !isHostId(hostFlag)) {
@@ -116,9 +117,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
       if (hostFlag !== undefined && isHostId(hostFlag)) dopts.host = hostFlag;
       const r = runDoctor(dopts);
       io.out(formatDoctor(r));
-      io.out(
-        r.ok ? 'next: `ego status`' : 'next: fix the NOT SATISFIED lines, then `ego doctor` again',
-      );
+      io.out(r.ok ? 'next: `ego status`' : 'next: fix the NOT SATISFIED lines, then `ego doctor` again');
       return r.ok ? 0 : 1;
     }
     case 'check': {
@@ -156,9 +155,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
     default: {
       const later = PHASE_LATER[cmd];
       if (later) {
-        io.err(
-          `ego ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`,
-        );
+        io.err(`ego ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`);
         return 2;
       }
       io.err(`unknown command "${cmd}". Try \`ego help\`.`);
@@ -208,7 +205,19 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
   return 0;
 }
 
-function init(io: CliIo, flags: Record<string, string | boolean>): number {
+/** A yes/no on the human's terminal. Only ever called when stdin AND stdout are TTYs; any failure to read is a no. */
+function ttyConfirm(question: string): boolean {
+  try {
+    process.stdout.write(`${question} [y/N] `);
+    const buf = Buffer.alloc(64);
+    const n = readSync(0, buf, 0, buf.length, null);
+    return /^y(es)?$/i.test(buf.toString('utf8', 0, n).trim());
+  } catch {
+    return false;
+  }
+}
+
+function init(io: CliIo, flags: Record<string, string | boolean>, argv: string[]): number {
   const opts: Parameters<typeof initProject>[0] = {
     cwd: io.cwd,
     now: io.now,
@@ -226,6 +235,16 @@ function init(io: CliIo, flags: Record<string, string | boolean>): number {
     }
     opts.repin = true;
   }
+  // local-development targets (issue #16 section 7): the decisions are flags, the proposal is printed text, and the
+  // only question this ever asks is on a human terminal - stdin and stdout both TTYs - about widenings already waiting
+  const localTargets = flagValues(argv, 'local-target');
+  if (localTargets.length) opts.localTargets = localTargets;
+  if (flags['no-local-targets'] !== undefined) opts.noLocalTargets = true;
+  if (process.stdin.isTTY && process.stdout.isTTY && io.env['EGO_NONINTERACTIVE'] !== '1')
+    opts.confirmWidening = (widenings) =>
+      ttyConfirm(
+        `${widenings.length} widening(s) are waiting in the layer files and would take effect now:\n${widenings.map((w) => `  - ${w}`).join('\n')}\nAccept?`,
+      );
   const r = initProject(opts);
   const lines = [
     `EGO ${r.pinned === 'created' ? 'initialized' : 're-synchronized'} ${r.projectRoot}`,
@@ -245,6 +264,7 @@ function init(io: CliIo, flags: Record<string, string | boolean>): number {
     }`,
     ...r.notes.map((n) => `- ${n}`),
     ...r.moved.map((m) => `- moved ${m.from} -> ${m.to}`),
+    ...r.localTargets.lines,
     `generated: ${r.generated.join(', ')}`,
     '',
     r.doctorText,
@@ -452,9 +472,7 @@ function context(io: CliIo, project: ProjectContext | null, positional: string[]
     io.out(
       `${i.loaded ? 'LOADED    ' : 'NOT LOADED'} ~${String(i.tokens).padStart(5)} ${i.item}: ${i.reason}`,
     );
-  io.out(
-    'next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `ego init`',
-  );
+  io.out('next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `ego init`');
   return 0;
 }
 

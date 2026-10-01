@@ -17,8 +17,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { main } from '../../cli/src/main.ts';
+import { initProject } from '../src/project/init.ts';
+import { addToFrontmatterList } from '../src/project/local-surfaces.ts';
 import { evaluate } from '../src/authority/evaluate.ts';
 import { diffAuthorityTables, classifyAuthorityChanges } from '../src/authority/compile.ts';
 import { ensurePolicyCache, readPolicyCache, type PolicyCache } from '../src/policy/cache.ts';
@@ -26,6 +30,11 @@ import { ctx, workspace } from './support/corpus.ts';
 
 const CP = new URL('../../../control-plane/', import.meta.url).pathname;
 const SELF = { runtimeSha256: 'q98-local-targets-test', version: '0.0.0-test' };
+
+// EVERY FIXTURE LIVES UNDER ONE PARENT, not directly in the system temp directory: `detectProject` lists the SIBLINGS of
+// a repository, so a fixture created straight in $TMPDIR makes each `ego init` stat every temp entry on the machine
+// (see the note in support/corpus.ts). It took a hundred seconds a test before this.
+const PARENT = mkdtempSync(join(tmpdir(), 'ego-q98-root-'));
 
 type Lists = Partial<
   Record<
@@ -453,7 +462,7 @@ test('another repository is not this repository: its declarations, its files and
   assert.equal(cap(c, mine, 'kubectl --context their-dev apply -f a.yaml'), 'k8s.nonlocal.mutate');
 
   // a layer file that is a link to somebody else's file is not read: only a file the repository itself owns counts
-  const outside = mkdtempSync(join(tmpdir(), 'ego-other-'));
+  const outside = mkdtempSync(join(PARENT, 'other-'));
   writeFileSync(join(outside, 'local-targets.md'), layerFile({ k8s_local_contexts: ['linked-dev'] }));
   const linked = workspace({});
   mkdirSync(join(linked, '.harness'), { recursive: true });
@@ -511,4 +520,447 @@ test('the cache round-trips the declared targets', () => {
   const read = readPolicyCache(dir);
   assert.deepEqual(read?.table.localTargets, written.table.localTargets);
   assert.equal(read?.table.tableHash, written.table.tableHash);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 7. `ego init`: DETECT, PROPOSE, ADOPT (issue #16 section 7)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const gitEnv = (): NodeJS.ProcessEnv => {
+  const e: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/.test(k)) e[k] = v;
+  return e;
+};
+
+/** a human terminal: nothing marks it as an agent shell */
+const humanEnv = (home: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+  PATH: process.env['PATH'],
+  HOME: home,
+  EGO_HOME: join(home, '.ego'),
+  LANG: 'C',
+  ...extra,
+});
+
+function repo(files: Record<string, string> = {}): string {
+  const dir = mkdtempSync(join(PARENT, 'repo-'));
+  spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['config', 'user.email', 't@example.com'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['config', 'user.name', 't'], { env: gitEnv(), cwd: dir });
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'demo', version: '1.0.0' }));
+  for (const [name, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), content);
+  }
+  spawnSync('git', ['add', '-A'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['commit', '-qm', 'init'], { env: gitEnv(), cwd: dir });
+  return dir;
+}
+
+async function ego(
+  argv: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  stdin = '',
+): Promise<{ code: number; out: string; err: string }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await main(argv, {
+    cwd,
+    env,
+    stdin,
+    out: (s) => out.push(s),
+    err: (s) => err.push(s),
+    now: () => '2026-10-01T10:00:00.000Z',
+  });
+  return { code, out: out.join('\n'), err: err.join('\n') };
+}
+
+/** the verdict of a command through the real hook entry point, so the cache a hook reads is the one tested */
+async function hookVerdict(dir: string, env: NodeJS.ProcessEnv, command: string): Promise<string> {
+  const r = await ego(
+    ['hook', 'claude-code', 'PreToolUse'],
+    dir,
+    env,
+    JSON.stringify({
+      session_id: 'q98',
+      cwd: dir,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+    }),
+  );
+  return JSON.parse(r.out).hookSpecificOutput.permissionDecision as string;
+}
+
+const COMPOSE = `services:
+  db:
+    image: postgres:16
+    ports:
+      - "127.0.0.1:5432:5432"
+  cache:
+    image: redis:7
+    ports: ["6379:6379"]
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+`;
+const SURFACE_FILES: Record<string, string> = {
+  'docker-compose.yml': COMPOSE,
+  '.env.example':
+    'DATABASE_URL=postgres://app:s3cretpw-do-not-print@db:5432/app\nREDIS_URL=redis://cache:6379\nANALYTICS_DB_HOST=analytics.acme.com\nSTRIPE_KEY=sk_test_x\n',
+  'kind-config.yaml': 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: dev\n',
+  'skaffold.yaml':
+    'apiVersion: skaffold/v4beta6\nkind: Config\ndeploy:\n  kubeContext: team-dev\nprofiles:\n  - name: release\n    deploy:\n      kubeContext: acme-prod-eks\n',
+  Tiltfile: "allow_k8s_contexts('tilt-dev')\n",
+  '.devcontainer/devcontainer.json':
+    '{\n  // the app container joins the compose network\n  "dockerComposeFile": "../docker-compose.yml",\n  "service": "web",\n  "runServices": ["db", "cache"] /* data stores */\n}\n',
+};
+
+test('init DETECTS local-development surfaces from repository files and PROPOSES them; it adopts nothing', async () => {
+  const dir = repo(SURFACE_FILES);
+  const home = mkdtempSync(join(PARENT, 'home-'));
+  const r = await ego(['init'], dir, humanEnv(home));
+  assert.equal(r.code, 0, r.out + r.err);
+  // what each file revealed
+  assert.match(
+    r.out,
+    /detected: docker-compose\.yml: services db \(postgres:16, localhost:5432\), cache \(redis:7, localhost:6379\)/,
+  );
+  assert.match(
+    r.out,
+    /detected: \.env\.example: DATABASE_URL host db, REDIS_URL host cache, ANALYTICS_DB_HOST host analytics\.acme\.com/,
+  );
+  assert.match(r.out, /detected: kind-config\.yaml: kind cluster dev \(context kind-dev\)/);
+  assert.match(r.out, /detected: skaffold\.yaml: kubeContext team-dev, acme-prod-eks/);
+  assert.match(r.out, /detected: Tiltfile: allow_k8s_contexts tilt-dev/);
+  assert.match(
+    r.out,
+    /detected: \.devcontainer\/devcontainer\.json: compose-based devcontainer, service web, runs db, cache/,
+  );
+  // what is already local is said to need nothing; what is not is proposed with the exact command that adopts it
+  assert.match(r.out, /already LOCAL_DEV, nothing to adopt: .*db:localhost/);
+  assert.match(r.out, /already LOCAL_DEV, nothing to adopt: .*kube:kind-dev/);
+  for (const [kind, name] of [
+    ['kube', 'team-dev'],
+    ['kube', 'tilt-dev'],
+    ['db', 'db'],
+    ['db', 'cache'],
+  ]) {
+    assert.match(
+      r.out,
+      new RegExp(
+        `proposed LOCAL_DEV: ${kind}:${name} \\(.*\\) - adopt with: ego init --local-target ${kind}:${name}`,
+      ),
+    );
+  }
+  // production is listed as refused, never proposed
+  assert.match(r.out, /not proposed: kube:acme-prod-eks \(names production/);
+  assert.doesNotMatch(r.out, /proposed LOCAL_DEV: kube:acme-prod-eks/);
+  // a host that is somebody's DNS is evidence of nothing local, and a secret in a template is never echoed
+  assert.doesNotMatch(r.out, /proposed LOCAL_DEV: db:analytics/);
+  assert.doesNotMatch(r.out, /s3cretpw/);
+  // a proposal changes nothing
+  assert.ok(!existsSync(join(dir, '.harness', 'local-targets.md')));
+  assert.equal(await hookVerdict(dir, humanEnv(home), 'kubectl --context team-dev apply -f a.yaml'), 'deny');
+  assert.equal(await hookVerdict(dir, humanEnv(home), 'psql -h db -c "delete from t"'), 'deny');
+  // and the same printout is not a decision: `--no-local-targets` declines it
+  const declined = await ego(['init', '--no-local-targets'], dir, humanEnv(home));
+  assert.equal(declined.code, 0, declined.out + declined.err);
+  assert.doesNotMatch(declined.out, /proposed LOCAL_DEV|local development surfaces/);
+});
+
+test('init --local-target adopts into .harness/local-targets.md, prints the AUTHORITY DIFF, and a hook then allows it', async () => {
+  const dir = repo(SURFACE_FILES);
+  const home = mkdtempSync(join(PARENT, 'home-'));
+  const env = humanEnv(home);
+  await ego(['init'], dir, env);
+  const r = await ego(['init', '--local-target', 'kube:team-dev', '--local-target=db:db'], dir, env);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(
+    r.out,
+    /adopted LOCAL_DEV target\(s\) into \.harness\/local-targets\.md: kube:team-dev, db:db/,
+  );
+  // the diff names what widened, in the words a person reads
+  assert.match(r.out, /AUTHORITY DIFF against the previously accepted table \(major\):/);
+  assert.match(
+    r.out,
+    /WIDENS local-target-added \(kube context "team-dev" declared LOCAL_DEV by the project \(\.harness\/local-targets\.md\)\)/,
+  );
+  assert.match(r.out, /WIDENS local-target-added \(database host "db" declared LOCAL_DEV by the project/);
+  const file = readFileSync(join(dir, '.harness', 'local-targets.md'), 'utf8');
+  assert.match(file, /k8s_local_contexts:\n {2}- 'team-dev'\n/);
+  assert.match(file, /db_local_hosts:\n {2}- 'db'\n/);
+  // the proposal is no longer a proposal
+  assert.doesNotMatch(r.out, /proposed LOCAL_DEV: (kube:team-dev|db:db) /);
+  // the hook now reads the accepted table
+  assert.equal(await hookVerdict(dir, env, 'kubectl --context team-dev apply -f a.yaml'), 'allow');
+  assert.equal(await hookVerdict(dir, env, 'psql -h db -c "drop table if exists scratch"'), 'allow');
+  assert.equal(await hookVerdict(dir, env, 'kubectl --context some-shared-cluster apply -f a.yaml'), 'deny');
+  assert.equal(await hookVerdict(dir, env, 'kubectl --context acme-prod-eks apply -f a.yaml'), 'deny');
+  // the same init again changes nothing and prints no diff
+  const again = await ego(['init'], dir, env);
+  assert.doesNotMatch(again.out, /AUTHORITY DIFF/);
+  assert.equal((await ego(['check'], dir, env)).code, 0);
+  // and a third target is appended without disturbing the first two or the file's comments
+  writeFileSync(
+    join(dir, '.harness', 'local-targets.md'),
+    file.replace('k8s_local_contexts:\n', '# the team dev cluster\nk8s_local_contexts:\n'),
+  );
+  const third = await ego(
+    ['init', '--local-target', 'kube:other-dev', '--local-target', 'container:team-docker'],
+    dir,
+    env,
+  );
+  assert.equal(third.code, 0, third.out + third.err);
+  const text = readFileSync(join(dir, '.harness', 'local-targets.md'), 'utf8');
+  assert.match(text, /# the team dev cluster\nk8s_local_contexts:\n {2}- 'team-dev'\n {2}- 'other-dev'\n/);
+  assert.match(text, /container_local_contexts:\n {2}- 'team-docker'\n/);
+  assert.equal(await hookVerdict(dir, env, 'docker --context team-docker run --rm alpine true'), 'allow');
+});
+
+test('init refuses --local-target from an agent shell, for a production name, for a bad spelling, and writes nothing', async () => {
+  const dir = repo(SURFACE_FILES);
+  const home = mkdtempSync(join(PARENT, 'home-'));
+  const env = humanEnv(home);
+  await ego(['init'], dir, env);
+  const before = readFileSync(join(dir, '.harness', 'generated', 'policy.json'), 'utf8');
+  const target = join(dir, '.harness', 'local-targets.md');
+
+  // an agent shell, in each spelling the hosts mark one with
+  for (const marker of [
+    { CLAUDECODE: '1' },
+    { CLAUDE_CODE: '1' },
+    { CLAUDE_PID: '123' },
+    { CODEX_SANDBOX: 'seatbelt' },
+    { CODEX_CLI: '1' },
+  ]) {
+    const r = await ego(['init', '--local-target', 'kube:team-dev'], dir, humanEnv(home, marker));
+    assert.equal(r.code, 2, JSON.stringify(marker));
+    assert.match(
+      r.err,
+      /adopting a local development target is a human act from your own terminal, never from an agent shell/,
+    );
+    assert.ok(!existsSync(target), 'nothing was written');
+  }
+
+  // production, whichever way it is spelled, and nothing is written even for the valid one given beside it
+  for (const spec of [
+    'kube:acme-prod-eks',
+    'kube:PRODUCTION',
+    'db:prod-db.acme.internal',
+    'container:prd-docker',
+    'kube:live',
+  ]) {
+    const r = await ego(['init', '--local-target', 'kube:team-dev', '--local-target', spec], dir, env);
+    assert.equal(r.code, 2, spec);
+    assert.match(r.err, /refused: .* cannot be adopted as a .* - names production/, spec);
+    assert.ok(!existsSync(target), `${spec}: the valid target beside it was not written either`);
+  }
+
+  // spellings that are not a target at all
+  for (const spec of [
+    'team-dev',
+    'k8s:team-dev',
+    'kube:',
+    ':x',
+    'kube:$CTX',
+    'kube:*',
+    'db:*.com',
+    'kube:a b',
+  ]) {
+    const r = await ego(['init', '--local-target', spec], dir, env);
+    assert.equal(r.code, 2, spec);
+    assert.match(r.err, /--local-target takes <kind>:<name>|cannot be adopted/, spec);
+  }
+  assert.equal(
+    (await ego(['init', '--local-target'], dir, env)).code,
+    2,
+    'a flag with no value is an error, not a silent decline',
+  );
+  const both = await ego(['init', '--local-target', 'kube:team-dev', '--no-local-targets'], dir, env);
+  assert.equal(both.code, 2);
+  assert.match(both.err, /contradict/);
+
+  assert.ok(!existsSync(target));
+  assert.equal(
+    readFileSync(join(dir, '.harness', 'generated', 'policy.json'), 'utf8'),
+    before,
+    'the table did not move',
+  );
+});
+
+test('a name that is already local needs no entry: nothing is written and init says why', async () => {
+  const dir = repo({});
+  const env = humanEnv(mkdtempSync(join(PARENT, 'home-')));
+  await ego(['init'], dir, env);
+  const r = await ego(
+    ['init', '--local-target', 'kube:kind-dev', '--local-target', 'db:localhost'],
+    dir,
+    env,
+  );
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /not written: kube:kind-dev \(already local by default\)/);
+  assert.match(r.out, /not written: db:localhost \(already local by default\)/);
+  assert.ok(!existsSync(join(dir, '.harness', 'local-targets.md')));
+});
+
+test('a layer file edited out of band is pending until a human init, and the human sees the diff they accept', async () => {
+  const dir = repo({});
+  const home = mkdtempSync(join(PARENT, 'home-'));
+  const env = humanEnv(home);
+  await ego(['init'], dir, env);
+  // the file arrives (an agent write the human allowed, a teammate's commit)
+  mkdirSync(join(dir, '.harness'), { recursive: true });
+  writeFileSync(join(dir, '.harness', 'local-targets.md'), layerFile({ k8s_local_contexts: ['team-dev'] }));
+  assert.equal(
+    await hookVerdict(dir, env, 'kubectl --context team-dev apply -f a.yaml'),
+    'deny',
+    'not applied from the working tree',
+  );
+  assert.match((await ego(['doctor'], dir, env)).out, /pending widening/);
+  assert.equal((await ego(['check'], dir, env)).code, 1);
+  // an agent shell cannot accept it
+  const agent = await ego(['init'], dir, humanEnv(home, { CLAUDECODE: '1' }));
+  assert.match(agent.out, /policy widening NOT applied/);
+  assert.equal(await hookVerdict(dir, env, 'kubectl --context team-dev apply -f a.yaml'), 'deny');
+  // the human's init accepts it AND says what it accepted
+  const human = await ego(['init'], dir, env);
+  assert.doesNotMatch(human.out, /policy widening NOT applied/);
+  assert.match(human.out, /AUTHORITY DIFF against the previously accepted table \(major\):/);
+  assert.match(human.out, /WIDENS local-target-added \(kube context "team-dev"/);
+  assert.equal(await hookVerdict(dir, env, 'kubectl --context team-dev apply -f a.yaml'), 'allow');
+  // doctor reports the registry, and what it refused
+  writeFileSync(
+    join(dir, '.harness', 'local-targets.md'),
+    layerFile({ k8s_local_contexts: ['team-dev', 'acme-prod-eks'] }),
+  );
+  const refused = await ego(['init'], dir, env);
+  assert.match(
+    refused.out,
+    /ignored by the local-target registry: kube:acme-prod-eks from the project \(\.harness\/local-targets\.md\) - names production/,
+  );
+  const doctor = await ego(['doctor'], dir, env);
+  assert.match(doctor.out, /local targets: .*1 declared.*team-dev/);
+  assert.match(doctor.out, /local targets ignored: .*acme-prod-eks/);
+});
+
+test('a human terminal is asked about waiting widenings and a no leaves them pending; nothing needs an answer when there is no terminal', () => {
+  const dir = repo({});
+  const home = mkdtempSync(join(PARENT, 'home-'));
+  const env = humanEnv(home);
+  initProject({ cwd: dir, env, offline: true });
+  mkdirSync(join(dir, '.harness'), { recursive: true });
+  writeFileSync(
+    join(dir, '.harness', 'local-targets.md'),
+    layerFile({ db_local_hosts: ['devdb.corp.internal'] }),
+  );
+
+  // a person says no: the widening stays pending and is shown to them
+  const asked: string[][] = [];
+  const no = initProject({
+    cwd: dir,
+    env,
+    offline: true,
+    confirmWidening: (w) => (asked.push(w), false),
+  });
+  assert.equal(asked.length, 1);
+  assert.match(asked[0]!.join('\n'), /database host "devdb\.corp\.internal"/);
+  assert.match(no.notes.join('\n'), /policy widening NOT applied/);
+  assert.equal(readPolicyCache(dir)?.table.localTargets.declared.length, 0);
+  // ...and declining while asking to adopt another target is refused rather than half done
+  assert.throws(
+    () =>
+      initProject({
+        cwd: dir,
+        env,
+        offline: true,
+        localTargets: ['kube:x-dev'],
+        confirmWidening: () => false,
+      }),
+    /declined: widenings are waiting/,
+  );
+  // a person says yes
+  const yes = initProject({ cwd: dir, env, offline: true, confirmWidening: () => true });
+  assert.equal(yes.localTargets.authorityDiff?.widenings.length, 1);
+  assert.equal(readPolicyCache(dir)?.table.localTargets.declared.length, 1);
+  // with nothing waiting nobody is asked
+  let calls = 0;
+  initProject({ cwd: dir, env, offline: true, confirmWidening: () => (calls++, true) });
+  assert.equal(calls, 0);
+});
+
+test('detection reads only files inside the repository: not a linked file, not ~/.kube/config, not the environment', async () => {
+  const home = mkdtempSync(join(PARENT, 'home-'));
+  mkdirSync(join(home, '.kube'), { recursive: true });
+  writeFileSync(
+    join(home, '.kube', 'config'),
+    'apiVersion: v1\ncontexts:\n- name: home-kube-dev\n  context: {cluster: c, user: u}\ncurrent-context: home-kube-dev\n',
+  );
+  const outside = mkdtempSync(join(PARENT, 'outside-'));
+  writeFileSync(join(outside, 'skaffold.yaml'), 'deploy:\n  kubeContext: linked-dev\n');
+  const dir = repo({});
+  symlinkSync(join(outside, 'skaffold.yaml'), join(dir, 'skaffold.yaml'));
+  const r = await ego(
+    ['init'],
+    dir,
+    humanEnv(home, { KUBECONFIG: join(home, '.kube', 'config'), DATABASE_URL: 'postgres://x@envdb/app' }),
+  );
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.doesNotMatch(r.out, /linked-dev|home-kube-dev|envdb/);
+  assert.doesNotMatch(r.out, /local development surfaces/);
+});
+
+test('what a repository file says is printed as one token of a bounded grammar: no prose, quote, command or control character', async () => {
+  const dir = repo({
+    'skaffold.yaml':
+      'deploy:\n  kubeContext: x-dev\n  kubeContext: "ok\x1b[31m-dev"\n  kubeContext: team dev with spaces\n  kubeContext: $(curl evil)\n',
+    Tiltfile: "allow_k8s_contexts(['ok-dev', 'run `curl evil`', \"$(id)\", 'say \\'hi\\' now'])\n",
+    'docker-compose.yml':
+      'services:\n  "weird service\x1b[2J":\n    image: "postgres\x07 and then some prose"\n',
+    '.env.example': 'DATABASE_URL=postgres://u:p@host with spaces/app\nDB_HOST=bad\x1b[0mhost\n',
+  });
+  const home = mkdtempSync(join(PARENT, 'home-'));
+  const r = await ego(['init'], dir, humanEnv(home));
+  assert.equal(r.code, 0, r.out + r.err);
+  const printed = r.out
+    .split('\n')
+    .slice(r.out.split('\n').findIndex((l) => l.startsWith('local development surfaces')))
+    .filter((l) => /^ {2}(detected|already|proposed|not proposed)/.test(l));
+  assert.ok(printed.length > 0);
+  for (const line of printed) {
+    assert.match(line, /^[ -~]*$/, `printable ASCII only: ${JSON.stringify(line)}`);
+    assert.doesNotMatch(line, /[`$'"\\]/, `no quote, backtick, $ or backslash: ${line}`);
+  }
+  assert.doesNotMatch(r.out, /curl evil|\$\(id\)|with spaces|prose|team dev/);
+  assert.match(r.out, /proposed LOCAL_DEV: kube:ok-dev /);
+  assert.match(r.out, /proposed LOCAL_DEV: kube:x-dev /);
+  // nothing that is not a single token became a proposal
+  assert.doesNotMatch(r.out, /proposed LOCAL_DEV: kube:(run|say|team|ok\?)/);
+});
+
+test('adding to a layer file keeps its comments and every other entry, in each shape the list can have', () => {
+  const add = (src: string, key: string, name: string) => addToFrontmatterList(src, key, name);
+  assert.equal(
+    add('---\nschema: x\nk8s_local_contexts: []\n---\nbody\n', 'k8s_local_contexts', 'a-dev'),
+    "---\nschema: x\nk8s_local_contexts:\n  - 'a-dev'\n---\nbody\n",
+  );
+  assert.equal(
+    add(
+      "---\nk8s_local_contexts:\n  # mine\n  - 'one'\n  - two # why\n\nother: 1\n---\n",
+      'k8s_local_contexts',
+      'three',
+    ),
+    "---\nk8s_local_contexts:\n  # mine\n  - 'one'\n  - two # why\n  - 'three'\n\nother: 1\n---\n",
+  );
+  assert.equal(
+    add("---\nk8s_local_contexts: [one, 'two']\n---\n", 'k8s_local_contexts', 'x-dev'),
+    "---\nk8s_local_contexts:\n  - one\n  - 'two'\n  - 'x-dev'\n---\n",
+  );
+  assert.equal(
+    add('---\nschema: x\n---\n', 'db_local_hosts', 'h.test'),
+    "---\nschema: x\ndb_local_hosts:\n  - 'h.test'\n---\n",
+  );
+  assert.throws(() => add('no frontmatter', 'db_local_hosts', 'x'), /no frontmatter/);
+  assert.throws(() => add('---\ndb_local_hosts: nope\n---\n', 'db_local_hosts', 'x'), /not a list/);
 });
