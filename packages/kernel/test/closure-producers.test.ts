@@ -369,6 +369,21 @@ test('lint-staged: the commit hook that runs it reads the nested configuration t
   assert.equal(verdict('git commit -m x', repo({ ...files, 'packages/a/.lintstagedrc.json': OK_RC })), 'ALLOW');
 });
 
+test('lint-staged: yarn and pnpm run the binary of that name when no script has it, so the configuration is read for them too', () => {
+  const hostile = { '.lintstagedrc.json': BAD_RC };
+  const nested = { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.json': BAD_RC };
+  const wrong: string[] = [];
+  for (const command of ['pnpm lint-staged', 'yarn lint-staged', 'pnpm lint-staged --relative', 'yarn lint-staged --concurrent false']) {
+    if (verdict(command, repo(hostile)) !== 'DENY') wrong.push(`${command} over a hostile root configuration`);
+    if (verdict(command, repo(nested)) !== 'DENY') wrong.push(`${command} over a hostile nested configuration`);
+    if (verdict(command, repo({ '.lintstagedrc.json': OK_RC })) !== 'ALLOW') wrong.push(`${command} over a harmless configuration`);
+  }
+  assert.deepEqual(wrong, []);
+  // a script of that name is the script, read as it always was
+  const script = { 'package.json': JSON.stringify({ scripts: { 'lint-staged': 'eslint --fix' } }), ...hostile };
+  assert.equal(verdict('pnpm lint-staged', repo(script)), 'ALLOW');
+});
+
 test('lint-staged: a shell it is told to use runs every task, so the configuration was not read to its end', () => {
   const files = { '.lintstagedrc.json': OK_RC };
   const wrong: string[] = [];

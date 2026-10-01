@@ -7741,6 +7741,11 @@ function resolveScriptCommand(
           reason: 'npm start default',
           resolution: 'RESOLVED_COMPLETE',
         };
+      // YARN AND PNPM RUN THE BINARY OF THAT NAME WHEN NO SCRIPT HAS IT: `pnpm lint-staged` is `lint-staged`, and a binary is
+      // judged by its own producer. The matcher that grants `pnpm lint…` its class has no word boundary, so the line was
+      // ALLOW over a configuration nobody read.
+      if ((head === 'yarn' || head === 'pnpm') && sub === script && script === 'lint-staged')
+        return resolveScriptCommand(table, ctx, requote(['lint-staged', ...tokens.slice(2)]), env);
       // the manifest was fully read and genuinely has no such script: nothing executes. This is the narrow case
       // where absence is PROVEN, and the only one that keeps a declared ALLOW.
       return {
