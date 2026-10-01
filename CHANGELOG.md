@@ -7,6 +7,39 @@ discipline of decision Q84 (authority changes are never patch releases).
 
 ### Added
 - Repository skeleton, toolchain, frozen architecture baseline (`docs/architecture/pre-build-package.md`).
+- **Failure reason codes** (issue #16 section 10). Every non-ALLOW evaluation result carries a typed `code`, a
+  structured `rule` (the rule source, and whether configuration can change the outcome), and a reason string that
+  leads with the code and says both: `HARD_LOCKED` (an absolute deny; nothing can change it), `ADMIN_DENIED` (an
+  ADMIN_GOVERNED capability the organization has not enabled, or a DENY the selected profile or authority mode chose;
+  the organization layer, the profile or the mode can change it), `HUMAN_APPROVAL_REQUIRED` (an ASK: one human
+  approval, TASK_APPROVAL), `SCOPE_DENIED` (a protected path, a target that is named but not a declared local one, an
+  operation the core table denies and no policy enables), `TARGET_UNCLASSIFIED` (what used to be text inside the
+  reason; now the code), `POLICY_INVALID` (a policy that does not load or compile, or a pin that fails its stamp: the
+  command or hook fails closed with the code, the file and what can fix it) and `POLICY_STALE` (a cache from another
+  runtime or naming, an edited layer file, a widening awaiting a human, a pin not yet at the required trust: in
+  `ego check`, `ego doctor`, at SessionStart and in the pre-promotion refusal). `NETWORK_UNAVAILABLE`,
+  `SERVICE_UNAVAILABLE`, `RUNTIME_CAPABILITY_UNAVAILABLE` and `DOWNSTREAM_AUTH_DENIED` are members of the enum with
+  their producers documented as arriving with the phase that owns the module (forge, MCP and tracker adapters in phase
+  2, host conformance in phase 6); nothing produces them yet and nothing pretends to. The mapping from a decision to
+  its code is one function (`explainOutcome`), the hook decision carries the code (`HookDecision.code`), and both
+  host dialects render the reason through one reader (`decisionReason`) so the code reaches the human on claude-code
+  and on codex-cli. `Evaluation.reason` stays prose; `code` and `rule` are new fields, so existing consumers are
+  unaffected, though the reason text now begins with the code and ends with two sentences.
+- **`ego capabilities`, `ego explain capability` and `ego doctor` print the Q98 vocabulary** (issue #16 section 12):
+  per capability the effect class (`LOCAL_WORKSPACE` or `EXTERNAL_EFFECT`), the lock tier (`HARD_LOCK`,
+  `ADMIN_GOVERNED` or none), the verdict in force, the ceiling (the widest verdict any configuration path can reach:
+  ASK for an ADMIN_GOVERNED external write), the layer that decided (`core`, `admin-governed`, `organization (…)`,
+  `profile P`, `mode M`) and, for a capability whose verdict depends on where the command points, the
+  target-classification rule. Every field is derived from the compiled table; the target rule is read from the same
+  table the resolver uses to choose the capability, so the rule shown is the rule applied. `ego doctor` lists the
+  ADMIN_GOVERNED and the target-dependent capabilities one by one and summarises the rest; `ego doctor --capabilities`
+  lists all of them.
+- **`ego authority diff <old> <new>`** prints the classified changes between two compiled tables
+  (`diffAuthorityTables` and `classifyAuthorityChanges`, written for the release pipeline and referenced by no
+  command until now), the semver class under Q84, and marks every WIDENING with the profile × mode cells it applies in.
+  An operand is `core`, `current`, `proposed` (the layer files as they are in the working tree, before a human accepts
+  them: the review `ego init` asks for), or the path of a policy cache or table file, including one written by an
+  earlier release. `--fail-on-widening` exits 1 when anything widens. It only reads.
 
 ### Changed (authority — MAJOR under Q84)
 - **A session grant lifts only a capability whose effect stays on this machine** (Q98 section 4 / issue #16 sections
@@ -75,3 +108,29 @@ discipline of decision Q84 (authority changes are never patch releases).
   were ASK `command.unknown` (`gh repo delete`, `gh release delete`, `gh issue reopen`, `gh repo edit`, …) are DENY.
 - A hit is now marked absolute by the capability it names, in one place (`evaluate`), not by each of the code paths
   that construct hits; a path-classified write outside the workspace is labelled "absolute core deny" in the reason.
+- **Naming migration: `organization-locked` is `ADMIN_GOVERNED` (issue #16 section 12, #2 section 12). MAJOR under Q84
+  for the schema, no verdict moves.** The canonical terms are `LOCAL_WORKSPACE`, `EXTERNAL_EFFECT`, `HARD_LOCK`,
+  `ADMIN_GOVERNED` and `TASK_APPROVAL`; the code, the messages, the doctor, `ego capabilities`, `ego explain`, the
+  SessionStart text, the generated root instructions, the provenance and the documents now use them. What was renamed:
+  the file `control-plane/permissions/capabilities/organization-locked.md` is `admin-governed.md` (`family:
+  admin-governed`, `lock: admin-governed`); `CapabilityLock` `'organization'` is `'admin-governed'`;
+  `ControlPlane.organizationLocked` and `CompiledAuthorityTable.organizationLocked` are `adminGoverned`; the provenance
+  layer strings read `admin-governed` and `organization (widened admin-governed deny…)`; the compile errors for a mode
+  or a grant that names the tier say `ADMIN_GOVERNED capability`. **What did not change:** every effective verdict in
+  every profile × mode cell, the tier membership, the ASK ceiling and the lock-tier semantics. `ego authority diff`
+  between the previous release's table and this one is empty; that was checked against the previous compiler's own
+  output, not only against a hand-made fixture. **The authority-table hash does change**, because the field name and
+  the provenance strings are part of the hashed body. Consumer action: none is required. No pin records the table hash
+  (the pin holds version, integrity, sources, schemas, node and profile), so no pin is invalidated. The policy cache
+  (`.harness/generated/policy.json`) is gitignored, per machine and keyed on the runtime identity, so the upgrade
+  regenerates it on the next hook anyway; until then `ego check` and `ego doctor` report `POLICY_STALE` with a message
+  that says why, and a cache written under the old naming is read in the new shape rather than discarded, so a layer
+  widening a human already accepted is not turned into a pending one. If you maintain a control-plane fork or an
+  `organization-locked.md` of your own, rename it and its `family:` and `lock:` values when convenient: the old
+  spelling is a read alias, translated once and reported as one deprecation line per file (in the policy cache's
+  `notices`, in `ego doctor`, and on stderr from the commands that load the control plane). The alias widens nothing:
+  a tier declared outside the core layer is still refused, and an unknown `lock:` value still fails closed. Code that
+  reads `table.organizationLocked` or compares `lock === 'organization'` must follow the rename (TypeScript reports
+  both); a CI job that keeps a stored table to diff against needs nothing, because the diff reads old tables.
+- Provenance `file` names and the target-resolution reason no longer lose their first character when the control-plane
+  root is given with a trailing slash (`ermissions/…`).

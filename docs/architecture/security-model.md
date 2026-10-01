@@ -33,6 +33,36 @@ Each does one job. None replaces another.
 | **Containment** | Restricts what a process can physically reach: filesystem, network, credentials, tool surface | Does not understand intent, and **does not exist today in any profile** (issue #26) |
 | **Independent review** | Finds weaknesses in all of the above, continuously | Never proves their absence |
 
+## The vocabulary a refusal speaks (Q98)
+
+Five terms name what a person reads in a refusal, in `ego capabilities`, in `ego explain capability` and in `ego doctor`.
+They describe mechanisms the rest of this document already states; nothing here adds a claim.
+
+| Term | Meaning |
+|---|---|
+| `LOCAL_WORKSPACE` | An effect that stays on this machine, inside the governed development surface. Normal repository-local work is meant to stay fluid. |
+| `EXTERNAL_EFFECT` | An effect that reaches state outside it: a remote, a forge, a service, a shared cluster. It has a standing ceiling of ASK; no phrase, mode or host setting makes it unattended. |
+| `HARD_LOCK` | The tier no layer may widen: not an organization policy, a profile, an overlay, a grant, a mode, a skill, a task approval or a model. |
+| `ADMIN_GOVERNED` | DENY by default; only the organization policy layer may enable it, and then no further than ASK. Formerly named `organization-locked`. |
+| `TASK_APPROVAL` | One bounded human approval of one ASK. Never a durable grant. |
+
+A refusal also carries one typed code, the rule source, and whether configuration can change it:
+
+| Code | Meaning | Can configuration change it? |
+|---|---|---|
+| `HARD_LOCKED` | An absolute deny (HARD_LOCK). | No. |
+| `ADMIN_DENIED` | An ADMIN_GOVERNED capability the organization has not enabled, or a DENY that the selected profile or authority mode chose. | Yes: the organization layer, the profile or the mode. |
+| `HUMAN_APPROVAL_REQUIRED` | An ASK: a human approves this one operation. | A grant phrase lifts a LOCAL_WORKSPACE capability for the session; an EXTERNAL_EFFECT asks every time. |
+| `SCOPE_DENIED` | A protected path, a target that is named but not a declared local one, or an operation the core table denies and no policy enables. | Rarely: an authority mode that widens it, or a change to EGO's own control plane. |
+| `TARGET_UNCLASSIFIED` | Where the effect lands could not be resolved to a declared target (an ambient or variable kube context, database host or container engine; an MCP tool whose server nothing resolves). | Name the target so it resolves; a human may approve the one operation meanwhile. |
+| `POLICY_INVALID` | The policy does not load or compile. The command or hook fails closed. | Yes: fix the file named in the message. |
+| `POLICY_STALE` | The compiled policy, the pin or the trust level is behind what is on disk or required. | Yes: regenerate; a pending widening needs a human `ego init`; trust needs `ego sync`. |
+| `NETWORK_UNAVAILABLE`, `SERVICE_UNAVAILABLE`, `RUNTIME_CAPABILITY_UNAVAILABLE`, `DOWNSTREAM_AUTH_DENIED` | Defined, **not produced**: each needs a module that does not exist yet (forge, tracker and MCP adapters in phase 2, host conformance in phase 6). | Not applicable until a producer exists. |
+
+The code is derived from the decision by one function (`packages/kernel/src/authority/reasons.ts`), never from the path
+that produced it. Which capabilities fall in which tier is shown, derived from the compiled table, by `ego capabilities`;
+a change in what a reconfiguration widens is shown, with every widening marked, by `ego authority diff <old> <new>`.
+
 ## The rule that holds the model together
 
 The classifier will always have a frontier. What matters is what happens at that frontier, and the rule is:

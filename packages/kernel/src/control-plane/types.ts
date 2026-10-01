@@ -7,10 +7,13 @@ export const VERDICT_RANK: Record<Verdict, number> = { ALLOW: 0, ASK: 1, DENY: 2
 export type LayerName = 'core' | 'organization' | 'profile' | 'overlay';
 
 /**
- * Lock tier of a capability (Q98). `absolute`: never widenable by any layer. `organization`: DENY at the core and
- * widenable only by the organization policy layer, never by an overlay, grant, mode, skill or model. `none`: ordinary.
+ * Lock tier of a capability (Q98). `absolute` is the HARD_LOCK tier: never widenable by any layer. `admin-governed` is
+ * the ADMIN_GOVERNED tier: DENY at the core and widenable only by the organization policy layer, never by an overlay,
+ * grant, mode, skill or model, and then no further than ASK. `none`: ordinary. The names users see (HARD_LOCK,
+ * ADMIN_GOVERNED) are printed by `LOCK_TIER_LABEL`; the previous spelling of the second tier is read by
+ * `control-plane/legacy-names.ts` and by nothing else.
  */
-export type CapabilityLock = 'absolute' | 'organization' | 'none';
+export type CapabilityLock = 'absolute' | 'admin-governed' | 'none';
 
 export interface CapabilityDecl {
   id: string;
@@ -243,8 +246,8 @@ export interface ContainmentControl {
 export interface ControlPlane {
   root: string;
   absoluteDenies: CapabilityDoc;
-  /** organization-locked denies: DENY at the core, widenable only by the organization layer (Q98) */
-  organizationLocked: CapabilityDoc | null;
+  /** ADMIN_GOVERNED capabilities: DENY at the core, widenable only by the organization layer, never past ASK (Q98) */
+  adminGoverned: CapabilityDoc | null;
   capabilityDocs: CapabilityDoc[];
   containment: ContainmentControl[];
   matchers: Matcher[];
@@ -259,6 +262,9 @@ export interface ControlPlane {
   boundedCommands: BoundedCommands;
   /** sha256 of every authored file, keyed by path relative to root, for provenance and freshness */
   sourceHashes: Record<string, string>;
+  /** what the loader translated or tolerated (a file still written under a previous naming): one line per file,
+   *  never a failure. Printed by the commands that load the control plane and recorded in the policy cache. */
+  notices: string[];
 }
 
 export class ControlPlaneValidationError extends Error {

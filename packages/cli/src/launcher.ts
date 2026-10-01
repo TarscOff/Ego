@@ -8,6 +8,7 @@ import type { CliIo } from './io.ts';
 import { parseFlags } from './io.ts';
 import { runCommand, projectPrePromotion, PRE_PROMOTION_SET, type ProjectContext } from './commands.ts';
 import { gitToplevel } from '../../kernel/src/util/git.ts';
+import { renderFailure } from '../../kernel/src/authority/reasons.ts';
 import { hasPin, readPin, PinError } from '../../kernel/src/launcher/pin.ts';
 import {
   selfIdentity,
@@ -100,7 +101,11 @@ export async function launch(argv: string[], io: CliIo, opts: LaunchOptions = {}
     if (cmd === 'init' && e instanceof PinError) return runCommand(argv, io, null);
     io.err(
       e instanceof PinError
-        ? `${e.message.split(';')[0]}; a human may run \`ego init --repin\` from their own terminal`
+        ? `EGO: ${renderFailure('POLICY_INVALID', e.message.split(';')[0]!, {
+            source: 'the project pin, .harness/harness.md',
+            changeable: true,
+            changeBy: 'a human may run `ego init --repin` from their own terminal; an agent shell cannot',
+          })}`
         : `pin unreadable: ${(e as Error).message}`,
     );
     return 2;

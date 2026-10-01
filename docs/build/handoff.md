@@ -64,21 +64,26 @@ classifying obfuscated opaque code, and lets the loop converge.
     kube contexts, local DB hosts and production markers; the evaluator resolves the real target and re-judges any
     capability that merely ASSERTS a local one. LOCAL unchanged, PRODUCTION absolute, EXTERNAL denied via the
     previously unreachable `k8s.nonlocal.mutate`/`db.nonlocal.mutate`, and UNCLASSIFIED asks a human.
-  - `8bf035d` **Q98-2**: the v1 ASK ceiling. An organization may enable an admin-governed external write, never to
+  - `8bf035d` **Q98-2**: the standing ASK ceiling. An organization may enable an ADMIN_GOVERNED external write, never to
     unattended ALLOW; a widening to ALLOW compiles to ASK and the provenance records the clamp.
-  Still to do: the HARD_LOCK tier decision (#16 §5), failure reason codes (#16 §10), the 22 deterministic tests
-  (#16 §11), docs/doctor/receipts terminology (#16 §12), and the `ego init` local-target wizard (#16 §7).
+  - The HARD_LOCK tier decision (#16 §5) is made, not open: the product owner decided on 2026-09-22 that every lock of
+    the administrable tier stays administrable (ADMIN_GOVERNED, ceiling ASK) and that HARD_LOCK keeps only the
+    non-widenable core (see `alignment-2026-09.md`, "Q98 resolution").
+  - Failure reason codes (#16 §10) and the terminology (#16 §12: the canonical names `LOCAL_WORKSPACE`,
+    `EXTERNAL_EFFECT`, `HARD_LOCK`, `ADMIN_GOVERNED`, `TASK_APPROVAL` in refusals, `ego capabilities`, `ego explain`,
+    `ego doctor`; the old name `organization-locked` kept only as a read alias; `ego authority diff`) landed with the naming
+    migration; `CHANGELOG.md` has the consumer action. The doctor does not yet print receipts-side availability
+    (receipts are issue #10).
+  Still to do: the 22 deterministic tests (#16 §11) and the `ego init` local-target wizard and registry (#16 §7).
   Then round 14 must validate the NEW boundary before `INDEPENDENT-AGENT REVIEW` can go to PASSED.
 
 ## Remaining
 
 1. **Finish the review loop** to a clean complete round, then flip the `INDEPENDENT-AGENT REVIEW` line to PASSED.
-2. **Q98 is decided** (issue #2 is FINAL) and is being implemented per #16; see "In progress". The one open product
-   question is #16 §5: whether `forge.pr.create`, `forge.pr.merge`, `git.remote.push.force`,
-   `git.remote.branch.delete`, `git.remote.tag.delete` and `forge.branch.protection.modify` move to
-   `absolute-denies.md` (never widenable, reversing is a MAJOR change per Q84) or stay admin-governed with a v1 DENY
-   ceiling (same behaviour today, cheap to relax later). Nothing else in the control plane references those ids, so
-   either is mechanically clean.
+2. **Q98 is decided** (issue #2 is FINAL) and is being implemented per #16; see "In progress". The #16 §5 question
+   is closed: `forge.pr.create`, `forge.pr.merge`, `git.remote.push.force`, `git.remote.branch.delete`,
+   `git.remote.tag.delete` and `forge.branch.protection.modify` stay ADMIN_GOVERNED (administrable, DENY by default,
+   ceiling ASK), and moving one into `absolute-denies.md` would be a MAJOR change per Q84.
 3. **Phases 2–7** per the frozen baseline: tasks/held-scopes/forge/workspace-registry (2); skills/catalog/ask (3);
    grilling/evidence/benchmark (4); policies/stakeholder-packs/decisions (5); remote source adapters +
    `distribution bundle` + conformance suite (6); phase-7 validation. `CONFORMANCE` stays NOT RUN until the phase-6

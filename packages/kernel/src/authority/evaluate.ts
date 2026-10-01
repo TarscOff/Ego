@@ -7,6 +7,8 @@ import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
+import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
+import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 
@@ -53,6 +55,11 @@ export interface Evaluation {
   reason: string;
   /** the most restrictive hit that decided the verdict */
   decisive?: CapabilityHit;
+  /** WHY a non-ALLOW verdict is not an ALLOW, as a typed code (issue #16 section 10); absent for an ALLOW. `reason` is
+   *  prose for a person and leads with this code; branch on this field, never on the prose. */
+  code?: ReasonCode;
+  /** where the deciding rule comes from and whether configuration can change the outcome; present with `code` */
+  rule?: RuleExplanation;
 }
 
 const WRAPPERS = new Set([
@@ -243,7 +250,7 @@ const FUNCTION_DEF_PREFIX = `${MARK}define-function`;
 const FUNCTION_BODY_END = `${MARK}end-function`;
 /** UNBINDS a name a SUBSHELL defined. `git() { true; } & git push origin main` runs the definition in a
  *  background subshell and `echo $(git() { true; })` runs it in a substitution, so neither shadows the real
- *  program — and EGO believed both did, which made an organization-locked push read as a call to a known local
+ *  program — and EGO believed both did, which made an ADMIN_GOVERNED push read as a call to a known local
  *  function (exit review 10). A definition inside `( )` was already handled; these are its two other spellings.
  *  The definition now carries `inSubshell` itself, so the binding reader no longer needs the marker (and must not use it
  *  to forget an EARLIER definition that does stand); what still reads it is the "defined before use" ledger. */
@@ -8482,6 +8489,103 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
   'production.secrets.mutate': 'cloud',
 };
 
+/**
+ * WHAT EACH KIND OF TARGET RESOLVES TO. For a Kubernetes tool, a database client or a container engine the resolver
+ * answers one of four classes (LOCAL, PRODUCTION, EXTERNAL, UNCLASSIFIED); this table says which capability each
+ * non-local class lands on, and which list of `local-targets.md` declares a local one. It is read twice and by nothing
+ * else: `retargetLocalCapability` picks the capability from it, and `targetRuleFor` prints the rule from it — so the
+ * rule `ego explain capability` shows a person is the rule the evaluator applies, not a description that can drift.
+ */
+const TARGET_KINDS = {
+  k8s: {
+    noun: 'kube context or namespace',
+    declaredIn: ['k8s_local_contexts'],
+    production: 'production.k8s.mutate',
+    external: 'k8s.nonlocal.mutate',
+    unclassified: 'k8s.target.unclassified',
+  },
+  db: {
+    noun: 'database host',
+    declaredIn: ['db_local_hosts'],
+    production: 'production.database.mutate',
+    external: 'db.nonlocal.mutate',
+    unclassified: 'db.target.unclassified',
+  },
+  container: {
+    noun: 'container engine context or host',
+    declaredIn: ['k8s_local_contexts', 'db_local_hosts'],
+    production: 'production.deploy',
+    external: 'container.nonlocal.run',
+    unclassified: 'container.target.unclassified',
+  },
+} as const;
+/** the one place the cloud CLIs de-escalate: a provider endpoint that is a declared local host (an emulator) */
+const CLOUD_LOCAL_CAPABILITY = 'cloud.local.mutate';
+
+/** Every capability whose verdict depends on WHERE the command points: the ones the resolver re-judges, and the ones it
+ *  can land on. Derived from the two tables above, never listed by hand. */
+export function targetDependentCapabilities(table: CompiledAuthorityTable): string[] {
+  const ids = new Set<string>([...Object.keys(TARGET_SENSITIVE), CLOUD_LOCAL_CAPABILITY]);
+  for (const k of Object.values(TARGET_KINDS)) {
+    ids.add(k.production);
+    ids.add(k.external);
+    ids.add(k.unclassified);
+  }
+  return [...ids].filter((id) => id in table.capabilities).sort();
+}
+
+/** The target-dependent capabilities grouped by the kind of target that decides them, with the one rule that
+ *  classifies it: what `ego doctor` prints, so a rule shared by five capabilities is said once. */
+export function targetGroups(
+  table: CompiledAuthorityTable,
+): Array<{ kind: string; capabilities: string[]; rule: string }> {
+  const groups: Array<{ kind: string; capabilities: string[]; rule: string }> = [];
+  const resolved = (kind: string): string[] =>
+    Object.entries(TARGET_SENSITIVE)
+      .filter(([, k]) => k === kind)
+      .map(([id]) => id);
+  for (const [kind, k] of Object.entries(TARGET_KINDS)) {
+    const ids = [...resolved(kind), k.production, k.external, k.unclassified].filter((id) => id in table.capabilities);
+    const rule = ids.map((id) => (resolved(kind).includes(id) ? targetRuleFor(table, id) : undefined)).find(Boolean);
+    if (rule) groups.push({ kind, capabilities: ids.sort(), rule });
+  }
+  const cloud = [...resolved('cloud'), CLOUD_LOCAL_CAPABILITY].filter((id) => id in table.capabilities);
+  const cloudRule = targetRuleFor(table, resolved('cloud')[0] ?? '');
+  if (cloudRule) groups.push({ kind: 'cloud', capabilities: cloud.sort(), rule: cloudRule });
+  return groups;
+}
+
+/**
+ * The target-classification rule behind a capability, in words, or undefined when its verdict does not depend on a
+ * target. `ego capabilities`, `ego explain capability` and `ego doctor` print it (issue #16 section 12).
+ */
+export function targetRuleFor(table: CompiledAuthorityTable, capability: string): string | undefined {
+  const label = (id: string): string => {
+    const c = table.capabilities[id];
+    return `${id} (${c && c.lock !== 'none' ? LOCK_TIER_LABEL[c.lock] : (table.effective[id] ?? 'unknown')})`;
+  };
+  const file = table.localTargets?.file ?? 'control-plane/workspace/local-targets.md';
+  const declared = file.includes('control-plane/') ? file.slice(file.indexOf('control-plane/')) : file;
+  const markers = (table.localTargets?.productionMarkers ?? []).join(', ');
+  const kindOf = TARGET_SENSITIVE[capability];
+  if (kindOf === 'cloud')
+    return `judged by the endpoint it names, not by the tool (cloud): an endpoint on a declared local host (${declared}: db_local_hosts) is ${label(CLOUD_LOCAL_CAPABILITY)}; the provider default or any other endpoint stays ${label(capability)}`;
+  if (capability === CLOUD_LOCAL_CAPABILITY)
+    return `the result of target classification (cloud): the endpoint is a declared local host (${declared}: db_local_hosts), so a cloud CLI is local work instead of ${label('production.cloud.mutate')}`;
+  for (const [kind, k] of Object.entries(TARGET_KINDS)) {
+    const lists = k.declaredIn.join(' or ');
+    if (kindOf === kind)
+      return `judged by where it points, not by the tool (${kind}): a ${k.noun} declared in ${declared} (${lists}) keeps this capability; a production marker (${markers}) in the target is ${label(k.production)}; a named target that is not declared is ${label(k.external)}; a target that cannot be resolved (ambient context, a variable) is ${label(k.unclassified)}`;
+    if (capability === k.production)
+      return `the result of target classification (${kind}): a production marker (${markers}) in the ${k.noun}, wherever the tool is run from`;
+    if (capability === k.external)
+      return `the result of target classification (${kind}): the ${k.noun} is named but is not declared local in ${declared} (${lists}), so it is EXTERNAL`;
+    if (capability === k.unclassified)
+      return `the result of target classification (${kind}): the ${k.noun} could not be resolved (ambient context, a variable, a glob), so it is UNCLASSIFIED and never silently local`;
+  }
+  return undefined;
+}
+
 /** THE TOOL DECIDES WHETHER A TARGET EXISTS, NOT THE CAPABILITY THAT HAPPENED TO WIN. Matchers are
  *  first-match-wins, so a segment can be classified by a capability that says nothing about a target while still
  *  naming a tool whose whole job is to act on one: `docker exec` matches the script-opaque matcher — an
@@ -10569,13 +10673,13 @@ function retargetLocalCapability(
   // or no endpoint at all returns the hit untouched.
   if (kind === 'cloud') {
     const cloud = resolveCloudTarget(tokens, targets, envInputs);
-    if (cloud.cls !== 'LOCAL' || !('cloud.local.mutate' in table.capabilities)) return hit;
+    if (cloud.cls !== 'LOCAL' || !(CLOUD_LOCAL_CAPABILITY in table.capabilities)) return hit;
     return {
-      capability: 'cloud.local.mutate',
-      verdict: verdictFor(table, ctx, 'cloud.local.mutate'),
+      capability: CLOUD_LOCAL_CAPABILITY,
+      verdict: verdictFor(table, ctx, CLOUD_LOCAL_CAPABILITY),
       via: `target ${cloud.target} is LOCAL, a declared local development target (${targets.file})`,
       segment: norm,
-      absolute: isAbsoluteCap(table, 'cloud.local.mutate'),
+      absolute: isAbsoluteCap(table, CLOUD_LOCAL_CAPABILITY),
     };
   }
   const resolved =
@@ -10589,20 +10693,20 @@ function retargetLocalCapability(
       ? (resolved as { executes: boolean }).executes
       : (resolved as { mutating: boolean }).mutating;
   if (!acts || resolved.cls === 'LOCAL') return hit; // reads and genuinely local work keep their verdict
-  const byKind = <T,>(k8s: T, db: T, container: T): T => (kind === 'k8s' ? k8s : kind === 'db' ? db : container);
+  const outcomes = TARGET_KINDS[kind];
   const capability =
     resolved.cls === 'PRODUCTION'
-      ? byKind('production.k8s.mutate', 'production.database.mutate', 'production.deploy')
+      ? outcomes.production
       : resolved.cls === 'EXTERNAL'
-        ? byKind('k8s.nonlocal.mutate', 'db.nonlocal.mutate', 'container.nonlocal.run')
-        : byKind('k8s.target.unclassified', 'db.target.unclassified', 'container.target.unclassified');
+        ? outcomes.external
+        : outcomes.unclassified;
   if (!(capability in table.capabilities)) return hit;
   return {
     capability,
     verdict: verdictFor(table, ctx, capability),
     via:
       resolved.cls === 'UNCLASSIFIED'
-        ? `TARGET_UNCLASSIFIED: ${resolved.target} could not be resolved to a declared local development target (${targets.file})`
+        ? `${resolved.target} could not be resolved to a declared local development target (${targets.file})`
         : `target ${resolved.target} is ${resolved.cls}, not a declared local development target (${targets.file})`,
     segment: norm,
     absolute: isAbsoluteCap(table, capability),
@@ -11084,7 +11188,7 @@ function classifyNormalized(
     const writes = networkWriteHits(table, ctx, compiled, norm, state.env);
     if (writes.length) {
       const weight = (h: CapabilityHit) =>
-        VERDICT_RANK[h.verdict] * 10 + (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'organization' ? 1 : 0);
+        VERDICT_RANK[h.verdict] * 10 + (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'admin-governed' ? 1 : 0);
       writes.sort((a, b) => weight(b) - weight(a));
       outer = writes[0]!;
       additive.push(...writes.slice(1));
@@ -12635,7 +12739,7 @@ function carriedShellBodies(seg: string): string[] {
 /** AWK FORKS A SHELL, and the command it forks is a string EXPRESSION: `system("CMD")`, `print … | "CMD"` and
  *  `"CMD" | getline`. When that expression is a LITERAL — written inline, or held in a variable the same program
  *  assigns a literal to — the command is KNOWN, and reporting only opacity left a `git push origin main` at ASK
- *  where the same text anywhere else is an organization-locked deny (exit review 7).
+ *  where the same text anywhere else is an ADMIN_GOVERNED deny (exit review 7).
  *
  *  Separate from `carriedShellBodies` because these bodies have no other route into the analyzer: the normalizer
  *  reaches a `trap` or a herestring body on its own, and it has no path for an awk program at all. */
@@ -12985,7 +13089,7 @@ function analyzeSegments(
     // define `git`, and neither does a definition inside a `while`/`until`/`for`/`case` branch or one that is a
     // PIPELINE stage, since every stage runs in its own subshell. The analyzer recorded the name anyway, and the
     // real `git push origin main` that followed was classified as a call to a known local function — read-only,
-    // ALLOW, through an organization-locked deny and through absolute core denies for psql and the cloud CLIs
+    // ALLOW, through an ADMIN_GOVERNED deny and through absolute core denies for psql and the cloud CLIs
     // (exit review 8). A binding is trusted only where it is UNCONDITIONAL AND STILL STANDS: ONE reader decides that,
     // for the analyzer and for the working-directory model alike (functionBindingTimeline).
     // a file the line SOURCES runs in this shell, so what it does to the function table is part of the line; it is read
@@ -13330,7 +13434,7 @@ function analyzeSegments(
               const lock = table.capabilities[m.capability]?.lock;
               if (
                 lock === 'absolute' ||
-                lock === 'organization' ||
+                lock === 'admin-governed' ||
                 m.capability === 'command.env-inject' ||
                 m.capability === 'ego.gate.bypass'
               )
@@ -14029,10 +14133,19 @@ export function evaluate(
       }
     }
     if (targets.length === 0 || refusal !== undefined) {
+      // No capability decided this: the call is refused before any path is classified, because a path that cannot be
+      // read cannot be judged. It is the scope of the edit that is unknown, so it is a scope refusal.
+      const rule: RuleExplanation = {
+        source: 'the evaluator (apply_patch path resolution), before any capability is consulted',
+        changeable: true,
+        changeBy: 'send a patch whose file headers can be parsed; the paths must be known before execution',
+      };
       return {
         verdict: 'DENY',
         hits: [],
-        reason: `apply_patch ${refusal ?? 'with no parseable file headers'} is denied (paths must be known before execution)`,
+        reason: `SCOPE_DENIED: apply_patch ${refusal ?? 'with no parseable file headers'} is denied (paths must be known before execution). Rule source: ${rule.source}. Configuration can change it: ${rule.changeBy}.`,
+        code: 'SCOPE_DENIED',
+        rule,
       };
     }
     // `*** Move to:` names the DESTINATION of a rename and was never classified: an unconditional, fully
@@ -14120,21 +14233,43 @@ export function evaluate(
     // rendered as `permissionDecision: "allow"`, which SUPPRESSES the host's own prompt. Returning ALLOW there was
     // strictly worse than saying nothing (challenge findings 8 and 13). `command.unknown` is ASK and its
     // description is "the host's own permission prompt decides".
-    return {
-      verdict: verdictFor(table, ctx, 'command.unknown'),
-      hits,
-      reason: `no governed operation could be resolved for tool "${tool}" (unmodelled tool, or a missing or unexpected operand); the host's own permission prompt decides`,
-    };
+    const verdict = verdictFor(table, ctx, 'command.unknown');
+    const base = `no governed operation could be resolved for tool "${tool}" (unmodelled tool, or a missing or unexpected operand); the host's own permission prompt decides`;
+    const outcome = explainOutcome(table, ctx, { capability: 'command.unknown', verdict, absolute: false });
+    return outcome
+      ? { verdict, hits, reason: renderReason(base, outcome), code: outcome.code, rule: outcome.rule }
+      : { verdict, hits, reason: base };
   }
   const weight = (h: CapabilityHit) =>
     VERDICT_RANK[h.verdict] * 10 +
-    (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'organization' ? 1 : 0);
+    (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'admin-governed' ? 1 : 0);
   const decisive = hits.reduce((a, b) => (weight(b) > weight(a) ? b : a));
-  const reason =
+  if (decisive.verdict === 'ALLOW')
+    return {
+      verdict: 'ALLOW',
+      hits,
+      reason: `allowed: ${hits.map((h) => h.capability + (h.grantApplied ? ' (granted)' : '')).join(', ')}`,
+      decisive,
+    };
+  // WHICH TIER A REFUSAL BELONGS TO IS A FACT ABOUT THE CAPABILITY, so the word for it and the code both come from the
+  // table (`explainOutcome`), in one place, and not from the path that found the hit.
+  const tier = decisive.absolute
+    ? ` (${LOCK_TIER_LABEL.absolute}: absolute core deny)`
+    : table.capabilities[decisive.capability]?.lock === 'admin-governed'
+      ? ` (${LOCK_TIER_LABEL['admin-governed']} deny)`
+      : '';
+  const where = `in profile ${ctx.profile}, mode ${ctx.mode} (${decisive.via}${decisive.segment ? `: ${decisive.segment}` : ''}${decisive.effectOf ? `; effect of ${decisive.effectOf}` : ''})`;
+  const base =
     decisive.verdict === 'DENY'
-      ? `${decisive.capability} is DENY${decisive.absolute ? ' (absolute core deny)' : table.capabilities[decisive.capability]?.lock === 'organization' ? ' (organization-locked deny)' : ''} in profile ${ctx.profile}, mode ${ctx.mode} (${decisive.via}${decisive.segment ? `: ${decisive.segment}` : ''}${decisive.effectOf ? `; effect of ${decisive.effectOf}` : ''})`
-      : decisive.verdict === 'ASK'
-        ? `${decisive.capability} requires human approval in profile ${ctx.profile}, mode ${ctx.mode} (${decisive.via}${decisive.segment ? `: ${decisive.segment}` : ''}${decisive.effectOf ? `; effect of ${decisive.effectOf}` : ''})`
-        : `allowed: ${hits.map((h) => h.capability + (h.grantApplied ? ' (granted)' : '')).join(', ')}`;
-  return { verdict: decisive.verdict, hits, reason, decisive };
+      ? `${decisive.capability} is DENY${tier} ${where}`
+      : `${decisive.capability} requires human approval ${where}`;
+  const outcome = explainOutcome(table, ctx, decisive)!;
+  return {
+    verdict: decisive.verdict,
+    hits,
+    reason: renderReason(base, outcome),
+    decisive,
+    code: outcome.code,
+    rule: outcome.rule,
+  };
 }

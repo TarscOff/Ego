@@ -9,6 +9,7 @@ import { git, gitConfigScope } from '../util/git.ts';
 import { loadControlPlane } from '../control-plane/load.ts';
 import { readPolicyCache } from '../policy/cache.ts';
 import { readPin } from '../launcher/pin.ts';
+import { explainOutcome, renderReason } from '../authority/reasons.ts';
 import { redact, allDetectors, isSensitiveFileName } from '../redaction/redact.ts';
 import { controlPlaneDir } from '../launcher/self.ts';
 
@@ -225,17 +226,31 @@ const LOCKFILE_EXCLUDES = [
   'packages.lock.json',
 ].map((n) => `:(exclude,glob)**/${n}`);
 
-function pushVerdict(projectRoot: string): string {
+/** The pre-push hook's answer for an agent shell, and the sentence it refuses with. The sentence carries the same code,
+ *  rule source and configurability as the PreToolUse refusal for the same capability because it comes from the same
+ *  mapping (`explainOutcome`), not from a second description of the tier. */
+function pushDecision(projectRoot: string): { verdict: string; refusal: string } {
+  const base =
+    'pushes from agent sessions are governed by EGO (git.remote.push is DENY unless the organization policy widens it); a human pushes from their own terminal';
   try {
     const pin = readPin(projectRoot);
     const cache = readPolicyCache(projectRoot);
-    return (
-      cache?.table.profiles[pin.profile]?.modes[cache.table.defaultMode]?.['git.remote.push'] ??
+    const mode = cache?.table.defaultMode ?? '';
+    const verdict =
+      cache?.table.profiles[pin.profile]?.modes[mode]?.['git.remote.push'] ??
       cache?.table.effective['git.remote.push'] ??
-      'DENY'
-    );
+      'DENY';
+    const outcome =
+      cache && verdict !== 'ALLOW'
+        ? explainOutcome(
+            cache.table,
+            { profile: pin.profile, mode },
+            { capability: 'git.remote.push', verdict, absolute: false },
+          )
+        : undefined;
+    return { verdict, refusal: outcome ? renderReason(base, outcome) : base };
   } catch {
-    return 'DENY';
+    return { verdict: 'DENY', refusal: base };
   }
 }
 
@@ -317,10 +332,9 @@ export function runGitHook(
   if (name === 'pre-push') {
     if (isAgentShell(env)) {
       // Q98: an organization may widen git.remote.push; then the PreToolUse decision (ASK answered by a human, or ALLOW) governs
-      if (pushVerdict(projectRoot) === 'DENY') {
-        messages.push(
-          'refused: pushes from agent sessions are governed by EGO (git.remote.push is DENY unless the organization policy widens it); a human pushes from their own terminal',
-        );
+      const push = pushDecision(projectRoot);
+      if (push.verdict === 'DENY') {
+        messages.push(`refused: ${push.refusal}`);
         return { ok: false, messages };
       }
     }

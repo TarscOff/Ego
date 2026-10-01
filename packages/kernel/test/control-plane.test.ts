@@ -14,8 +14,8 @@ test('loads the authored control plane without problems', () => {
   const cp = loadControlPlane(ROOT);
   assert.ok(cp.absoluteDenies.capabilities.some((c) => c.id === 'production.deploy'));
   assert.ok(!cp.absoluteDenies.capabilities.some((c) => c.id === 'git.remote.push'));
-  assert.ok(cp.organizationLocked?.capabilities.some((c) => c.id === 'git.remote.push'));
-  assert.equal(cp.organizationLocked?.lock, 'organization');
+  assert.ok(cp.adminGoverned?.capabilities.some((c) => c.id === 'git.remote.push'));
+  assert.equal(cp.adminGoverned?.lock, 'admin-governed');
   assert.ok(cp.containment.length >= 6);
   assert.equal(cp.profiles.find((p) => p.id === 'STRICT')?.budgets.onExceed, 'BLOCK');
   assert.equal(cp.profiles.find((p) => p.id === 'STANDARD')?.budgets.maxDelegationDepth, 3);
@@ -48,8 +48,8 @@ test('compiles a deterministic authority table with correct precedence', () => {
   assert.equal(t1.profiles['HIGH_ASSURANCE']!.modes['EGO_MAINTENANCE']!['git.remote.push'], 'DENY');
   assert.ok(t1.preDeniedCommandClasses.includes('git.remote.push'));
   assert.ok(t1.preDeniedCommandClasses.includes('production.k8s.mutate'));
-  assert.ok(t1.organizationLocked.includes('forge.pr.merge'));
-  assert.equal(t1.capabilities['git.remote.push']!.lock, 'organization');
+  assert.ok(t1.adminGoverned.includes('forge.pr.merge'));
+  assert.equal(t1.capabilities['git.remote.push']!.lock, 'admin-governed');
   assert.equal(t1.capabilities['production.deploy']!.lock, 'absolute');
   assert.equal(t1.profiles['STRICT']!.budgets.maxToolCalls, 1500);
   assert.ok(t1.protectedPaths.some((p) => p.path === '~/.ssh/**'));
@@ -95,7 +95,7 @@ test('overlay may narrow but never widen or reference absolute denies', () => {
   assert.throws(() => compileAuthority(cp, { overlay: absolute }), /absolute deny/);
 });
 
-test('organization-locked denies: only the organization layer may widen them (Q98)', () => {
+test('ADMIN_GOVERNED capabilities: only the organization layer may widen them (Q98)', () => {
   const cp = loadControlPlane(ROOT);
   const dir = mkdtempSync(join(tmpdir(), 'ego-org-'));
   const orgWiden = loadOverlayCapabilities(
@@ -167,14 +167,14 @@ test('organization-locked denies: only the organization layer may widen them (Q9
   assert.equal(classifyAuthorityChanges(changes, t1), 'major');
 });
 
-test('modes and grants can never reference organization-locked denies', () => {
+test('modes and grants can never reference ADMIN_GOVERNED capabilities', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ego-cp-lock-'));
   cpSync(ROOT, dir, { recursive: true });
   writeFileSync(
     join(dir, 'modes', 'evil.md'),
     '---\nschema: ego.mode/1\nid: EVIL\nkind: authority\noverrides:\n  - capability: git.remote.push\n    verdict: ALLOW\n---\n# EVIL\n',
   );
-  assert.throws(() => loadControlPlane(dir), /organization-locked deny "git.remote.push"/);
+  assert.throws(() => loadControlPlane(dir), /ADMIN_GOVERNED capability "git.remote.push"/);
 });
 
 test('a profile without budgets fails to load', () => {
@@ -483,7 +483,7 @@ test('fail closed: a bullet with a malformed checkbox never silently drops the c
 test('Q98 ceiling: an organization may enable an admin-governed capability, but never to unattended ALLOW', () => {
   const cp = loadControlPlane(ROOT);
   const dir = mkdtempSync(join(tmpdir(), 'ego-ceiling-'));
-  // the organization layer is the ONLY layer allowed to widen an organization-locked deny, and every capability in
+  // the organization layer is the ONLY layer allowed to widen an ADMIN_GOVERNED capability, and every capability in
   // that tier is administrable. Enabling an EXTERNAL effect still keeps its bounded human approval, so a widening to
   // ALLOW lands on ASK instead of being accepted verbatim.
   const orgAllow = loadOverlayCapabilities(

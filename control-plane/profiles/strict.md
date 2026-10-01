@@ -47,7 +47,7 @@ narrow:
 The enterprise default. This page has two halves: what the profile enforces today, and what it declares and no code
 enforces yet. `ego doctor` reports the second half.
 
-**Enforced today.** Every absolute and organization-locked deny is enforced deterministically by the blocking
+**Enforced today.** Every HARD_LOCK and ADMIN_GOVERNED capability is enforced deterministically by the blocking
 PreToolUse hook (and, for commits and pushes, by the repo-side git hooks, which `--no-verify` bypasses). Governed
 mutation begins only once the pinned runtime identity has signed-release trust: until `ego sync` promotes it, only
 reads and the pre-promotion commands run. That requirement (`requires_signed_release_trust`) is enforced by the

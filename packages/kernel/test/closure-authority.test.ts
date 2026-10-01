@@ -55,7 +55,7 @@ const overlayDoc = (
   return loadOverlayCapabilities(f, kind);
 };
 /** every administrable external capability, enabled at ASK by an organization: the most permissive legal table */
-const ADMIN_GOVERNED = table.organizationLocked;
+const ADMIN_GOVERNED = table.adminGoverned;
 const enabledTable = compileAuthority(loadControlPlane(ROOT), {
   organization: overlayDoc('organization', 'Requires human approval', ...ADMIN_GOVERNED),
 });
@@ -120,7 +120,7 @@ test('tier marking: git.hooks.bypass, fs.outside-workspace.write and forge.prote
     assert.ok(table.absoluteDenies.includes(id), `${id} must be in table.absoluteDenies`);
     assert.equal(table.capabilities[id]!.lock, 'absolute', id);
     assert.equal(table.capabilities[id]!.absolute, true, id);
-    assert.ok(!table.organizationLocked.includes(id), `${id} is not an administrable lock`);
+    assert.ok(!table.adminGoverned.includes(id), `${id} is not an administrable lock`);
     for (const p of PROFILES)
       for (const m of MODES) assert.equal(table.profiles[p]!.modes[m]![id], 'DENY', `${id} in ${p}/${m}`);
   }
@@ -335,7 +335,7 @@ const BYPASS_SPELLINGS: readonly string[] = [
 test('protection bypass: forge.protection.bypass is DENY in every profile, and an organization that enables EVERYTHING administrable cannot make it ASK', () => {
   assert.ok(table.absoluteDenies.includes('forge.protection.bypass'));
   assert.ok(
-    !table.organizationLocked.includes('forge.protection.bypass'),
+    !table.adminGoverned.includes('forge.protection.bypass'),
     'a bypass is not an administrable act',
   );
   for (const profile of PROFILES) {
@@ -481,7 +481,7 @@ const REACHED: Readonly<Record<string, readonly string[]>> = {
 
 test('administrable forge identifiers are REACHED: enabling exactly one turns its spellings to ASK, and enabling everything else leaves them DENY', () => {
   for (const [id, spellings] of Object.entries(REACHED)) {
-    assert.ok(table.organizationLocked.includes(id), `${id} is administrable`);
+    assert.ok(table.adminGoverned.includes(id), `${id} is administrable`);
     assert.ok(!table.absoluteDenies.includes(id), `${id} is not absolute`);
     assert.ok(
       table.matchers.some((m) => m.capability === id),
@@ -561,7 +561,7 @@ test('administrable forge identifiers: an organization asking for ALLOW gets ASK
         `---\nschema: ego.mode/1\nid: EVIL\nkind: authority\noverrides:\n  - capability: ${id}\n    verdict: ALLOW\n---\n# EVIL\n`,
       ),
     );
-    assert.throws(() => loadControlPlane(withMode), /organization-locked deny/, `mode -> ${id}`);
+    assert.throws(() => loadControlPlane(withMode), /ADMIN_GOVERNED capability/, `mode -> ${id}`);
   }
 });
 

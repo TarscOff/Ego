@@ -2,7 +2,7 @@
 // installed (K4, M10): this dialect emits the neutral JSON shape and fails closed on anything it cannot parse.
 import { join } from 'node:path';
 import type { HookEvent, HookDecision, HookEventName } from '../../kernel/src/hooks/events.ts';
-import { isHookEventName } from '../../kernel/src/hooks/events.ts';
+import { decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
 import { writeAtomic } from '../../kernel/src/util/fs.ts';
 import { argvToCommandLine, shellQuote } from '../../kernel/src/util/shell-quote.ts';
 
@@ -144,12 +144,12 @@ export function renderCodexOutput(d: HookDecision): { stdout: string; exitCode: 
     else {
       out['decision'] = 'deny';
       out['reason'] =
-        `${d.reason ?? ''}${d.action === 'ask' ? ' [codex-cli: ASK is refused until conformance verifies the ask channel; a human may run the operation from their own terminal]' : ''}`;
+        `${decisionReason(d)}${d.action === 'ask' ? ' [codex-cli: ASK is refused until conformance verifies the ask channel; a human may run the operation from their own terminal]' : ''}`;
       exitCode = 2;
     }
   } else if (d.action === 'block' || d.action === 'deny') {
     out['decision'] = 'block';
-    out['reason'] = d.reason ?? '';
+    out['reason'] = decisionReason(d);
     exitCode = 2;
   }
   if (d.context) out['additionalContext'] = d.context;

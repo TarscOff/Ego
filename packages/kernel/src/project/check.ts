@@ -1,8 +1,9 @@
 // `ego check`: generated freshness, policy compilation, context budget, pin integrity. Exit non-zero on any failure.
 import { join } from 'node:path';
-import { readPin } from '../launcher/pin.ts';
+import { PinError, readPin } from '../launcher/pin.ts';
 import { selfIdentity, selfVersion, controlPlaneDir } from '../launcher/self.ts';
-import { policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { formatFreshness, policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { POLICY_INVALID_RULE, POLICY_STALE_RULE, renderFailure } from '../authority/reasons.ts';
 import { readGeneratedManifest } from './init.ts';
 import { gitHookStatus } from './githooks.ts';
 import { isFile, readTextIfExists } from '../util/fs.ts';
@@ -35,7 +36,7 @@ export function runCheck(projectRoot: string): CheckReport {
     items.push({
       name: 'policy cache',
       ok: fresh.fresh,
-      detail: fresh.fresh ? 'fresh' : fresh.reasons.join('; '),
+      detail: formatFreshness(fresh),
     });
     const cache = readPolicyCache(projectRoot);
     const budget = cache?.table.profiles[pin.profile]?.budgetTokens ?? 2000;
@@ -48,7 +49,14 @@ export function runCheck(projectRoot: string): CheckReport {
     });
   } catch (e) {
     pinOk = false;
-    items.push({ name: 'pin', ok: false, detail: (e as Error).message });
+    items.push({
+      name: 'pin',
+      ok: false,
+      detail:
+        e instanceof PinError
+          ? renderFailure('POLICY_INVALID', e.message, POLICY_INVALID_RULE)
+          : (e as Error).message,
+    });
   }
   const hooks = gitHookStatus(projectRoot);
   items.push({
@@ -79,7 +87,9 @@ export function runCheck(projectRoot: string): CheckReport {
     items.push({
       name: 'generated artifacts',
       ok: stale.length === 0,
-      detail: stale.length ? stale.join('; ') : `${Object.keys(manifest.files).length} files fresh`,
+      detail: stale.length
+        ? renderFailure('POLICY_STALE', stale.join('; '), POLICY_STALE_RULE)
+        : `${Object.keys(manifest.files).length} files fresh`,
     });
   }
   return { ok: pinOk && items.every((i) => i.ok), items };

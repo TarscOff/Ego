@@ -1,17 +1,22 @@
 ---
 schema: ego.capabilities/1
-id: organization-locked
-family: organization-locked
-lock: organization
-title: Organization-locked denies
+id: admin-governed
+family: admin-governed
+lock: admin-governed
+title: ADMIN_GOVERNED capabilities
 ---
-# Organization-locked denies
+# ADMIN_GOVERNED capabilities
 
-Denied at the core layer and widenable only by the organization policy layer (`policies/organization/permissions.md`
-in the organization's governance repository). A product overlay, a task grant, an authority mode, a skill, an issue,
-a stakeholder document or a model can never widen them. Day one behaviour is identical to an absolute deny; the
-difference is that an accountable organization can decide otherwise, in a versioned, explainable, testable file.
-Moving an identifier between this file and `../absolute-denies.md` is a MAJOR release (Q84, Q98).
+Denied at the core layer and widenable only by the organization policy layer (`policies/organization/permissions.md`,
+read from the governed checkout; a human accepts any widening with `ego init`). A product overlay, a task grant, an
+authority mode, a skill, an issue, a stakeholder document or a model can never widen them. Day one behaviour is
+identical to a HARD_LOCK (an absolute deny); the difference is that an accountable organization can decide otherwise,
+in a versioned, explainable, testable file. Moving an identifier between this file and `../absolute-denies.md` is a
+MAJOR release (Q84, Q98).
+
+This tier was formerly named `organization-locked` (the old name) until the Q98 naming migration (issue #16 section 12). The loader still reads
+the old spelling of `family:` and `lock:` as an alias and reports the file in one deprecation line; new files use the
+canonical values `family: admin-governed` and `lock: admin-governed`.
 
 **Every capability in this tier is administrable, and there is no release phasing.** An organization decides, in a
 versioned file, whether each one is disabled or available. Nothing here is ever moved to a non-widenable lock: a human
@@ -24,9 +29,6 @@ an unattended `ALLOW`. A layer that asks for `ALLOW` is compiled to `ASK`, and t
 it was clamped, so the decision stays visible instead of silently ignored. No host mode — `open`, `free`, full-PC,
 skip-permissions — suppresses that gate. This is the bounded human approval of decision Q98 (`TASK_APPROVAL`): it is
 what makes the capability administrable rather than unattended, not a temporary restriction.
-
-The canonical wording for this tier is `ADMIN_GOVERNED`; `organization-locked` is the compatibility name still used by
-the schema.
 
 ## Denied
 

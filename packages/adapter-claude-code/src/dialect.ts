@@ -2,7 +2,7 @@
 // hook output. UX only: no policy, permission, task, decision or secret logic lives here.
 import { join } from 'node:path';
 import type { HookEvent, HookDecision, HookEventName } from '../../kernel/src/hooks/events.ts';
-import { isHookEventName } from '../../kernel/src/hooks/events.ts';
+import { decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
 import { readJsonIfExists, writeAtomic, ensureDir } from '../../kernel/src/util/fs.ts';
 
 export const HOST_ID = 'claude-code' as const;
@@ -58,14 +58,14 @@ export function renderClaudeCodeOutput(d: HookDecision): { stdout: string; exitC
       out['hookSpecificOutput'] = {
         hookEventName: 'PreToolUse',
         permissionDecision,
-        permissionDecisionReason: d.reason ?? '',
+        permissionDecisionReason: decisionReason(d),
       };
       break;
     }
     case 'UserPromptSubmit': {
       if (d.action === 'block' || d.action === 'deny') {
         out['decision'] = 'block';
-        out['reason'] = d.reason ?? '';
+        out['reason'] = decisionReason(d);
       } else if (d.context)
         out['hookSpecificOutput'] = { hookEventName: 'UserPromptSubmit', additionalContext: d.context };
       break;
@@ -78,7 +78,7 @@ export function renderClaudeCodeOutput(d: HookDecision): { stdout: string; exitC
     case 'PostToolUse': {
       if (d.action === 'block' || d.action === 'deny') {
         out['decision'] = 'block';
-        out['reason'] = d.reason ?? '';
+        out['reason'] = decisionReason(d);
       } else if (d.context)
         out['hookSpecificOutput'] = { hookEventName: 'PostToolUse', additionalContext: d.context };
       break;
@@ -87,7 +87,7 @@ export function renderClaudeCodeOutput(d: HookDecision): { stdout: string; exitC
     case 'SubagentStop': {
       if (d.action === 'block' || d.action === 'deny') {
         out['decision'] = 'block';
-        out['reason'] = d.reason ?? '';
+        out['reason'] = decisionReason(d);
       }
       break;
     }

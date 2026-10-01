@@ -4,6 +4,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { launch, type DelegationInfo } from './launcher.ts';
 import type { CliIo } from './io.ts';
+import { POLICY_INVALID_RULE, renderFailure } from '../../kernel/src/authority/reasons.ts';
 
 export interface MainOptions {
   cwd?: string;
@@ -13,6 +14,18 @@ export interface MainOptions {
   err?: (s: string) => void;
   now?: () => string;
   delegatedBy?: DelegationInfo;
+}
+
+/**
+ * WHAT A FAILURE LOOKS LIKE TO A PERSON. A policy that does not load or compile (a malformed control-plane or layer file,
+ * a layer that widens what it may not) is POLICY_INVALID, named with its code, the file in the message and what can fix
+ * it, wherever it surfaced: a command, a hook (which then fails closed with exit 2) or a delegated runtime. The check is
+ * by name because a delegated runtime carries its own copy of the class.
+ */
+export function describeFailure(err: Error): string {
+  return err.name === 'ControlPlaneValidationError'
+    ? `EGO: ${renderFailure('POLICY_INVALID', err.message, POLICY_INVALID_RULE)}`
+    : `EGO: ${err.message}`;
 }
 
 export async function main(argv: string[], opts: MainOptions = {}): Promise<number> {
@@ -30,7 +43,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     return await launch(argv, io, launchOpts);
   } catch (e) {
     const err = e as Error;
-    io.err(`EGO: ${err.message}`);
+    io.err(describeFailure(err));
     if (io.env['EGO_DEBUG'] === '1' && err.stack) io.err(err.stack);
     return 2;
   }
