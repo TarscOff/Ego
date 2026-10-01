@@ -430,7 +430,8 @@ Pinned by `packages/kernel/test/closure-producers.test.ts`.
   way round: a short list of keys that execute nothing and redirect nothing (presentation, notices, install policy, network
   limits) stays ordinary, an empty value is ignored as npm ignores it, and every other key asks. The keys that name a program or a
   module (`onload-script`, `init-module`, `node-gyp`, `editor`, `git`, `browser`, `viewer`, `scripts-prepend-node-path` beside
-  `script-shell`, `shell` and `node-options`) are one table read by the flag, the `.npmrc` and the variable spellings. The flag and
+  `script-shell`, `shell` and `node-options`) are one table read by the flag, the `.npmrc` and the variable spellings; a flag is also the
+  key it abbreviates, because npm takes any unambiguous prefix (`--node-opt` is `--node-options`, verified on npm 11). The flag and
   `.npmrc` readers remain a list of the keys that run something, because most `--words` before a script name are options of the
   command and not configuration keys.
 - **`lint-staged` reads the configurations below the working directory.** Since 13 it uses the configuration nearest to each staged
