@@ -2184,7 +2184,8 @@ const noHostPath = (c: string): boolean =>
   // (a governed path reached THROUGH A LINK is a host path too, whatever the line calls it: the links the closure-paths classes
   // use are named `dlnk`, `hlnk`, `chain-d`, `rel-d`, `spaced up` and `spaced link`, and what they lead to is `settings.json`
   // or an archive extracted beside the workspace)
-  !/(\.harness|\.git\/|githooks|control-plane|policies\b|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials|\bdlnk\b|\bhlnk\b|chain-d|rel-d|spaced (?:up|link)|settings\.json)/.test(c) &&
+  // (...and a WILDCARD that reaches a hidden credential file without spelling it: `.e*`, `.??v`, `dotglob`, `*(D)`, `sub/.*`)
+  !/(\.harness|\.git\/|githooks|control-plane|policies\b|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials|\bdlnk\b|\bhlnk\b|chain-d|rel-d|spaced (?:up|link)|settings\.json|(?:^|[\s/])\.[a-z?]*[*?[]|dotglob|glob_dots|\(D\))/.test(c) &&
   // ...and a bulk deletion of the working tree is a path effect too, however it is spelled — as is a command
   // whose governed path is named by a FILE rather than on the line, since that file is the image's too. `zip` MOVES
   // its sources with `-m` and with `--move`. A case with a newline in it is several shell lines, and a RUN is one.

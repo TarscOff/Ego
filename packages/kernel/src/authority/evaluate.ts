@@ -10305,12 +10305,14 @@ function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
   const out: DbArgs = { options: [], escaping: [], positional: [], unknown: [] };
   const longs = [...spec.value, ...spec.flag, ...(spec.escaping ?? [])];
   const takesValue = new Set(spec.value);
-  const resolve = (name: string): string | null => {
-    if (longs.includes(name)) return name;
-    if (!spec.abbreviate) return null;
-    // an abbreviation must name ONE option: the client refuses an ambiguous one, and so does this
-    const hits = longs.filter((l) => l.startsWith(name));
-    return hits.length === 1 ? hits[0]! : null;
+  // The options a written name may be. An EXACT name is never ambiguous (`--execute` is not short for `--execute-file`); an
+  // abbreviation that two options share is refused by the client - and read here as EVERY one of them, because the reading that
+  // lets a statement or a script through is the one a reader that refuses it too misses (`psql --fi=x.sql` is a file as much as
+  // it is a field separator): whatever it is, each candidate that carries something to run is judged as given.
+  const resolve = (name: string): string[] => {
+    if (longs.includes(name)) return [name];
+    if (!spec.abbreviate) return [];
+    return longs.filter((l) => l.startsWith(name));
   };
   const synthetic = (text: string): DbWord => ({ text, quoted: true, expands: false });
   for (let i = 0; i < args.length; i++) {
@@ -10333,17 +10335,21 @@ function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
     const rawName = eq < 0 ? whole : whole.slice(0, eq);
     const bare = spec.underscoreIsDash === true ? rawName.replace(/_/g, '-') : rawName;
     const glued = eq < 0 ? null : whole.slice(eq + 1);
-    const takeValue = (name: string): void => {
-      if (glued !== null) out.options.push({ name, value: { text: glued, quoted: w.quoted, expands: w.expands } });
-      else if (args[i + 1] !== undefined) out.options.push({ name, value: args[++i]! });
-      else out.options.push({ name, value: null });
-    };
     // `--name` and, for Go-style parsers, `-name`
-    const asLong = t.startsWith('--') || spec.singleDash === true ? resolve(bare) : null;
-    if (asLong !== null && (t.startsWith('--') || bare.length > 1)) {
-      if (spec.escaping?.includes(asLong)) out.escaping.push(asLong);
-      else if (takesValue.has(asLong)) takeValue(asLong);
-      else out.options.push({ name: asLong, value: glued === null ? null : synthetic(glued) });
+    const asLong = t.startsWith('--') || spec.singleDash === true ? resolve(bare) : [];
+    if (asLong.length > 0 && (t.startsWith('--') || bare.length > 1)) {
+      // the word takes a value when ANY candidate does; each candidate that takes one is given it, one that does not is given none
+      const valued = asLong.some((n) => takesValue.has(n) && !spec.escaping?.includes(n));
+      let value: DbWord | null = null;
+      if (valued) {
+        if (glued !== null) value = { text: glued, quoted: w.quoted, expands: w.expands };
+        else if (args[i + 1] !== undefined) value = args[++i]!;
+      }
+      for (const name of asLong) {
+        if (spec.escaping?.includes(name)) out.escaping.push(name);
+        else if (takesValue.has(name)) out.options.push({ name, value });
+        else out.options.push({ name, value: glued === null ? null : synthetic(glued) });
+      }
       continue;
     }
     if (t.startsWith('--')) {

@@ -54,6 +54,10 @@ test('RC-DB: every statement a client is given is read, whichever option spellin
     `mysql -h prod-db -e'show tables' -e'drop table t'`,
     `mysql -h prod-db -e 'show tables' --exe 'drop table t'`,
     `mysql -h prod-db --execute='show tables' --execute='drop table t'`,
+    // an abbreviation two options share is refused by the client and read as each of them here: this one is `--file` as much as
+    // it is `--field-separator`, and that one is `--execute` as much as it is `--enable-cleartext-plugin`
+    `psql -h prod-db -c 'show all' --fi=/tmp/changes`,
+    `mysql -h prod-db -e 'show tables' --e='drop table t'`,
     `mariadb -h prod-db -e 'select 1' --execute 'delete from t'`,
     `psql -h prod-db -c 'select 1' -c 'drop table t'`,
     `psql -h prod-db -c'select 1' -c'drop table t'`,
