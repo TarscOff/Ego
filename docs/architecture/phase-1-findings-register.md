@@ -278,7 +278,7 @@ One reader per dimension is the repository's own rule; every OPEN row below is a
 
 ### RC-TIME Evaluation deadline
 
-- r11-243 (H): `node --experimental-strip-types .probe/probe.ts 'sed -n '\''                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            p'\'' README.md; git push origin main' '{"README.md":"x\n"}'`
+- r11-243 (H): time node --experimental-strip-types .probe/probe.ts "$(python3 -c "print('sed -n \'' + ' '*700 + 'p\' README.md; git push origin main')")"   (prints DENY, but only after far more than the 30 s hook timeout)
 
 ### RC-PROP Proportionality
 
@@ -1293,7 +1293,7 @@ earlier product decision, cited. An OPEN OG row of CRITICAL severity is MUST_FIX
 | r11-240 | M | 7 | C | UA | `PSQL_EDITOR='touch /tmp/x' psql -h localhost -c '\ef'` | AS/AS | CLOSED |  | T:- |
 | r11-241 | H | 9 | B | UA | `Write {"file_path":"k","content":"x"}` | DE/DE | CLOSED |  | T:- |
 | r11-242 | M | 5 | B | UA | `prettier --check .` | AL/AS | OPEN | CONTAINMENT_DEPENDENCY · RC-RUN | ordinary use of a runner/compiler option or config that names a program; only a sandbox bounds it · +neighbours 2/2 |
-| r11-243 | H | 9 | B | UA | `sed -n ' p' README.md; git push origin main` | DE/DE | OPEN | MUST_FIX · RC-TIME | a 600-space sed script takes about 31 s to evaluate; the hook timeout is 30 s · evaluation took 105 s, the hook timeout is 30 s |
+| r11-243 | H | 9 | B | UA | `sed -n ' p' README.md; git push origin main` | DE/DE | OPEN | MUST_FIX · RC-TIME | the sed-script scan backtracks superlinearly on whitespace (700 spaces: 66 s in the review); a DENY that arrives after the 30 s hook timeout may not be applied · evaluation took 105 s, the hook timeout is 30 s |
 | r11-244 | L | 11 | F | OG | `cat <<'A('⏎hello⏎A(⏎` | TH/AL | OPEN | FAIL_SAFE · RC-PROP | an exception that lets an operator look is not applied to this spelling; refusal, never an ALLOW · +neighbours 2/2; evaluator throws (fail-closed) |
 | r11-245 | H | 11 | F | OG | `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/health` | DE/AS | OPEN | FAIL_SAFE · RC-PROP | an exception that lets an operator look is not applied to this spelling; refusal, never an ALLOW |
 | r11-246 | H | 11 | F | OG | `kubectl --context production get pods` | DE/AL | OPEN | FAIL_SAFE · RC-PROP | an exception that lets an operator look is not applied to this spelling; refusal, never an ALLOW |
