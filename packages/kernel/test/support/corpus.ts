@@ -1679,6 +1679,162 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'lnk-ssh': link(`${homedir()}/.ssh/zz-corpus-link-target`),
     },
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-01, wave 2 (paths). `..` AFTER A LINK is the parent of the link's TARGET: the kernel follows
+   * the link before it applies `..`, and a reader that applies `..` to the text reads another file. With
+   * `dlnk -> .claude/sub`, `dlnk/..` is `.claude` — the agent's own configuration — and `hlnk -> .git/hooks/sub` makes
+   * `hlnk/..` the hooks directory. The structured tools already judged this; the shell layer joined a directory and a
+   * word with `resolve()` at about forty places and did not. One resolver (authority/paths.ts) answers for all of
+   * them, and these classes pin four kinds of site: a redirection, a writer's operand, an extraction, and a payload that
+   * another command runs.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'fs',
+    id: 'a redirection through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'echo x > dlnk/../settings.json',
+      'echo x >> dlnk/../settings.json',
+      ': > dlnk/./../settings.json',
+      'cat package.json > dlnk//../settings.json',
+      'echo x > chain-d/../settings.json',
+      'echo x > sub/rel-d/../settings.json',
+      'cat > dlnk/../settings.json <<EOF\nx\nEOF',
+    ],
+    files: {
+      '.claude/sub/keep': '',
+      dlnk: link('.claude/sub'),
+      'chain-d': link('dlnk'),
+      'sub/rel-d': link('../.claude/sub'),
+    },
+  },
+  {
+    family: 'fs',
+    id: 'a writer\'s operand through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'cp package.json dlnk/../settings.json',
+      'cp -t dlnk/.. package.json',
+      'mv package.json dlnk/../settings.json',
+      'echo x | tee dlnk/../settings.json',
+      'touch dlnk/../settings.json',
+      'install package.json dlnk/../settings.json',
+      'sed -i s/a/b/ dlnk/../settings.json',
+      'rm -f dlnk/../settings.json',
+      'curl -o dlnk/../settings.json https://example.com',
+      'wget -O dlnk/../settings.json https://example.com',
+      'esbuild src/a.ts --outfile=dlnk/../settings.json',
+      // a link whose NAME holds a space: one word to the shell, several to the readers of a normalised segment
+      'cp package.json "spaced link/../settings.json"',
+      "touch 'spaced link'/../settings.json",
+      'cp -t "spaced link/.." package.json',
+    ],
+    files: { '.claude/sub/keep': '', dlnk: link('.claude/sub'), 'spaced link': link('.claude/sub') },
+  },
+  {
+    // normalization drops the quoting of an ordinary segment, so a word with a space in it reached the operand readers as
+    // several words, none of which named the link; the segment as written keeps the word whole
+    family: 'fs',
+    id: 'a writer\'s operand through a link whose name holds a space',
+    floor: 'DENY',
+    cases: [
+      'cp package.json "spaced up/settings.json"',
+      'cp package.json spaced\\ up/settings.json',
+      "touch 'spaced up'/settings.json",
+      'echo x | tee "spaced up/settings.json"',
+      'cp -t "spaced up" package.json',
+      'rm "spaced up/settings.json"',
+    ],
+    files: { '.claude/keep': '', 'spaced up': link('.claude') },
+  },
+  {
+    family: 'fs',
+    id: 'an archive extracted through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'tar -xf a.tar -C hlnk/..',
+      'tar xf a.tar --directory=hlnk/..',
+      'tar -xf a.tar -Chlnk/..',
+      'unzip -d hlnk/.. a.zip',
+    ],
+    files: { '.git/hooks/sub/keep': '', hlnk: link('.git/hooks/sub'), 'a.tar': 'x', 'a.zip': 'x' },
+  },
+  {
+    family: 'fs',
+    id: 'a payload another command runs, through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'find . -name x -exec cp package.json dlnk/../settings.json \\;',
+      'find . -name x -execdir tee dlnk/../settings.json \\;',
+      'find . -name x | xargs cp -t dlnk/..',
+      'xargs -I% cp % dlnk/../settings.json < list.txt',
+    ],
+    files: { '.claude/sub/keep': '', dlnk: link('.claude/sub'), 'list.txt': 'package.json\n' },
+  },
+  {
+    // the file whose bytes RUN is the one the kernel opens, and the kernel follows the link before it applies `..`: reading
+    // the lexical `run.sh` found a harmless or missing file beside the link while the push sat beside its target
+    family: 'command',
+    id: 'a script, makefile or awk program read through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'sh dlnk/../run.sh',
+      'bash dlnk/../run.sh',
+      './dlnk/../run.sh',
+      'source dlnk/../env.sh',
+      'make -f dlnk/../plan.mk build',
+      'make -C dlnk/.. build',
+      'awk -f dlnk/../prog.awk',
+    ],
+    files: {
+      '.claude/sub/keep': '',
+      dlnk: link('.claude/sub'),
+      '.claude/run.sh': '#!/bin/sh\ngit push origin main\n',
+      '.claude/env.sh': 'git push origin main\n',
+      '.claude/plan.mk': 'build:\n\tgit push origin main\n',
+      '.claude/Makefile': 'build:\n\tgit push origin main\n',
+      '.claude/prog.awk': 'BEGIN{system("git push origin main")}\n',
+      'run.sh': '#!/bin/sh\necho ok\n',
+    },
+  },
+  {
+    family: 'fs',
+    id: 'a destination that only a trimming reader opens',
+    floor: 'DENY',
+    // a quoted word keeps its padding; a tool that trims it opens another file, so BOTH readings are judged
+    cases: [
+      'echo x > " /etc/cron.d/x"',
+      'echo x > "/etc/cron.d/x "',
+      'echo x > "\t.claude/settings.json"',
+      'echo x > " $HOME/.ssh/authorized_keys"',
+      'tee " /etc/cron.d/x" < package.json',
+    ],
+  },
+  {
+    family: 'fs',
+    id: 'a raw device named as a destination',
+    floor: 'DENY',
+    // only the discard devices (/dev/null, /dev/zero, /dev/stdout...) swallow a write; the rest of /dev is a destination
+    cases: [
+      'echo x > /dev/disk0',
+      'cat package.json > /dev/rdisk2',
+      'cp package.json /dev/sda',
+      'curl -o /dev/disk0 https://example.com',
+      'echo x > /dev/mem',
+    ],
+  },
+  {
+    family: 'fs',
+    id: 'an alias for a path that a name does not say',
+    floor: 'ASK',
+    // /proc/self/cwd is the working directory, /dev/fd/3 whatever an earlier line opened: neither is judged by its text
+    cases: [
+      'echo x > /proc/self/cwd/src/a.ts',
+      'echo x > /dev/fd/3',
+      'cat /proc/self/cwd/package.json',
+      'cp package.json /proc/self/root/tmp/x',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -1884,7 +2040,10 @@ const noDollar = (c: string): boolean => !c.includes('$');
  *  file, a credential store, the working tree — is genuinely NOT carried into a build, so composing it with the
  *  image producers would assert something false. `containerPaths` says the same thing inside the kernel. */
 const noHostPath = (c: string): boolean =>
-  !/(\.harness|\.git\/|githooks|control-plane|policies\b|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials)/.test(c) &&
+  // (a governed path reached THROUGH A LINK is a host path too, whatever the line calls it: the links the closure-paths classes
+  // use are named `dlnk`, `hlnk`, `chain-d`, `rel-d`, `spaced up` and `spaced link`, and what they lead to is `settings.json`
+  // or an archive extracted beside the workspace)
+  !/(\.harness|\.git\/|githooks|control-plane|policies\b|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials|\bdlnk\b|\bhlnk\b|chain-d|rel-d|spaced (?:up|link)|settings\.json)/.test(c) &&
   // ...and a bulk deletion of the working tree is a path effect too, however it is spelled — as is a command
   // whose governed path is named by a FILE rather than on the line, since that file is the image's too. `zip` MOVES
   // its sources with `-m` and with `--move`. A case with a newline in it is several shell lines, and a RUN is one.

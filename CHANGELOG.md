@@ -149,3 +149,17 @@ discipline of decision Q84 (authority changes are never patch releases).
   both); a CI job that keeps a stored table to diff against needs nothing, because the diff reads old tables.
 - Provenance `file` names and the target-resolution reason no longer lose their first character when the control-plane
   root is given with a trailing slash (`ermissions/…`).
+- **A shell word is judged by what it resolves to — one resolver for the shell layer** (closure audit 2026-10-01, wave 2).
+  `echo x > d/../settings.json` with `d -> .claude/sub` was ALLOW while `cd d && echo x > ../settings.json` — the same
+  file — was DENY: about forty sites turned a word into a path with `resolve(cwd, word)`, which applies `..` to the text,
+  and the kernel follows `d` first. `authority/paths.ts` now answers "what may this word denote" once — the lexical and
+  the physical reading, as written and trimmed, in every directory the shell may be in, after `~`, `~+`, `~-`, `~user`,
+  `$HOME`, `${HOME}`, `$PWD`, `$OLDPWD` — and every site judges all of them and keeps the worst. A redirection, a writer's
+  operand, an archive extraction, a `find -exec` payload, a git pathspec, an option's value and the file a script reader
+  opens all go through it. Visible changes: a write through `link/..` is judged by the link's target (DENY where it names a
+  protected path); a path through `/proc/self/cwd`, `/proc/self/root` or an open descriptor above 2 (`/dev/fd/3`) asks;
+  `curl -o /dev/null URL` is an ASK like `curl URL` (it was an absolute DENY: an option's value was not read as a discard
+  device the way a redirection was), `wget -O` and `curl -D`/`-c` destinations are judged, and `echo x > /dev/disk0` is
+  DENY (a redirection dropped every path under `/dev`; now only the discard devices are dropped, `/dev/shm` is scratch).
+  A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask, and a leading `~` is the HOME the line assigned (`export HOME=/etc; echo x > ~/passwd`). A
+  decision shares one view of the filesystem (the ordinary-development corpus runs in about two thirds of its former time).
