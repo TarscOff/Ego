@@ -1569,9 +1569,26 @@ function lexHcl(src: string): Tok[] | null {
           continue;
         }
         if ((d === '$' || d === '%') && src[i + 1] === '{') {
+          // an interpolation runs to its matching brace and may hold braces and quoted strings of its own: `"${join(",", x)}"`
           dyn = true;
-          s += d;
-          i++;
+          let depth = 0;
+          let j = i + 1;
+          for (; j < n; j++) {
+            const e = src[j]!;
+            if (e === '{') depth++;
+            else if (e === '}') {
+              if (--depth === 0) {
+                j++;
+                break;
+              }
+            } else if (e === '"') {
+              j++;
+              while (j < n && src[j] !== '"' && src[j] !== '\n') j += src[j] === '\\' ? 2 : 1;
+            } else if (e === '\n') return null;
+          }
+          if (depth !== 0) return null;
+          s += src.slice(i, j);
+          i = j;
           continue;
         }
         if (d === '"') {
@@ -1747,6 +1764,29 @@ function asStrings(v: unknown): string[] | null {
   return null;
 }
 
+/** The block scalars (`key: |` and `key: >`) a YAML file holds under a key, read from the TEXT. The subset parser strips
+ *  comment lines and indentation inside a block scalar and drops its blank lines, which is the text of an inline
+ *  Dockerfile: a `# syntax=` line is its first line and the blank line is what a folded scalar turns into a newline. */
+function rawBlockScalars(text: string, key: string): Array<{ line: number; folded: boolean; text: string }> {
+  const lines = text.split(/\r?\n/);
+  const out: Array<{ line: number; folded: boolean; text: string }> = [];
+  const header = new RegExp(`^(\\s*)(?:- )?["']?${key}["']?\\s*:\\s*([|>])[0-9+-]*\\s*(?:#.*)?$`);
+  const indentOf = (l: string): number => l.length - l.trimStart().length;
+  for (let i = 0; i < lines.length; i++) {
+    const m = header.exec(lines[i]!);
+    if (!m) continue;
+    const base = m[1]!.length;
+    const body: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && (lines[j]!.trim() === '' || indentOf(lines[j]!) > base)) body.push(lines[j++]!);
+    const first = body.find((l) => l.trim() !== '');
+    const cut = first === undefined ? 0 : indentOf(first);
+    out.push({ line: i + 1, folded: m[2] === '>', text: body.map((l) => (l.trim() === '' ? '' : l.slice(cut))).join('\n') });
+    i = j - 1;
+  }
+  return out;
+}
+
 /** a compose file's services that BUILD, as targets */
 function parseComposeAsTargets(name: string, text: string): { targets: Target[]; gaps: BuildGap[] } {
   const gaps: BuildGap[] = [];
@@ -1756,8 +1796,13 @@ function parseComposeAsTargets(name: string, text: string): { targets: Target[];
     .split('\n')
     .map((l) => l.replace(/(^|\s)#.*$/, ''))
     .join('\n');
-  if (/(^|[\s:[,-])(&|\*)[A-Za-z0-9_-]+|<<\s*:|^\s*include\s*:|^\s*extends\s*:/m.test(stripped))
-    return { targets: [], gaps: [{ what: 'body', where: name, why: 'the compose file uses anchors, merge keys, include or extends, which this reader does not follow' }] };
+  // ...AND SO DO THE MERGE TAGS (`!override`, `!reset`) and every other YAML tag: the subset parser reads `!override {context:
+  // ., dockerfile: Evil}` as one string, and the service's real build is the map behind it
+  if (/(^|[\s:[,-])(&|\*)[A-Za-z0-9_-]+|(^|[\s:[,-])!+[A-Za-z]|<<\s*:|^\s*include\s*:|^\s*extends\s*:/m.test(stripped))
+    return {
+      targets: [],
+      gaps: [{ what: 'body', where: name, why: 'the compose file uses anchors, merge keys, tags, include or extends, which this reader does not follow' }],
+    };
   let doc: YamlValue;
   try {
     doc = parseYaml(text.replace(/^---\s*$/m, ''));
@@ -1839,6 +1884,20 @@ function parseComposeAsTargets(name: string, text: string): { targets: Target[];
         else t.cacheTo = [...t.cacheTo, ...s];
       }
     }
+    targets.push(t);
+  }
+  // an inline Dockerfile written as a block scalar is read from the text: every one is a Dockerfile some service builds
+  for (const b of rawBlockScalars(text, 'dockerfile_inline')) {
+    if (b.folded) {
+      gaps.push({ what: 'body', where: name, why: `the folded dockerfile_inline at line ${b.line} is not unfolded by this reader` });
+      continue;
+    }
+    if (/\$[{A-Za-z_]/.test(b.text.replace(/\$\$/g, ''))) {
+      gaps.push({ what: 'config', where: name, why: `the dockerfile_inline at line ${b.line} is interpolated` });
+      continue;
+    }
+    const t = emptyTarget(`inline Dockerfile at line ${b.line}`);
+    t.inline = b.text.replace(/\$\$/g, '$');
     targets.push(t);
   }
   return { targets, gaps };

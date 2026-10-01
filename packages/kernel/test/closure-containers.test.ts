@@ -177,6 +177,8 @@ test('bake reads the Dockerfile an HCL or JSON target names, its inline Dockerfi
     ['docker buildx bake -f ci.hcl', { 'ci.hcl': 'target "x" { dockerfile = "Evil" }', Evil: EVIL }, 'DENY'],
     ['docker buildx bake --file=ci.hcl', { 'ci.hcl': 'target "x" { dockerfile = "Evil" }', Evil: EVIL }, 'DENY'],
     ['docker buildx bake -fci.hcl', { 'ci.hcl': 'target "x" { dockerfile = "Evil" }', Evil: EVIL }, 'DENY'],
+    // an interpolation may hold quotes and braces of its own; a target after it is still a target
+    ['docker buildx bake', { 'docker-bake.hcl': 'target "a" {\n  tags = ["x:${join(",", ["a", "b"])}"]\n  args = { for k, v in { a = "b" } : k => v }\n}\ntarget "b" {\n  dockerfile = "Evil"\n}\n', Evil: EVIL }, 'DENY'],
     // a file is read by what it holds, whatever it is called, and a byte order mark is not part of its first key
     ['docker buildx bake -f Bakefile', { Bakefile: '{"target":{"x":{"dockerfile":"Evil"}}}', Evil: EVIL }, 'DENY'],
     ['docker buildx bake -f Bakefile', { Bakefile: 'target "x" {\n  dockerfile = "Evil"\n}\n', Evil: EVIL }, 'DENY'],
@@ -240,9 +242,16 @@ test('what the reader cannot read is an ask: a variable, a matrix, an anchor, an
     ['docker buildx bake', { 'docker-bake.hcl': 'target "default" {\n  matrix = { x = ["a"] }\n}\n' }, 'ASK'],
     ['docker buildx bake', { 'compose.yaml': 'x-base: &base\n  build: .\nservices:\n  a:\n    <<: *base\n', Dockerfile: OK }, 'ASK'],
     ['docker buildx bake', { 'compose.yaml': 'include:\n  - other.yaml\nservices:\n  a:\n    image: redis\n' }, 'ASK'],
+    ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build: !override {context: ., dockerfile: Evil}\n', Evil: EVIL }, 'ASK'],
+    ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build: !reset null\n' }, 'ASK'],
     // compose interpolates `$VAR`; `$$` is a literal dollar. A services section the parser cannot read is not an empty one
     ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build:\n      dockerfile_inline: |\n        FROM alpine\n        RUN echo $HOME\n' }, 'ASK'],
     ['docker buildx bake', { 'compose.yaml': 'services:\n\ta:\n\t\tbuild: .\n', Dockerfile: EVIL }, 'ASK'],
+    // a folded scalar turns its blank lines into newlines and its other line breaks into spaces; a literal one keeps a
+    // `# syntax=` first line, which a comment-stripping reader loses
+    ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build:\n      dockerfile_inline: >\n        FROM alpine\n\n        RUN git push origin main\n' }, 'ASK'],
+    ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build:\n      dockerfile_inline: |\n        # syntax=evil/frontend:1\n        FROM alpine\n' }, 'ASK'],
+    ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build:\n      dockerfile_inline: |\n        # note\n        FROM alpine\n\n        RUN git push origin main\n' }, 'DENY'],
     ['docker buildx bake', { 'compose.yaml': 'services: {a: {build: {context: ., dockerfile: Evil}}}\n', Evil: EVIL }, 'ASK'],
     ['docker buildx bake https://github.com/evil/repo.git', undefined, 'ASK'],
     ['docker buildx bake -f https://github.com/evil/repo.git', undefined, 'ASK'],
