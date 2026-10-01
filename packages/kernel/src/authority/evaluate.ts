@@ -8407,6 +8407,11 @@ function resolveScriptCommand(
     // resolver does not read, a directory it could not list. What was found is still judged; the gap is added to it.
     if (below.problem !== null)
       problems.push({ path: cwd, why: `the search below the working directory for nested lint-staged configurations could not be completed: ${below.problem}`, outcome: 'UNREADABLE' });
+    // `--shell <path>` HANDS EVERY TASK TO THE PROGRAM IT NAMES, which is the same re-pointing of the interpreter that
+    // `--script-shell` is for npm: the tasks the configuration spells are read as commands and run by something else
+    const shellAt = tokens.findIndex((t) => t === '-x' || t === '--shell' || t.startsWith('--shell='));
+    if (shellAt >= 0 && (tokens[shellAt]!.includes('=') || /^[^-]/.test(tokens[shellAt + 1] ?? '')))
+      problems.push({ path: tokens[shellAt]!, why: 'lint-staged is told which shell runs its tasks, so the commands it was read to run are handed to another program', outcome: 'UNSUPPORTED' });
     for (const f of candidates) {
       const base = f.slice(f.lastIndexOf('/') + 1);
       // a JS/CJS/MJS config is code, and code is not resolvable by reading - whether or not the file can be opened

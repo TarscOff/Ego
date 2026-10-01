@@ -365,6 +365,17 @@ test('lint-staged: the commit hook that runs it reads the nested configuration t
   assert.equal(verdict('git commit -m x', repo({ ...files, 'packages/a/.lintstagedrc.json': OK_RC })), 'ALLOW');
 });
 
+test('lint-staged: a shell it is told to use runs every task, so the configuration was not read to its end', () => {
+  const files = { '.lintstagedrc.json': OK_RC };
+  const wrong: string[] = [];
+  for (const command of ['npx lint-staged --shell /tmp/evil', 'npx lint-staged -x /tmp/evil', 'npx lint-staged --shell=/tmp/evil', 'lint-staged --shell ./evil.sh'])
+    if (verdict(command, repo(files)) === 'ALLOW') wrong.push(command);
+  assert.deepEqual(wrong, []);
+  // the other options of the tool select nothing that runs
+  for (const command of ['npx lint-staged --diff main', 'npx lint-staged --concurrent false', 'npx lint-staged --quiet'])
+    assert.equal(verdict(command, repo(files)), 'ALLOW', command);
+});
+
 test('lint-staged: a configuration this command writes below the working directory is not the one that was there', () => {
   const base = { '.lintstagedrc.json': OK_RC, 'evil/.lintstagedrc.json': BAD_RC, 'evil/x': '1' };
   const stale: string[] = [
