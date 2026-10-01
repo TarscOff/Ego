@@ -24,6 +24,7 @@
 //   H. `-I DIR` is part of where an `include` is looked for.
 //   I. a pipeline and a background job run while the stages after them do.
 //   J. the words of a redirection are not make goals - `make 2>&1` ran under a proof that its "goal" `2>&1` had no rule.
+//   K. a command the makefile runs while it is read (`$(shell cp gen.in gen.mk)` above an include) may write what it reads next.
 //
 // The verdicts below are what a reader must give. `DENY` means the act is READ (the makefile is on the disk and nothing can have
 // changed it); `ASK` means something runs that could not be read; `ALLOW` is the control that must stay as it was.
@@ -362,6 +363,7 @@ test('E. a glob no file matches yet is stale if an earlier segment writes one', 
     ['printf into the matching name', `printf 'all:\\n\\t${ACT}\\n' > evil.mk && make -f ev*.mk`, files, 'ASK'],
     ['cp into the matching name', 'cp Makefile evil.mk && make -f ev*.mk', files, 'ASK'],
     ['a directory made on the way', "mkdir s && printf 'all:\\n\\tgit push origin main\\n' > s/evil.mk && make -f s*/evil.mk", files, 'ASK'],
+    ['a glob in the home directory', 'make -f ~/ev*.mk', files, 'ASK'],
     ['a glob behind a variable', 'make -f "$X"*.mk', files, 'ASK'],
     ['a glob behind a command substitution', 'make -f $(echo ev)*.mk', files, 'ASK'],
   ]);
@@ -558,5 +560,34 @@ test('J. the words of a redirection are not make goals: the default goal still r
     ['a quoted > is a goal', "make '>'", { Makefile: OK }, 'ALLOW'],
     ['no makefile: nothing runs', 'make 2>&1', {}, 'ALLOW'],
     ['a harmless default goal', 'make 2>&1 | tail', { Makefile: OK }, 'ALLOW'],
+  ]);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * K. A COMMAND THE MAKEFILE RUNS WHILE IT IS READ
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('K. a command run at parse time that may write is a command that may write the makefile read after it', () => {
+  const gen = { 'gen.in': 'all::\n\techo x\n' };
+  check([
+    ['$(shell) above an optional include', 'make all', { Makefile: 'X := $(shell cp gen.in gen.mk)\n-include gen.mk\nall::\n\techo ok\n', ...gen }, 'ASK'],
+    ['$(shell) above a plain include', 'make all', { Makefile: 'X := $(shell cp gen.in gen.mk)\ninclude gen.mk\nall::\n\techo ok\n', ...gen }, 'ASK'],
+    ['!= above an include', 'make all', { Makefile: 'X != cp gen.in gen.mk\n-include gen.mk\nall::\n\techo ok\n', ...gen }, 'ASK'],
+    ['a redirection', 'make all', { Makefile: "X := $(shell echo 'all::' > gen.mk)\n-include gen.mk\nall::\n\techo ok\n" }, 'ASK'],
+    ['a script', 'make all', { Makefile: 'X := $(shell ./gen.sh)\n-include local.mk\nall:\n\techo ok\n', 'gen.sh': '#!/bin/sh\necho hi\n' }, 'ASK'],
+    ['find -exec', 'make all', { Makefile: "X := $(shell find . -name '*.in' -exec cp {} gen.mk \\;)\n-include gen.mk\nall::\n\techo ok\n" }, 'ASK'],
+    [
+      'the second -f file',
+      'make -f a.mk -f b.mk all',
+      { 'a.mk': 'X := $(shell cp gen.in b.mk)\nall::\n\techo a\n', 'b.mk': 'all::\n\techo b\n', ...gen },
+      'ASK',
+    ],
+    ['an include that is already there is rewritten before it is read', 'make all', { Makefile: 'X := $(shell cp gen.in gen.mk)\ninclude gen.mk\nall::\n\techo ok\n', ...gen, 'gen.mk': 'all::\n\techo old\n' }, 'ASK'],
+    // (the controls: a pure read does not write, and a command with nothing read after it has nothing to make stale)
+    ['a version lookup', 'make all', { Makefile: 'VERSION := $(shell git describe --tags)\n-include local.mk\nall:\n\techo ok\n' }, 'ALLOW'],
+    ['the date', 'make all', { Makefile: 'NOW := $(shell date +%s)\ninclude config.mk\nall:\n\techo ok\n', 'config.mk': 'X = 1\n' }, 'ALLOW'],
+    ['uname', 'make all', { Makefile: 'OS := $(shell uname -s)\n-include local.mk\nall:\n\techo ok\n' }, 'ALLOW'],
+    ['!= pwd', 'make all', { Makefile: 'D != pwd\n-include local.mk\nall:\n\techo ok\n' }, 'ALLOW'],
+    ['a script and nothing read after it', 'make all', { Makefile: 'X := $(shell ./gen.sh)\nall:\n\techo ok\n', 'gen.sh': '#!/bin/sh\necho hi\n' }, 'ALLOW'],
   ]);
 });

@@ -6174,6 +6174,8 @@ function shellGlobWords(
       words.push(t.text);
       continue;
     }
+    // a pattern behind `~` is in somebody's home directory, which this reader does not list
+    if (t.text.startsWith('~')) incomplete ??= t.text;
     const { names, incomplete: partial } = expandNamePattern(cwd, t.text);
     patterns.push(t.text.startsWith('/') ? t.text : `${cwd === '/' ? '' : cwd}/${t.text}`);
     if (partial) incomplete ??= t.text;
@@ -7015,6 +7017,33 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   for (const name of included)
     if (model.rules.has(name)) model.unsupported.push(`an included makefile is remade by this makefile: ${name}`);
   return model;
+}
+
+/** The capabilities whose matchers are pure reads: a command the authored table first classifies as one of these writes nothing. */
+const PURE_READ_CAPABILITIES: ReadonlySet<string> = new Set(['command.read-only', 'git.local.status', 'git.remote.inspect']);
+const readMatchers = new WeakMap<CompiledAuthorityTable, Array<{ re: RegExp; capability: string }>>();
+/**
+ * DOES THIS COMMAND WRITE ANYTHING? Asked of the authored table, not of a list of writers: the first matcher that claims the command
+ * decides, exactly as it does when the command is classified, and only a pure read (a version lookup, `date`, `uname -s`) says no.
+ * Everything else - an interpreter, a script, a tool nobody classified, a copy - may have written the file the makefile reads next.
+ */
+function commandMayWrite(table: CompiledAuthorityTable, text: string): boolean {
+  let list = readMatchers.get(table);
+  if (list === undefined) {
+    list = table.matchers
+      .filter((m) => m.command && (m.tool === 'Bash' || m.tool === 'any') && !m.additive)
+      .map((m) => ({ re: new RegExp(m.command!, 'i'), capability: m.capability }));
+    readMatchers.set(table, list);
+  }
+  for (const stage of splitShellPipeline(externalText(text))) {
+    if (stage.text.startsWith(MARK)) continue;
+    if (redirectionTargets(stage.text).length > 0 || /[$`]/.test(stage.text)) return true;
+    for (const n of normalizeSegment(stage.text)) {
+      const first = list.find((m) => m.re.test(n));
+      if (first === undefined || !PURE_READ_CAPABILITIES.has(first.capability)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -8543,6 +8572,12 @@ function resolveScriptCommand(
     const includeStale = [...merged.pendingIncludes, ...merged.sources].some((f) =>
       MAKE_WILDCARD.test(f) ? patternStale(f) : stale(f),
     );
+    // ...AND SO DOES A COMMAND THE MAKEFILE ITSELF RUNS WHILE IT IS READ. `X := $(shell cp gen.in gen.mk)` above `-include gen.mk`
+    // writes the include before make opens it: the file was absent when it was listed, and what the command wrote is what runs. Any
+    // command run at parse time that is not a pure read may have written a makefile this invocation goes on to read - a later `-f`
+    // file, an include (present or not).
+    const readsMoreThanOne = paths.length > 1 || merged.sources.length > paths.length || merged.pendingIncludes.length > 0;
+    const parseStale = readsMoreThanOne && merged.parseRan.some((c) => commandMayWrite(table, c));
     // ...and this one hands over what was read too. Returning a null body here discarded a makefile that had
     // already been parsed, so its parse-time `$(shell …)` and its recipes vanished the moment ANY earlier
     // segment of the command line could not be classified — which the wildcard ledger entry makes easy. An
@@ -8783,13 +8818,15 @@ function resolveScriptCommand(
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
-    if (staleNow || includeStale)
+    if (staleNow || includeStale || parseStale)
       gaps.push({
         what: 'body',
         where: makeDir,
         why: includeStale
           ? 'an optional include is written earlier in the same command, so what was read is not what runs'
-          : 'the makefile is rewritten earlier in the same command, so its analysed contents are not what runs',
+          : parseStale
+            ? 'a command that runs while the makefile is read may write a makefile it reads after it, so what was read is not what runs'
+            : 'the makefile is rewritten earlier in the same command, so its analysed contents are not what runs',
       });
     // A target this resolver could not find is PROVEN absent only when nothing in the makefile could define it
     // invisibly. Returning early on the first missing target also discarded every gap found for the OTHER goals
