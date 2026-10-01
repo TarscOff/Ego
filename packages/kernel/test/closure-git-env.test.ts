@@ -152,6 +152,27 @@ test('...and the neighbours of an oversize command are still read: a push behind
   }
 });
 
+test('every other tool ends in a verdict too: a path or a patch too large to judge asks, it does not throw', () => {
+  const dir = workspace();
+  overrideWorkLimit(1_000);
+  try {
+    for (const [tool, input] of [
+      ['Write', { file_path: join(dir, 'src/a.ts'), content: 'x' }],
+      ['Read', { file_path: join(dir, 'README.md') }],
+      ['Grep', { pattern: 'x', path: dir }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const e = evaluate(table, ctx(dir), { tool, input });
+      assert.equal(e.verdict, 'ASK', `${tool}: ${e.verdict}`);
+      assert.match(e.reason, /too large to classify within the bound/);
+      assert.equal(e.code, 'HUMAN_APPROVAL_REQUIRED');
+    }
+  } finally {
+    overrideWorkLimit(null);
+  }
+  // ...and with the real limit the same calls are the ordinary ones
+  assert.equal(evaluate(table, ctx(dir), { tool: 'Read', input: { file_path: join(dir, 'package.json') } }).verdict, 'ALLOW');
+});
+
 test('a command nested deeper than the stack is an ASK, not an exception', () => {
   const dir = workspace();
   const e = run(`${'sudo '.repeat(1800)}ls`, dir);

@@ -15052,7 +15052,23 @@ function searchToolHits(
 export function evaluate(table: CompiledAuthorityTable, ctx: EvaluationContext, req: ToolRequest): Evaluation {
   // ONE VIEW OF THE FILESYSTEM PER DECISION: every canonicalisation inside this call shares a cache that is gone when it
   // returns (see withPathCache), so a physical walk costs each link once and a link made between two calls is seen
-  return withPathCache(() => withWorkBound(() => evaluateRequest(table, ctx, req)));
+  return withPathCache(() =>
+    withWorkBound(() => {
+      try {
+        return evaluateRequest(table, ctx, req);
+      } catch (e) {
+        // (a shell command is answered inside `classifyBounded`, keeping what it found; this is every other tool - a path of megabytes, a
+        // patch of thousands of files - and a command whose bound was reached while its answer was being finished)
+        if (!(e instanceof WorkBoundExceeded)) throw e;
+        const hit = unknownHit(table, ctx, e.message);
+        const outcome = explainOutcome(table, ctx, hit)!;
+        const where = `in profile ${ctx.profile}, mode ${ctx.mode} (${hit.via})`;
+        const base =
+          hit.verdict === 'DENY' ? `${hit.capability} is DENY ${where}` : `${hit.capability} requires human approval ${where}`;
+        return { verdict: hit.verdict, hits: [hit], reason: renderReason(base, outcome), decisive: hit, code: outcome.code, rule: outcome.rule };
+      }
+    }),
+  );
 }
 
 /** `classifyCommand`, UNDER THE BOUND. A command that costs more than the bound allows - or nests deeper than the stack
