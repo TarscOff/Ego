@@ -344,6 +344,69 @@ test('the working directory has the same view of a definition: a cd that is real
     assert.equal(verdict(c, dir), 'DENY', c);
 });
 
+test('`find -exec` of anything that writes its operands is a write to every path the search can reach', () => {
+  const dir = workspace({ 'src/a.ts': 'x\n', 'control-plane/permissions/matchers.md': 'x\n' });
+  // the audit's reproductions (review-11 #88): a predicate that names the hooks directory selects files IN it
+  for (const c of [
+    'find . -path "*/.git/hooks/*" -exec chmod +x {} \\;',
+    'find . -path "*/.git/hooks/*" -exec chmod 777 {} \\;',
+    'find . -path "*/.git/hooks/*" -exec chmod +x {} +',
+    'find . -path "*/.git/hooks/*" -execdir chmod +x {} \\;',
+    'find . -path "*/.git/hooks/*" -ok chmod +x {} \\;',
+    'find . -ipath "*/.git/hooks/*" -exec chmod +x {} \\;',
+    'find . -path "*/.git/hooks/*" -exec touch {} \\;',
+    'find . -path "*/.git/hooks/*" -exec chown root {} \\;',
+    'find . -path "*/.git/hooks/*" -exec chgrp staff {} \\;',
+    'find . -path "*/.git/hooks/*" -exec mv {} /tmp/saved \\;',
+    'find . -path "*/.git/hooks/*" -exec cp /tmp/evil {} \\;',
+    'find . -path "*/.git/hooks/*" -delete',
+    // a governed tree named by the predicate, whichever way it is spelled
+    'find . -path "./control-plane/*" -exec chmod 644 {} \\;',
+    'find . -path "*control-plane*" -exec chmod 644 {} \\;',
+    'find . -wholename "*/.harness/*" -exec chmod 644 {} +',
+    'find . -path "*/.harness/*" -delete',
+    // a SECOND starting point is a starting point: the search reaches everything under it
+    'find . .git/hooks -name x -exec chmod +x {} \\;',
+    'find src .git/hooks -type f -exec touch {} \\;',
+    'find -L . .harness/generated -exec chmod 600 {} \\;',
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  // a predicate that does not NAME the place cannot be shown to avoid it: asking is the verdict, as it is for cp
+  for (const c of [
+    'find . -name pre-commit -exec chmod +x {} \\;',
+    'find . -name pre-commit -exec chmod +x {} +',
+    'find . -name "*.sh" -exec chmod +x {} \\;',
+    'find . -type f -exec chmod 644 {} \\;',
+    'find . -exec chmod +x {} \\;',
+    'find . -execdir chmod +x {} \\;',
+    'find . -ok chmod +x {} \\;',
+    'find . -name pre-commit -exec touch {} \\;',
+    'find . -name pre-commit -exec cp src/a.ts {} \\;',
+    'find . -name pre-commit -exec mv {} /tmp/x \\;',
+    'find src -name "*.sh" -exec chmod +x {} \\;',
+    // a pattern that is on the EXCLUDING side of the test (`-prune`, `!`) names nothing that is selected
+    'find . -path "*/.git/*" -prune -o -type f -exec chmod +x {} \\;',
+    'find . -type f ! -path "*/.git/*" -exec chmod +x {} \\;',
+    'find . -name node_modules -prune -o -name "*.sh" -exec chmod +x {} \\;',
+    // fd is find under another name: its match is appended when no placeholder says where it goes
+    'fd pre-commit -x chmod +x',
+    'fd -H pre-commit -x chmod +x {}',
+    "fd -H -p 'git/hooks' -x chmod +x {}",
+  ])
+    assert.equal(verdict(c, dir), 'ASK', c);
+  // ...and the reads, and the ordinary work, are untouched
+  for (const c of [
+    'find . -name "*.ts"',
+    'find src -name "*.ts" -exec cat {} \\;',
+    'find . -name "*.ts" -exec grep -l foo {} +',
+    'find . -type f -exec wc -l {} +',
+    'find . -exec echo {} \\;',
+    'find . -path "*/.git/hooks/*" -exec cat {} \\;',
+    'find . -path "*/.git/hooks/*" -exec grep -l exit {} +',
+  ])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+});
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * THE MODEL AGAINST THE SHELLS. A list of spellings proves the spellings. The property is SOUNDNESS: whatever bash and
  * zsh really do, the model never claims a name is a function when either of them runs the program. (Bound in zsh and

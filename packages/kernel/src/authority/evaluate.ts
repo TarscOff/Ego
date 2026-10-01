@@ -1870,12 +1870,96 @@ function withoutRedirections(text: string): string {
   return requote(words);
 }
 
+/** THE HEADS THAT WRITE EVERY OPERAND THEY ARE GIVEN, and the ones that write one operand, the destination. Three readers
+ *  each kept their own copy of this fact - what a path operand of such a head is judged as, which of them ask when an
+ *  operand is built at run time, and which `find … -exec CMD {}` writes to every match - and they disagreed about
+ *  `chmod`, `chgrp` and `touch`, always in the direction that released the write: `find . -path ".git/hooks/<glob>" -exec
+ *  chmod +x {} \;` read `{}` as the search root, and a mode change of `.` touches nothing (review-11 #88). */
+const EVERY_OPERAND_WRITERS = new Set([
+  'tee', 'truncate', 'touch', 'chmod', 'chown', 'chgrp', 'rm', 'mkdir', 'rmdir', 'ln', 'shred', 'unlink', 'rename', 'patch', 'mv',
+]);
+const DESTINATION_WRITERS = new Set(['cp', 'gcp', 'install', 'ginstall', 'ditto', 'rsync', 'scp', 'cpio']);
+/** what `{}` is a write to, in `find … -exec CMD {}`: a destination or every operand - or an in-place edit */
+const MATCH_WRITERS = new Set([...EVERY_OPERAND_WRITERS, ...DESTINATION_WRITERS, 'sed', 'gsed', 'perl', 'dd']);
+
+/** THE STARTING POINTS OF A `find`: every word before the first expression (a word beginning with `-`, `(`, `!` or `,`),
+ *  after the leading `-H -L -P -D … -O…` options. All of them are searched; reading only the first judged
+ *  `find . .git/hooks -exec chmod +x {} \;` by `.` alone. */
+function findStartingPoints(rest: readonly string[]): string[] {
+  let i = 1;
+  while (i < rest.length) {
+    const t = rest[i]!;
+    if (t === '-H' || t === '-L' || t === '-P' || /^-O\d?$/.test(t)) i++;
+    else if (t === '-D') i += 2;
+    else break;
+  }
+  const roots: string[] = [];
+  for (; i < rest.length; i++) {
+    const t = rest[i]!;
+    if ((t.startsWith('-') && t !== '-') || t === '(' || t === '!' || t === ',') break;
+    roots.push(t);
+  }
+  return roots.length ? roots : ['.'];
+}
+
+/** The literal path a `-path` / `-wholename` pattern names, wildcards trimmed off both ends: a pattern for the hooks directory names
+ *  `.git/hooks`, `./control-plane/*` names `control-plane`, `*control-plane*` names `control-plane`. A wildcard in the
+ *  middle, or nothing literal at all, names nothing the kernel can judge. */
+function findPatternPath(pattern: string): string | null {
+  const core = pattern
+    .replace(/^(?:\.\/)+/, '')
+    .replace(/^[*?]+\/?/, '')
+    .replace(/\/?[*?]+$/, '')
+    .replace(/\/+$/, '');
+  return core === '' || /[*?[\]{}]/.test(core) ? null : core;
+}
+
+/** THE COMMANDS A MATCH PRODUCES - one reader for `find -exec` and `fd -x`. `{}` stands for every path the search
+ *  reaches, so a payload that WRITES it writes whatever those predicates select: a name built at run time, which asks;
+ *  and, where a predicate NAMES a place (a `-path` pattern for the hooks directory), that place itself, which is judged as the path it is.
+ *  A payload that only reads sees the search root, the most specific path the kernel can see. */
+function matchPayloads(cmd: readonly string[], roots: readonly string[], named: readonly string[], isMatch: (c: string) => boolean, inMatchDir: boolean, implicitMatch: boolean): string[] {
+  const out: string[] = [];
+  const writes = MATCH_WRITERS.has((cmd[0] ?? '').replace(/^.*\//, ''));
+  // fd puts the match last when the command has no placeholder, as `xargs` does
+  const words = implicitMatch && !cmd.some(isMatch) ? [...cmd, '{}'] : [...cmd];
+  const placed = words.some(isMatch);
+  for (const root of roots) {
+    const r = root.replace(/(.)\/+$/, '$1');
+    // (the root form stays too: a search root that is itself governed is a deny whatever the matches are)
+    if (writes && placed) out.push(requote(words.map((c) => (isMatch(c) ? root : c))));
+    // `-execdir` and `-okdir` run the payload IN THE DIRECTORY OF EACH MATCH, which is somewhere inside the search root: its
+    // relative operands are judged under the root, which is governed wherever any of its files is
+    out.push(
+      requote(
+        words.map((c, k) =>
+          isMatch(c) && writes ? '$FIND_MATCH'
+          : isMatch(c) ? root
+          : inMatchDir && k > 0 && !c.startsWith('-') && !c.startsWith('/') && !c.includes('=') ? `${r}/${c}`
+          : c,
+        ),
+      ),
+    );
+  }
+  if (writes && placed) for (const n of named) out.push(requote(words.map((c) => (isMatch(c) ? n : c))));
+  return [...new Set(out)];
+}
+
 /** `find … -exec CMD {} \;` / `-execdir` / `-ok` / `-okdir` / `fd -x|--exec CMD` / `-delete`: the payload runs, so it is classified. */
 function findPayloads(rest: string[]): string[] {
   const out: string[] = [];
   const head = rest[0];
   if (head === 'find' || head === 'gfind') {
-    const searchRoot = rest.slice(1).find((t) => !t.startsWith('-')) ?? '.';
+    const roots = findStartingPoints(rest);
+    // the places the PREDICATES name: `-path P` selects files whose whole path matches P. Unless the expression also EXCLUDES
+    // something (`-path '*/.git/*' -prune -o …`, `! -path …`), when a name no longer says which side of the test it is on
+    const named: string[] = [];
+    const excludes = rest.some((t) => t === '-prune' || t === '!' || t === '\\!' || t === '-not');
+    for (let i = 1; !excludes && i < rest.length - 1; i++)
+      if (/^-(i?path|i?wholename)$/.test(rest[i]!)) {
+        const p = findPatternPath(rest[i + 1]!);
+        if (p !== null) named.push(p);
+      }
     for (let i = 1; i < rest.length; i++) {
       const t = rest[i]!;
       if (t === '-exec' || t === '-execdir' || t === '-ok' || t === '-okdir') {
@@ -1883,35 +1967,18 @@ function findPayloads(rest: string[]): string[] {
         let j = i + 1;
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '\\;' && rest[j] !== '+')
           cmd.push(rest[j++]!);
-        // `{}` stands for a match under the search root: the root is the most specific path the kernel can see.
-        // `-execdir` and `-okdir` run the payload IN THE DIRECTORY OF EACH MATCH, which is somewhere inside the search
-        // root: its relative operands are judged under the root, which is governed wherever any of its files is
-        const inMatchDir = t === '-execdir' || t === '-okdir';
-        // `{}` is a write DESTINATION for these heads, and it stands for every match under the root - `.git/hooks/pre-commit`
-        // among them - so it is written as what it is, a name built at run time (exit review 11)
-        const writerPayload = /^(cp|mv|tee|install|ln|truncate|sed|perl|dd|ginstall)$/.test((cmd[0] ?? '').replace(/^.*\//, ''));
-        // (the root form stays too: a search root that is itself governed is a deny whatever the matches are)
-        if (cmd.length && writerPayload && cmd.includes('{}'))
-          out.push(requote(cmd.map((c) => (c === '{}' ? searchRoot : c))));
-        if (cmd.length)
-          out.push(
-            requote(
-              cmd.map((c, k) =>
-                c === '{}' && writerPayload ? '$FIND_MATCH'
-                : c === '{}' ? searchRoot
-                : inMatchDir && k > 0 && !c.startsWith('-') && !c.startsWith('/') && !c.includes('=') ? `${searchRoot.replace(/\/$/, '')}/${c}`
-                : c,
-              ),
-            ),
-          );
+        if (cmd.length) out.push(...matchPayloads(cmd, roots, named, (c) => c === '{}', t === '-execdir' || t === '-okdir', false));
         i = j;
       } else if (t === '-delete') {
-        // predicates narrow a deletion: only a search root that is itself a protected tree is judged as deleting it
-        out.push(
-          /(^|\/)\.(harness|git|husky|claude|codex|ssh|aws|kube|gnupg)(\/|$)/i.test(searchRoot)
-            ? `rm -r ${searchRoot}`
-            : `rm -r ${searchRoot.replace(/\/$/, '')}/FIND_MATCH`,
-        );
+        // predicates narrow a deletion: only a search root that is itself a protected tree - or a place a predicate names - is
+        // judged as deleting it
+        for (const root of roots)
+          out.push(
+            /(^|\/)\.(harness|git|husky|claude|codex|ssh|aws|kube|gnupg)(\/|$)/i.test(root)
+              ? `rm -r ${root}`
+              : `rm -r ${root.replace(/\/$/, '')}/FIND_MATCH`,
+          );
+        for (const n of named) out.push(`rm -r ${n}`);
       }
     }
   }
@@ -1919,7 +1986,7 @@ function findPayloads(rest: string[]): string[] {
     // `fd [OPTIONS] [pattern] [path]`: the search root is the second bare operand, else the working directory
     const execAt = rest.findIndex((t) => t === '-x' || t === '--exec' || t === '-X' || t === '--exec-batch');
     const operands = rest.slice(1, execAt < 0 ? rest.length : execAt).filter((t) => !t.startsWith('-'));
-    const searchRoot = operands[1] ?? '.';
+    const roots = [operands[1] ?? '.'];
     for (let i = 1; i < rest.length; i++) {
       const t = rest[i]!;
       if (t === '-x' || t === '--exec' || t === '-X' || t === '--exec-batch') {
@@ -1928,7 +1995,7 @@ function findPayloads(rest: string[]): string[] {
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '\\;') cmd.push(rest[j++]!);
         // `{}` / `{/}` / `{.}` stand for a match under the search root, exactly as find's `{}` does: substitute the
         // root rather than dropping the placeholder, or `fd -x rm -rf {}` reads as a bare `rm -rf` (round 13)
-        if (cmd.length) out.push(requote(cmd.map((c) => (/^\{.*\}$/.test(c) ? searchRoot : c))));
+        if (cmd.length) out.push(...matchPayloads(cmd, roots, [], (c) => /^\{.*\}$/.test(c), false, true));
         i = j;
       }
     }
@@ -1952,7 +2019,11 @@ function findPayloads(rest: string[]): string[] {
       }
       after.push(t);
     }
-    const payload = after.filter((t) => t !== replstr && !/^\{.*\}$/.test(t) && t !== ':::');
+    // `{}` is a placeholder for `parallel` always and for `xargs` only when `-I`/`-i` names one; otherwise it is an argument
+    // like any other - and inside `xargs find … -exec chmod +x {} \;` it is find's own match, which dropping blinded the
+    // payload reader to
+    const placeholders = head === 'parallel' || replstr !== null;
+    const payload = after.filter((t) => t !== replstr && !(placeholders && /^\{.*\}$/.test(t)) && t !== ':::');
     if (payload.length) out.push(requote(payload));
   }
   return out;
@@ -3718,6 +3789,8 @@ function editsInPlace(head: string, tokens: string[]): boolean {
 const IFS_RE = /[ \t\n]/;
 
 const WRITE_HEADS = new Set([
+  // every head that writes all of its operands is one whose destinations are judged - one list, not two copies
+  ...EVERY_OPERAND_WRITERS,
   'cp',
   'mv',
   // the GNU-named twins macOS installs: `gsed -i` edits in place exactly as `sed -i` does, and the destination
@@ -9526,7 +9599,7 @@ function classifyShellPaths(
     const head = (tokens[commandHeadIndex(tokens)] ?? '').replace(/^.*\//, '');
     const editsInPlaceHere = /^(sed|gsed|perl)$/.test(head) && tokens.some((t) => /^-[a-zA-Z]*i/.test(t) || t === '--in-place');
     if (
-      (/^(tee|touch|mkdir|cp|mv|ln|install|truncate|ginstall)$/.test(head) || editsInPlaceHere) &&
+      (EVERY_OPERAND_WRITERS.has(head) || /^(cp|install|ginstall)$/.test(head) || editsInPlaceHere) &&
       tokens.slice(commandHeadIndex(tokens) + 1).some((t) => !t.startsWith('-') && /[$`]/.test(t))
     )
       hits.push({
@@ -10181,21 +10254,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           if (dest === null) dest = 'ALL';
         }
     } else if (
-      [
-        'tee',
-        'truncate',
-        'touch',
-        'chmod',
-        'chown',
-        'rm',
-        'mkdir',
-        'rmdir',
-        'ln',
-        'shred',
-        'unlink',
-        'rename',
-        'patch',
-      ].includes(head) ||
+      EVERY_OPERAND_WRITERS.has(head) ||
       // `cp -l` makes a HARD LINK: a second name for the same inode, through which a governed file is writable
       // by a path no rule covers (exit review 7)
       (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t)))

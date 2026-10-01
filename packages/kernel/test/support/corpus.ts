@@ -1394,6 +1394,36 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'argocd app sync prod --dry-run --dry-run=false',
     ],
   },
+  {
+    family: 'fs',
+    // `{}` is every path the predicates select, and a predicate that names the hooks directory selects files in it
+    id: 'a mutating find -exec or -delete over a place its predicate names',
+    floor: 'DENY',
+    cases: [
+      'find . -path "*/.git/hooks/*" -exec chmod +x {} \\;',
+      'find . -path "*/.git/hooks/*" -exec chmod 777 {} +',
+      'find . -path "*/.git/hooks/*" -execdir touch {} \\;',
+      'find . -path "*/.git/hooks/*" -exec cp /tmp/evil {} \\;',
+      'find . -path "*/.git/hooks/*" -delete',
+      'find . -path "./control-plane/*" -exec chmod 644 {} \\;',
+      'find . -wholename "*/.harness/*" -exec chown root {} \\;',
+      'find . .git/hooks -name x -exec chmod +x {} \\;',
+    ],
+  },
+  {
+    family: 'fs',
+    // ...and one that does not name it cannot be shown to avoid it
+    id: 'a mutating find -exec over a search that can reach a governed place',
+    floor: 'ASK',
+    cases: [
+      'find . -name pre-commit -exec chmod +x {} \\;',
+      'find . -type f -exec touch {} +',
+      'find . -exec chmod +x {} \\;',
+      'find . -name pre-commit -exec mv {} /tmp/x \\;',
+      'find . -name pre-commit -exec cp src/a.ts {} \\;',
+      'fd pre-commit -x chmod +x',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -1476,7 +1506,9 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'timeout', apply: (c) => `timeout 60 ${c}`, safe: noLeadingAssignment },
   { name: 'nice', apply: (c) => `nice -n 5 ${c}`, safe: noLeadingAssignment },
   { name: 'stdbuf', apply: (c) => `stdbuf -o0 ${c}`, safe: noLeadingAssignment },
-  { name: 'xargs', apply: (c) => `echo x | xargs -I{} ${c}`, safe: noLeadingAssignment },
+  // `xargs -I{}` replaces EVERY `{}` in its arguments, find's own match among them: `find … -exec chmod +x {}` becomes
+  // `chmod +x x`, which is a different command and not a variant of the one the class names
+  { name: 'xargs', apply: (c) => `echo x | xargs -I{} ${c}`, safe: (c) => noLeadingAssignment(c) && !c.includes('{}') },
   // shell structure
   { name: 'after &&', apply: (c) => `true && ${c}` },
   { name: 'after ||', apply: (c) => `false || ${c}` },
