@@ -11407,6 +11407,13 @@ function isPathLike(tok: string, cwdIsSensitive = false): boolean {
   );
 }
 
+/** The part of a word that names a path: `--out=FILE` and `of=FILE` carry theirs after the `=`, an option alone carries none. */
+function pathValueOf(raw: string): string {
+  const eq = raw.indexOf('=');
+  if (raw.startsWith('-')) return eq > 0 ? raw.slice(eq + 1) : '';
+  return /^(of|if|dest|src|file)=/.test(raw) ? raw.slice(eq + 1) : raw;
+}
+
 /** Path-like tokens of a segment, read by the shared resolver in the tracked cwd (one entry per reading of each token);
  *  tokens with unresolved variables are reported as dynamic. */
 function pathTokens(segment: string, cwd: string, old?: readonly string[]): PathEntry[] {
@@ -11427,15 +11434,7 @@ function pathTokens(segment: string, cwd: string, old?: readonly string[]): Path
       : -1;
   for (const [idx, raw] of allTokens.entries()) {
     if (idx === 0 || idx === patternIndex) continue;
-    const eq = raw.indexOf('=');
-    const tok =
-      raw.startsWith('-') && eq > 0
-        ? raw.slice(eq + 1)
-        : raw.startsWith('-')
-          ? ''
-          : /^(of|if|dest|src|file)=/.test(raw)
-            ? raw.slice(eq + 1)
-            : raw;
+    const tok = pathValueOf(raw);
     if (!tok || !isPathLike(tok, cwdIsSensitive) || tok === '{}') continue;
     out.push(...pathEntries(cwd, tok, old));
   }
@@ -12289,6 +12288,34 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         absolute: false,
       });
   }
+  // A WORD WITH WHITESPACE IN IT REACHES THE OPERAND READERS ABOVE AS SEVERAL WORDS: normalization drops the quoting that held
+  // it together, so `cp x "sp l/settings.json"` is the two words `sp` and `l/settings.json`. When `sp l` is a link to `.claude`
+  // the pieces name nothing governed, and the real file is `.claude/settings.json` - ALLOW, for a link whose NAME holds a space
+  // (and the same with a `..` after it). The segment AS WRITTEN keeps the word whole (a redirection is read from it for the
+  // same reason), so a writer's word with whitespace in it joins the paths below from there as well, as a destination; any
+  // other command's word is read the same way when it looks like a path. The pieces stay judged too: they over-read, which
+  // only ever adds a hit.
+  const wholeWords = new Set<string>();
+  const wholeIsDest = (value: string): boolean => {
+    const pieces = value.split(/[ \t\n]+/).filter(Boolean);
+    if (dest === 'ALL') return true;
+    if (dest === 'AFTER_DASHDASH') {
+      const after = tokens.slice(tokens.indexOf('--') + 1);
+      return pieces.some((piece) => after.includes(piece));
+    }
+    return dest !== null && pieces.includes(dest);
+  };
+  if (!containerPaths)
+    for (const word of tokenize(rawSeg)) {
+      const value = pathValueOf(word);
+      if (!value || !/[ \t\n]/.test(hostTrim(value)) || patternWords.includes(value)) continue;
+      // a word with a glob or a substitution in it is text more often than a name (`select * from t`), and its pieces
+      // already answer for it as globs and dynamic words do
+      if (/[*?[{$`]/.test(value)) continue;
+      if (!write && !value.includes('/') && !value.startsWith('~')) continue; // a read of a bare name: nothing to resolve
+      wholeWords.add(value);
+      if (!paths.some((p) => p.raw === value)) paths.push(...pathEntries(cwd, value, old));
+    }
   if (containerPaths || paths.length === 0) return hits;
   for (const p of paths) {
     if (p.abs === null) {
@@ -12326,6 +12353,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     }
     const isDest =
       dest === 'ALL' ||
+      // a whole word is a destination when the destination the operand readers found is one of its pieces: `cp "sp l/x" /tmp`
+      // reads the link, `cp /tmp/x "sp l/x"` writes through it
+      (write && wholeWords.has(p.raw) && wholeIsDest(p.raw)) ||
       (dest === 'AFTER_DASHDASH' && tokens.indexOf(p.raw) > tokens.indexOf('--')) ||
       (dest !== null && p.raw === dest);
     // reads: credential stores (any spelling, canonicalized), env files; recursive reads of HOME or `/` reach them too

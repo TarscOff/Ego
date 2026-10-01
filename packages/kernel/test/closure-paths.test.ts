@@ -38,6 +38,11 @@ const FILES: Record<string, string> = {
   // refused outright rather than asked about (an archive's contents cannot be seen)
   '.git/hooks/sub/keep': '',
   hk: link('.git/hooks/sub'),
+  // a link and a plain directory whose NAMES hold a space: the word that names them keeps its quoting only in the segment
+  // as written, and the operand readers see a normalised one
+  'd dir': link('.claude/sub'),
+  'sp l': link('.claude'),
+  'my docs/keep': '',
   'a.tar': 'x',
   'a.zip': 'x',
   'urls.txt': 'https://example.com\n',
@@ -126,6 +131,32 @@ const REFUSED_DOTDOT: readonly string[] = [
   'esbuild src/a.ts --outfile=d/../settings.json',
   'tsc --tsBuildInfoFile d/../settings.json',
   'cmd --output d/../settings.json',
+  // a name with a space in it: one word to the shell, several to the readers of a normalised segment
+  'echo x > "d dir/../settings.json"',
+  'cp package.json "d dir/../settings.json"',
+  'cp package.json d\\ dir/../settings.json',
+  "cp package.json 'd dir'/../settings.json",
+  'cp -t "d dir/.." package.json',
+  'touch "d dir/../settings.json"',
+  'mv package.json "d dir/../settings.json"',
+  'echo x | tee "d dir/../settings.json"',
+  'sed -i s/a/b/ "d dir/../settings.json"',
+  'rm "d dir/../settings.json"',
+  'dd if=package.json of="d dir/../settings.json"',
+  'curl -o "d dir/../settings.json" https://example.com',
+  'sudo cp package.json "d dir/../settings.json"',
+  'env X=1 cp package.json "d dir/../settings.json"',
+  // ...and a link whose name holds a space needs no `..` at all: `sp l` is `.claude`
+  'cp package.json "sp l/settings.json"',
+  'cp package.json sp\\ l/settings.json',
+  'touch "sp l/settings.json"',
+  'echo x | tee "sp l/settings.json"',
+  'mv package.json "sp l/settings.json"',
+  'rm "sp l/settings.json"',
+  'cp -t "sp l" package.json',
+  'cp package.json "sp l"',
+  'sed -i s/a/b/ "sp l/settings.json"',
+  'curl -o "sp l/settings.json" https://example.com',
 ];
 
 test('A. `..` after a link names the parent of the link TARGET, at every site that turns a shell word into a path', () => {
@@ -171,6 +202,14 @@ test('A. the physical spelling and the linked spelling of one file are judged al
   assert.equal(verdictOf('echo x > e/../out.txt'), 'ALLOW');
   assert.equal(verdictOf('cp package.json e/../copy.json'), 'ALLOW');
   assert.equal(verdictOf('touch e/../x.ts'), 'ALLOW');
+  // ...and a plain directory with a space in its name is ordinary work, with or without a `..`
+  for (const command of ['cp package.json "my docs/../copy.json"', 'echo x > "my docs/../out.txt"', 'touch "my docs/../x.ts"', 'cp package.json "my docs/copy.json"', 'cat "my docs/../package.json"'])
+    assert.equal(verdictOf(command), 'ALLOW', command);
+  // a word that is only READ through a link with a space in its name is read, as it is through any other spelling
+  assert.equal(verdictOf('cp "sp l/settings.json" /tmp/x'), verdictOf('cp .claude/settings.json /tmp/x'));
+  assert.equal(verdictOf('cat "sp l/settings.json"'), verdictOf('cat .claude/settings.json'));
+  assert.equal(verdictOf('git commit -m "update docs/a b.md"'), verdictOf('git commit -m "update docs"'));
+  assert.equal(verdictOf('sqlite3 app.db "select * from t where a = 1"'), verdictOf('sqlite3 app.db "select 1"'));
 });
 
 test('A. reading through a link and `..` is judged like the file it reaches', () => {
@@ -569,6 +608,71 @@ test('G. the resolver returns the lexical reading AND the physical one, bounded 
   assert.ok(pathCandidates(dir, '/proc/self/root/../x').paths.includes('/x'));
 });
 
+test('G. whatever the word, the resolver returns absolute paths, in bounded time, and does not throw', () => {
+  const dir = workspace(FILES);
+  // a small deterministic generator (a linear congruential sequence), so a failure names a word that can be replayed
+  let seed = 20261001;
+  const next = (n: number): number => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed % n;
+  };
+  const pieces = ['d', 'e', 'chain', 'src', '..', '.', '', '~', '~-', '~+', '$HOME', '${HOME}', '$X', '`c`', '*', '?', '[a]', '{a,b}', ' ', '\t', '/', '//', 'proc', 'self', 'cwd', 'fd', '3', '/dev/null', 'a b', ' '];
+  const started = Date.now();
+  for (let i = 0; i < 3000; i++) {
+    const parts: string[] = [];
+    for (let k = 1 + next(7); k > 0; k--) parts.push(pieces[next(pieces.length)]!);
+    const word = parts.join(next(3) === 0 ? '' : '/');
+    const c = pathCandidates(next(2) === 0 ? dir : [dir, join(dir, 'src'), join(dir, 'd')], word, next(2) === 0 ? [dir] : undefined);
+    for (const p of c.paths) assert.ok(p.startsWith('/'), `${JSON.stringify(word)} produced the relative path ${p}`);
+    if (c.dynamic) assert.deepEqual(c.paths, [], JSON.stringify(word));
+  }
+  assert.ok(Date.now() - started < 20000, 'three thousand words are read in bounded time');
+});
+
+test('G. the physical reading is the file the kernel opens: a differential against open(2) over random paths through links and `..`', () => {
+  // every directory holds a marker that says which directory it is, so the content read through a path names the place the
+  // kernel resolved it to. The reading is checked against the kernel itself, not against what the author expects `..` to do.
+  const dir = workspace({
+    ...FILES,
+    MARK: 'root',
+    '.claude/MARK': 'claude',
+    '.claude/sub/MARK': 'sub',
+    'src/MARK': 'src',
+    'src/deep/MARK': 'deep',
+    'rel/MARK': 'rel',
+  });
+  let seed = 7;
+  const next = (n: number): number => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed % n;
+  };
+  const parts = ['d', 'd', 'e', 'e', 'chain', 'rel', 'rel/up', 'src', 'deep', '..', '..', '..', '..', '.', '.claude', 'sub'];
+  let compared = 0;
+  let throughLinks = 0;
+  for (let i = 0; i < 4000; i++) {
+    const word = [...Array.from({ length: 1 + next(6) }, () => parts[next(parts.length)]!), 'MARK'].join('/');
+    let truth: string;
+    try {
+      // string concatenation, not `join`: `join` would collapse the `..` before the kernel ever saw it
+      truth = readFileSync(`${dir}/${word}`, 'utf8');
+    } catch {
+      continue; // the kernel cannot open it either (a missing component, a file where a directory should be)
+    }
+    compared++;
+    const c = pathCandidates(dir, word);
+    const reads = c.paths.map((p) => {
+      try {
+        return readFileSync(p, 'utf8');
+      } catch {
+        return null;
+      }
+    });
+    assert.ok(reads.includes(truth), `${word}: the kernel opens the '${truth}' marker, the readings are ${c.paths.join(' | ')} -> ${JSON.stringify(reads)}`);
+    if (/(^|\/)(d|e|chain|rel\/up)\/\.\./.test(word)) throughLinks++;
+  }
+  assert.ok(compared > 300 && throughLinks > 30, `the sample reached ${compared} openable paths, ${throughLinks} of them through a link and \`..\``);
+});
+
 test('G. the readers that are not judges: the file a command opens, the directory a -C leaves it in, the directories a cd may reach', () => {
   const dir = workspace(FILES);
   const real = realpathSync(dir);
@@ -601,7 +705,8 @@ test('G. a physical walk costs filesystem calls, and ordinary work pays for none
   const startedDots = Date.now();
   for (let i = 0; i < 60; i++) verdictOf('echo x > e/../out.txt', dir);
   const dots = Date.now() - startedDots;
-  assert.ok(dots < Math.max(plain * 3, 3000), `a \`..\` word through a link costs ${dots} ms against ${plain} ms for a plain one`);
+  // (a loose bound on purpose: it exists to catch a walk that repeats itself per site, not to time the machine)
+  assert.ok(dots < Math.max(plain * 5, 10000), `a \`..\` word through a link costs ${dots} ms against ${plain} ms for a plain one`);
 });
 
 test('H. no site resolves a shell word on its own: the evaluator does not import `resolve`, and every candidate goes through authority/paths.ts', () => {

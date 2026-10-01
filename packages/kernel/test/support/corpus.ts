@@ -1657,8 +1657,28 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'curl -o dlnk/../settings.json https://example.com',
       'wget -O dlnk/../settings.json https://example.com',
       'esbuild src/a.ts --outfile=dlnk/../settings.json',
+      // a link whose NAME holds a space: one word to the shell, several to the readers of a normalised segment
+      'cp package.json "spaced link/../settings.json"',
+      "touch 'spaced link'/../settings.json",
+      'cp -t "spaced link/.." package.json',
     ],
-    files: { '.claude/sub/keep': '', dlnk: link('.claude/sub') },
+    files: { '.claude/sub/keep': '', dlnk: link('.claude/sub'), 'spaced link': link('.claude/sub') },
+  },
+  {
+    // normalization drops the quoting of an ordinary segment, so a word with a space in it reached the operand readers as
+    // several words, none of which named the link; the segment as written keeps the word whole
+    family: 'fs',
+    id: 'a writer\'s operand through a link whose name holds a space',
+    floor: 'DENY',
+    cases: [
+      'cp package.json "spaced up/settings.json"',
+      'cp package.json spaced\\ up/settings.json',
+      "touch 'spaced up'/settings.json",
+      'echo x | tee "spaced up/settings.json"',
+      'cp -t "spaced up" package.json',
+      'rm "spaced up/settings.json"',
+    ],
+    files: { '.claude/keep': '', 'spaced up': link('.claude') },
   },
   {
     family: 'fs',
