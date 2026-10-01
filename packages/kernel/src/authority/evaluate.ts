@@ -14285,6 +14285,10 @@ function analyzeSegments(
     // the pairs that EARLIER segments recorded - taken before this segment adds its own, so the `ln` that creates a
     // link is not itself a write through it
     linkPairsNow = [...written].filter((w) => w.startsWith('\0link:')).map((w) => w.slice(6).split('\0->') as [string, string]);
+    // THE DIRECTORY A WRITER RUNS IN IS THE ONE ITS OWN OPTIONS LEFT IT IN: `env -C sub cp ../evil.mk Makefile` writes `sub/Makefile`, and a
+    // ledger that recorded `Makefile` beside the shell's directory left the file the next `make -C sub` reads looking untouched. The
+    // classification of the same segment already follows `env -C` / `git -C` (env.cwd); the ledger is the same question.
+    const ledgerDirs = env.cwd === effectiveCwd ? [effectiveCwd, ...altDirs] : [env.cwd];
     // THE WRITER IS FOUND WHERE THE COMMAND STARTS, not at the first word. `env cp evil/plan.mk sub && make -C sub
     // -f plan.mk` copies through a wrapper, and reading the raw head left the ledger empty, so the makefile the
     // next command read looked untouched (exit review 10, cross-product: every wrapper the corpus knows).
@@ -14302,7 +14306,7 @@ function analyzeSegments(
           }
         }
       }
-      for (const dir of [effectiveCwd, ...altDirs]) {
+      for (const dir of ledgerDirs) {
         for (const w of writtenPathOperands(n, dir)) {
           if (w === LEDGER_ANY) written.add('\0any');
           else recordWrite(w);
@@ -14311,7 +14315,7 @@ function analyzeSegments(
     }
     // a sed script's `w FILE` writes it whatever the operands say - read from the segment AS WRITTEN, where the script
     // is still one quoted word
-    for (const dir of [effectiveCwd, ...altDirs])
+    for (const dir of ledgerDirs)
       for (const f of sedWrittenFiles(seg, ctx, dir)) for (const q of pathCandidates(dir, f).paths) recordWrite(q);
     // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
     // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect

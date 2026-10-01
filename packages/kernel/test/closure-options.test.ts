@@ -748,3 +748,20 @@ test('RC-OPT: gawk reads a long option by any unique prefix - an in-place edit, 
   assert.deepEqual(expandLongOptions(words('gawk --incl=inplace --prof=x p f')), ['gawk', '--include=inplace', '--profile=x', 'p', 'f']);
   assert.deepEqual(expandLongOptions(words('gawk --fi=x p')), ['gawk', '--fi=x', 'p']);
 });
+
+test('RC-CAR: the write ledger follows the directory a carrier chain left a writer in, as the verdict does', () => {
+  const fixture = { Makefile: 'all:\n\techo ok\n', 'sub/Makefile': 'all:\n\techo ok\n', 'evil.mk': 'all:\n\tgit push origin main\n' };
+  const dir = workspace(fixture);
+  // `env -C sub cp ../evil.mk Makefile` replaces sub/Makefile, which the next `make -C sub` reads: that make is not the one the
+  // manifest on disk describes
+  for (const c of [
+    'env -C sub cp ../evil.mk Makefile && make -C sub all',
+    'env --chdir=sub cp ../evil.mk Makefile && make -C sub all',
+    'env -iC sub cp ../evil.mk Makefile && make -C sub all',
+    'timeout -s KILL 5 env -C sub cp ../evil.mk Makefile && make -C sub all',
+    'cp ../evil.mk Makefile && make all',
+  ])
+    assert.notEqual(verdict(c, dir), 'ALLOW', c);
+  // a carrier that changes directory and writes nothing leaves the ledger alone
+  assert.equal(verdict('env -C sub ls && make -C sub all', dir), 'ALLOW');
+});
