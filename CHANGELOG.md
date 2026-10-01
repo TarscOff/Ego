@@ -57,6 +57,27 @@ discipline of decision Q84 (authority changes are never patch releases).
   and how reversible it is (`authority/approval.ts`). Durable tasks do not exist before phase 2, so the task line says so.
 
 ### Changed (authority — MAJOR under Q84)
+- **A cluster command is read once** (closure of root cause RC-K8S, independent reviews 7-11: `sa10-33` CRITICAL and
+  `r11-68 69 70 71 72 73 74 75 76 77 169 170 186 187 191 206`). `kubectl`, `oc`, `helm` and minikube's own `kubectl`
+  were judged by four readers that each knew a slice of the command line — a verb table, a dry-run scanner, the regexes
+  of `matchers.md` and a target resolver over text whose quoting was already gone. `kubectl --context production set
+  env deploy/x 'A=b --list'` was a production mutation at ALLOW because the resolver read the last blank-separated
+  words as the read-only flag. `authority/k8s.ts` (`k8sEffect`) now answers, over the words as the tool receives them,
+  which cluster is reached (`--context`, `--cluster`, `--user`, `--server`/`-s`, `--kubeconfig`/`oc --config` and the
+  CONTENT of a kubeconfig the workspace holds, judged by its SERVER, `KUBECONFIG`, `KUBERNETES_MASTER`,
+  `KUBERNETES_SERVICE_HOST`, `HELM_KUBECONTEXT`, `HELM_KUBEAPISERVER`, `HELM_NAMESPACE`, `minikube kubectl --`), what is
+  read (a Secret by resource type, by a `-f`/`-k` source, by a stream, by a word a shell fills in; `helm status -o
+  json|yaml`; `kubectl config view --raw|--flatten`; a file named as `KEY=PATH`), what changes (a flag VALUE is data,
+  never the flag; the last `--list` and the last dry-run flag decide) and what runs (a plugin, a credential plugin in
+  a kubeconfig, a post-renderer). One option table (`k8s.ts`) now feeds the verb scan, the dry-run reader, the
+  help-probe reader and `flagFilledInAfter`. Verdicts that change for ordinary commands: a verb the tool does not have
+  (`kubectl foo`, `kubectl argo rollouts get`, `helm secrets view`, `helm unittest`) and an option in front of the verb
+  that the tool does not have are plugin invocations and ASK, also against a local cluster; `kubectl config view
+  --flatten` and a `kubectl config set-*` behind a global option are denied like their plain spellings; a Secret read
+  from a non-local cluster through a source the kernel cannot read is denied; a workspace kubeconfig whose context
+  points at a server that is not a declared local one is no longer local, and one that is (a kind or k3d cluster's)
+  now makes `kubectl --kubeconfig ./kube.conf apply -f x.yaml` local without a `--context`; a kubeconfig the same
+  command line writes, or whose credential plugin runs a program, asks.
 - **A session grant lifts only a capability whose effect stays on this machine** (Q98 section 4 / issue #16 sections
   4 and 8: "never permit an unattended external-write ALLOW", and a human phrase is a bounded task approval, never a
   durable authority grant). Until now `you can comment on the issue` made every later `gh issue comment` — any issue,

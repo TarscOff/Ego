@@ -362,9 +362,12 @@ function parse(head: string, words: readonly K8sWord[]): Parsed {
     if (isOptionWord(w)) {
       p.roles[i] = 'option';
       const shape = optionShape(head, p.verb, w.text);
-      // IN FRONT OF THE VERB only the persistent options may stand. cobra skips the word after one it does not know as that
-      // option's value, so the verb it finds is a different word, and kubectl hands what it finds to a plugin of that name
-      if (p.verbAt < 0 && !isGlobalName(head, shape.name)) {
+      // IN FRONT OF THE VERB, cobra finds the command by skipping the words that are flags. A flag it does not know whole
+      // (anything but the persistent options) it takes to have a value when it is spelled without `=`: it skips the NEXT
+      // word, and when the flag has none that word is the verb, so the command it finds is another one - and kubectl hands
+      // what it finds to a plugin of that name. So in front of the verb stand: a persistent option, an option glued to its
+      // value (`--dry-run=client` is parsed by the verb that follows), and one KNOWN to take a value (`-o yaml get pods`)
+      if (p.verbAt < 0 && !isGlobalName(head, shape.name) && shape.glued === undefined && shape.next !== 'yes') {
         p.unplaced ??= `an option, ${shape.name}, that ${head} does not have in front of its verb`;
         p.plugin = true;
       }

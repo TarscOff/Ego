@@ -94,6 +94,11 @@ test('...and the real flags still LOOK at production', () => {
       [`${PROD} rollout status deploy/x`, 'ALLOW'],
       [`${PROD} auth can-i create pods`, 'ALLOW'],
       [`${PROD} delete pod x --help`, 'ALLOW'],
+      // cobra parses a flag spelled with `=` by the verb that follows it, and skips the value of one it knows takes one: both
+      // stand in front of the verb. A bare flag the tool does not know in front of it swallows the verb, and asks
+      [`${PROD} --dry-run=client set env deploy/x A=b`, 'ALLOW'],
+      [`${PROD} -o yaml get pods`, 'ALLOW'],
+      [`${PROD} --dry-run set env deploy/x A=b`, 'DENY'],
     ],
     { 'x.yaml': 'kind: ConfigMap\nmetadata:\n  name: x\n' },
   );
