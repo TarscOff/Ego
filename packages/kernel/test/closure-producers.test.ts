@@ -247,6 +247,31 @@ test('npm: a key that runs code is one key whether it arrives as a flag, as an .
   assert.equal(v('npm run build --loglevel=silent --if-present', BUILD), 'ALLOW');
 });
 
+test('npm: a flag is the key it abbreviates - npm takes any unambiguous prefix of a configuration key', () => {
+  // verified against npm 11: `npm config get node-options --node-opt=X` prints X
+  const wrong: string[] = [];
+  for (const flag of [
+    "--node-opt='--require ./evil.js'",
+    "--node-o='--require ./evil.js'",
+    '--script-sh=/tmp/evil.sh',
+    '--onload=./evil.js',
+    '--init-mod=./evil.js',
+    '--node-gy=./evil.sh',
+    '--shel=/tmp/evil.sh',
+    '--userc=/tmp/evil',
+    '--globalc=/tmp/evil',
+    '--foreground-s',
+    '--viewe=./evil.sh',
+  ])
+    if (v(`npm run build ${flag}`, BUILD) === 'ALLOW') wrong.push(flag);
+  assert.deepEqual(wrong, []);
+  // the flags of ordinary work are none of these
+  for (const flag of ['--silent', '--if-present', '--no-audit', '--no-fund', '--no-progress', '--loglevel=silent', '--prefer-offline', '--json', '--no-update-notifier'])
+    assert.equal(v(`npm run build ${flag}`, BUILD), 'ALLOW', flag);
+  // npm does not normalise a flag the way it normalises a variable: an underscore or a capital is an unknown key, not this one
+  assert.equal(v("npm run build --node_options='--require ./evil.js'", BUILD), 'ALLOW');
+});
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * 3. lint-staged CONFIGURATIONS BELOW THE WORKING DIRECTORY
  *

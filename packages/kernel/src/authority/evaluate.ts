@@ -245,10 +245,19 @@ const NPM_CONFIG_RUNS: readonly string[] = [
   'script-shell', 'shell', 'node-options', 'onload-script', 'init-module', 'node-gyp', 'editor', 'git', 'browser',
   'viewer', 'scripts-prepend-node-path',
 ];
-/** ...as a flag (the flag also keeps the settings that relocate npm's configuration or turn script output on) ... */
-const NPM_RUNS_FLAG = new RegExp(
-  `^--(${NPM_CONFIG_RUNS.join('|')}|ignore-scripts=false|foreground-scripts|userconfig|globalconfig|prefix)(=|$)`,
-);
+/** ...as a flag (the flag also keeps the settings that relocate npm's configuration or turn script output on). npm's option
+ *  parser takes ANY UNAMBIGUOUS PREFIX of a key as that key (`npm config get node-options --node-opt=X` prints X on npm 11), so
+ *  `--node-opt` is `--node-options`, `--onload` is `--onload-script` and `--shel` is `--shell`; an ambiguous prefix is ignored by
+ *  npm, and is read as the key here, which can only ask more. An underscore or a capital is no abbreviation: npm does not
+ *  normalise a flag as it does a variable. `--ignore-scripts=false` is the one flag whose VALUE decides. */
+const NPM_FLAG_KEYS: readonly string[] = [...NPM_CONFIG_RUNS, 'foreground-scripts', 'userconfig', 'globalconfig', 'prefix'];
+function npmFlagRuns(token: string): boolean {
+  const m = /^--([^=]+)(?:=([\s\S]*))?$/.exec(token);
+  if (m === null) return false;
+  const name = m[1]!;
+  if (name.length >= 2 && 'ignore-scripts'.startsWith(name)) return m[2] === 'false';
+  return NPM_FLAG_KEYS.some((k) => name === k || (name.length >= 2 && k.startsWith(name)));
+}
 /** ...and as a line of an rc file (plus the yarn berry spellings that hand the package manager to a program) */
 const NPM_RUNS_RC = new RegExp(`^\\s*(${NPM_CONFIG_RUNS.join('|')}|scriptShell|yarnPath|plugins)\\s*[:=]`, 'm');
 /** NODE_OPTIONS members that execute nothing and open nothing */
@@ -7783,7 +7792,7 @@ function resolveScriptCommand(
     );
     // npm accepts its configuration as flags anywhere on the line, including AFTER the script name, and
     // `--script-shell` re-points the interpreter of every script (challenge 8, finding 3)
-    const npmFlags = tokens.filter((t) => NPM_RUNS_FLAG.test(t));
+    const npmFlags = tokens.filter(npmFlagRuns);
     // the same settings live in `.npmrc` / `.yarnrc.yml`, which npm reads from the package directory upwards.
     // A flag on the command line was modelled and the FILE that sets the identical key was not (challenge 8).
     // A CONFIGURATION FILE THIS COMMAND REWRITES IS NOT THE ONE npm WILL READ. `printf 'script-shell=/tmp/evil.sh'
