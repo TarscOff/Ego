@@ -1403,16 +1403,18 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     floor: 'DENY',
     cases: [
       'make -f ev*.mk',
-      "make -f 'ev*.mk'",
       'make -f ev?l.mk',
       'make -f ev[a-z]l.mk',
-      'make --file=ev*.mk',
+      'make --file ev*.mk',
       'make -kf ev*.mk',
       'make -f s*/evil.mk',
+      // (a goal and a directory are words the shell expands as well)
+      'make -C su* all',
     ],
     files: {
       'evil.mk': 'all:\n\tgit push --force origin main\n',
       'sub/evil.mk': 'all:\n\tgit push --force origin main\n',
+      'sub/Makefile': 'all:\n\tgit push --force origin main\n',
     },
   },
   {

@@ -303,19 +303,29 @@ test('E. a glob in -f is expanded against the directory, as the shell does (r11-
   const files = { Makefile: OK, 'evil.mk': EVIL, 'sub/evil.mk': EVIL };
   check([
     ['the reported star', 'make -f ev*.mk', files, 'DENY'],
-    ['quoted', "make -f 'ev*.mk'", files, 'DENY'],
+    // (only a WHOLE unquoted word is expanded: `'ev*.mk'`, `--file=ev*.mk` and `-fev*.mk` reach make as they are and name no file -
+    //  checked against GNU make 3.81, which answers "No such file" to each of them)
+    ['quoted: the shell does not expand it', "make -f 'ev*.mk'", files, 'ALLOW'],
     ['a question mark', 'make -f ev?l.mk', files, 'DENY'],
     ['a bracket class', 'make -f ev[a-z]l.mk', files, 'DENY'],
     ['a negated class', 'make -f ev[!x]l.mk', files, 'DENY'],
     ['a POSIX class', 'make -f ev[[:alpha:]]l.mk', files, 'DENY'],
-    ['--file=', 'make --file=ev*.mk', files, 'DENY'],
+    ['--file= is one word, and the shell expands no part of it', 'make --file=ev*.mk', files, 'GATED'],
     ['--makefile', 'make --makefile ev*.mk', files, 'DENY'],
-    ['-f glued', 'make -fev*.mk', files, 'DENY'],
+    ['-f glued is one word as well', 'make -fev*.mk', files, 'ALLOW'],
     ['a cluster ending in f', 'make -kf ev*.mk', files, 'DENY'],
     ['a glob in a directory component', 'make -f s*/evil.mk', files, 'DENY'],
     ['a dot-slash prefix', 'make -f ./e*l.mk', files, 'DENY'],
     ['a second -f', 'make -f Makefile -f ev*.mk', files, 'DENY'],
-    ['an abbreviated long option', 'make --fil=ev*.mk', files, 'DENY'],
+    ['an abbreviated long option, glued', 'make --fil=ev*.mk', files, 'ALLOW'],
+    ['an abbreviated long option, separate', 'make --fil ev*.mk', files, 'DENY'],
+    ['--makefile separate', 'make --makefile ev?l.mk', files, 'DENY'],
+    ['-C is a word too: the directory the glob names is entered', 'make -C su* all', { Makefile: OK, 'sub/Makefile': EVIL }, 'DENY'],
+    ['-C with a question mark', 'make -C s?b all', { Makefile: OK, 'sub/Makefile': EVIL }, 'DENY'],
+    ['-C and -f together', 'make -C su* -f x.mk', { 'sub/x.mk': EVIL }, 'DENY'],
+    ['--directory= is one word', 'make --directory=su* all', { Makefile: OK, 'sub/Makefile': EVIL }, 'ALLOW'],
+    ['-C quoted', "make -C 'su*' all", { Makefile: OK, 'sub/Makefile': EVIL }, 'ALLOW'],
+    ['-C with a directory created on the way', 'mkdir sub && cp evil.mk sub/Makefile && make -C su* all', { Makefile: OK, 'evil.mk': EVIL }, 'ASK'],
     ['after -C the glob is the shell\'s (the directory it stands in), the match is opened in -C', 'make -C sub -f ev*.mk', { ...files, 'sub/Makefile': OK }, 'DENY'],
     // (a dry run prints the recipe and does not run it - the glob is read, the act is not performed)
     ['a dry run is a dry run', 'make -n -f ev*.mk', files, 'ALLOW'],
@@ -334,7 +344,7 @@ test('E. the glob is the same one behind every wrapper, and reads what the shell
     ['inside a function', 'f() { make -f ev*.mk; }; f', files, 'DENY'],
     ['from a recipe', 'make top', { ...files, Makefile: 'top:\n\tmake -f ev*.mk\n' }, 'DENY'],
     // (a hidden file matches too: the shell hides it only until `dotglob` is set, and a file nobody read is the worse mistake)
-    ['a hidden match', "make -f '*.mk'", { Makefile: OK, '.evil.mk': EVIL }, 'DENY'],
+    ['a hidden match', 'make -f *.mk', { Makefile: OK, '.evil.mk': EVIL }, 'DENY'],
     ['a pattern that begins with the dot', 'make -f .ev*.mk', { Makefile: OK, '.evil.mk': EVIL }, 'DENY'],
     // (the shell compares names as written: `E*` does not match `evil`, on any filesystem)
     ['a pattern of the wrong case', "make -f 'E*.mk'", files, 'ALLOW'],
@@ -349,9 +359,9 @@ test('E. the glob is the same one behind every wrapper, and reads what the shell
 test('E. a glob no file matches yet is stale if an earlier segment writes one', () => {
   const files = { Makefile: OK };
   check([
-    ['printf into the matching name', `printf 'all:\\n\\t${ACT}\\n' > evil.mk && make -f 'ev*.mk'`, files, 'ASK'],
+    ['printf into the matching name', `printf 'all:\\n\\t${ACT}\\n' > evil.mk && make -f ev*.mk`, files, 'ASK'],
     ['cp into the matching name', 'cp Makefile evil.mk && make -f ev*.mk', files, 'ASK'],
-    ['a directory made on the way', "mkdir s && printf 'all:\\n\\tgit push origin main\\n' > s/evil.mk && make -f 's*/evil.mk'", files, 'ASK'],
+    ['a directory made on the way', "mkdir s && printf 'all:\\n\\tgit push origin main\\n' > s/evil.mk && make -f s*/evil.mk", files, 'ASK'],
     ['a glob behind a variable', 'make -f "$X"*.mk', files, 'ASK'],
     ['a glob behind a command substitution', 'make -f $(echo ev)*.mk', files, 'ASK'],
   ]);
@@ -361,9 +371,28 @@ test('E. a pattern with more matches than this reader follows is a gap, not an e
   const many: Record<string, string> = { Makefile: OK };
   for (let i = 0; i < 600; i++) many[`gen/m${i}.mk`] = OK;
   check([
-    ['-f', "make -f 'gen/m*.mk'", many, 'ASK'],
+    ['-f', "make -f gen/m*.mk", many, 'ASK'],
     ['an include', 'make all', { ...many, Makefile: 'include gen/m*.mk\nall::\n\techo ok\n' }, 'ASK'],
     ['a few hundred are read, and read as what they are', 'make all', { ...Object.fromEntries(Object.entries(many).slice(0, 301)), Makefile: '-include gen/m*.mk\nall:\n\techo ok\n' }, 'ALLOW'],
+  ]);
+});
+
+test('E. a glob GOAL is expanded by the shell too: make dep* runs the target of the directory it names', () => {
+  const dflt = { Makefile: `.PHONY: deploy\ndeploy:\n\t${ACT}\n`, 'deploy/keep': '' };
+  check([
+    ['a star', 'make dep*', dflt, 'DENY'],
+    ['a question mark', 'make dep?oy', dflt, 'DENY'],
+    ['a bracket', 'make de[p]loy', dflt, 'DENY'],
+    ['a dot-slash prefix', 'make ./dep*', dflt, 'DENY'],
+    ['behind -n it is a dry run', 'make -n dep*', dflt, 'ALLOW'],
+    ['among other goals', 'make clean dep*', { ...dflt, Makefile: `${dflt.Makefile}clean:\n\trm -rf out\n` }, 'DENY'],
+    ['behind a wrapper', 'nice make dep*', dflt, 'DENY'],
+    ['inside sh -c', "sh -c 'make dep*'", dflt, 'DENY'],
+    ['a file the same command creates', 'touch deploy && make dep*', { Makefile: dflt.Makefile }, 'ASK'],
+    // (the shell hands make the word as it is when nothing matches, and make has no target of that name)
+    ['nothing matches', 'make dep*', { Makefile: dflt.Makefile }, 'ALLOW'],
+    ['a harmless match', 'make bu*', { Makefile: 'build:\n\techo ok\n', 'build/keep': '' }, 'ALLOW'],
+    ['every file in the directory', 'make *', { Makefile: dflt.Makefile }, 'ALLOW'],
   ]);
 });
 

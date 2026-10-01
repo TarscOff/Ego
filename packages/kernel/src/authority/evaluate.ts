@@ -6120,24 +6120,22 @@ function expandNamePattern(baseDir: string, word: string, limit = 512): { names:
 /**
  * THE MAKEFILES AN INVOCATION OPENS FIRST - the one reader of "which file is the makefile". With no `-f`, GNU make's own
  * precedence (GNUmakefile, then makefile, then Makefile) in the make directory; with `-f`, every word, in order, because make
- * reads them ALL. A word with a glob character is expanded against `shellDir` - the shell does it where the command STANDS,
- * before make has entered its `-C` directory - and the matches are opened in `makeDir`. A word that cannot be turned into a
- * file (`$X`, an empty string) is `unresolved`: it used to be dropped, which left "no makefile" and a positive claim of
- * absence over a file that decides what runs. `patterns` are the glob words as absolute patterns, for the freshness ledger: a
- * file an earlier segment creates that the glob would match is a makefile that was not there when it was listed.
+ * reads them ALL. The words come out of `shellGlobWords`, so a glob has been expanded by the time they get here; one that still
+ * holds a glob character was quoted or matched nothing, and make opens it by that name - a file that is not there. A word that
+ * cannot be turned into a file (`$X`, an empty string) is `unresolved`: it used to be dropped, which left "no makefile" and a
+ * positive claim of absence over a file that decides what runs. `-I DIR` is where an `include` that is not in the make directory
+ * is looked for: part of the same question, answered here.
  */
 function makefileRoots(
-  shellDir: string,
   makeDir: string,
   files: readonly string[],
   includeWords: readonly string[] = [],
-): { paths: string[]; patterns: string[]; unresolved: string[]; includeDirs: string[] } {
-  // `-I DIR` is where an `include` that is not in the make directory is looked for: part of the same question, answered here
+): { paths: string[]; unresolved: string[]; includeDirs: string[] } {
   const includeDirs: string[] = [];
-  const badIncludeDirs: string[] = [];
+  const unresolved: string[] = [];
   for (const w of includeWords) {
     const opened = openedPath(makeDir, w);
-    if (opened === null) badIncludeDirs.push(w);
+    if (opened === null) unresolved.push(w);
     else includeDirs.push(opened);
   }
   if (files.length === 0)
@@ -6145,27 +6143,44 @@ function makefileRoots(
     // make never opens while claiming RESOLVED_COMPLETE (challenge 6, findings 2, 8, 20). The candidate is resolved to the
     // REAL directory entry: on a case-insensitive filesystem `makefile` and `Makefile` are the same file but canonicalise to
     // different strings, which silently unhooked the freshness ledger.
-    return { paths: defaultMakefile(makeDir), patterns: [], unresolved: badIncludeDirs, includeDirs };
+    return { paths: defaultMakefile(makeDir), unresolved, includeDirs };
   const paths: string[] = [];
-  const patterns: string[] = [];
-  const unresolved: string[] = [...badIncludeDirs];
   for (const f of files) {
-    if (MAKE_WILDCARD.test(f)) {
-      const { names, incomplete } = expandNamePattern(shellDir, f);
-      patterns.push(f.startsWith('/') ? f : `${shellDir === '/' ? '' : shellDir}/${f}`);
-      if (incomplete) unresolved.push(f);
-      for (const name of names) {
-        const opened = openedPath(makeDir, name);
-        if (opened === null) unresolved.push(name);
-        else paths.push(opened);
-      }
-      continue;
-    }
-    const opened = openedPath(makeDir, f);
+    // (a word that still holds a glob character is a literal name: `openedPath` reads a glob as a set, so the path reader is asked
+    //  for the plain reading, nothing expanded)
+    const opened = MAKE_WILDCARD.test(f) ? (pathCandidates(makeDir, f, undefined, { literal: true }).paths[0] ?? null) : openedPath(makeDir, f);
     if (opened === null) unresolved.push(f);
     else paths.push(opened);
   }
-  return { paths, patterns, unresolved, includeDirs };
+  return { paths, unresolved, includeDirs };
+}
+
+/**
+ * THE WORDS OF A COMMAND LINE AFTER THE SHELL HAS EXPANDED THEM. An unquoted word that holds `*`, `?` or `[` is replaced by the
+ * names it matches in the directory the command STANDS in (sorted, as the shell sorts them); a word that matches nothing, and a
+ * word that was quoted, reaches the program as it is. `patterns` are the expanded words as absolute patterns, for the freshness
+ * ledger: a file an earlier segment creates that one of them would match is a name that was not in the listing. `incomplete`
+ * names a pattern whose directory could not be listed or that matched more than this reader follows - a gap, never an empty set.
+ */
+function shellGlobWords(
+  marked: ReadonlyArray<{ text: string; quoted: boolean }>,
+  cwd: string,
+): { words: string[]; patterns: string[]; incomplete: string | null } {
+  const words: string[] = [];
+  const patterns: string[] = [];
+  let incomplete: string | null = null;
+  for (const t of marked) {
+    if (t.quoted || !MAKE_WILDCARD.test(t.text)) {
+      words.push(t.text);
+      continue;
+    }
+    const { names, incomplete: partial } = expandNamePattern(cwd, t.text);
+    patterns.push(t.text.startsWith('/') ? t.text : `${cwd === '/' ? '' : cwd}/${t.text}`);
+    if (partial) incomplete ??= t.text;
+    if (names.length === 0) words.push(t.text);
+    else words.push(...names);
+  }
+  return { words, patterns, incomplete };
 }
 
 /** make functions whose RESULT is text this resolver does not evaluate. Naming them is what makes an UNKNOWN
@@ -8315,7 +8330,14 @@ function resolveScriptCommand(
     // `build.log` as GOALS: no makefile has a rule for them, so the requested target was "absent" and the default goal - which
     // may be a `git push` - ran under that proof. The same reader every other head uses (commandWords) takes them out.
     const rawMarked = commandWords(makeAt >= 0 ? allRawMarked.slice(makeAt) : (carriedRaw() ?? tokenizeMarked(norm)));
-    const rawTokens = rawMarked.map((t) => t.text);
+    // THE SHELL EXPANDS EVERY UNQUOTED WORD THAT HOLDS A GLOB CHARACTER BEFORE MAKE IS STARTED, and make is handed the result: `make
+    // -f ev*.mk` opens `evil.mk`, `make -C su* all` enters `sub`, `make dep*` builds the `deploy` a file or a directory names. It is
+    // the WORD that is expanded, whole - `--file=ev*.mk`, `-fev*.mk` and a quoted `'ev*.mk'` reach make as they are and name no file
+    // (checked against GNU make 3.81). The command line was read with the pattern as if it were the name, found nothing, and called
+    // the makefile or the goal absent (closure audit wave 2, RC-MK). Done once, here, before the one command-line reader runs.
+    const expansion = shellGlobWords(rawMarked.slice(1), cwd);
+    const rawTokens = [rawMarked[0]?.text ?? 'make', ...expansion.words];
+    const goalPatterns = expansion.patterns;
     // ONE READER FOR THE COMMAND LINE: clusters, abbreviations, options that take a value, and `--` (see
     // parseMakeCommandLine). Nine self-attack findings came from three scans that each knew a different subset.
     const cl = parseMakeCommandLine(rawTokens);
@@ -8384,7 +8406,8 @@ function resolveScriptCommand(
     // THE MAKEFILES THIS INVOCATION OPENS FIRST come from ONE reader (makefileRoots): the default names in GNU make's own order,
     // or every `-f` word - a glob expanded against the directory as the shell does, a word nobody can resolve reported rather
     // than dropped. The includes they pull in are followed by parseMakefile.
-    const roots = makefileRoots(cwd, makeDir, makeFiles, cl.includeDirs);
+    const roots = makefileRoots(makeDir, makeFiles, cl.includeDirs);
+    if (expansion.incomplete !== null) roots.unresolved.unshift(expansion.incomplete);
     if (roots.unresolved.length)
       return {
         kind: 'make-target',
@@ -8419,7 +8442,7 @@ function resolveScriptCommand(
       const dirPart = canonicalPath(f.slice(0, f.search(/[*?[]/)) || '/');
       return written.has('\0any') || [...written].some((w) => w.startsWith(dirPart));
     };
-    const staleNow = staleCandidates.some((p) => stale(p)) || roots.patterns.some(patternStale);
+    const staleNow = staleCandidates.some((p) => stale(p)) || goalPatterns.some(patternStale);
     if (!paths.length || !paths.some((p) => readInsideWorkspace(ctx, p) !== null)) {
       // ...AND AN ABSENCE CANNOT BE CLAIMED OVER A FILE THIS COMMAND CREATES. With nothing on disk there is no
       // body to hand over, so the staleness is the whole answer — and it must be given BEFORE the absence,
@@ -8692,9 +8715,12 @@ function resolveScriptCommand(
       for (const [path, root] of [...paths.map((p) => [p, true] as const), ...includes.map((p) => [p, false] as const)]) {
         const names = makefileNames(makeDir, path);
         const by = remadeBy(merged, names, (prereq) => {
-          const abs = isAbsolute(prereq) ? prereq : join(makeDir, prereq);
           // on the disk, written earlier on the line, made by a literal rule, or something make runs at parse time may have made
-          return fileExists(abs) || stale(abs) || merged.rules.has(prereq) || merged.parseRan.length > 0;
+          return (
+            merged.rules.has(prereq) ||
+            merged.parseRan.length > 0 ||
+            pathCandidates(makeDir, prereq, undefined, { literal: true }).paths.some((abs) => fileExists(abs) || stale(abs))
+          );
         });
         if (by === null) continue;
         remade.push({ path, name: names[0]!, by, root });
