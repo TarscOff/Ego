@@ -221,7 +221,9 @@ function handleLocked(
         const mode = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {}).find((m) => m === marker);
         if (!mode) notes.push(`EGO: unknown mode "${marker}" ignored.`);
         else if (mode === 'EGO_MAINTENANCE' && !inEgo)
-          notes.push('EGO: EGO_MAINTENANCE is available only in the EGO source repository; mode unchanged.');
+          notes.push(
+            'EGO: EGO_MAINTENANCE is available only in the EGO source repository; mode unchanged.',
+          );
         else if (mode === 'BENCHMARK')
           notes.push(
             'EGO: BENCHMARK mode is entered by `harness benchmark run`, not by prompt; mode unchanged.',

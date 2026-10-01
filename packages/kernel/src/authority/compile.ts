@@ -23,15 +23,7 @@ import {
 export type EffectScope = 'local' | 'external';
 
 /** The second segment of an identifier says where its effect lands when it is one of these. */
-const OFF_MACHINE_SCOPES = new Set([
-  'remote',
-  'nonlocal',
-  'registry',
-  'target',
-  'production',
-  'public',
-  'external',
-]);
+const OFF_MACHINE_SCOPES = new Set(['remote', 'nonlocal', 'registry', 'target', 'production', 'public', 'external']);
 /** Namespaces whose identifiers describe THIS machine unless their scope segment says otherwise (`git.local.*` and
  *  `git.remote.*` share a namespace; `db.local.*` and `db.nonlocal.*` do too). */
 const LOCAL_NAMESPACES = new Set(['fs', 'command', 'ego', 'git', 'container']);

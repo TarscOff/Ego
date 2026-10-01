@@ -117,7 +117,9 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
       if (hostFlag !== undefined && isHostId(hostFlag)) dopts.host = hostFlag;
       const r = runDoctor(dopts);
       io.out(formatDoctor(r));
-      io.out(r.ok ? 'next: `ego status`' : 'next: fix the NOT SATISFIED lines, then `ego doctor` again');
+      io.out(
+        r.ok ? 'next: `ego status`' : 'next: fix the NOT SATISFIED lines, then `ego doctor` again',
+      );
       return r.ok ? 0 : 1;
     }
     case 'check': {
@@ -155,7 +157,9 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
     default: {
       const later = PHASE_LATER[cmd];
       if (later) {
-        io.err(`ego ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`);
+        io.err(
+          `ego ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`,
+        );
         return 2;
       }
       io.err(`unknown command "${cmd}". Try \`ego help\`.`);
@@ -473,7 +477,9 @@ function context(io: CliIo, project: ProjectContext | null, positional: string[]
     io.out(
       `${i.loaded ? 'LOADED    ' : 'NOT LOADED'} ~${String(i.tokens).padStart(5)} ${i.item}: ${i.reason}`,
     );
-  io.out('next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `ego init`');
+  io.out(
+    'next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `ego init`',
+  );
   return 0;
 }
 

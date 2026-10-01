@@ -59,8 +59,7 @@ export function loadOverlayBounded(file: string): string[] {
     throw new ControlPlaneValidationError([`${file}: schema must be ego.bounded-commands/1`]);
   const raw = doc.frontmatter['bounded'];
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw))
-    throw new ControlPlaneValidationError([`${file}: frontmatter "bounded" must be a list`]);
+  if (!Array.isArray(raw)) throw new ControlPlaneValidationError([`${file}: frontmatter "bounded" must be a list`]);
   return raw.map((v) => String(v));
 }
 
@@ -222,8 +221,7 @@ export function tableWidenings(baseline: CompiledAuthorityTable, next: CompiledA
   // tree — the one thing the organization layer exists to prevent.
   const baseBounded = new Set(baseline.boundedCommands?.bounded ?? []);
   for (const e of next.boundedCommands?.bounded ?? [])
-    if (!baseBounded.has(e))
-      out.push(`bounded vocabulary: "${e}" declared to introduce no executable closure`);
+    if (!baseBounded.has(e)) out.push(`bounded vocabulary: "${e}" declared to introduce no executable closure`);
   // Declaring a target local, or un-marking a production name, changes no capability verdict and still turns a
   // refusal into an allowed operation. It is judged by the same reader the authority diff uses.
   for (const c of diffLocalTargets(baseline.localTargets, next.localTargets))

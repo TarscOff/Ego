@@ -366,9 +366,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
   const shimMatches = ((): boolean | null => {
     if (!isFile(shim)) return null;
     try {
-      return (
-        readTextIfExists(shim) === readTextIfExists(join(packageRoot(), 'runtime', 'posix', 'ego-hook.sh'))
-      );
+      return readTextIfExists(shim) === readTextIfExists(join(packageRoot(), 'runtime', 'posix', 'ego-hook.sh'));
     } catch {
       return null;
     }
@@ -376,11 +374,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
   add(
     'hooks',
     'fail-closed shim',
-    shimMatches === true
-      ? 'SATISFIED'
-      : shimMatches === null && !isFile(shim)
-        ? 'NOT SATISFIED'
-        : 'UNVERIFIED',
+    shimMatches === true ? 'SATISFIED' : shimMatches === null && !isFile(shim) ? 'NOT SATISFIED' : 'UNVERIFIED',
     shimMatches === true
       ? '.harness/hooks/ego-hook.sh matches the copy EGO installs'
       : isFile(shim)
