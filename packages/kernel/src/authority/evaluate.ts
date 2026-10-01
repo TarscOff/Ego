@@ -9646,8 +9646,8 @@ function inWorkspace(ctx: EvaluationContext, abs: string): boolean {
 }
 
 /** What a cluster command may say about a file it names, from where the kernel stands: read inside the workspace, not
- *  there, not readable, outside the workspace, or - because this very command line, or an earlier one whose effect is
- *  unknown, writes it - not what the disk holds now. */
+ *  there, not readable, or outside the workspace - and, when this very command line (or an earlier one whose effect is
+ *  unknown) may have written it, marked stale: the text read is then the worst case it can be taken for, not the whole truth. */
 function k8sFile(ctx: EvaluationContext, env: ExecutionEnvironment | undefined, word: string): K8sFile {
   if (/[$`*?[{]/.test(word)) return { state: 'dynamic' };
   const cwd = env?.cwd ?? ctx.cwd ?? process.cwd();
@@ -9656,9 +9656,10 @@ function k8sFile(ctx: EvaluationContext, env: ExecutionEnvironment | undefined, 
   const abs = openedPath(cwd, word);
   if (abs === null) return { state: 'dynamic' };
   if (!inWorkspace(ctx, abs)) return { state: 'outside' };
-  if (env && (env.written.has('\0any') || env.written.has(canonicalPath(abs)))) return { state: 'fresh' };
+  const stale = env !== undefined && (env.written.has('\0any') || env.written.has(canonicalPath(abs)));
   const text = readInsideWorkspace(ctx, abs);
-  if (text !== null) return { state: 'text', text };
+  if (text !== null) return stale ? { state: 'text', text, stale: true } : { state: 'text', text };
+  if (stale) return { state: 'fresh' };
   return fileExists(abs) ? { state: 'unread' } : { state: 'absent' };
 }
 

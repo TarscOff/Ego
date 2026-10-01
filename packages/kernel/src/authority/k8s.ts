@@ -33,14 +33,14 @@ export interface K8sWord {
 
 /** What the kernel can say about a file a word names. */
 export type K8sFile =
-  /** read inside the workspace */
-  | { state: 'text'; text: string }
+  /** read inside the workspace. `stale`: an earlier part of THIS command line (or an earlier command whose effect is unknown)
+   *  may have rewritten it, so what the tool opens is not necessarily what was read - the text is still the worst-case evidence */
+  | { state: 'text'; text: string; stale?: boolean }
   /** not there (yet), and nothing earlier in this command line writes it */
   | { state: 'absent' }
   /** there, and the kernel cannot read it: too large, a directory, a device */
   | { state: 'unread' }
-  /** an earlier part of THIS command line writes it (or an earlier command's effect is unknown), so what it holds when
-   *  the tool opens it is not what is on the disk now */
+  /** not there now, and an earlier part of THIS command line may create it */
   | { state: 'fresh' }
   /** a path the workspace does not own: absolute, under `~`, or climbing out of it */
   | { state: 'outside' }
@@ -553,6 +553,8 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
       const model = readKubeconfig(f.text);
       if (model === null) signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (not a kubeconfig this reader understands)` });
       else models.push(model);
+      // what is on the disk is the worst case it can be taken for, not the whole truth: it may be rewritten before the tool opens it
+      if (f.stale === true) signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (this command line may rewrite it)` });
     } else if (f.state === 'outside') {
       // the workspace does not own it, so it says nothing about where a declared name points
       signals.push({ cls: 'EXTERNAL', target: label + name });
@@ -746,7 +748,7 @@ function manifestSecret(source: string, recursive: boolean, host: K8sHost): stri
   }
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(source)) return 'it is fetched from a URL, which is not read';
   const f = host.file(source);
-  if (f.state === 'text') return SECRET_KIND.test(f.text) ? 'it declares a Secret' : null;
+  if (f.state === 'text') return SECRET_KIND.test(f.text) ? 'it declares a Secret' : f.stale === true ? 'this command line may rewrite it' : null;
   if (f.state === 'absent') return null;
   if (f.state === 'unread') {
     const files = host.directory(source, recursive);
@@ -756,6 +758,7 @@ function manifestSecret(source: string, recursive: boolean, host: K8sHost): stri
       const gf = host.file(g);
       if (gf.state === 'text') {
         if (SECRET_KIND.test(gf.text)) return `${g} declares a Secret`;
+        if (gf.stale === true) return `${g} may be rewritten by this command line`;
       } else if (gf.state !== 'absent') return `${g} cannot be read`;
     }
     return null;
