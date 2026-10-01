@@ -44,7 +44,7 @@ export interface CompiledCapability {
   family: string;
   description: string;
   absolute: boolean;
-  /** lock tier (Q98): absolute, organization (widenable only by the organization layer) or none */
+  /** lock tier (Q98): absolute (HARD_LOCK), admin-governed (ADMIN_GOVERNED: widenable only by the organization layer, never past ASK) or none */
   lock: CapabilityLock;
   /** verdict from the core layer before any narrowing */
   core: Verdict;
@@ -77,8 +77,8 @@ export interface CompiledAuthorityTable {
   sourceHashes: Record<string, string>;
   capabilities: Record<string, CompiledCapability>;
   absoluteDenies: string[];
-  /** organization-locked denies: DENY at the core, widenable only by the organization layer (Q98) */
-  organizationLocked: string[];
+  /** ADMIN_GOVERNED capabilities: DENY at the core, widenable only by the organization layer, never past ASK (Q98) */
+  adminGoverned: string[];
   /** effective verdict after core → organization → overlay, before profile and mode */
   effective: Record<string, Verdict>;
   /** provenance per capability: which layer set the effective verdict */
@@ -102,7 +102,7 @@ export interface CompiledAuthorityTable {
   grantNegationWindowTokens: number;
   /** path patterns whose read or write is DENY at the core layer (credential stores, hook config, generated) */
   protectedPaths: Array<{ path: string; tool: string; capability: string }>;
-  /** capabilities matched by Bash matchers that are absolute or organization-locked and effectively DENY (pre-denied command classes) */
+  /** capabilities matched by Bash matchers that are HARD_LOCK or ADMIN_GOVERNED and effectively DENY (pre-denied command classes) */
   preDeniedCommandClasses: string[];
   /** command regex sources for read-only commands (STRICT shell allowlist base) */
   readOnlyCommandPatterns: string[];
@@ -136,7 +136,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
   const effective: Record<string, Verdict> = {};
   const provenance: Record<string, LayerTrace[]> = {};
   const absoluteDenies: string[] = [];
-  const organizationLocked: string[] = [];
+  const adminGoverned: string[] = [];
 
   for (const c of cp.absoluteDenies.capabilities) {
     capabilities[c.id] = {
@@ -164,12 +164,12 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       effective[c.id] = c.verdict;
       provenance[c.id] = [
         {
-          layer: c.lock === 'organization' ? 'organization-locked' : 'core',
+          layer: c.lock === 'admin-governed' ? 'admin-governed' : 'core',
           file: rel(cp.root, c.file),
           verdict: c.verdict,
         },
       ];
-      if (c.lock === 'organization') organizationLocked.push(c.id);
+      if (c.lock === 'admin-governed') adminGoverned.push(c.id);
     }
   }
 
@@ -186,14 +186,14 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       }
       const current = effective[c.id]!;
       const widening = VERDICT_RANK[c.verdict] < VERDICT_RANK[current];
-      // Q98: only the organization layer may widen an organization-locked deny; nothing else may widen anything.
-      if (widening && !(layerName === 'organization' && capabilities[c.id]!.lock === 'organization')) {
+      // Q98: only the organization layer may widen an ADMIN_GOVERNED capability; nothing else may widen anything.
+      if (widening && !(layerName === 'organization' && capabilities[c.id]!.lock === 'admin-governed')) {
         problems.push(
           `${c.file}:${c.line}: ${layerName} layer attempts to widen "${c.id}" from ${current} to ${c.verdict}; lower layers may only narrow`,
         );
         continue;
       }
-      // Q98: an admin-governed (organization-locked) capability is always administrable — the organization may enable
+      // Q98: an ADMIN_GOVERNED capability is always administrable — the organization may enable
       // it — but enabling an EXTERNAL effect never makes it unattended. Widening to ALLOW lands on ASK (the bounded
       // human approval) and the provenance says so, rather than being silently accepted.
       const clamped = widening && c.verdict === 'ALLOW' ? 'ASK' : c.verdict;
@@ -201,8 +201,8 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       provenance[c.id]!.push({
         layer: widening
           ? clamped === c.verdict
-            ? 'organization (widened organization-locked deny)'
-            : 'organization (widened organization-locked deny, clamped to the ASK ceiling)'
+            ? 'organization (widened admin-governed deny)'
+            : 'organization (widened admin-governed deny, clamped to the ASK ceiling)'
           : layerName,
         file: opts.projectRoot ? rel(opts.projectRoot, c.file) : basename(c.file),
         verdict: clamped,
@@ -331,7 +331,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     sourceHashes: sortRecord(cp.sourceHashes),
     capabilities: sortRecord(capabilities),
     absoluteDenies: [...absoluteDenies].sort(),
-    organizationLocked: [...organizationLocked].sort(),
+    adminGoverned: [...adminGoverned].sort(),
     effective: sortRecord(effective),
     provenance: sortRecord(provenance),
     profiles: sortRecord(profiles),
@@ -370,7 +370,9 @@ function sortRecord<T>(r: Record<string, T>): Record<string, T> {
 }
 
 function rel(root: string, file: string): string {
-  return file.startsWith(root) ? file.slice(root.length + 1) : file;
+  // a root written with a trailing separator must not cost the first character of the name (`ermissions/…`)
+  const base = root.endsWith('/') ? root.slice(0, -1) : root;
+  return base !== '' && file.startsWith(base + '/') ? file.slice(base.length + 1) : file;
 }
 
 /** Diff two compiled tables for `authority_changes` (Q84): effective verdict changes, added and removed IDs. */
@@ -589,10 +591,43 @@ export function classifyAuthorityChanges(
     if (
       c.kind === 'added' &&
       c.capability !== '*' &&
-      (next.absoluteDenies.includes(c.capability) || next.organizationLocked.includes(c.capability))
+      (next.absoluteDenies.includes(c.capability) || next.adminGoverned.includes(c.capability))
     )
       level = 'major';
     if (c.kind === 'matcher-added' && next.effective[c.capability] === 'ALLOW') level = 'major';
   }
   return level;
+}
+
+const LOCK_RANK: Record<CapabilityLock, number> = { none: 0, 'admin-governed': 1, absolute: 2 };
+
+/**
+ * WHETHER A CHANGE MAKES THE TABLE MORE PERMISSIVE, or removes something that held it back: the changes a human must
+ * see before they apply (issue #16 section 7: "versioned and diffable with no silent widening"). Narrowings, new
+ * ASK or DENY capabilities and budget changes are listed but not marked; anything this cannot prove narrower is
+ * marked, because a missed widening costs more than a spurious mark. `ego authority diff` prints the mark and
+ * `--fail-on-widening` turns it into an exit code.
+ */
+export function isWideningChange(c: AuthorityChange, next: CompiledAuthorityTable): boolean {
+  switch (c.kind) {
+    case 'changed':
+      return c.from !== undefined && c.to !== undefined && VERDICT_RANK[c.to] < VERDICT_RANK[c.from];
+    case 'added':
+      return c.to === 'ALLOW';
+    case 'removed':
+      return c.from !== 'ALLOW';
+    case 'lock-changed':
+      return c.fromLock !== undefined && c.toLock !== undefined && LOCK_RANK[c.toLock] < LOCK_RANK[c.fromLock];
+    case 'matcher-added':
+      return next.effective[c.capability] === 'ALLOW';
+    case 'matcher-removed':
+    case 'matcher-repartitioned':
+    case 'sanitizer-weakened':
+    case 'grants-widened':
+    case 'protection-removed':
+      return true;
+    case 'grants-narrowed':
+    case 'budget-changed':
+      return false;
+  }
 }

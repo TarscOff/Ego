@@ -3,6 +3,12 @@
 import { join, resolve, sep } from 'node:path';
 import { evaluate, type EvaluationContext } from '../authority/evaluate.ts';
 import { evaluateBudget, applyBudgetExtension, type BudgetCounters } from '../authority/budget.ts';
+import {
+  POLICY_STALE_RULE,
+  renderFailure,
+  type ReasonCode,
+  type RuleExplanation,
+} from '../authority/reasons.ts';
 import type { ExecutionBudgets } from '../control-plane/types.ts';
 import { ensurePolicyCache, type PolicyCache } from '../policy/cache.ts';
 import {
@@ -68,6 +74,19 @@ const NETWORK_CAPABILITY_PREFIXES = [
   'forge.',
   'mcp.remote.',
 ];
+
+/** What the hook says when IT refuses, rather than the evaluator: an execution budget, a retry stop, a payload that names
+ *  no tool, a pin not yet at the trust its profile requires. Same shape as an evaluated refusal (code, rule source,
+ *  whether configuration can change it) so a human reads one kind of message. */
+function hookRefusal(code: ReasonCode, detail: string, rule: RuleExplanation): string {
+  return `EGO: ${renderFailure(code, detail, rule)}`;
+}
+
+const budgetRule = (profile: string, what: string): RuleExplanation => ({
+  source: `profile ${profile}, ${what}`,
+  changeable: true,
+  changeBy: 'a human extends them for this session with `ego budget extend` from their own terminal, or selects a profile with larger budgets',
+});
 
 let detectorCache: { root: string; detectors: SecretDetector[] } | null = null;
 function detectorsFor(controlPlaneRoot: string): SecretDetector[] {
@@ -170,7 +189,14 @@ function handleLocked(
       const launcher = resolveLauncher(rt.env ?? process.env);
       const lines = [
         `EGO ${self.version} (runtime ${self.runtimeSha256.slice(0, 12)}) governs this repository. Profile ${rt.pin.profile}, mode ${session.mode}, task source ${rt.pin.taskSource ?? 'ad-hoc'}.`,
-        `Authority: ${cache.table.absoluteDenies.length} absolute denies and ${cache.table.organizationLocked.length} organization-locked denies are enforced deterministically; an ASK capability that stays on this machine prompts the human once per grant, and one that leaves it (a forge write, a request sent to a remote host) prompts on every occurrence.`,
+        `Authority: ${cache.table.absoluteDenies.length} HARD_LOCK capabilities (no layer can widen them) and ${cache.table.adminGoverned.length} ADMIN_GOVERNED capabilities (DENY until the organization policy enables them, then never past ASK) are enforced deterministically; an ASK capability that stays on this machine (LOCAL_WORKSPACE) prompts the human once per grant, and one that leaves it (EXTERNAL_EFFECT: a forge write, a request sent to a remote host) prompts on every occurrence (TASK_APPROVAL, one bounded approval).`,
+        cache.pendingWidening
+          ? renderFailure(
+              'POLICY_STALE',
+              `${cache.pendingWidening.widenings.length} policy widening(s) in the layer files are NOT applied (${cache.pendingWidening.widenings.slice(0, 3).join('; ')}${cache.pendingWidening.widenings.length > 3 ? '; …' : ''}); the policy in force is the last accepted one`,
+              POLICY_STALE_RULE,
+            )
+          : '',
         session.grants.length
           ? `Active grants (this session): ${session.grants.join(', ')}.`
           : 'No grants active.',
@@ -275,12 +301,17 @@ function handleLocked(
     case 'PreToolUse': {
       if (!ev.tool || !ev.tool.name) {
         // a payload without a tool is not a decision the kernel can make: fail closed, never allow by default
-        ledger('tool.pre', { tool: null, verdict: 'DENY', reason: 'payload without tool_name' });
+        ledger('tool.pre', { tool: null, verdict: 'DENY', reason: 'payload without tool_name', code: 'TARGET_UNCLASSIFIED' });
         writeSession(root, session);
         return {
           event: ev.event,
           action: 'deny',
-          reason: 'EGO: PreToolUse payload has no tool_name; failing closed',
+          reason: hookRefusal('TARGET_UNCLASSIFIED', 'PreToolUse payload has no tool_name; failing closed', {
+            source: 'the host payload: a PreToolUse event that names no tool',
+            changeable: false,
+            changeBy: 'there is nothing to configure; the host must say which tool it is about to run, because EGO cannot classify an operation it cannot name',
+          }),
+          code: 'TARGET_UNCLASSIFIED',
           exitCode: 2,
         };
       }
@@ -305,14 +336,20 @@ function handleLocked(
         writeSession(root, session);
         const what = bv.breaches.map((b) => `${b.dimension} ${b.observed} > ${b.limit}`).join(', ');
         ledger('budget.breach', { action: bv.action, breaches: bv.breaches, tool: tool.name });
-        const reason = `EGO execution budget exceeded (${what}); ${bv.action === 'BLOCK' ? 'governed tool calls are blocked' : 'human decision required'} until a human runs \`ego budget extend\` for this session.`;
+        const code: ReasonCode = bv.action === 'BLOCK' ? 'ADMIN_DENIED' : 'HUMAN_APPROVAL_REQUIRED';
+        const reason = hookRefusal(
+          code,
+          `execution budget exceeded (${what}); ${bv.action === 'BLOCK' ? 'governed tool calls are blocked' : 'human decision required'} until a human runs \`ego budget extend\` for this session`,
+          budgetRule(rt.pin.profile, 'execution budgets'),
+        );
         return {
           event: ev.event,
           action: bv.action === 'BLOCK' ? 'deny' : 'ask',
           reason,
+          code,
           userMessage: reason,
           exitCode: 0,
-          details: { budget: bv },
+          details: { budget: bv, code },
         };
       }
       const summary = summarizeInput(tool.name, tool.input, cpRoot);
@@ -327,11 +364,17 @@ function handleLocked(
           limit: budgets.maxRetriesPerStep,
           action: budgets.onExceed,
         });
-        const reason = `EGO: this step already failed ${failures} times (${budgets.maxRetriesPerStep} retries allowed); ${budgets.onExceed === 'BLOCK' ? 'it is blocked' : 'a human decision is required'}: change approach or ask for a decision.`;
+        const code: ReasonCode = budgets.onExceed === 'BLOCK' ? 'ADMIN_DENIED' : 'HUMAN_APPROVAL_REQUIRED';
+        const reason = hookRefusal(
+          code,
+          `this step already failed ${failures} times (${budgets.maxRetriesPerStep} retries allowed); ${budgets.onExceed === 'BLOCK' ? 'it is blocked' : 'a human decision is required'}: change approach or ask for a decision`,
+          budgetRule(rt.pin.profile, 'retries per step'),
+        );
         return {
           event: ev.event,
           action: budgets.onExceed === 'BLOCK' ? 'deny' : 'ask',
           reason,
+          code,
           userMessage: reason,
           exitCode: 0,
         };
@@ -350,13 +393,18 @@ function handleLocked(
           summary,
           prePromotion: true,
         });
-        const reason = `EGO: profile ${rt.pin.profile} permits no governed mutation (${cap}) until the pinned runtime reaches signed-release trust; run \`ego sync\` (Q96).`;
-        return { event: ev.event, action: 'deny', reason, userMessage: reason, exitCode: 0 };
+        const reason = hookRefusal(
+          'POLICY_STALE',
+          `profile ${rt.pin.profile} permits no governed mutation (${cap}) until the pinned runtime reaches signed-release trust; run \`ego sync\` (Q96)`,
+          POLICY_STALE_RULE,
+        );
+        return { event: ev.event, action: 'deny', reason, code: 'POLICY_STALE', userMessage: reason, exitCode: 0 };
       }
       ledger('tool.pre', {
         tool: tool.name,
         verdict: evaluation.verdict,
         capability: evaluation.decisive?.capability,
+        ...(evaluation.code ? { code: evaluation.code } : {}),
         summary,
       });
       const action = evaluation.verdict === 'ALLOW' ? 'allow' : evaluation.verdict === 'ASK' ? 'ask' : 'deny';
@@ -365,11 +413,12 @@ function handleLocked(
         action,
         reason: `EGO: ${evaluation.reason}`,
         exitCode: 0,
-        details: { hits: evaluation.hits },
+        details: { hits: evaluation.hits, ...(evaluation.code ? { code: evaluation.code } : {}) },
       };
+      if (evaluation.code) decision.code = evaluation.code;
       if (action === 'deny') {
         const cap = evaluation.decisive?.capability ?? 'unknown';
-        decision.userMessage = `EGO refused ${tool.name}: ${cap} is DENY. \`ego explain capability ${cap}\` explains why.`;
+        decision.userMessage = `EGO refused ${tool.name}: ${evaluation.code ?? 'DENY'}, ${cap} is DENY. \`ego explain capability ${cap}\` explains why.`;
       }
       return decision;
     }

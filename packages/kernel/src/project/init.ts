@@ -355,7 +355,8 @@ export function initProject(opts: InitOptions): InitReport {
   }
   writeJsonAtomic(join(projectRoot, GENERATED_MANIFEST_RELATIVE), manifest);
 
-  const doctor = runDoctor({ cwd: projectRoot, env, now, offline: opts.offline ?? false });
+  // the capability matrix is a summary here: `ego init` already prints a page, and `ego doctor` has the rest
+  const doctor = runDoctor({ cwd: projectRoot, env, now, offline: opts.offline ?? false, authority: 'summary' });
   return {
     projectRoot,
     detection,

@@ -35,6 +35,22 @@ import { indexSummary, parseSource } from '../../kernel/src/launcher/sync.ts';
 import { isSignedTrust } from '../../kernel/src/launcher/home.ts';
 import { isFile, readTextIfExists } from '../../kernel/src/util/fs.ts';
 import { detectProject } from '../../kernel/src/project/detect.ts';
+import {
+  describeCapabilities,
+  describeCapability,
+  formatCapabilityRow,
+} from '../../kernel/src/authority/describe.ts';
+import { authorityCommand } from './authority.ts';
+
+/** a deprecation note is one line, said once per process however many times the control plane is loaded */
+const noticesSaid = new Set<string>();
+export function sayNoticesOnce(io: CliIo, notices: readonly string[] | undefined): void {
+  for (const n of notices ?? [])
+    if (!noticesSaid.has(n)) {
+      noticesSaid.add(n);
+      io.err(n);
+    }
+}
 
 export interface ProjectContext {
   root: string;
@@ -56,6 +72,7 @@ export const PRE_PROMOTION_SET = new Set([
   'context',
   'capabilities',
   'explain',
+  'authority',
   'modes',
   'catalog',
   'init',
@@ -112,6 +129,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
         env: io.env,
         now: io.now,
         offline: flags['offline'] === true || io.env['EGO_OFFLINE'] === '1',
+        authority: flags['capabilities'] === true ? 'all' : 'governed',
       };
       if (hostFlag !== undefined && isHostId(hostFlag)) dopts.host = hostFlag;
       const r = runDoctor(dopts);
@@ -133,6 +151,8 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
       return capabilities(io, project, positional, flags);
     case 'explain':
       return explain(io, project, positional, flags);
+    case 'authority':
+      return authorityCommand(io, project, positional, flags);
     case 'modes':
       return modes(io, project, positional, flags);
     case 'context':
@@ -198,7 +218,7 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
       `You are in ${project.root}, governed by EGO ${project.pin.version} (${project.pin.integrity.slice(0, 12)}), profile ${project.pin.profile}, task source ${project.pin.taskSource ?? 'ad-hoc'}, trust ${idx.trust ?? 'none'}.`,
       project.prePromotion
         ? 'Only the pre-promotion set is available until `ego sync` promotes trust.'
-        : 'Available now: `status`, `doctor`, `check`, `capabilities`, `explain capability <id>`, `modes`, `context explain`, `sources`, `budget extend`, `redact`, `sync`, `version`.',
+        : 'Available now: `status`, `doctor`, `check`, `capabilities`, `explain capability <id>`, `authority diff <old> <new>`, `modes`, `context explain`, `sources`, `budget extend`, `redact`, `sync`, `version`.',
       'Coming in later phases: tasks and issues (2), skills and catalog (3), grilling and benchmark (4), policies and decisions (5), upgrade and conformance (6).',
       'Next: `ego status`',
       'Say: "Is EGO healthy?"',
@@ -265,6 +285,7 @@ function status(io: CliIo, project: ProjectContext | null): number {
     io.now(),
   );
   const cp = loadControlPlane(controlPlaneDir());
+  sayNoticesOnce(io, cp.notices);
   const ttl = cp.coordination.heartbeatTtlSeconds * 1000;
   const now = Date.parse(io.now());
   const sessions = listSessions(root).filter((s) => !s.endedAt && now - Date.parse(s.heartbeatAt) < ttl);
@@ -284,9 +305,11 @@ function status(io: CliIo, project: ProjectContext | null): number {
   return 0;
 }
 
-function tableFor(project: ProjectContext) {
+function tableFor(io: CliIo, project: ProjectContext) {
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
-  return ensurePolicyCache(controlPlaneDir(), project.root, self).cache.table;
+  const { cache } = ensurePolicyCache(controlPlaneDir(), project.root, self);
+  sayNoticesOnce(io, cache.notices);
+  return cache.table;
 }
 
 function capabilities(
@@ -296,7 +319,7 @@ function capabilities(
   flags: Record<string, string | boolean>,
 ): number {
   if (!project) return notInitialized(io);
-  const table = tableFor(project);
+  const table = tableFor(io, project);
   const profile = flagString(flags, 'profile') ?? project.pin.profile;
   const mode = flagString(flags, 'mode') ?? table.defaultMode;
   const verdicts = table.profiles[profile]?.modes[mode];
@@ -305,13 +328,13 @@ function capabilities(
     return 2;
   }
   const family = positional[0];
-  const rows = Object.entries(verdicts)
-    .filter(([id]) => !family || table.capabilities[id]?.family === family || id.startsWith(family + '.'))
-    .sort(([a], [b]) => a.localeCompare(b));
+  const rows = describeCapabilities(table, profile, mode).filter(
+    (v) => !family || v.family === family || v.id.startsWith(family + '.'),
+  );
   io.out(`profile ${profile}, mode ${mode} (${rows.length} capabilities)`);
-  for (const [id, v] of rows) {
-    const c = table.capabilities[id]!;
-    io.out(`${v.padEnd(5)} ${id}${c.lock !== 'none' ? ` [${c.lock}]` : ''} — ${c.description}`);
+  for (const v of rows) {
+    io.out(formatCapabilityRow(v));
+    if (v.targetRule) io.out(`  target: ${v.targetRule}`);
   }
   io.out('next: `ego explain capability <id>`');
   return 0;
@@ -329,23 +352,26 @@ function explain(
     io.err('usage: ego explain capability <id>');
     return 2;
   }
-  const table = tableFor(project);
+  const table = tableFor(io, project);
   const c = table.capabilities[id];
   if (!c) {
     io.err(`unknown capability "${id}"; see \`ego capabilities\``);
     return 2;
   }
   const profile = flagString(flags, 'profile') ?? project.pin.profile;
+  const mode = flagString(flags, 'mode') ?? table.defaultMode;
+  const v = describeCapability(table, profile, mode, id)!;
   const lines = [
     `${id}: ${c.description}`,
-    `family ${c.family}; lock ${c.lock}; effect ${c.effect ?? 'external'}; core verdict ${c.core}; effective ${table.effective[id]}`,
+    `effect class ${v.effectClass}; lock tier ${v.lockTier}; family ${c.family}; core verdict ${c.core}; effective ${v.verdict} (profile ${profile}, mode ${mode}); ceiling ${v.ceiling}; source ${v.source}`,
     `provenance: ${(table.provenance[id] ?? []).map((p) => `${p.layer} (${p.file}) -> ${p.verdict}`).join('; ')}`,
+    ...(v.targetRule ? [`target rule: ${v.targetRule}`] : []),
     ...Object.keys(table.profiles)
       .sort()
       .map(
         (p) =>
           `  ${p}: ${Object.entries(table.profiles[p]!.modes)
-            .map(([m, v]) => `${m}=${v[id]}`)
+            .map(([m, vv]) => `${m}=${vv[id]}`)
             .join(', ')}`,
       ),
   ];
@@ -368,11 +394,11 @@ function explain(
     );
   if (c.lock === 'absolute')
     lines.push(
-      'This is an absolute core deny: no organization policy, profile, overlay, grant, mode, skill, issue or model can widen it.',
+      'This is a HARD_LOCK capability: no organization policy, profile, overlay, grant, mode, skill, issue, task approval or model can widen it.',
     );
-  else if (c.lock === 'organization')
+  else if (c.lock === 'admin-governed')
     lines.push(
-      'This is an organization-locked deny: only the organization policy layer (policies/organization/permissions.md in the governance repository) can widen it; overlays, grants, modes, skills and models never can.',
+      'This is an ADMIN_GOVERNED capability: only the organization policy layer (policies/organization/permissions.md, read from this checkout; a human accepts any widening with `ego init`) can enable it; overlays, grants, modes, skills and models never can. Enabled, it still asks a human for every use: the ceiling is ASK (TASK_APPROVAL, one bounded approval, never a durable grant).',
     );
   lines.push(`next: \`ego capabilities ${c.family}\` for profile ${profile}`);
   io.out(lines.join('\n'));
@@ -387,6 +413,7 @@ function modes(
 ): number {
   if (!project) return notInitialized(io);
   const cp = loadControlPlane(controlPlaneDir());
+  sayNoticesOnce(io, cp.notices);
   const inEgo = isEgoSourceRepository(project.root);
   if (positional[0] === 'set') {
     const mode = positional[1];
@@ -446,7 +473,7 @@ function context(io: CliIo, project: ProjectContext | null, positional: string[]
     io.err('usage: ego context explain');
     return 2;
   }
-  const inv = contextInventory(project.root, project.pin, tableFor(project));
+  const inv = contextInventory(project.root, project.pin, tableFor(io, project));
   io.out(`budget ${inv.budget} tokens (profile ${project.pin.profile}); loaded ~${inv.loadedTokens}`);
   for (const i of inv.items)
     io.out(

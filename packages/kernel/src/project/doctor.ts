@@ -11,7 +11,14 @@ import {
 } from '../launcher/self.ts';
 import { egoHome, isRuntimeCached, readIndex, effectiveTrust, isSignedTrust } from '../launcher/home.ts';
 import { loadTrustStore, revokedKeyIds } from '../launcher/trust.ts';
-import { policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { formatFreshness, policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { POLICY_STALE_RULE, renderFailure } from '../authority/reasons.ts';
+import {
+  describeCapabilities,
+  formatCapabilityFacts,
+  governedSurface,
+  summarize,
+} from '../authority/describe.ts';
 import { runtimeRootDir } from '../runtime/root.ts';
 import { readGeneratedManifest } from './init.ts';
 import { gitHookStatus } from './githooks.ts';
@@ -49,6 +56,9 @@ export interface DoctorOptions {
   offline: boolean;
   /** host to evaluate containment against; detected from environment markers when absent */
   host?: HostId;
+  /** how much of the capability matrix the `authority` section lists: `summary` is the counts, `governed` (the
+   *  default) adds every ADMIN_GOVERNED capability and the target-dependent groups, `all` lists every capability */
+  authority?: 'summary' | 'governed' | 'all';
 }
 
 interface DeclaredOnlySetting {
@@ -205,7 +215,15 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     pinMatch ? 'SATISFIED' : 'NOT SATISFIED',
     pinMatch
       ? 'same identity'
-      : `pin ${pin.integrity.slice(0, 12)} vs executing ${self.runtimeSha256.slice(0, 12)}; the launcher delegates to the pinned runtime when cached`,
+      : renderFailure(
+          'POLICY_STALE',
+          `pin ${pin.integrity.slice(0, 12)} vs executing ${self.runtimeSha256.slice(0, 12)}; the launcher delegates to the pinned runtime when cached`,
+          {
+            source: 'the project pin, .harness/harness.md, against the executing runtime',
+            changeable: true,
+            changeBy: '`ego sync` fetches the pinned runtime, `ego upgrade` changes the pin (a human act)',
+          },
+        ),
   );
   const pinIdx = readIndex(home, pin.name, pin.version);
   const pinTrust = pinIdx ? effectiveTrust(pinIdx, revokedKeyIds(loadTrustStore(home))) : null;
@@ -245,7 +263,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     'policy',
     'compiled policy cache',
     fresh.fresh ? 'SATISFIED' : 'NOT SATISFIED',
-    fresh.fresh ? 'fresh' : fresh.reasons.join('; '),
+    formatFreshness(fresh),
   );
   const cache = readPolicyCache(root);
   if (cache?.pendingWidening)
@@ -253,7 +271,11 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       'policy',
       'pending widening',
       'NOT SATISFIED',
-      `${cache.pendingWidening.widenings.length} widening(s) in the layer files are not applied until a human runs \`ego init\` from their own terminal: ${cache.pendingWidening.widenings.slice(0, 3).join('; ')}`,
+      renderFailure(
+        'POLICY_STALE',
+        `${cache.pendingWidening.widenings.length} widening(s) in the layer files are not applied until a human runs \`ego init\` from their own terminal: ${cache.pendingWidening.widenings.slice(0, 3).join('; ')}`,
+        POLICY_STALE_RULE,
+      ),
       false,
     );
   if (cache) {
@@ -261,9 +283,10 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       'policy',
       'authority table',
       'INFO',
-      `hash ${cache.table.tableHash.slice(0, 12)}…, ${cache.table.absoluteDenies.length} absolute, ${cache.table.organizationLocked.length} organization-locked, ${Object.keys(cache.table.capabilities).length} capabilities`,
+      `hash ${cache.table.tableHash.slice(0, 12)}…, ${cache.table.absoluteDenies.length} HARD_LOCK, ${cache.table.adminGoverned.length} ADMIN_GOVERNED, ${Object.keys(cache.table.capabilities).length} capabilities`,
       false,
     );
+    for (const n of cache.notices ?? []) add('policy', 'notice', 'INFO', n, false);
     const layered = Object.keys(cache.layerSources);
     add(
       'policy',
@@ -272,6 +295,26 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       layered.length ? layered.join(', ') : 'core only (no organization policy, no overlay narrowing)',
       false,
     );
+    // THE CAPABILITY MATRIX (issue #16 section 12): effect class, lock tier, the verdict in force, the ceiling, the layer
+    // that decided and, for a capability that depends on a target, the rule that classifies the target. Every field is
+    // derived from the compiled table by the same module `ego capabilities` and `ego explain` read.
+    const mode = cache.table.defaultMode;
+    const level = opts.authority ?? 'governed';
+    const views = describeCapabilities(cache.table, pin.profile, mode);
+    add(
+      'authority',
+      'capability matrix',
+      'INFO',
+      `${summarize(views)} (profile ${pin.profile}, mode ${mode}); ${level === 'all' ? 'every capability is listed below' : level === 'governed' ? 'the ADMIN_GOVERNED capabilities and the target-dependent groups are listed below; `ego doctor --capabilities` or `ego capabilities` lists every one' : '`ego doctor` lists the ADMIN_GOVERNED capabilities and the target-dependent groups, `ego capabilities` every one'}`,
+      false,
+    );
+    if (level === 'all') for (const v of views) add('authority', v.id, 'INFO', formatCapabilityFacts(v), false);
+    else if (level === 'governed') {
+      const surface = governedSurface(cache.table, views);
+      for (const v of surface.adminGoverned) add('authority', v.id, 'INFO', formatCapabilityFacts(v), false);
+      for (const g of surface.targets)
+        add('authority', `target-dependent (${g.kind})`, 'INFO', `${g.capabilities.join(', ')}: ${g.rule}`, false);
+    }
   }
   const manifest = readGeneratedManifest(root);
   if (!manifest) add('generated', 'artifacts', 'NOT SATISFIED', 'no generated manifest; run `ego init`');

@@ -48,6 +48,7 @@ import {
   type Verdict,
 } from './types.ts';
 import { HOST_IDS } from '../hosts/matrix.ts';
+import { legacyNamingNotice, readFamilyValue, readLockValue } from './legacy-names.ts';
 
 const SECTION_VERDICTS: Array<{ keys: string[]; verdict: Verdict }> = [
   { keys: ['allowed', 'allow'], verdict: 'ALLOW' },
@@ -96,6 +97,7 @@ export function parseCapabilityDoc(
   source: string,
   layer: LayerName,
   problems: string[],
+  notices: string[] = [],
 ): CapabilityDoc | null {
   let doc: MarkdownDoc;
   try {
@@ -110,13 +112,20 @@ export function parseCapabilityDoc(
     return null;
   }
   const id = requireString(doc, 'id');
-  const family = requireString(doc, 'family');
+  // THE PREVIOUS SPELLING OF THE ADMIN_GOVERNED TIER IS A READ ALIAS (issue #16 section 12): a control-plane fork or an
+  // organization file written under it keeps its meaning, and the file is named once in `notices` so it gets renamed.
+  // The alias is translated here and nowhere else; everything below sees only the canonical values.
+  const familyRead = readFamilyValue(requireString(doc, 'family'));
+  const family = familyRead.value;
   const title = doc.title ?? optionalString(doc, 'title') ?? id;
   const absolute = optionalBoolean(doc, 'absolute', false);
-  const lockRaw = optionalString(doc, 'lock') ?? (absolute ? 'absolute' : 'none');
-  if (lockRaw !== 'absolute' && lockRaw !== 'organization' && lockRaw !== 'none')
-    problems.push(`${file}: lock must be absolute, organization or none`);
-  const lock: CapabilityLock = lockRaw === 'absolute' || lockRaw === 'organization' ? lockRaw : 'none';
+  const lockRead = readLockValue(optionalString(doc, 'lock') ?? (absolute ? 'absolute' : 'none'));
+  const lockRaw = lockRead.value;
+  const spelled = [familyRead.legacy && 'family', lockRead.legacy && 'lock'].filter((x): x is string => !!x);
+  if (spelled.length) notices.push(legacyNamingNotice(file, spelled.map((k) => `\`${k}:\``)));
+  if (lockRaw !== 'absolute' && lockRaw !== 'admin-governed' && lockRaw !== 'none')
+    problems.push(`${file}: lock must be absolute, admin-governed or none`);
+  const lock: CapabilityLock = lockRaw === 'absolute' || lockRaw === 'admin-governed' ? lockRaw : 'none';
   if (absolute && lock !== 'absolute') problems.push(`${file}: absolute: true requires lock: absolute`);
   if (lock === 'absolute' && !absolute) problems.push(`${file}: lock: absolute requires absolute: true`);
   if (lock !== 'none' && layer !== 'core') problems.push(`${file}: only the core layer may declare a lock`);
@@ -722,23 +731,24 @@ export function loadControlPlane(root: string): ControlPlane {
     return f;
   };
 
+  const notices: string[] = [];
   const absFile = req('permissions/absolute-denies.md');
-  const absoluteDenies = absFile ? parseCapabilityDoc(absFile, readText(absFile), 'core', problems) : null;
+  const absoluteDenies = absFile
+    ? parseCapabilityDoc(absFile, readText(absFile), 'core', problems, notices)
+    : null;
   if (absoluteDenies && !absoluteDenies.absolute) problems.push(`${absFile}: must declare absolute: true`);
 
   const capabilityDocs: CapabilityDoc[] = [];
-  let organizationLocked: CapabilityDoc | null = null;
+  let adminGoverned: CapabilityDoc | null = null;
   for (const f of listMarkdown(join(root, 'permissions', 'capabilities'))) {
     rec(f);
-    const d = parseCapabilityDoc(f, readText(f), 'core', problems);
+    const d = parseCapabilityDoc(f, readText(f), 'core', problems, notices);
     if (d) {
       if (d.absolute) problems.push(`${f}: only absolute-denies.md may be absolute`);
-      if (d.lock === 'organization') {
-        if (organizationLocked)
-          problems.push(
-            `${f}: only one organization-locked file is allowed (also ${organizationLocked.file})`,
-          );
-        organizationLocked = d;
+      if (d.lock === 'admin-governed') {
+        if (adminGoverned)
+          problems.push(`${f}: only one admin-governed file is allowed (also ${adminGoverned.file})`);
+        adminGoverned = d;
       }
       capabilityDocs.push(d);
     }
@@ -805,7 +815,7 @@ export function loadControlPlane(root: string): ControlPlane {
       if (!allIds.has(n.capability))
         problems.push(`${p.file}: narrow references unknown capability "${n.capability}"`);
   const absoluteIds = new Set(absoluteDenies?.capabilities.map((c) => c.id) ?? []);
-  const lockedIds = new Set(organizationLocked?.capabilities.map((c) => c.id) ?? []);
+  const lockedIds = new Set(adminGoverned?.capabilities.map((c) => c.id) ?? []);
   for (const m of modes) {
     for (const o of m.overrides) {
       if (!allIds.has(o.capability))
@@ -813,14 +823,14 @@ export function loadControlPlane(root: string): ControlPlane {
       if (absoluteIds.has(o.capability))
         problems.push(`${m.file}: mode may not override absolute deny "${o.capability}"`);
       if (lockedIds.has(o.capability))
-        problems.push(`${m.file}: mode may not override organization-locked deny "${o.capability}"`);
+        problems.push(`${m.file}: mode may not override ADMIN_GOVERNED capability "${o.capability}"`);
     }
   }
   for (const g of grants.grants) {
     if (absoluteIds.has(g.capability))
       problems.push(`${grants.file}: grant may not reference absolute deny "${g.capability}"`);
     if (lockedIds.has(g.capability))
-      problems.push(`${grants.file}: grant may not reference organization-locked deny "${g.capability}"`);
+      problems.push(`${grants.file}: grant may not reference ADMIN_GOVERNED capability "${g.capability}"`);
   }
   const profileIds = new Set(profiles.map((p) => p.id));
   for (const c of containment)
@@ -853,7 +863,7 @@ export function loadControlPlane(root: string): ControlPlane {
   return {
     root,
     absoluteDenies: absoluteDenies!,
-    organizationLocked,
+    adminGoverned,
     capabilityDocs,
     containment,
     matchers,
@@ -867,6 +877,7 @@ export function loadControlPlane(root: string): ControlPlane {
     localTargets,
     boundedCommands,
     sourceHashes,
+    notices,
   };
 }
 
@@ -887,10 +898,11 @@ function parseCoordinationDefaults(): CoordinationConstants {
 export function loadOverlayCapabilities(
   file: string,
   layer: 'organization' | 'overlay',
+  notices: string[] = [],
 ): CapabilityDoc | null {
   if (!isFile(file)) return null;
   const problems: string[] = [];
-  const doc = parseCapabilityDoc(file, readText(file), layer, problems);
+  const doc = parseCapabilityDoc(file, readText(file), layer, problems, notices);
   if (problems.length) throw new ControlPlaneValidationError(problems);
   if (doc && (doc.absolute || doc.lock !== 'none'))
     throw new ControlPlaneValidationError([`${file}: an overlay may not be absolute or locked`]);

@@ -74,10 +74,10 @@ test('npm run scripts are classified by their effect (alignment item 5)', () => 
   // yarn / pnpm shorthand
   assert.equal(bash('yarn deploy', c).decisive?.capability, 'git.remote.push');
   assert.equal(bash('pnpm release', c).decisive?.capability, 'forge.pr.create');
-  // the grant cannot open an organization-locked deny found inside an effect
+  // the grant cannot open an ADMIN_GOVERNED capability found inside an effect
   assert.equal(bash('npm run deploy', ctx(dir, { grants: ['git.remote.push'] })).verdict, 'DENY');
-  // organization-locked denies are explained as such
-  assert.match(deploy.reason, /organization-locked deny/);
+  // ADMIN_GOVERNED denies are explained as such
+  assert.match(deploy.reason, /ADMIN_GOVERNED deny/);
 });
 
 test('shell scripts are read and classified when static and inside the workspace', () => {

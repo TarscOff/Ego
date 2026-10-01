@@ -1,6 +1,7 @@
 // Neutral hook event model. Adapters translate host payloads into these events and kernel decisions back into host
 // output; the kernel never sees host-specific shapes.
 import type { HostId } from '../hosts/matrix.ts';
+import type { ReasonCode } from '../authority/reasons.ts';
 
 export const HOOK_EVENTS = [
   'SessionStart',
@@ -40,6 +41,9 @@ export interface HookDecision {
   event: HookEventName;
   action: HookAction;
   reason?: string;
+  /** WHY the action is not an allow, as a typed code (issue #16 section 10). The reason text carries it too; a host
+   *  that renders `reason` through `decisionReason` shows it even when the text was written without it. */
+  code?: ReasonCode;
   /** additional context for the model (SessionStart, UserPromptSubmit, PostToolUse) */
   context?: string;
   /** message on the host's user-visible channel */
@@ -52,4 +56,15 @@ export interface HookDecision {
 
 export function isHookEventName(v: string): v is HookEventName {
   return (HOOK_EVENTS as readonly string[]).includes(v);
+}
+
+/**
+ * THE REASON A HOST SHOWS, WITH ITS CODE. Both host dialects render a decision's reason into their own channel, and
+ * each used to read `d.reason` itself; a code that lived only in the text the kernel happened to write would reach the
+ * human only when every writer remembered it. This is the one reader: the code is in what the host shows, once.
+ */
+export function decisionReason(d: Pick<HookDecision, 'reason' | 'code'>): string {
+  const reason = d.reason ?? '';
+  if (!d.code || reason.includes(d.code)) return reason;
+  return reason ? `${d.code}: ${reason}` : d.code;
 }

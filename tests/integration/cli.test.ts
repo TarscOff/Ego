@@ -802,7 +802,7 @@ test('a policy widening in the layer files never applies from the working tree; 
     }),
   );
   assert.equal(JSON.parse(write.out).hookSpecificOutput.permissionDecision, 'deny');
-  // an out-of-band edit widening an organization-locked deny is clamped
+  // an out-of-band edit widening an ADMIN_GOVERNED capability is clamped
   mkdirSync(join(dir, 'policies', 'organization'), { recursive: true });
   writeFileSync(
     join(dir, 'policies', 'organization', 'permissions.md'),
