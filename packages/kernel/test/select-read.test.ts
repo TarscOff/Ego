@@ -156,3 +156,82 @@ test('a comparison inside the statement is not a shell redirection, and a real i
   ])
     assert.notEqual(verdict(c, dir), 'ALLOW', c);
 });
+
+test('a grammar word followed by a parenthesis is the grammar only where it can be: elsewhere it is a call', () => {
+  const dir = workspace();
+  // PostgreSQL accepts `by`, `over` and `join` as function names (an independent attack on the grammar, 2026-10-01), so a
+  // lexical "this word may precede a parenthesis" let a call named like one of them through
+  for (const q of [
+    'select join(1, 2)',
+    'select filter(1)',
+    'select group(1)',
+    'select over(1, 2)',
+    'select by(1, 2)',
+    'select a, join(1) from t',
+    'select f(x), over(1) from t',
+    'select any(1)',
+    'select all(1)',
+    'select some(1)',
+    'select a from t where join(1)',
+    'select a from t where a = by(1)',
+    'select a from t order by over(1)',
+  ])
+    assert.notEqual(verdict(prod(q), dir), 'ALLOW', q);
+  // ...and in their own position they are the grammar, as ordinary reports are written
+  for (const q of [
+    'select a, sum(b) over (partition by a order by c) from t',
+    'select a from t group by (a)',
+    'select a from t order by (a, b)',
+    'select a from t o join (select id from u) x on x.id = o.id',
+    'select a from t left join (select id from u) x on x.id = t.id',
+    'select a from t cross join (select 1) x',
+    'select a from t where b = any (select id from u)',
+    'select a from t where b > all (select id from u)',
+    'select a from t where b in (1, 2, 3) and c not in (select id from u)',
+    'select a from t where exists (select 1 from u where u.t = t.id)',
+    'select a from t union (select b from u)',
+    'select count(*) filter (where b > 1) from t',
+    'select percentile_cont(0.5) within group (order by b) from t',
+    'select a from t where b between (1) and (2)',
+  ])
+    assert.equal(verdict(prod(q), dir), 'ALLOW', q);
+});
+
+test('the ordinary reads an engineer types are reads, in PostgreSQL and in MySQL', () => {
+  const dir = workspace();
+  for (const q of [
+    'select lag(amount) over (partition by customer_id order by created_at) from orders',
+    'select json_agg(id) from t',
+    'select jsonb_build_object(1, 2)',
+    "select split_part(email, '@', 2) from users",
+    "select regexp_replace(email, '@.*', '') from users",
+    'select format(total, 2) from orders',
+    'select age(created_at) from users',
+    'select stddev(total), percentile_cont(0.5) within group (order by total) from orders',
+    'select pg_size_pretty(pg_database_size(current_database()))',
+    "select current_setting('server_version')",
+    'select * from generate_series(1, 10)',
+    "select if(total > 100, 1, 0), ifnull(nickname, name) from orders",
+    'select date_add(created_at, interval 1 day), datediff(now(), created_at) from orders',
+    'select user_id, group_concat(id) from orders group by user_id',
+    "select json_extract(data, '$.name') from profiles",
+    'select convert(total, decimal(10,2)) from orders',
+    'select unix_timestamp(created_at) from orders',
+  ])
+    assert.equal(verdict(`mysql -h prod-db.acme.com -e ${word(q)}`, dir), 'ALLOW', q);
+});
+
+test('a name that acts is not on the list - in any engine the evaluator routes through the same exception', () => {
+  const dir = workspace();
+  for (const f of [
+    'pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf', 'pg_rotate_logfile', 'pg_switch_wal', 'pg_create_restore_point',
+    'pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'pg_stat_file', 'pg_advisory_lock', 'pg_advisory_xact_lock',
+    'pg_try_advisory_lock', 'pg_sleep', 'pg_sleep_for', 'pg_notify', 'pg_logical_emit_message', 'pg_replication_slot_advance',
+    'nextval', 'setval', 'lastval', 'currval', 'set_config', 'lo_import', 'lo_export', 'lo_unlink', 'lo_create', 'lowrite',
+    'dblink', 'dblink_exec', 'dblink_connect', 'query_to_xml', 'table_to_xml', 'xpath', 'txid_current', 'pg_backend_pid',
+    'load_file', 'sleep', 'benchmark', 'get_lock', 'release_lock', 'master_pos_wait', 'source_pos_wait', 'sys_exec', 'sys_eval',
+    'openrowset', 'opendatasource', 'xp_cmdshell', 'url', 'file', 'remote', 's3', 'hdfs', 'executable', 'mysql', 'postgresql',
+    'readfile', 'writefile', 'edit', 'load_extension', 'fileio_read', 'zipfile', 'sqlar_compress',
+  ])
+    assert.notEqual(verdict(prod(`select ${f}(1)`), dir), 'ALLOW', f);
+});

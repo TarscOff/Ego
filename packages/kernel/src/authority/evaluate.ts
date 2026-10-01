@@ -8094,20 +8094,69 @@ function dbStatements(tokens: string[]): { statements: string[]; fromFile: boole
  *  omission. The type names are here because `varchar(10)` and `numeric(10,2)` have the shape of a call. */
 const SELECT_PURE_FUNCTIONS = new Set(
   (
-    'count sum avg min max coalesce nullif greatest least lower upper length char_length character_length octet_length ' +
-    'trim ltrim rtrim btrim substr substring left right replace concat concat_ws lpad rpad reverse position strpos initcap ' +
-    'abs round floor ceil ceiling sqrt power mod sign cast extract date_part date_trunc to_char to_date to_number to_timestamp ' +
-    'date year month day hour minute second now current_date current_time current_timestamp row_number rank dense_rank ' +
-    'array_length array_agg string_agg md5 version database current_database current_schema current_user ' +
-    'varchar char numeric decimal timestamp time float'
+    // aggregates and window functions
+    'count sum avg min max stddev stddev_pop stddev_samp variance var_pop var_samp corr covar_pop covar_samp ' +
+    'percentile_cont percentile_disc bool_and bool_or every bit_and bit_or bit_xor group_concat string_agg array_agg ' +
+    'json_agg jsonb_agg json_object_agg jsonb_object_agg json_arrayagg json_objectagg ' +
+    'row_number rank dense_rank lag lead first_value last_value nth_value ntile percent_rank cume_dist ' +
+    // conditionals
+    'coalesce nullif greatest least if ifnull isnull cast convert ' +
+    // strings
+    'lower upper length char_length character_length octet_length bit_length trim ltrim rtrim btrim substr substring ' +
+    'substring_index left right replace concat concat_ws lpad rpad reverse repeat space position strpos locate instr ' +
+    'initcap translate format split_part regexp_replace regexp_match regexp_matches regexp_substr regexp_like ' +
+    'regexp_instr overlay ascii chr to_hex md5 sha1 sha2 sha256 crc32 hex unhex to_base64 from_base64 strcmp ' +
+    'find_in_set field elt ' +
+    // numbers
+    'abs round floor ceil ceiling trunc truncate sqrt cbrt power mod exp ln log log10 log2 sign pi degrees radians div ' +
+    'sin cos tan asin acos atan atan2 width_bucket random rand to_number ' +
+    // dates and times
+    'extract date_part date_trunc date_bin to_char to_date to_timestamp date year month day hour minute second now ' +
+    'current_date current_time current_timestamp localtime localtimestamp clock_timestamp statement_timestamp ' +
+    'timeofday age make_date make_time make_timestamp date_add date_sub datediff timestampdiff timestampadd ' +
+    'unix_timestamp from_unixtime str_to_date date_format time_format curdate curtime last_day weekday dayofweek ' +
+    'dayofmonth dayofyear yearweek adddate subdate isfinite ' +
+    // arrays and json
+    'array_length cardinality array_to_string string_to_array array_position unnest generate_series ' +
+    'json_build_object jsonb_build_object json_build_array jsonb_build_array to_json to_jsonb row_to_json ' +
+    'json_extract json_unquote json_contains json_keys json_array json_object json_length json_type json_valid ' +
+    'json_value jsonb_typeof jsonb_array_length json_array_length json_extract_path jsonb_extract_path ' +
+    'json_extract_path_text jsonb_extract_path_text jsonb_pretty ' +
+    // what the session is, and the size of things (the pg_ names here READ; every other pg_ function is refused)
+    'version database current_database current_schema schema current_user session_user user connection_id ' +
+    'current_setting pg_size_pretty pg_database_size pg_total_relation_size pg_relation_size pg_table_size ' +
+    'pg_indexes_size ' +
+    // type names, which have the shape of a call: varchar(10), numeric(10,2), datetime(3)
+    'varchar char text numeric decimal timestamp time datetime float double real bit varbit binary signed unsigned ' +
+    'bigint integer int smallint json jsonb date interval boolean'
   ).split(' '),
 );
 
 /** Words that are followed by a parenthesis because of the GRAMMAR - a subquery, a list, a join condition - and not
  *  because they are being called. */
 const SELECT_PAREN_WORDS = new Set(
-  'in and or not exists any all some on using from where having by select union intersect except as join when then else case between limit offset distinct over'.split(' '),
+  'in and or not exists on using from where having select union intersect except when then else case between distinct'.split(' '),
 );
+
+/** Words that are callable function names on some engine (PostgreSQL accepts `by`, `over` and `join` as one) and are a
+ *  parenthesis' companion only in one POSITION: after `)` for a window, after `group`/`order`/`partition` for a list,
+ *  after a table (or a join type) for a derived table, after a comparison for a quantified subquery. In any other position
+ *  `select join(1)` is a call, and the call is judged as one. */
+function parenWordInPosition(w: string, prev: { k: string; v: string } | undefined): boolean {
+  if (prev === undefined) return false;
+  const pw = prev.k === 'word' ? prev.v.toLowerCase() : '';
+  if (w === 'over' || w === 'filter') return prev.k === 'op' && prev.v === ')';
+  if (w === 'group') return pw === 'within';
+  if (w === 'by') return pw === 'group' || pw === 'order' || pw === 'partition';
+  if (w === 'any' || w === 'all' || w === 'some') return prev.k === 'op' && /^(=|<|>|<=|>=|<>|!=)$/.test(prev.v);
+  if (w === 'join') {
+    if (/^(left|right|inner|outer|full|cross|natural|lateral)$/.test(pw)) return true;
+    if (prev.k === 'quoted' || (prev.k === 'op' && prev.v === ')')) return true;
+    // a table or its alias stands before `join`; a keyword or an operator would make it a call
+    return prev.k === 'word' && !SELECT_PAREN_WORDS.has(pw) && !SELECT_EFFECT_WORDS.has(pw) && pw !== 'distinct';
+  }
+  return false;
+}
 
 /** The words that give a SELECT an effect or a lock: `INTO` writes a file or a table, `FOR UPDATE` and `LOCK IN SHARE
  *  MODE` take locks, `PROCEDURE ANALYSE` runs one, `WITH` can carry a data-modifying statement. Everything else a
@@ -8197,7 +8246,7 @@ function isPlainSelect(q: string): boolean {
     if (callNext) {
       // a qualified call is somebody's function, whatever its last word is called
       if (prev?.k === 'op' && prev.v === '.') return false;
-      if (!SELECT_PURE_FUNCTIONS.has(w) && !SELECT_PAREN_WORDS.has(w)) return false;
+      if (!SELECT_PURE_FUNCTIONS.has(w) && !SELECT_PAREN_WORDS.has(w) && !parenWordInPosition(w, prev)) return false;
     }
   }
   return depth === 0;
