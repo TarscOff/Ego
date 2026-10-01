@@ -8697,7 +8697,59 @@ const DB_EXECUTES_UNREAD =
   // `\ifile`), and a script path may be followed by a quote or a parenthesis rather than whitespace
   // (`mongosh --eval 'load("/tmp/evil.js")'`) — each of which put an unread program back out of reach
   // (exit review 10).
-  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$|["'),;])|\s(-f|--file|-init|--init)(=|\s|\S)|\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(|--queries?[-_]file\b|--(multi)?query[-_]file\b/i;
+  /\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(|--queries?[-_]file\b|--(multi)?query[-_]file\b/i;
+
+/** THE OPTIONS THAT HAND A CLIENT A SCRIPT, case-sensitively: the net above is case-insensitive for the SQL words it looks
+ *  for, which made `-F` - pg_dump's format (`-Fc`), psql's field separator - the same flag as `-f`. A client's options
+ *  are spelled as they are. */
+const DB_SCRIPT_FLAG = /\s(-f|--file|-init|--init)(=|\s|\S)/;
+/** A WORD THAT NAMES A SCRIPT BY ITS EXTENSION - the part of the net above that is about a file's NAME, kept apart because
+ *  it is only true of a file the client READS. `pg_dump app > dump.sql` is the standard way to dump a database, and its
+ *  output file is a file the command WRITES: read as "runs an unread program" it asked on every dump. The words that the
+ *  command line itself marks as written (a redirection target, the value of an output option) are subtracted
+ *  one-for-one, so a name that is also an operand the client reads (`mongosh a.js > a.js`) still counts once. */
+const DB_SCRIPT_BY_NAME = /\s(\S*\.(?:sql|psql|ddl|cql|js|py|rb|lua))(?=\s|$|["'),;])/gi;
+function namesAScript(text: string, written: readonly string[]): boolean {
+  const budget = new Map<string, number>();
+  for (const w of written) budget.set(w, (budget.get(w) ?? 0) + 1);
+  for (const m of text.matchAll(DB_SCRIPT_BY_NAME)) {
+    // `--output=out.sql` is one word of the line and names the file after its `=`
+    const name = [m[1]!, m[1]!.replace(/^-[^=]*=/, '')].find((n) => (budget.get(n) ?? 0) > 0);
+    if (name === undefined) return true;
+    budget.set(name, budget.get(name)! - 1);
+  }
+  return false;
+}
+/** THE OPTIONS THROUGH WHICH A CLIENT WRITES A FILE, for the heads that have no grammar of their own (the modelled clients
+ *  report theirs as `DbEscape.writes`): `pg_dump`'s `-f` and `mysqldump`'s `-r` are output, where `psql`'s `-f` is a script. */
+const DB_OUTPUT_OPTIONS: Readonly<Record<string, { short: string; long: string }>> = {
+  pg_dump: { short: 'f', long: 'file' },
+  pg_dumpall: { short: 'f', long: 'file' },
+  pg_restore: { short: 'f', long: 'file' },
+  mysqldump: { short: 'r', long: 'result-file' },
+};
+/** The files a head with no grammar writes through its output option, and its words with that option and value taken
+ *  out. A value built at run time is NOT set aside: a file nobody can name is not one the client was shown to write. */
+function dbOutputOptions(head: string, words: readonly string[]): { files: string[]; rest: string[] } {
+  const spec = DB_OUTPUT_OPTIONS[head];
+  const files: string[] = [];
+  const rest: string[] = [];
+  if (spec === undefined) return { files, rest: [...words] };
+  const take = (value: string | undefined, ...originals: string[]): void => {
+    if (value === undefined || /[$`]/.test(value)) rest.push(...originals);
+    else files.push(value);
+  };
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === `-${spec.short}` || w === `--${spec.long}`) {
+      take(words[i + 1], w, ...(words[i + 1] === undefined ? [] : [words[i + 1]!]));
+      i++;
+    } else if (w.startsWith(`--${spec.long}=`)) take(w.slice(spec.long.length + 3), w);
+    else if (w.startsWith(`-${spec.short}`) && !w.startsWith('--') && w.length > 2) take(w.slice(2), w);
+    else rest.push(w);
+  }
+  return { files, rest };
+}
 
 const TARGET_ENV_RE =
   // THE CONTAINER ENGINE IS SELECTED BY ENVIRONMENT TOO. `DOCKER_HOST` and `DOCKER_CONTEXT` were enrolled in the
@@ -9618,7 +9670,10 @@ function isPlainSelect(q: string): boolean {
   if (q.length > 4000 || !/^select\b/i.test(q)) return false;
   type Tok = { k: 'word' | 'quoted' | 'str' | 'num' | 'sysvar' | 'op'; v: string };
   const toks: Tok[] = [];
-  const OPS = ['->>', '->', '<=', '>=', '<>', '!=', '||', '::'];
+  // `~`, `~*`, `!~` and `!~*` are PostgreSQL's regular-expression MATCH operators (`~` is also the bitwise NOT of both
+  // engines): comparisons, pure, and the ordinary way to filter on a pattern. Refused as an unknown character they made
+  // `select count(*) from t where code ~ '^[0-9]+$'` a statement that acts, and against a production host an absolute deny.
+  const OPS = ['->>', '->', '<=', '>=', '<>', '!=', '||', '::', '!~*', '!~', '~*'];
   let i = 0;
   while (i < q.length) {
     const c = q[i]!;
@@ -9666,7 +9721,7 @@ function isPlainSelect(q: string): boolean {
     }
     // `--` and `/*` open comments; MySQL's `/*!` and `/*+` are executed or interpreted, so no comment is accepted
     if ((c === '-' && q[i + 1] === '-') || (c === '/' && q[i + 1] === '*')) return false;
-    const op = OPS.find((o) => rest.startsWith(o)) ?? (/^[=<>+\-*/%,.()]/.test(c) ? c : undefined);
+    const op = OPS.find((o) => rest.startsWith(o)) ?? (/^[=<>+\-*/%,.()~]/.test(c) ? c : undefined);
     if (op === undefined) return false;
     toks.push({ k: 'op', v: op });
     i += op.length;
@@ -9696,12 +9751,52 @@ function isPlainSelect(q: string): boolean {
   return depth === 0;
 }
 
+/** A BACKSLASH INSIDE A SINGLE-QUOTED LITERAL IS A CHARACTER OF THE LITERAL, and is the ordinary way to write a pattern:
+ *  `where code ~ '^\d+$'`. The rule below refuses every backslash because mysql's `\g`, `\G`, `\!` and `\.` send a
+ *  statement, run a shell or source a file - and none of them is recognised by either client inside a quote. So the
+ *  backslashes of a literal are set aside (returned as a plain letter, so the rest of the grammar reads the same
+ *  statement) and the ones outside a literal stay for that rule to refuse. null when a literal cannot be read the same
+ *  way by every engine: a backslash in front of a quote is an escaped quote to mysql and a literal backslash that closes
+ *  the string to PostgreSQL, so the two clients disagree about where the statement goes on. */
+function literalBackslashesBlanked(s: string): string | null {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    out += c;
+    if (c !== "'") continue;
+    // `E'...'` is PostgreSQL's ESCAPE string: a backslash in it is an escape (`E'\x27'` is a quote the lexer never saw), not
+    // a character - the one literal whose backslashes are not data
+    const escapeString = /(^|[^A-Za-z0-9_$])[Ee]'$/.test(out);
+    let j = i + 1;
+    for (; ; j++) {
+      if (j >= s.length) return null; // an unterminated literal: not a statement to read
+      const d = s[j]!;
+      if (d === '\\') {
+        if (escapeString || s[j + 1] === "'") return null;
+        out += 'x';
+        continue;
+      }
+      out += d;
+      if (d === "'") {
+        if (s[j + 1] === "'") {
+          out += "'";
+          j++;
+          continue;
+        }
+        break;
+      }
+    }
+    i = j;
+  }
+  return out;
+}
+
 /** A statement that is a READ of schema, plan or server state - by a strict grammar, not by the absence of words.
  *  A blocklist of write verbs is wrong by omission (`created_at` contains `create`; `\g` ends a statement in mysql
  *  without a semicolon), so what is accepted is described positively and everything else is not a read. */
 function isReadStatement(q: string): boolean {
-  const s0 = q.trim().replace(/;\s*$/, '');
-  if (s0 === '' || /;/.test(s0)) return false;
+  const s0 = literalBackslashesBlanked(q.trim().replace(/;\s*$/, ''));
+  if (s0 === null || s0 === '' || /;/.test(s0)) return false;
   // psql metacommands: the whole statement, one optional argument, nothing that chains (`\g`, `\gexec`, `\;`, `\!`)
   if (s0.startsWith('\\')) return /^\\(?:d[a-zA-Z+]{0,3}|l\+?|z|sf|ef|conninfo)(?:\s+[\w."*?$-]+)?$/.test(s0);
   // nothing else may carry a backslash: mysql's `\g`, `\G`, `\!` and `\.` send, run a shell or source a file
@@ -11967,7 +12062,17 @@ function classifyShellPaths(
   // operand as a filesystem read made `dirname -- "$0"` — the first line of a real husky hook — ask, and with it
   // every commit in that repository (exit review 4).
   if (STRING_OPERAND_HEADS.has(head)) return hits;
-  const paths = pathTokens(bare, cwd).filter((p) => !patternWords.includes(p.raw));
+  // A DATABASE CLIENT'S STATEMENT IS DATA, NOT A PATH OPERAND. The normalised segment has lost the quotes around it, so
+  // `psql -c "... where c ~ '^\d+$'"` reached this scan as a run of bare words and the SQL operator `~` was the home
+  // directory: an ask for a read outside the workspace on the most ordinary regular-expression match. A word of the
+  // statement that names no directory is not a path; one that does (`/etc/hostname`, `~/.ssh/id_rsa`) is still scanned,
+  // beside the reader that knows which server-side functions open a file.
+  const rawWords = tokenizeMarked(rawSeg);
+  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
+  const statementWords = new Set(
+    (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
+  );
+  const paths = pathTokens(bare, cwd).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
   // approvable question, never a silent yes.
@@ -12029,7 +12134,6 @@ function classifyShellPaths(
     mongosh: /^--eval$/,
     mongo: /^--eval$/,
   };
-  const rawWords = tokenizeMarked(rawSeg);
   const clientAt = rawWords.findIndex((t) => !t.quoted && STATEMENT_FLAG[t.text.replace(/^.*\//, '')] !== undefined);
   let unquotedSeg = seg;
   let unquotedWords = rawWords.map((w) => w.text);
@@ -12048,9 +12152,17 @@ function classifyShellPaths(
   // THE CLIENT'S OTHER CHANNELS - a program, a file it writes, native code - are read by ONE grammar (dbClientEscape)
   // rather than found by their spelling. A statement the reader recognised is set aside from the redirection test
   // below, for the same reason a statement flag's value is: `where id < 10` is a comparison, not `< file`.
-  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
   if (dbEscape !== null && dbEscape.statements.length > 0)
     unquotedSeg = unquotedWords.filter((w) => !dbEscape.statements.some((st) => w === st || w.endsWith(`=${st}`))).join(' ');
+  // A FILE THE CLIENT WRITES IS JUDGED AS A WRITE, NOT TAKEN FOR A PROGRAM IT RUNS. The modelled clients report theirs
+  // (`DbEscape.writes`); the dump tools have no grammar and their output option is read here. The redirection targets
+  // are the shell's, and are read with the quoting still on the line.
+  const dbArgs = DB_CLIENT_HEADS.has(head) ? dbWordsOf(head, rawWords, seg) : [];
+  const dbAt = dbArgs.findIndex((w) => w.text.replace(/^.*\//, '') === head);
+  const dumped = dbOutputOptions(head, dbAt < 0 ? [] : dbArgs.slice(dbAt + 1).map((w) => w.text));
+  const writtenByName = [...(dbEscape?.writes ?? []), ...dumped.files, ...redirectionTargets(rawSeg)].filter((f) => !/[$`]/.test(f));
+  const readSurface =
+    dumped.files.length === 0 ? seg : requote([...dbArgs.slice(0, dbAt + 1).map((w) => w.text), ...dumped.rest]);
   if (dbEscape !== null)
     for (const why of [...dbEscape.opaque, ...dbEscape.unproven])
       hits.push({
@@ -12062,14 +12174,21 @@ function classifyShellPaths(
         opaqueUnread: true,
       });
   if (dbEscape !== null)
-    for (const [mode, dests] of [['Write', dbEscape.writes], ['Read', dbEscape.reads]] as const)
+    for (const [mode, dests] of [['Write', [...dbEscape.writes, ...dumped.files]], ['Read', dbEscape.reads]] as const)
       for (const dest of dests) {
         const expanded = expandHome(dest, cwd);
         if (expanded === null || /[$`]/.test(expanded)) continue;
         const w = classifyPath(table, ctx, mode, canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)));
         if (w.verdict !== 'ALLOW') hits.push({ ...w, via: `the client ${mode === 'Write' ? 'writes' : 'reads'} ${dest} (${w.via})`, segment: seg });
       }
-  if (DB_CLIENT_HEADS.has(head) && (DB_EXECUTES_UNREAD.test(seg) || /\s<\s*\S/.test(' ' + unquotedSeg) || redisReadsScript))
+  if (
+    DB_CLIENT_HEADS.has(head) &&
+    (DB_EXECUTES_UNREAD.test(readSurface) ||
+      DB_SCRIPT_FLAG.test(readSurface) ||
+      namesAScript(readSurface, writtenByName) ||
+      /\s<\s*\S/.test(' ' + unquotedSeg) ||
+      redisReadsScript)
+  )
     hits.push({
       capability: 'command.script-opaque',
       verdict: verdictFor(table, ctx, 'command.script-opaque'),

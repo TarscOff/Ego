@@ -704,6 +704,192 @@ test('a dynamic word after the last dry-run flag does not make a read, a probe o
   assert.equal(v('kubectl --context production get pods --dry-run=client $EXTRA', x), 'ALLOW');
 });
 
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 6. A FILE A COMMAND WRITES IS NOT A PROGRAM IT RUNS - AND A STATEMENT IS DATA, NOT A PATH
+ *
+ * The second wave's database work left two false asks it recorded and did not touch. The legacy net that asks when a
+ * database client "runs an unread program" matched a file NAME by extension anywhere on the line, so `pg_dump app >
+ * dump.sql` - the standard way to dump a database - asked because its output file ends in `.sql`. The extension is a
+ * statement about what a client READS (a script handed to it); a redirection target and the value of an output option
+ * are files it WRITES, and they are judged as writes by the path rules, as before.
+ *
+ * And a regular expression in a statement, `c ~ '^\d+$'`, asked as a read outside the workspace: the normalised
+ * segment has lost the quotes, the statement is split into words, and the SQL operator `~` was taken for the home
+ * directory. A word of a client's statement that names no directory is data.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('dumping a database into a file named like a script is ordinary work', () => {
+  const ordinary: string[] = [
+    'pg_dump app > dump.sql',
+    'pg_dump app >> dump.sql',
+    'pg_dump app 2> err.sql',
+    'pg_dump app -f dump.sql',
+    'pg_dump -f dump.sql app',
+    'pg_dump --file=dump.sql app',
+    'pg_dump --file dump.sql app',
+    'pg_dump -fdump.sql app',
+    'pg_dump -Fc app -f backup.psql',
+    'sqlite3 app.db .dump > dump.sql',
+    "sqlite3 app.db '.dump' >> dump.sql",
+    'sqlite3 app.db ".schema" > schema.sql',
+    'sqlite3 app.db .tables > tables.py',
+    "psql app -c 'select 1' > out.sql",
+    "psql app -c 'select 1' -o out.sql",
+    "psql app -c 'select 1' --output=out.sql",
+    "psql app -c 'select 1' --output out.sql",
+    "psql app -c 'select 1' -o out.js",
+    "mysql app -e 'select 1' > out.sql",
+    'mysqldump app > dump.sql',
+    'mysqldump app -r dump.sql',
+    'mysqldump --result-file=dump.sql app',
+    "mongosh --eval 'db.a.find()' > out.js",
+    "clickhouse-client -q 'select 1' > out.sql",
+  ];
+  const wrong: string[] = [];
+  for (const command of ordinary) {
+    const got = v(command, { 'app.db': 'x' });
+    if (got !== 'ALLOW') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('a script a client READS is still the human gate, whatever else the line writes', () => {
+  const gated: string[] = [
+    'psql app < dump.sql',
+    'mysql app < dump.sql',
+    'sqlite3 app.db < dump.sql',
+    'psql app -f dump.sql',
+    'psql app -f dump.sql > out.sql',
+    'psql app -f dump.sql -o out.txt',
+    "sqlite3 app.db '.read dump.sql'",
+    "sqlite3 app.db '.read dump.sql' > out.txt",
+    'sqlite3 -init init.sql app.db',
+    'mongosh script.js',
+    'mongosh --file script.js > out.txt',
+    'cqlsh -f script.cql',
+    "psql -c '\\i dump.sql' > out.txt",
+    // the output option is the one that was masked: a program in the statement beside it is not
+    "psql app -c '\\! rm -rf build' -o out.sql",
+    "psql app -c 'copy t to program \\'sh\\'' -o out.sql",
+    "sqlite3 app.db '.shell id' > out.sql",
+  ];
+  const wrong: string[] = [];
+  for (const command of gated) {
+    const got = v(command, { 'app.db': 'x', 'dump.sql': 'select 1;', 'script.js': '1', 'script.cql': 'select 1;', 'init.sql': 'select 1;' });
+    if (got === 'ALLOW') wrong.push(command);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('the file a dump writes is still judged as a write', () => {
+  const dirty: string[] = [
+    'pg_dump app -f .git/hooks/pre-commit',
+    'pg_dump app > .git/hooks/pre-commit',
+    'pg_dump app --file=.git/hooks/pre-commit',
+    'pg_dump app -f /etc/dump.sql',
+    'pg_dump app > /etc/dump.sql',
+    'mysqldump app -r .git/hooks/pre-commit',
+    'mysqldump app --result-file=/etc/dump.sql',
+    "psql app -c 'select 1' -o .git/hooks/pre-commit",
+    "psql app -c 'select 1' > .git/hooks/pre-commit",
+    "psql app -c 'select 1' -o ~/.ssh/authorized_keys",
+    'pg_dump app -f control-plane/permissions/matchers.md',
+  ];
+  const wrong: string[] = [];
+  for (const command of dirty) {
+    const got = v(command);
+    if (got === 'ALLOW') wrong.push(command);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('a regular expression in a statement is not a path', () => {
+  const ordinary: string[] = [
+    String.raw`psql -c "select count(*) from t where code ~ '^\d+$'"`,
+    String.raw`psql -c "select 1 where code ~ '^\\d+$'"`,
+    `psql -c "select 1 where 'a' ~ 'a'"`,
+    `psql -c "select 1 where code ~ '[a-z]+'"`,
+    `psql -c 'select 1 where code ~ $$x$$'`,
+    `psql -c "select ~5"`,
+    `mysql -e "select 1 where code ~ 'x'"`,
+    `sqlite3 app.db "select 1 where code ~ 'x'"`,
+    `psql -d app -c "select 1 where code ~ 'x'" -o out.txt`,
+  ];
+  const wrong: string[] = [];
+  for (const command of ordinary) {
+    const got = v(command, { 'app.db': 'x' });
+    if (got !== 'ALLOW') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+  // a statement that names a directory is still read as naming one
+  for (const command of [
+    `psql -c "select pg_read_file('/etc/hostname')"`,
+    `psql -c "select 1 where code ~ '/etc/passwd'"`,
+    `psql -c "select pg_read_file('~/.ssh/id_rsa')"`,
+  ])
+    assert.notEqual(v(command), 'ALLOW', command);
+  // and an operand outside the statement is a path as it was
+  assert.notEqual(v(`sqlite3 ~/.config/x.db "select 1 where code ~ 'x'"`), 'ALLOW');
+});
+
+test('a regular-expression match is a read against a production host, and what makes a statement more than a read is still refused', () => {
+  const prod = 'psql -h prod-db.acme.com';
+  const reads: string[] = [
+    String.raw`${prod} -c "select count(*) from t where code ~ '^\d+$'"`,
+    String.raw`${prod} -c "select 1 where code ~ '^\\d+$'"`,
+    `${prod} -c "select 1 where code ~ '^[0-9]+$'"`,
+    `${prod} -c "select 1 where code ~* 'x'"`,
+    `${prod} -c "select 1 where code !~ 'x'"`,
+    `${prod} -c "select 1 where code !~* 'x'"`,
+    `${prod} -c "select ~5"`,
+    String.raw`${prod} -c "select regexp_replace(code, '\s+', ' ') from t"`,
+    String.raw`${prod} -c "select 1 where code like '%\%'"`,
+    `${prod} -c "select 1 where code ~ 'it''s'"`,
+  ];
+  const wrong: string[] = [];
+  for (const command of reads) {
+    const got = v(command);
+    if (got !== 'ALLOW') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+  const acts: string[] = [
+    // a backslash in front of a quote is an escaped quote to one client and the end of the literal to another
+    String.raw`${prod} -c "select 1 where code ~ 'a\' or 1=1"`,
+    String.raw`${prod} -c "select 'a\''; drop table t"`,
+    // an escape string is the one literal whose backslashes are not data (`E'\x27'` is a quote the lexer never saw)
+    String.raw`${prod} -c "select E'\x27' where code ~ 'x'"`,
+    String.raw`${prod} -c "select e'\d' from t"`,
+    // a backslash OUTSIDE a literal is a client command: mysql's \g, \G and \!, psql's meta-commands
+    String.raw`${prod} -c "select 1 \g"`,
+    String.raw`${prod} -c "select 1 where code ~ 'x' \gexec"`,
+    String.raw`${prod} -c "select 1 \! id"`,
+    // everything else that makes a SELECT act
+    `${prod} -c "select 1 where code ~ 'x'; drop table t"`,
+    `${prod} -c "select pg_terminate_backend(pid) from pg_stat_activity where code ~ 'x'"`,
+    `${prod} -c "select * from t where code ~ 'x' for update"`,
+    `${prod} -c "select nextval('s') where code ~ 'x'"`,
+    `${prod} -c "select 1 where code ~ 'x' -- comment"`,
+    String.raw`${prod} -c "delete from t where code ~ '^\d+$'"`,
+  ];
+  const notRefused: string[] = [];
+  for (const command of acts) {
+    const got = v(command);
+    if (got === 'ALLOW') notRefused.push(command);
+  }
+  assert.deepEqual(notRefused, []);
+});
+
+test('a client option is spelled as it is: -F is a format, not the flag that hands over a script', () => {
+  const ordinary = ['pg_dump -Fc app', 'pg_dump -Fc app -f backup.psql', 'pg_dump -Fp app > dump.sql', "psql -F ',' -c 'select 1'", "psql -A -F '|' -c 'select 1'"];
+  const wrong: string[] = [];
+  for (const command of ordinary) {
+    const got = v(command);
+    if (got !== 'ALLOW') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.notEqual(v('psql -f script.sql', { 'script.sql': 'select 1;' }), 'ALLOW');
+});
+
 test('the profile documents say what the narrowing lists do', () => {
   const page = (f: string): string => readFileSync(join(CONTROL_PLANE, 'profiles', f), 'utf8');
   const high = page('high-assurance.md');
