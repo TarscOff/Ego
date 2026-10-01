@@ -47,6 +47,7 @@ import { writePin, readPin } from '../src/launcher/pin.ts';
 import { selfIdentity, selfVersion } from '../src/launcher/self.ts';
 import { sha256Canonical } from '../src/util/hash.ts';
 import { runCheck } from '../src/project/check.ts';
+import { runGitHook } from '../src/project/githooks.ts';
 import { runDoctor, formatDoctor } from '../src/project/doctor.ts';
 import { renderClaudeCodeOutput } from '../../adapter-claude-code/src/dialect.ts';
 import { renderCodexOutput } from '../../adapter-codex-cli/src/dialect.ts';
@@ -296,6 +297,21 @@ test('A3 a control plane authored under the old name still loads, means the same
   assert.equal(diffAuthorityTables(table, old).length, 0);
   // the canonical files raise no note
   assert.deepEqual((loadControlPlane(CP) as unknown as { notices?: string[] }).notices, []);
+  // neighbours of the same class: a fork that carries both spellings of the file has two files for one tier; a file
+  // that mixes the spellings (old lock value, canonical family) is read the same way, with a note naming only `lock:`
+  const both = legacyControlPlane();
+  cpSync(join(both, 'admin-governed.md.bak'), join(both, 'permissions', 'capabilities', 'admin-governed.md'));
+  assert.throws(() => loadControlPlane(both), /only one admin-governed file is allowed/);
+  const mixed = legacyControlPlane();
+  const legacyFile = join(mixed, 'permissions', 'capabilities', 'organization-locked.md');
+  writeFileSync(
+    legacyFile,
+    readFileSync(legacyFile, 'utf8').replace('family: organization-locked', 'family: admin-governed'),
+  );
+  const mixedCp = loadControlPlane(mixed) as unknown as { notices: string[] };
+  assert.equal(mixedCp.notices.length, 1);
+  assert.match(mixedCp.notices[0]!, /`lock:`/);
+  assert.doesNotMatch(mixedCp.notices[0]!, /`family:`/);
   // an alias is not a licence: only the core layer may declare a tier, and an unknown value still fails closed
   const d = mkdtempSync(join(tmpdir(), 'ego-q98v-lock-'));
   const bad = join(d, 'permissions.md');
@@ -558,6 +574,22 @@ test('A6 a cache written under the old name is POLICY_STALE with a clear message
   const same = ensurePolicyCache(CP, p.root, SELF());
   assert.equal(same.regenerated, true);
   assert.ok('adminGoverned' in same.cache.table);
+});
+test('A7 a cache written under the old name is never the baseline a widening is measured against', () => {
+  const p = project();
+  orgPolicy(p.root, 'Requires human approval', 'forge.pr.create');
+  const accepted = ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true }).cache;
+  assert.equal(accepted.table.effective['forge.pr.create'], 'ASK');
+  // a cache in the old shape that records the WIDE table under the CURRENT runtime identity and no accepted layer
+  // sources: believed as a baseline, it would make the organization file's widening look like no widening at all
+  writeFileSync(
+    join(p.root, POLICY_CACHE_RELATIVE),
+    JSON.stringify({ ...accepted, acceptedLayerSources: {}, table: toLegacy(accepted.table) }),
+  );
+  const again = ensurePolicyCache(CP, p.root, SELF()).cache as unknown as PolicyCacheShape;
+  assert.ok(again.pendingWidening, 'the widening is still waiting for a human');
+  assert.equal(again.table.effective['forge.pr.create'], 'DENY', 'and is not applied');
+  assert.equal(handleHook(pre(p.root, 'gh pr create --fill'), p.rt).action, 'deny');
 });
 interface PolicyCacheShape {
   pendingWidening?: unknown;
@@ -1170,6 +1202,25 @@ test('B7 other refusals the hook takes are coded too: budgets, the retry stop, t
   assert.equal(prePromo.code, 'POLICY_STALE');
   assert.match(prePromo.reason ?? '', /POLICY_STALE/);
   assert.match(prePromo.reason ?? '', /ego sync/);
+});
+
+test('B7b the pre-push hook refuses an agent shell with the same code, rule source and configurability', () => {
+  const p = project();
+  ensurePolicyCache(CP, p.root, SELF());
+  const refused = runGitHook('pre-push', p.root, { CLAUDECODE: '1' }, '');
+  assert.equal(refused.ok, false);
+  const text = refused.messages.join('\n');
+  assert.match(text, /ADMIN_DENIED: pushes from agent sessions are governed by EGO/);
+  assert.match(text, /a human pushes from their own terminal/, 'the remedy it always named');
+  assert.match(text, /Rule source: ADMIN_GOVERNED, /);
+  assert.match(text, /Configuration can change it: the organization policy layer/);
+  // and it agrees with the PreToolUse refusal for the same capability, because both come from one mapping
+  const hook = handleHook(pre(p.root, 'git push origin main'), p.rt) as HookDecision & { code?: string };
+  assert.equal(hook.code, 'ADMIN_DENIED');
+  // an organization that enables the push at ASK lets the shell reach the PreToolUse gate
+  orgPolicy(p.root, 'Requires human approval', 'git.remote.push');
+  ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true });
+  assert.equal(runGitHook('pre-push', p.root, { CLAUDECODE: '1' }, '').ok, true);
 });
 
 test('B8 POLICY_INVALID: a policy that fails to compile refuses with the code, the file and what can fix it', async () => {

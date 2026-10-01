@@ -44,7 +44,7 @@ export function readFamilyValue(raw: string): { value: string; legacy: boolean }
 
 /** The single line reported for a file that still uses the old spelling. */
 export function legacyNamingNotice(file: string, spelled: string[]): string {
-  return `DEPRECATED: ${file} spells ${spelled.join(' and ')} under the previous name of the ADMIN_GOVERNED tier (${LEGACY_FAMILY_VALUE}); it is read as ${ADMIN_GOVERNED_VALUE} and means the same. Rename the file and the values before the alias is removed in a future MAJOR release (Q84).`;
+  return `DEPRECATED: ${file} spells ${spelled.join(' and ')} under the previous name of the ADMIN_GOVERNED tier (${LEGACY_FAMILY_VALUE}); it is read as ${ADMIN_GOVERNED_VALUE} and means the same. Write ${ADMIN_GOVERNED_VALUE} instead (the capability file is named ${ADMIN_GOVERNED_VALUE}.md) before the alias is removed in a future MAJOR release (Q84).`;
 }
 
 /** True for a compiled authority table written before the migration: it names the tier in `organizationLocked`. */

@@ -297,8 +297,9 @@ export function ensurePolicyCache(
     writePolicyCache(projectRoot, fresh);
     return { cache: fresh, regenerated: true };
   }
+  // a cache written under the previous naming never serves as the baseline a widening is measured against
   const baseline =
-    cached && cached.runtimeSha256 === self.runtimeSha256
+    cached && cached.runtimeSha256 === self.runtimeSha256 && !cached.legacyNaming
       ? cached.table
       : compileAuthority(loadControlPlane(controlPlaneRoot), { projectRoot });
   const widenings = tableWidenings(baseline, fresh.table);

@@ -124,7 +124,9 @@ export function parseCapabilityDoc(
   const spelled = [familyRead.legacy && 'family', lockRead.legacy && 'lock'].filter((x): x is string => !!x);
   if (spelled.length) notices.push(legacyNamingNotice(file, spelled.map((k) => `\`${k}:\``)));
   if (lockRaw !== 'absolute' && lockRaw !== 'admin-governed' && lockRaw !== 'none')
-    problems.push(`${file}: lock must be absolute, admin-governed or none`);
+    problems.push(
+      `${file}: lock must be absolute, admin-governed or none (HARD_LOCK and ADMIN_GOVERNED name the tiers; a file spells them absolute and admin-governed)`,
+    );
   const lock: CapabilityLock = lockRaw === 'absolute' || lockRaw === 'admin-governed' ? lockRaw : 'none';
   if (absolute && lock !== 'absolute') problems.push(`${file}: absolute: true requires lock: absolute`);
   if (lock === 'absolute' && !absolute) problems.push(`${file}: lock: absolute requires absolute: true`);

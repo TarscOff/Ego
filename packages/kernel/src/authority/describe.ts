@@ -46,7 +46,8 @@ export function describeCapability(
     id,
     description: c.description,
     family: c.family,
-    effectClass: EFFECT_CLASS_LABEL[c.effect],
+    // a table older than the effect field names no effect: external is the fail-safe reading (the grant clamp's own default)
+    effectClass: EFFECT_CLASS_LABEL[c.effect ?? 'external'],
     lockTier: LOCK_TIER_LABEL[c.lock],
     verdict: cellVerdict(table, profile, mode, id),
     ceiling: capabilityCeiling(table, id),
