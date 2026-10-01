@@ -593,6 +593,17 @@ test('K. a command run at parse time that may write is a command that may write 
   ]);
 });
 
+test('K. the file function writes a file while the makefile is read (GNU make 4)', () => {
+  check([
+    ['above an optional include', 'make all', { Makefile: '$(file >gen.mk,all::)\n-include gen.mk\nall::\n\techo ok\n' }, 'ASK'],
+    ['in an assignment', 'make all', { Makefile: 'X := $(file >gen.mk,all::)\n-include gen.mk\nall::\n\techo ok\n' }, 'ASK'],
+    ['with braces', 'make all', { Makefile: 'X := ${file >gen.mk,all::}\n-include gen.mk\nall::\n\techo ok\n' }, 'ASK'],
+    ['appending', 'make all', { Makefile: 'X := $(file >>gen.mk,all::)\n-include gen.mk\nall::\n\techo ok\n' }, 'ASK'],
+    ['in a recipe', 'make all', { Makefile: 'all:\n\t$(file >sub/Makefile,all:)\n\tmake -C sub all\n', 'sub/Makefile': OK }, 'ASK'],
+    ['reading a file is not writing one', 'make all', { Makefile: 'X := $(file <gen.in)\nall:\n\techo ok\n', 'gen.in': 'hello' }, 'ALLOW'],
+  ]);
+});
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * L. A DELETION IS A WRITE
  * ------------------------------------------------------------------------------------------------------------- */

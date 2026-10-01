@@ -6418,6 +6418,9 @@ function readMakeNames(text: string, stopAtColon: boolean): { names: string[]; c
   return { names, colon, assignment: false };
 }
 
+/** make's `$(file >NAME,TEXT)` and `$(file >>NAME,TEXT)`: the write forms of the `file` function (`<NAME` only reads). */
+const MAKE_FILE_WRITE = /\$[({]file\s*>/;
+
 /** A name make expands against the files that exist (`*`, `?`, `[`): the makefile text does not name the targets or
  *  the prerequisites it defines, the directory does. */
 const MAKE_WILDCARD = /[*?[]/;
@@ -6643,6 +6646,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         inDefine = null;
       } else {
         if (/\$[({]eval\b/.test(t)) model.unsupported.push(`$(eval) inside define ${inDefine.name}: ${t}`);
+        if (MAKE_FILE_WRITE.test(t)) model.unsupported.push(`$(file) writes a file inside define ${inDefine.name}: ${t}`);
         inDefine.lines.push(t);
       }
       continue;
@@ -6879,6 +6883,9 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     for (const c of expandMakeText(trimmed, model.vars).ran) model.parseRan.push(c);
     // GNU make reads `${…}` and `$(…)` as the SAME reference, and the guard saw only the paren form
     if (/\$[({]eval\b/.test(trimmed)) model.unsupported.push(`$(eval): ${trimmed}`);
+    // GNU make >= 4.0 `$(file >NAME,TEXT)` WRITES A FILE WHILE THE MAKEFILE IS READ - the include below it reads what was just written
+    // (`$(file >gen.mk,all::)` above `-include gen.mk`), and the file did not exist when the include was listed
+    if (MAKE_FILE_WRITE.test(trimmed)) model.unsupported.push(`$(file) writes a file while the makefile is read: ${trimmed}`);
     // GNU make >= 4.0 `load FILE` (and `-load`) DLOPENS a shared object at MAKEFILE-PARSE time and calls its setup
     // function: native code in make's own process, for every goal and before any recipe, regardless of `-n`. It is
     // the third way a makefile executes at parse time and the only one that is not shell at all, so no
