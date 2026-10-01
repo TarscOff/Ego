@@ -22,6 +22,7 @@ import { sha256Hex } from '../util/hash.ts';
 import { resolveLauncher } from '../util/path-resolve.ts';
 import { HOST_MATRIX, HOST_IDS, type HostId } from '../hosts/matrix.ts';
 import { loadControlPlane } from '../control-plane/load.ts';
+import { CONTROL_KINDS, type Profile } from '../control-plane/types.ts';
 import { approxTokens } from '../context/root-instructions.ts';
 
 export type DoctorState = 'SATISFIED' | 'NOT SATISFIED' | 'SKIPPED' | 'UNVERIFIED' | 'INFO';
@@ -49,6 +50,80 @@ export interface DoctorOptions {
   /** host to evaluate containment against; detected from environment markers when absent */
   host?: HostId;
 }
+
+interface DeclaredOnlySetting {
+  /** the key as an operator writes it in a profile's front matter */
+  key: string;
+  /** the field the loader puts it in */
+  field: keyof Profile;
+  /** the value that asks for nothing: the loader's default, which STANDARD keeps */
+  baseline: unknown;
+  /** an unmet requirement fails doctor; a policy about a situation EGO cannot yet detect does not */
+  requirement: boolean;
+  /** what is missing, in one clause */
+  missing: string;
+}
+
+/**
+ * Profile settings the control plane parses, validates and compiles and that NO code reads: the package sources
+ * mention each field only in the loader, the type and the compiler's copy. Setting one to a stricter value changes
+ * nothing, and the profile documents described several of them as enforced (audit X8, D28). When a setting gains a
+ * consumer, take it out of this list and out of the "declared, not enforced" paragraph of the profile documents.
+ * `requires_signed_release_trust` is not here because its requirement IS enforced — by the profile's identity (any
+ * profile but STANDARD), not by reading the setting; the profile documents say so.
+ */
+export const DECLARED_ONLY_PROFILE_SETTINGS: readonly DeclaredOnlySetting[] = [
+  {
+    key: 'requires_managed_tier',
+    field: 'requiresManagedTier',
+    baseline: false,
+    requirement: true,
+    missing: 'EGO neither installs nor verifies a managed tier (issue #26)',
+  },
+  {
+    key: 'requires_remote_verify_backstop',
+    field: 'requiresRemoteVerifyBackstop',
+    baseline: false,
+    requirement: true,
+    missing: '`ego verify --range` is a phase-6 command and does not exist yet',
+  },
+  {
+    key: 'shell_uncertain_mutation_with_foreign_live_session',
+    field: 'shellUncertainMutation',
+    baseline: 'DETECT_AFTER',
+    requirement: false,
+    missing:
+      'no foreign live session is detected until held scopes exist (phase 2), so nothing is denied for this',
+  },
+  {
+    key: 'grilling_review_unavailable',
+    field: 'grillingReviewUnavailable',
+    baseline: 'CONTINUE_WITH_DISCLOSURE',
+    requirement: false,
+    missing: 'the Stop hook never blocks DONE, and the Grilling review is phase 4',
+  },
+  {
+    key: 'forge_unreachable_at_done',
+    field: 'forgeUnreachableAtDone',
+    baseline: 'CONTINUE_WITH_DISCLOSURE',
+    requirement: false,
+    missing: 'the Stop hook never blocks DONE, and the forge snapshot is phase 2',
+  },
+  {
+    key: 'owner_weakening_plain_policy',
+    field: 'ownerWeakeningPlainPolicy',
+    baseline: 'AUTO_WITH_INFORM',
+    requirement: false,
+    missing: 'the human decision gate is phase 5',
+  },
+  {
+    key: 'model_flagged_conflict_on_control',
+    field: 'modelFlaggedConflictOnControl',
+    baseline: 'INFORM',
+    requirement: false,
+    missing: 'the human decision gate is phase 5',
+  },
+];
 
 export function detectHost(env: NodeJS.ProcessEnv): HostId | null {
   if (env['CLAUDECODE'] === '1' || env['CLAUDE_CODE'] === '1' || env['CLAUDE_PID']) return 'claude-code';
@@ -363,18 +438,30 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
       `${cp.secrets.flatMap((s) => s.detectors).length} detectors, locked minimums enforced, structured curl parsing`,
       false,
     );
-    // required containment controls are judged against the active host; without a determined host nothing is
-    // claimed SATISFIED and nothing fails: the line says how to determine it (never fake parity, never fake failure)
+    // controls are judged against the active host; without a determined host nothing is claimed SATISFIED and
+    // nothing fails: the line says how to determine it (never fake parity, never fake failure)
     const active = opts.host ?? detectHost(opts.env);
     add(
-      'containment',
+      'controls',
       'active host',
       'INFO',
       active ?? 'undetermined: run doctor from inside the host or pass --host <claude-code|codex-cli>',
       false,
     );
-    const containment = cp.containment.filter((c) => c.requiredIn.includes(pin.profile));
-    for (const c of containment) {
+    // A control the profile only RECOMMENDS used to be invisible: nothing read `recommended_in`, so the sandbox — the
+    // single most important absent control — never appeared in a HIGH_ASSURANCE report. It is printed now, and it
+    // cannot fail the run: only a control the profile REQUIRES counts against the exit code. Lines are grouped by the
+    // control's `kind`, so a worktree is reported as isolation and never under the word containment (criterion 6).
+    const controls = cp.containment
+      .filter((c) => c.requiredIn.includes(pin.profile) || c.recommendedIn.includes(pin.profile))
+      .sort((a, b) => CONTROL_KINDS.indexOf(a.kind) - CONTROL_KINDS.indexOf(b.kind));
+    for (const c of controls) {
+      const isRequired = c.requiredIn.includes(pin.profile);
+      const need = isRequired
+        ? `required in ${pin.profile}`
+        : c.requiredIn.length
+          ? `recommended in ${pin.profile}, required in ${c.requiredIn.join(', ')}`
+          : `recommended in ${pin.profile}, required by no profile`;
       const hosts: HostId[] = active ? [active] : [...HOST_IDS];
       for (const h of hosts) {
         const status = c.hosts[h] ?? 'UNVERIFIED';
@@ -399,28 +486,43 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
             : status === 'PARTIAL'
               ? 'only partly provided — see the control description for what is and is not covered'
               : status === 'UNAVAILABLE'
-                ? 'not in force: neither the host nor EGO provides it today — see the control description'
+                ? 'not in force: EGO neither establishes nor detects it on this host today — see the control description'
                 : 'declared SUPPORTED in EGO\u2019s own control plane; not verified against the running host (phase 6)';
         add(
-          'containment',
+          c.kind,
           `${c.id} on ${h}`,
           state,
-          `required in ${pin.profile}; host status ${status} (${why})`,
-          active !== null,
+          `${need}; host status ${status} (${why})`,
+          isRequired && active !== null,
         );
       }
     }
     // A setting the control plane accepts, validates and compiles, but that NO consumer reads, is decoration: an
     // operator can tighten it, see it compile, and get nothing. Say so rather than letting the profile document's
-    // promise stand (challenge 5, finding 22).
+    // promise stand (challenge 5, finding 22). The list is DECLARED_ONLY_PROFILE_SETTINGS.
     const profile = cp.profiles.find((p) => p.id === pin.profile);
-    if (profile?.requiresManagedTier)
+    const asked = profile
+      ? DECLARED_ONLY_PROFILE_SETTINGS.filter((s) => profile[s.field] !== s.baseline)
+      : [];
+    for (const s of asked.filter((x) => x.requirement))
       add(
-        'containment',
-        'requires_managed_tier',
+        'profile',
+        s.key,
         'NOT SATISFIED',
-        `${pin.profile} declares requires_managed_tier: true, but no consumer reads it — EGO neither installs nor verifies a managed tier (issue #26)`,
+        `${pin.profile} declares ${s.key}: ${String(profile![s.field])}, but no consumer reads it — ${s.missing}`,
         true,
+      );
+    // The other settings are policies about a situation EGO cannot yet detect (a foreign live session, an unreachable
+    // forge, a decision gate). Listing each as a failure would make every STRICT project fail for a feature that has
+    // not shipped, so they are named once, and the profile documents say the same thing.
+    const policies = asked.filter((x) => !x.requirement);
+    if (policies.length)
+      add(
+        'profile',
+        'profile settings declared, not enforced',
+        'INFO',
+        policies.map((s) => `${s.key}=${String(profile![s.field])} (${s.missing})`).join('; '),
+        false,
       );
     const budgets = cp.profiles.find((p) => p.id === pin.profile)?.budgets;
     if (budgets)
@@ -445,7 +547,10 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     'human gate',
     'integrity',
     'INFO',
-    'prevent-in-band / detect-out-of-band; managed tier in HIGH_ASSURANCE',
+    // This line used to end "managed tier in HIGH_ASSURANCE" while the same HIGH_ASSURANCE run printed that EGO neither
+    // installs nor verifies one. In-band prevention is the hooks classifying a call before it runs; out-of-band
+    // detection is only the hash comparison of generated files that `ego check` and this command run on demand.
+    'prevent-in-band (hooks classify a call before it runs); detect-out-of-band on demand only (`ego check` and `ego doctor` compare the generated files with their manifest); no managed tier is installed or verified by EGO in any profile (issue #26)',
     false,
   );
   add(

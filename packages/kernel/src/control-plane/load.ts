@@ -17,12 +17,14 @@ import { readText, isFile, isDir, toPosix } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
 import type { YamlValue } from '../util/yaml.ts';
 import {
+  CONTROL_KINDS,
   ControlPlaneValidationError,
   type AuthorityMode,
   type BudgetExceedAction,
   type CapabilityDecl,
   type CapabilityLock,
   type ContainmentControl,
+  type ControlKind,
   type ExecutionBudgets,
   type CapabilityDoc,
   type ControlPlane,
@@ -288,6 +290,11 @@ function parseContainment(file: string, problems: string[]): ContainmentControl[
       return;
     }
     if (!CAP_ID_RE.test(c['id'])) problems.push(`${file}: invalid control identifier "${c['id']}"`);
+    // Required, with no default: a control that did not say what it is would be reported under the word the loader
+    // happened to pick, and "containment" is the word a reader trusts most.
+    const kind = c['kind'];
+    if (typeof kind !== 'string' || !(CONTROL_KINDS as readonly string[]).includes(kind))
+      problems.push(`${file}: control ${c['id']} kind must be one of ${CONTROL_KINDS.join(', ')}`);
     const list = (k: string): string[] => {
       const v = c[k];
       if (v === undefined || v === null) return [];
@@ -315,6 +322,7 @@ function parseContainment(file: string, problems: string[]): ContainmentControl[
     }
     out.push({
       id: c['id'],
+      kind: kind as ControlKind,
       description: c['description'],
       requiredIn: list('required_in'),
       recommendedIn: list('recommended_in'),
