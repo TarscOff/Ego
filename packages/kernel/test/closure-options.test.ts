@@ -236,6 +236,8 @@ test('RC-CAR: ...and a carrier in front of something harmless gates nothing that
   // (sudo asks on its own account, which is not what is under test)
   for (const carrier of ARGV_CARRIERS.filter((c) => !c.startsWith('sudo') && !/^(npx|bunx|bun x|pnpm exec|yarn exec|npm exec)/.test(c)))
     for (const benign of BENIGN) assert.equal(verdict(`${carrier} ${benign}`, dir), 'ALLOW', `${carrier} ${benign}`);
+  // a shell keyword may stand between carriers: `time` is a carrier with options of its own and also the keyword in front of a pipeline
+  for (const c of ['time ! false', 'time if true; then ls; fi', 'time -p ls', 'time FOO=1 make --version']) assert.equal(verdict(c, dir), 'ALLOW', c);
   for (const carrier of ['yarn exec', 'pnpm exec', 'npx', 'npm exec --'])
     for (const benign of ['git status', "sed -n 1p README.md"]) assert.notEqual(verdict(`${carrier} ${benign}`, dir), 'DENY', `${carrier} ${benign}`);
 });
@@ -284,6 +286,15 @@ test('RC-CAR: env appends its remaining arguments to the string -S split, so a h
     assert.equal(verdict(c, dir), 'DENY', c);
   // ...and the same string with a harmless remainder is not
   for (const c of ["env -S'git commit -m x'", "env -S'git commit' -m x", "env -S'git status' -s"]) assert.notEqual(verdict(c, dir), 'DENY', c);
+  // ...and a `-n` that is part of a MESSAGE is not the flag, however many carriers the message passes through
+  for (const c of [
+    "env -S'git commit' -m 'fix -n'",
+    "env -S 'git commit -m \"fix -n\"'",
+    "watch 'git commit -m \"fix -n\"'",
+    "timeout -s KILL 5 git commit -m 'fix -n'",
+    "find . -maxdepth 0 -exec git commit -m 'fix -n' \\;",
+  ])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
 });
 
 test('RC-CAR: the directory a carrier chain runs in is read by the same reader, whatever options stand in front of git -C', () => {
@@ -360,6 +371,9 @@ test('RC-OPT: tar abbreviations, clusters and the traditional spelling are one r
     'tar xvfC x.tar .git/hooks',
     'tar -C .git -C hooks -xf x.tar',
     'tar -C .git/hooks -x -f x.tar',
+    // a letter the table does not know is a flag the parser reports, and the mode behind it is still read
+    'tar -Exf x.tar -C .git/hooks',
+    'tar -qxf x.tar -C .git/hooks',
   ])
     assert.equal(verdict(c, dir), 'DENY', c);
   // ...and the archive WRITTEN is a write to that path in every mode that writes one (including --delete, which had no spelling at all)

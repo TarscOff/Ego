@@ -263,9 +263,14 @@ export function parseOptions(g: Grammar, argv: readonly string[], from = 0): Par
       if (!def) {
         // a single-dash WORD of the grammar (procps `-differences`, BSD `-arch`), taken whole
         const word = k === 0 ? c.words.find((x) => x.spelling === w) : undefined;
-        if (word) add(word.def, null, '-', i);
-        else unknown.push({ raw: w, at: i });
-        break;
+        if (word) {
+          add(word.def, null, '-', i);
+          break;
+        }
+        // a letter the table does not know is reported ONCE for the word and read as a flag, so the letters after it are still read: a
+        // variant of the tool that has the letter (`tar -Exf`) must not hide a mode behind it
+        if (!unknown.some((u) => u.at === i)) unknown.push({ raw: w, at: i });
+        continue;
       }
       const rest = letters.slice(k + 1);
       if (def.arity === 'none') {

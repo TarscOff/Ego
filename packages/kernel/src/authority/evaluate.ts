@@ -1705,7 +1705,8 @@ function normalizeSegmentInner(segment: string): string[] {
   // (normalizeTail), so the chain stops at them. This was a loop over a set of names and a regex of value-taking options per
   // wrapper, and a second, different copy of it served every reader of the line as written (independent review 11: RC-CAR).
   const keepsHead = (_name: string, spec: Carrier): boolean => spec.retains === true || spec.payload === true;
-  const peeled: Peeled = peelCarriers(tokens, 0, { stopAt: keepsHead, leadingAssignments: false });
+  // (a shell keyword may stand between carriers - `time ! false`, `time if …` - and is structure, not a command)
+  const peeled: Peeled = peelCarriers(tokens, 0, { prefixes: HEAD_PREFIXES, stopAt: keepsHead, leadingAssignments: false });
   const steps: PeelStep[] = peeled.steps;
   const leading: string[] = peeled.leading;
   // `command -v NAME` / `-V NAME` LOOKS THE NAME UP and prints where it is; it does not run it. Stripping
