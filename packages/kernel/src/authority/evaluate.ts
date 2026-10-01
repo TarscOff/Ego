@@ -5658,6 +5658,73 @@ export function expandMakeText(
   return { text: opaque ? null : out, prefix, ran };
 }
 
+/**
+ * A LIST OF FILE NAMES IN A MAKEFILE, READ THE WAY MAKE READS IT - THE ONE READER OF THE QUESTION "WHAT ARE THE NAMES
+ * HERE". A rule's targets, its prerequisites, an `include` and a default goal all name files, and each was split on
+ * `\s+`: make's grammar is not the shell's. Names are separated by unescaped blanks; a backslash in front of a blank,
+ * a colon or a hash is part of the name (`a\ b:` defines ONE target, `a b`), and a RUN of backslashes in front of one
+ * halves (`q\\:` is the name `q\` followed by the colon, `k\\\ l` is the name `k\ l`); a backslash in front of
+ * anything else stays as written. Checked against GNU make 3.81. The split left the target `a b` registered as `a\` and `b`, so
+ * `make 'a b'` found no rule, the goal came out "absent" and the recipe ran under ALLOW (closure audit F20); the same
+ * split on the cut at the colon dropped `a\:b` and `a\#b` altogether.
+ *
+ * Returns the names and, when `stopAtColon`, the index of the first colon that ends the list (-1 when none), so the
+ * caller reads a rule's head and its tail from the SAME scan. `=` outside an escape is an assignment, not a rule head:
+ * the scan reports it as `assignment` and the caller does not take the line for a rule.
+ */
+function readMakeNames(text: string, stopAtColon: boolean): { names: string[]; colon: number; assignment: boolean } {
+  const names: string[] = [];
+  let cur = '';
+  let open = false;
+  let colon = -1;
+  const flush = (): void => {
+    if (open) names.push(cur);
+    cur = '';
+    open = false;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '\\') {
+      let n = 1;
+      while (text[i + n] === '\\') n++;
+      const next = text[i + n];
+      open = true;
+      if (next === ' ' || next === '\t' || next === ':' || next === '#') {
+        // pairs collapse to one backslash; an odd one out escapes the blank, colon or hash, which is then part of the
+        // name. After an EVEN run the character keeps its own meaning and is read on the next turn
+        cur += '\\'.repeat(n >> 1);
+        i += n - 1;
+        if (n % 2 === 1) {
+          cur += next;
+          i++;
+        }
+      } else {
+        cur += '\\'.repeat(n);
+        i += n - 1;
+      }
+      continue;
+    }
+    if (c === ' ' || c === '\t') {
+      flush();
+      continue;
+    }
+    if (c === '#') break; // an unescaped hash starts a comment: nothing after it is a name
+    if (stopAtColon && c === ':') {
+      colon = i;
+      break;
+    }
+    if (stopAtColon && c === '=') return { names, colon: -1, assignment: true };
+    cur += c;
+    open = true;
+  }
+  flush();
+  return { names, colon, assignment: false };
+}
+
+/** A name make expands against the files that exist (`*`, `?`, `[`): the makefile text does not name the targets or
+ *  the prerequisites it defines, the directory does. */
+const MAKE_WILDCARD = /[*?[]/;
+
 /** Joins backslash continuations OUTSIDE recipe lines; a recipe's continuation stays one logical shell line. */
 function makeLogicalLines(text: string): string[] {
   const raw = text.split(/\r?\n/);
@@ -5910,7 +5977,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
 
     // `include a.mk b.mk` — the included rules really execute, so an unreadable one is not "no such target"
     const inc = /^([-s]?)include\s+(.+)$/.exec(trimmed);
-    if (inc && !/[$`]/.test(inc[2]!)) included.push(...inc[2]!.split(/\s+/).filter(Boolean));
+    if (inc && !/[$`]/.test(inc[2]!)) included.push(...readMakeNames(inc[2]!, false).names);
     if (inc) {
       current = null;
       // `-include` and `sinclude` exist PRECISELY so that a missing file is not an error: make carries on. Marking
@@ -5930,7 +5997,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       // concluded the goal it did not see was proven absent. `evil.mk` holding `deploy: git push origin main`
       // then ran under a proven-absent claim (exit review 7).
       const names: string[] = [];
-      for (const name of inc[2]!.split(/\s+/).filter(Boolean)) {
+      for (const name of readMakeNames(inc[2]!, false).names) {
         if (!/[*?[]/.test(name)) {
           names.push(name);
           continue;
@@ -6109,13 +6176,23 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     // `override` and `export` may precede it, exactly as they may precede any other assignment: without them
     // `override .DEFAULT_GOAL = deploy` selected no goal at all (exit review 9).
-    const goal = /^(?:override\s+|export\s+)*\.DEFAULT_GOAL\s*[:+?]?=\s*(\S+)/.exec(trimmed);
-    if (goal) {
+    const goal = /^(?:override\s+|export\s+)*\.DEFAULT_GOAL\s*[:+?]?=\s*(\S.*)$/.exec(trimmed);
+    // THE VALUE IS READ BY MAKE'S NAME GRAMMAR (GNU make 3.81 runs the target `a b` for `.DEFAULT_GOAL := a\ b`), and a
+    // value of several words is an error to make unless the WHOLE text is itself the name of a target - so it is the
+    // first name, and every further name, and the whole text, that are candidates; an over-reading here walks a goal
+    // make would refuse, never one it would run unread
+    const goalNames = goal ? readMakeNames(goal[1]!, false).names : [];
+    if (goal && goalNames.length > 0) {
+      const whole = goal[1]!.replace(/(^|[^\\])#.*$/, '$1').trim();
       // INSIDE A CONDITIONAL, EVERY BRANCH IS POSSIBLE — the same rule `altVars` applies to an ordinary
       // variable. Outside one, assignments are SEQUENTIAL and make takes the last, which this resolver can
       // determine exactly; recording every sequential assignment as a candidate would walk goals the file has
       // already overwritten and gate a makefile EGO can read perfectly well.
-      const g = goal[1]!.replace(/^(?:\.\/+)+/, '') || goal[1]!;
+      const canon = (n: string): string => n.replace(/^(?:\.\/+)+/, '') || n;
+      const g = canon(goalNames[0]!);
+      if (goalNames.length > 1) {
+        for (const extra of [...goalNames.slice(1), whole]) model.altGoals.add(canon(extra));
+      }
       if (openConditions.length) {
         if (model.defaultGoal) model.altGoals.add(model.defaultGoal);
         model.altGoals.add(g);
@@ -6146,12 +6223,26 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // GNU make strips the COMMENT before it looks for the `;` that starts a one-line recipe, so in `deploy: ## Deploy;
     // never run git push by hand` the text after the semicolon is prose (exit review 10, self-attack)
     const ruleLine = line.replace(/(^|[^\\])#.*$/, '$1');
-    const rule = /^([^:=#]+?)\s*::?(?!=)\s*([^;]*)(?:;(.*))?$/.exec(ruleLine);
+    // THE HEAD OF A RULE IS READ BY MAKE'S NAME GRAMMAR, NOT CUT BY A REGULAR EXPRESSION: `a\ b:`, `a\:b:` and
+    // `a\#b:` each define ONE target, and the cut that stopped at the first `:`, `=` or `#` and split on every blank
+    // registered other names than the ones `make 'a b'` looks up (closure audit F20)
+    const head = readMakeNames(ruleLine, true);
+    let rule: { prereqText: string; recipeText: string | undefined } | null = null;
+    if (!head.assignment && head.colon >= 0) {
+      // `::` is a double-colon rule; `:=` is an assignment and was never a rule
+      let at = head.colon + 1;
+      if (ruleLine[at] === ':' && ruleLine[at + 1] !== '=') at++;
+      if (ruleLine[at] !== '=') {
+        const tail = ruleLine.slice(at);
+        const semi = tail.indexOf(';');
+        rule = { prereqText: semi < 0 ? tail : tail.slice(0, semi), recipeText: semi < 0 ? undefined : tail.slice(semi + 1) };
+      }
+    }
     // ONLY A TAB MARKS A RECIPE. GNU make accepts a rule line indented with SPACES, and rejecting every
     // whitespace-led line made `  deploy:` invisible: `make deploy` force-pushed under a proven-absent claim
     // (exit review 7).
     if (rule && !/^\t/.test(line)) {
-      const targets = rule[1]!.trim().split(/\s+/).filter(Boolean);
+      const targets = head.names;
       // A TARGET-SPECIFIC VARIABLE IS NOT A PREREQUISITE LIST. `deploy: DOCKER = docker --context production rm
       // -f app` overrides DOCKER for that target's recipes, and it was parsed as a rule whose prerequisites are
       // the words of the assignment — so the recipe `$(DOCKER)` was expanded with the GLOBAL value and the
@@ -6160,7 +6251,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       // - a `;` and what follows it included - and creates no recipe: `run: V = true; echo X` gives V the value
       // `true; echo X`, which runs only where `$(V)` is expanded. (An earlier revision of this parser read the tail as a
       // recipe on the strength of an experiment that could not tell the two apart; both print the same lines.)
-      const whole = (rule[3] !== undefined ? `${rule[2]};${rule[3]}` : rule[2]!).trim();
+      const whole = (rule.recipeText !== undefined ? `${rule.prereqText};${rule.recipeText}` : rule.prereqText).trim();
       const tsv = /^((?:override\s+|export\s+|private\s+)*)([A-Za-z_][A-Za-z0-9_.]*)\s*(::?:?=|[+?!]=|=)\s*(.*)$/.exec(whole);
       if (tsv) {
         // what this parser does not model is REPORTED, not approximated: an appending or conditional assignment, a
@@ -6180,20 +6271,23 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         if (unmodelled && targets.some((t) => t.includes('%'))) model.unsupported.push(`${unmodelled}: ${whole}`);
         continue;
       }
-      const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
+      const prereqs = readMakeNames(rule.prereqText, false).names;
       // A target that can build something NO LITERAL RULE DEFINES makes "this goal has no rule, so nothing runs"
       // false. A `%` pattern is one; so are `.DEFAULT`, which make runs for any goal with no rule of its own, and
       // an old-style SUFFIX rule like `.c.o:` — both reached ALLOW by proving a target absent that make in fact
-      // builds (exit review 6).
-      if (targets.some((t) => /[%$]/.test(t) || /^\.DEFAULT$/i.test(t) || /^\.[A-Za-z0-9_+-]+\.[A-Za-z0-9_+-]+$/.test(t)))
+      // builds (exit review 6). A WILDCARD IS ANOTHER: make expands `*`, `?` and `[` in a target name against the
+      // files that exist, so `dep*:` is a rule for `deploy` whenever that file is there - the text names no target.
+      if (targets.some((t) => /[%$]/.test(t) || MAKE_WILDCARD.test(t) || /^\.DEFAULT$/i.test(t) || /^\.[A-Za-z0-9_+-]+\.[A-Za-z0-9_+-]+$/.test(t)))
         model.hasPatternRules = true;
       const shared: MakeRule = { recipes: [], prereqs };
-      if (rule[3] && rule[3].trim()) shared.recipes.push(rule[3].trim()); // `target: ; cmd` one-line form
+      if (rule.recipeText && rule.recipeText.trim()) shared.recipes.push(rule.recipeText.trim()); // `target: ; cmd` one-line form
       // the recipes array is the LIVE one: the recipe lines that follow this rule are appended to it
       for (const t of targets)
         if (t.includes('%') && !t.includes('$')) model.patternRules.push({ target: t, prereqs, recipes: shared.recipes });
       const localBlind = [...openConditions];
       if (prereqs.some((p) => /[$]/.test(p))) localBlind.push(`computed prerequisites: ${trimmed}`);
+      // ...AND A WILDCARD PREREQUISITE NAMES WHATEVER FILES EXIST, any of which may be a target with a rule of its own
+      if (prereqs.some((p) => MAKE_WILDCARD.test(p))) localBlind.push(`wildcard prerequisites: ${trimmed}`);
       for (const raw of targets) {
         // `./deploy:` AND `deploy:` ARE THE SAME TARGET: make canonicalises a leading `./` away, so a makefile
         // may define the safe recipe under one spelling and the dangerous one under the other. Registered
