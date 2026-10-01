@@ -16,6 +16,8 @@ import { evaluate, type EvaluationContext, type Evaluation } from '../src/author
 import { writePin, readPin } from '../src/launcher/pin.ts';
 import { selfIdentity, selfVersion } from '../src/launcher/self.ts';
 import { runCommand, type ProjectContext } from '../../cli/src/commands.ts';
+import { parseCodexEvent } from '../../adapter-codex-cli/src/dialect.ts';
+import { argvToCommandLine } from '../src/util/shell-quote.ts';
 import { table, workspace } from './support/corpus.ts';
 
 const HOME = homedir();
@@ -678,5 +680,138 @@ test('a tool nobody modelled asks; the few that cannot act on anything are liste
   const pre = project('HIGH_ASSURANCE', true);
   assert.equal((await hook(pre, 'claude-code', cc('TodoWrite', { todos: [] }))).action, 'allow');
   assert.equal((await hook(pre, 'claude-code', cc('Write', { file_path: join(pre.root, 'a.ts'), content: 'x' }))).action, 'deny');
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 5. CODEX SENDS AN ARGV, NOT A STRING (audit 13)
+ *
+ * Every real Codex shell call carries `["bash","-lc","git push"]`, directly or inside a JSON text in `arguments`.
+ * The dialect wrapped the whole JSON as the command, so each one was an unknown head: refused — safe, and
+ * unusable. The argv is now flattened into the shell-quoted line that executes as that vector.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const codexCommand = (extra: Record<string, unknown>): unknown =>
+  parseCodexEvent('PreToolUse', { session_id: 's', cwd: '/w', ...extra }, '/fallback').tool?.input['command'];
+
+test('codex-cli dialect: an argv array or a JSON `arguments` becomes the shell line the host will execute', () => {
+  assert.equal(argvToCommandLine(['ls', '-la']), 'ls -la');
+  assert.equal(argvToCommandLine(['bash', '-lc', 'git push origin main']), "bash -lc 'git push origin main'");
+  assert.equal(argvToCommandLine(['echo', 'a b; rm -rf /', "it's", '', '$(id)']), "echo 'a b; rm -rf /' 'it'\\''s' '' '$(id)'");
+  assert.equal(argvToCommandLine(['FOO=bar', 'ls']), "'FOO=bar' ls", 'a leading NAME=value is a program name to execve');
+  assert.equal(argvToCommandLine(['ls', 'a=b']), 'ls a=b');
+  for (const notArgv of [[], ['ls', 5], 'ls', null, [['ls']]]) assert.equal(argvToCommandLine(notArgv), null);
+
+  // the shapes Codex really uses, under every key the dialect reads
+  const argv = ['bash', '-lc', 'git push origin main'];
+  const line = 'git push origin main'; // the host's own `bash -lc` wrapper is not part of what is judged
+  for (const tool of ['shell', 'local_shell', 'exec_command', 'shell_command', 'container.exec']) {
+    assert.equal(codexCommand({ tool_name: tool, tool_input: { command: argv } }), line, `${tool} tool_input.command`);
+    assert.equal(codexCommand({ tool, input: { command: argv } }), line, `${tool} input.command`);
+    assert.equal(codexCommand({ tool_name: tool, arguments: JSON.stringify({ command: argv }) }), line, `${tool} arguments`);
+    assert.equal(codexCommand({ tool_name: tool, arguments: JSON.stringify(argv) }), line, `${tool} arguments as a bare array`);
+  }
+  assert.equal(codexCommand({ tool_name: 'shell', tool_input: { command: ['ls', '-la'] } }), 'ls -la');
+  assert.equal(codexCommand({ tool_name: 'shell', tool_input: { command: ['git', 'push', 'origin', 'main'] } }), 'git push origin main');
+  // only the exact wrapper is unwrapped (a shell, -c / -lc / -cl, one script); every other shape keeps its words
+  for (const [argv2, want] of [
+    [['/bin/sh', '-c', 'ls'], 'ls'],
+    [['zsh', '-cl', 'ls'], 'ls'],
+    [['bash', '-ic', 'ls'], 'bash -ic ls'],
+    [['bash', '-lc', 'ls', 'arg0'], 'bash -lc ls arg0'],
+    [['bash', '--rcfile', 'x', '-c', 'ls'], 'bash --rcfile x -c ls'],
+    [['bash', 'script.sh'], 'bash script.sh'],
+    [['python3', '-c', 'print(1)'], "python3 -c 'print(1)'"],
+    [['bash', '-lc', 'echo a; git push'], 'echo a; git push'],
+  ] as Array<[string[], string]>)
+    assert.equal(codexCommand({ tool_name: 'shell', tool_input: { command: argv2 } }), want, JSON.stringify(argv2));
+  assert.equal(codexCommand({ tool_name: 'shell', arguments: '{"command":"git push"}' }), 'git push');
+  assert.equal(codexCommand({ tool_name: 'exec_command', tool_input: { cmd: 'git push' } }), 'git push');
+  assert.equal(codexCommand({ tool_name: 'exec_command', arguments: '{"cmd":"git push"}' }), 'git push');
+  assert.equal(codexCommand({ tool_name: 'shell', arguments: '{"argv":["git","push"]}' }), 'git push');
+  // the flat shapes that always worked are unchanged
+  assert.equal(codexCommand({ tool: 'shell', arguments: 'git push' }), 'git push');
+  assert.equal(codexCommand({ tool_name: 'shell', tool_input: { command: 'git push' } }), 'git push');
+  assert.equal(codexCommand({ tool_name: 'shell', arguments: '[ -f x ] && ls' }), '[ -f x ] && ls', 'a command that looks like JSON is still a command');
+  assert.equal(codexCommand({ tool_name: 'shell', arguments: '{ ls; }' }), '{ ls; }');
+  // a workdir is the cd it is, so a relative path is judged where it will be opened
+  assert.equal(codexCommand({ tool_name: 'shell', tool_input: { command: ['ls'], workdir: '/some dir' } }), "cd '/some dir' && ls");
+  assert.equal(codexCommand({ tool_name: 'shell', arguments: '{"command":["ls"],"workdir":"/w"}' }), 'cd /w && ls');
+  // the keys the line was built from do not stay behind to be read a second time
+  const ev = parseCodexEvent('PreToolUse', { tool_name: 'exec_command', tool_input: { cmd: 'ls', workdir: '/w', yield_time_ms: 5 } }, '/c');
+  assert.deepEqual(ev.tool?.input, { yield_time_ms: 5, command: 'cd /w && ls' });
+  // an apply_patch is not a shell call, and its string form is still the patch
+  assert.equal(codexCommand({ tool_name: 'apply_patch', arguments: '*** Begin Patch' }), '*** Begin Patch');
+});
+
+test('codex-cli dialect: a shape it does not recognise is left as it arrived, so the kernel asks', async () => {
+  for (const extra of [
+    { tool_name: 'shell', tool_input: { command: 5 } },
+    { tool_name: 'shell', tool_input: { command: [] } },
+    { tool_name: 'shell', tool_input: { command: ['ls', 5] } },
+    { tool_name: 'shell', tool_input: { command: [['ls']] } },
+    { tool_name: 'shell', tool_input: { command: ['ls'], workdir: 5 } },
+    { tool_name: 'shell', tool_input: { command: ['ls'], workdir: '' } },
+    { tool_name: 'shell', tool_input: { nothing: 'here' } },
+    { tool_name: 'shell', arguments: '{"foo":1}' },
+    { tool_name: 'shell', arguments: '{"command": ' },
+    { tool_name: 'shell', arguments: 5 },
+    { tool_name: 'shell', arguments: null },
+    { tool_name: 'shell', arguments: '[1,2]' },
+    { tool_name: 'shell' },
+  ]) {
+    const p = project('STANDARD');
+    const x = await hook(p, 'codex-cli', extra);
+    assert.equal(x.action, 'deny', JSON.stringify(extra));
+    assert.equal(x.code, 2, JSON.stringify(extra));
+    assert.match(x.reason, /ASK is refused|is DENY/, `${JSON.stringify(extra)}: refused as a call nobody can read, not allowed: ${x.reason}`);
+  }
+});
+
+test('codex-cli hook: a flattened argv is judged as what it is', async () => {
+  for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE'] as const) {
+    const p = project(profile);
+    const shapes = (argv: string[], more: Record<string, unknown> = {}): Array<Record<string, unknown>> => [
+      { tool_name: 'shell', tool_input: { command: argv, ...more } },
+      { tool_name: 'shell', arguments: JSON.stringify({ command: argv, ...more }) },
+      { tool: 'local_shell', input: { command: argv, ...more } },
+    ];
+    for (const payload of shapes(['bash', '-lc', 'git push origin main'])) {
+      const x = await hook(p, 'codex-cli', payload);
+      assert.equal(x.action, 'deny', `${profile} ${JSON.stringify(payload)}`);
+      assert.equal(x.code, 2);
+      assert.match(x.reason, /git\.remote\.push is DENY/, 'refused for what it is, not for being unreadable');
+    }
+    for (const payload of shapes(['bash', '-lc', 'rm -rf /'])) assert.match((await hook(p, 'codex-cli', payload)).reason, /is DENY/);
+    for (const payload of shapes(['ls', '-la'])) {
+      const x = await hook(p, 'codex-cli', payload);
+      assert.equal(x.action, 'allow', `${profile} ${JSON.stringify(payload)}: ${x.reason}`);
+      assert.equal(x.code, 0);
+    }
+    assert.equal((await hook(p, 'codex-cli', shapes(['bash', '-lc', 'ls -la && git status'])[0]!)).action, 'allow');
+    // an argv element is ONE word: the metacharacters in it do not run
+    const quoted = await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: ['echo', 'hello; git push origin main'] } });
+    assert.equal(quoted.action, 'allow', quoted.reason);
+    // ...and the one that is a program name is the program
+    assert.match((await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: ['git', 'push', 'origin', 'main'] } })).reason, /is DENY/);
+    // a command that is merely unknown to the classifier is refused, as before
+    const ask = await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: ['bash', '-lc', 'curl https://example.com'] } });
+    assert.equal(ask.action, 'deny');
+    assert.match(ask.reason, /ASK is refused|network-tool is DENY/); // HIGH_ASSURANCE denies the network tool outright
+    // a wrapper that is not the host's exact one keeps its words, and a shell run on a script is an unknown head
+    const odd = await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: ['bash', '-ic', 'ls'] } });
+    assert.match(odd.reason, /ASK is refused/);
+    // exec_command carries `cmd`
+    assert.match((await hook(p, 'codex-cli', { tool_name: 'exec_command', tool_input: { cmd: 'git push' } })).reason, /is DENY/);
+    assert.equal((await hook(p, 'codex-cli', { tool_name: 'exec_command', tool_input: { cmd: 'ls' } })).action, 'allow');
+    // the directory the command runs in is the directory it is judged in
+    const wd = await hook(p, 'codex-cli', {
+      tool_name: 'shell',
+      tool_input: { command: ['bash', '-lc', 'echo x > authorized_keys'], workdir: `${HOME}/.ssh` },
+    });
+    assert.equal(wd.action, 'deny');
+    assert.match(wd.reason, /fs\.credential-store\.write|is DENY/, wd.reason);
+    const here = await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: ['bash', '-lc', 'echo x > out.txt'], workdir: p.root } });
+    assert.equal(here.action, 'allow', here.reason);
+  }
 });
 
