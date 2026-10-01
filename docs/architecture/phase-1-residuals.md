@@ -363,7 +363,7 @@ the instances are not the point:
 
 | Cause (lens counts in brackets) | What is open |
 |---|---|
-| **A table is wrong by omission** (runners 13, policy-layer 13, containers 13, k8s-cloud 13, db 8) | tools that run a program named by their OWN option or config: `clang --ld-path`, `gcc -fuse-ld`, `prettier --config`, `eslint -f ./x.js`, `pylint --init-hook`, `npm --script-shell`, `yarn-path`, `bun test`, `python -m black`; `docker buildx bake` (≈10 spellings: the bake file names Dockerfiles and targets), `docker pass`, `docker debug --host`, `buildx create --driver remote`; `kubectl --cluster`, `config view --flatten`, `get -f s.yaml` of a Secret, `--kubeconfig` with a kind context; `sqlite3 … writefile()/edit()` (×5), `mysql -uroot -e'…'`, `psql -o '\|cmd'`, `dbmate --env`. |
+| **A table is wrong by omission** (runners 13, policy-layer 13, containers 13, k8s-cloud 13, db 8) | tools that run a program named by their OWN option or config: `clang --ld-path`, `gcc -fuse-ld`, `prettier --config`, `eslint -f ./x.js`, `pylint --init-hook`, `npm --script-shell`, `yarn-path`, `bun test`, `python -m black`; `docker buildx bake` (≈10 spellings: the bake file names Dockerfiles and targets), `docker pass`, `docker debug --host`, `buildx create --driver remote`; `kubectl --cluster`, `config view --flatten`, `get -f s.yaml` of a Secret, `--kubeconfig` with a kind context; `dbmate --env`. (The database-client rows - `sqlite3 … writefile()/edit()`, `psql -o '\|cmd'`, `mysql -e'…'` - are CLOSED, see below.) |
 | **A path is judged by its spelling, not by the file** (fs-paths 14, hostapi 7, absolutes 12, errors 4) | a leading space in a tool `file_path`; a symlink whose NAME contains a glob character; `git checkout-index --prefix=.git/hooks/`; `tar --extr`/`--use=`; `cat .e*` and other wildcard shell operands that reach credential stores; `echo x > /dev/disk0`; a `Write` through a symlink to a path that does not exist yet. |
 | **A reached bound is still not an absence, on surfaces that were not wired** (limits 8, expansion-new 14) | `env env env …` nested past the depth cap, a `cd` chain past the path cap, `flock -c "flock -c …"` nested past four, a brace budget over 64 in `Glob`/`Grep` (the overflow report was wired only into the Bash loop). |
 | **Carried commands and producers** (carriers 14, producers-deep 14, claims 14) | `find … -exec` payloads of several kinds; `timeout -s KILL`, `env --unset A` before `sed 'w …'`; `yarn exec git -C …`; `watch 'git commit -nm x'`; a Dockerfile written in the same command before `docker buildx bake`; `lint-staged` config written or chosen by a variable; a `make -f ev*.mk` glob; `DF=x; docker build -f "$DF"` (a variable assigned earlier names the file). |
@@ -371,6 +371,42 @@ the instances are not the point:
 | **Proportionality** (proportionality 14, exceptions 4, profiles 13) | 49 over-gated DENY, most of them a dry run or a listing with a redirection or an extra flag: `git push --help >/dev/null`, `git push -vn`, `git grep core.hooksPath`, `git config --file … --get`, `gh api -X GET`, `cat ~/.ego/trust/keys.json` (a READ of the trust store), `grep -rn '~/.ssh' docs`, `find . -name '*.tmp' -exec rm {} \;` (pre-existing). |
 | **Environment and bounded-command tables** (markers 8, bounded 1, policy-layer) | `printf -v PATH …`, `read PATH`, `HELM_PLUGINS=`, `git -c man.man.path=… log --help`, `bash -n +n`, `node version`. |
 | **Overlay and profile edges** (overlay 6, profiles 13, taxonomy 10) | an overlay-protected path after the overlay's matcher is deleted from the tree; `service-account.json`/`secrets/*` patterns; STRICT not narrowing `git pull --no-ff`. |
+
+### CLOSED after the audit of 2026-10-01: the database-client family (class: a known client and an operand it does not bound)
+
+A database client handed something that makes it run a program, write a file outside its database or load native code kept
+the plain-client verdict `db.local.query` (ALLOW). Two of the findings were CRITICAL and are closed: review-11 #102 and #130
+(`sqlite3 :memory: "select writefile('.git/hooks/pre-commit', …)"` put an executable git hook on disk), and #131
+(`mongosh --eval` with an alias of `require`). The earlier fixes had each closed one spelling (`.shell`, `\!`, `COPY … TO
+PROGRAM`); the family is now read by ONE grammar per client (`dbClientEscape` in `evaluate.ts`) - what is positively known to
+be harmless is ordinary and everything else is opaque:
+
+- **sqlite3**: a statement is ordinary only when it starts with ordinary DML/DDL and every call is on the pure list (so
+  `writefile`, `readfile`, `fsdir`, `edit`, `zipfile`, `load_extension`, `ATTACH`, `VACUUM INTO` and `CREATE VIRTUAL TABLE` ask);
+  a dot-command only by its WHOLE name from a short read-only list (sqlite3 accepts any unambiguous prefix, so `.sh` is
+  `.shell`); the database file operand is judged as a write.
+- **psql**: options from psql's own list; `-o`/`--output`/`-L` and the meta-commands `\o \g \gx \w \s \copy \lo_export` hand a path
+  to the path rules and a pipe to the opaque class; an editor, an include, `\setenv`, `\gexec` and a backquote in any argument
+  are opaque; server-side `COPY`, `pg_read_file`, `lo_export`, `DO`, `LOAD`, `CREATE FUNCTION/EXTENSION`, `ALTER SYSTEM` ask.
+- **mysql/mariadb**: options from the client's own list (abbreviations resolve only when unambiguous); `pager`, `system`,
+  `source`, `edit`, `delimiter`, `connect` and their backslash forms are opaque; `tee` is a write; `INTO OUTFILE`, `LOAD DATA`,
+  `load_file()`, `SET GLOBAL` ask. `mysqlsh` runs scripts and is not read.
+- **mongosh/mongo**: an inline script is ordinary only as one recognised statement (`show`, `use`, or `db.<collection>.<method>`
+  with literal arguments and cursor modifiers) - never a callback, an unknown identifier, `$where`, `$function`,
+  `$accumulator`, `$out` or `$merge`. The blocklist matcher in `matchers.md` is removed.
+- **redis-cli/valkey-cli**: `MODULE`, `CONFIG SET`, `REPLICAOF`, `DEBUG`, `SHUTDOWN`, scripting, `MIGRATE`, `ACL`/`CLUSTER`
+  changes ask; `--rdb` is a write.
+- **clickhouse-client**: a table function or clause that reaches a file, a URL, a bucket, another server or a program asks, even
+  against a local server; `--pager`, `--history_file`, `--config-file`, `--queries-file` ask.
+- **Environment**: `PSQLRC`, `PSQL_PAGER`, `PSQL_EDITOR`, `PSQL_HISTORY`, `PGSYSCONFDIR`, `LIBMYSQL_PLUGIN_DIR`, the history
+  variables and `OPENSSL_CONF` join the enumeration in `ENV_INJECT_RE`.
+- A statement the shell fills in at run time (`-c "$STATEMENT"`) is not read and asks, for every client.
+
+Against a production host the same escape is no longer the plain-SELECT read: it is refused (DENY). Pinned by
+`packages/kernel/test/closure-db.test.ts` and by the corpus classes in `test/support/corpus.ts` (`db` family). Not covered, and
+still ASK for another reason: `cqlsh`, `influx`, `pg_dump`/`pg_restore`/`pgbench`, `mysqldump`/`mysqladmin` and `clickhouse
+local` are unmodelled producers (`command.unmodelled-closure`); `flyway`/`liquibase` apply a migration FILE and are the
+`db.local.migrate` class.
 
 ### The decision (OPEN - not taken here)
 

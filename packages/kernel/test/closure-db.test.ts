@@ -92,6 +92,83 @@ test('sqlite3: the database file operand is a file the client WRITES, judged lik
   assert.equal(verdict(`sqlite3 -readonly .git/hooks/pre-commit "select 1"`, dir), 'ALLOW');
 });
 
+test('clickhouse-client: a table function or clause that reaches a file, a URL, a server or a program asks, even against a local server', () => {
+  const dir = workspace();
+  notAllowed(
+    [
+      `clickhouse-client -q "select * from file('/etc/hostname')"`,
+      `clickhouse-client -q "select * from executable('cmd', TSV, 'a String')"`,
+      `clickhouse-client -q "select * from s3('bucket/key', CSV)"`,
+      `clickhouse-client -q "select * from remote('other-host', db.t)"`,
+      `clickhouse-client -q "select 1 into outfile '/tmp/out'"`,
+      `clickhouse-client -q "insert into function file('/tmp/out') select 1"`,
+      `clickhouse-client -q "create table t (a Int32) engine = URL('http://example.invalid/x', CSV)"`,
+      `clickhouse-client --query="$STATEMENT"`,
+      `clickhouse-client --pager cmd -q 'select 1'`,
+      `clickhouse-client --history_file=.git/hooks/pre-commit -q 'select 1'`,
+      `clickhouse-client --queries-file queries.sql`,
+      `clickhouse client -q "select * from file('/etc/hostname')"`,
+    ],
+    dir,
+  );
+  allowed(
+    [
+      `clickhouse-client -q "select 1"`,
+      `clickhouse-client --query "show tables"`,
+      `clickhouse-client -q "insert into t values (1)"`,
+      `clickhouse-client -q "create table t (a Int32) engine = MergeTree order by a"`,
+      `clickhouse-client --max_threads 4 -q "select count() from t where a < 10"`,
+    ],
+    dir,
+  );
+});
+
+test('redis-cli and valkey-cli: commands that load code, run a script, write a server file or reconfigure the server ask', () => {
+  const dir = workspace();
+  notAllowed(
+    [
+      `redis-cli module load lib.so`,
+      `redis-cli config set dir /tmp`,
+      `redis-cli config set dbfilename x`,
+      `redis-cli replicaof other-host 6379`,
+      `redis-cli slaveof other-host 6379`,
+      `redis-cli debug reload`,
+      `redis-cli shutdown nosave`,
+      `redis-cli script load "return 1"`,
+      `redis-cli eval "return 1" 0`,
+      `redis-cli function load "code"`,
+      `valkey-cli module load lib.so`,
+      // a dump written to a path: the path decides
+      `redis-cli --rdb .git/hooks/pre-commit`,
+      // the same command handed over on standard input
+      `echo "config set dir /tmp" | redis-cli`,
+      `redis-cli --some-new-option get foo`,
+      `redis-cli $COMMAND`,
+    ],
+    dir,
+  );
+  assert.equal(verdict(`redis-cli -h prod-cache.acme.com module load lib.so`, dir), 'DENY');
+  assert.equal(verdict(`redis-cli -h prod-cache.acme.com INFO`, dir), 'ALLOW');
+  allowed(
+    [
+      `redis-cli get foo`,
+      `redis-cli set foo bar`,
+      `redis-cli keys '*'`,
+      `redis-cli ping`,
+      `redis-cli info`,
+      `redis-cli config get maxmemory`,
+      `redis-cli -n 1 hgetall h`,
+      `redis-cli flushall`,
+      `redis-cli --scan --pattern 'user:*'`,
+      `redis-cli del foo`,
+      `redis-cli -h localhost -p 6379 incr counter`,
+      `redis-cli --rdb dump.rdb`,
+      `echo "get foo" | redis-cli`,
+    ],
+    dir,
+  );
+});
+
 test('mongosh and mongo: an inline script is ordinary only when it is a single expression of a known database shape', () => {
   const dir = workspace();
   notAllowed(
@@ -179,6 +256,7 @@ test('mysql and mariadb: client commands, option files and plugin options are ju
       `mysql -h 127.0.0.1 -P 3306 -uroot -psecret app -e "select 1"`,
       `mysql -u root -p -e "select 1"`,
       `mysql --batch --skip-column-names -e "select count(*) from t"`,
+      `mysql --skip_column_names --max_allowed_packet=64M -e "select 1"`,
       `mysql --default-character-set=utf8mb4 --ssl-mode=DISABLED -e "select 1"`,
       `mysql -e "insert into t values (1)"`,
       `mysql -e "drop table t"`,
@@ -220,9 +298,16 @@ test('psql: output, meta-commands, startup files and statements that leave the d
       `psql -c "$(cat statement.txt)"`,
       // an option this reader does not know
       `psql --some-new-option -c 'select 1'`,
+      // the scanner and the client must agree where a dollar-quoted body starts: after a non-ASCII letter the `$$` is part of
+      // a NAME, so the backslash command behind it is a command
+      `psql -c 'select é$$ \\o |cmd $$'`,
+      // a backquote in a meta-command argument runs a shell command
+      `psql -c '\\echo \`cmd\`'`,
     ],
     dir,
   );
+  // ...and inside a real dollar-quoted body a backslash is text
+  assert.equal(verdict(`psql -c 'select $$ \\o |cmd $$'`, dir), 'ALLOW');
   // the environment makes the client run a startup script, a pager, an editor or write a history file
   notAllowed(
     [
@@ -249,6 +334,7 @@ test('psql: output, meta-commands, startup files and statements that leave the d
       `psql -At -c "select 1"`,
       `psql -X -q -c "select 1"`,
       `psql -v ON_ERROR_STOP=1 -c "select 1"`,
+      `psql --set=ON_ERROR_STOP=1 -c "select 1"`,
       `psql --csv -c "select * from users"`,
       `psql -c "insert into t values (1)"`,
       `psql -c "create table t (id serial primary key, name text)"`,

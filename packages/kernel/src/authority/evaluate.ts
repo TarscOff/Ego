@@ -1775,9 +1775,12 @@ function expandGitAbbreviations(tokens: string[]): string[] {
 }
 
 /** Rejoins argv tokens into a command string, re-quoting any token that carries whitespace or a shell operator, so a
- *  carried `sh -c "git push"` keeps its body as one token when the payload is re-tokenized. */
+ *  carried `sh -c "git push"` keeps its body as one token when the payload is re-tokenized.
+ *  A BACKSLASH IS QUOTED TOO. The tokens are word VALUES, and tokenizing an unquoted word removes its backslashes, so
+ *  `psql -c '\e'` carried through `kubectl exec` came back as `psql -c e`: psql's editor command read as the word `e`,
+ *  at ALLOW (found by the generated cross-product of the database-client class). */
 function requote(tokens: string[]): string {
-  return tokens.map((t) => (t === '' ? "''" : /[\s;&|<>$`"']/.test(t) ? `'${t.replace(/'/g, `'\\''`)}'` : t)).join(' ');
+  return tokens.map((t) => (t === '' ? "''" : /[\s;&|<>$`"'\\]/.test(t) ? `'${t.replace(/'/g, `'\\''`)}'` : t)).join(' ');
 }
 
 /** A command line with its REDIRECTIONS taken out. `cp x control-plane/permissions/matchers.md 2>&1` has three operands
@@ -8344,6 +8347,8 @@ interface DbOptionSpec {
   alias?: Readonly<Record<string, string>>;
   /** the first word that is not an option ends them (redis-cli: the rest is the command) */
   stopAtPositional?: boolean;
+  /** MySQL accepts `--skip_column_names` for `--skip-column-names`: an underscore is a dash */
+  underscoreIsDash?: boolean;
 }
 interface DbOption {
   name: string;
@@ -8385,7 +8390,8 @@ function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
     }
     const whole = t.replace(/^--?/, '');
     const eq = whole.indexOf('=');
-    const bare = eq < 0 ? whole : whole.slice(0, eq);
+    const rawName = eq < 0 ? whole : whole.slice(0, eq);
+    const bare = spec.underscoreIsDash === true ? rawName.replace(/_/g, '-') : rawName;
     const glued = eq < 0 ? null : whole.slice(eq + 1);
     const takeValue = (name: string): void => {
       if (glued !== null) out.options.push({ name, value: { text: glued, quoted: w.quoted, expands: w.expands } });
@@ -8692,6 +8698,10 @@ function statementProblem(w: DbWord, judge: (text: string) => string | null): st
 }
 
 type SqlDialect = 'pg' | 'mysql' | 'plain';
+/** A character that can end an identifier. PostgreSQL treats every non-ASCII character as one, and a `$` after one is part
+ *  of the name, not the opening of a dollar-quoted body - a scanner that disagrees reads a real backslash command as the
+ *  inside of a string. */
+const IDENT_CHAR_END = /[A-Za-z0-9_\u0080-\uffff]$/;
 interface SqlScan {
   /** the text with every string literal blanked and every dollar-quoted body kept as code */
   code: string;
@@ -8719,7 +8729,7 @@ function sqlScan(text: string, dialect: SqlDialect): SqlScan | { refused: string
     const c = text[i]!;
     if (c === "'" || c === '"' || c === '`') {
       // a backslash escapes inside a MySQL string and a PostgreSQL E'' string, and nowhere else
-      const prefixE = dialect === 'pg' && c === "'" && /[eE]$/.test(code) && !/[A-Za-z0-9_]$/.test(code.slice(0, -1));
+      const prefixE = dialect === 'pg' && c === "'" && /[eE]$/.test(code) && !IDENT_CHAR_END.test(code.slice(0, -1));
       const escapes = (dialect === 'mysql' && c !== '`') || prefixE;
       let j = i + 1;
       for (;;) {
@@ -8743,7 +8753,7 @@ function sqlScan(text: string, dialect: SqlDialect): SqlScan | { refused: string
       i = j;
       continue;
     }
-    if (c === '$' && dialect === 'pg' && !/[A-Za-z0-9_]$/.test(code)) {
+    if (c === '$' && dialect === 'pg' && !IDENT_CHAR_END.test(code)) {
       const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(text.slice(i));
       if (tag) {
         const end = text.indexOf(tag[0], i + tag[0].length);
@@ -8825,7 +8835,7 @@ function sqlReachProblem(code: string): string | null {
 }
 
 const PSQL_OPTIONS: DbOptionSpec = {
-  value: ['command', 'dbname', 'file', 'field-separator', 'host', 'log-file', 'output', 'port', 'pset', 'record-separator', 'table-attr', 'username', 'variable'],
+  value: ['command', 'dbname', 'file', 'field-separator', 'host', 'log-file', 'output', 'port', 'pset', 'record-separator', 'set', 'table-attr', 'username', 'variable'],
   flag: [
     'no-align', 'echo-all', 'echo-errors', 'echo-queries', 'echo-hidden', 'quiet', 'single-step', 'single-line', 'tuples-only',
     'expanded', 'html', 'csv', 'list', 'no-password', 'password', 'no-psqlrc', 'no-readline', 'single-transaction', 'version', 'help',
@@ -8937,6 +8947,7 @@ const MYSQL_OPTIONS: DbOptionSpec = {
   shortFlag: 'AbBcCEfGgHiLnNoqrstTUvVwWXa?I',
   shortGlued: 'p',
   abbreviate: true,
+  underscoreIsDash: true,
   alias: { D: 'database', e: 'execute', h: 'host', P: 'port', S: 'socket', u: 'user' },
 };
 
@@ -9207,6 +9218,108 @@ function mongoEscape(args: readonly DbWord[]): DbEscape {
   return out;
 }
 
+// --- redis-cli / valkey-cli ------------------------------------------------------------------------------------
+// Most commands act on the dataset, which is what the client is for. The ones that do not are the server's own
+// administration: loading a native module, pointing the dataset's files somewhere (`CONFIG SET dir`), becoming a copy of
+// another server, running a script, stopping. Redis calls them its `@dangerous` and `@scripting` command categories.
+
+const REDIS_OPTIONS: DbOptionSpec = {
+  value: [
+    'user', 'pass', 'sni', 'cacert', 'cacertdir', 'cert', 'key', 'tls-ciphers', 'tls-ciphersuites', 'pattern', 'count',
+    'memkeys-samples', 'keystats-samples', 'pipe-timeout', 'intrinsic-latency',
+    // a dump of the server written to a path: judged as the write it is
+    'rdb', 'functions-rdb',
+  ],
+  flag: [
+    'tls', 'askpass', 'no-auth-warning', 'insecure', 'raw', 'no-raw', 'quoted-input', 'csv', 'json', 'quoted-json', 'show-pushes',
+    'verbose', 'version', 'help', 'stat', 'latency', 'latency-history', 'latency-dist', 'scan', 'bigkeys', 'memkeys', 'keystats',
+    'hotkeys',
+  ],
+  shortValue: 'hpsaurinDd',
+  shortFlag: 'ce23456x?',
+  // the first word that is not an option is the command, and everything after it belongs to the command
+  stopAtPositional: true,
+};
+
+/** Why a redis command is not ordinary work on the dataset, or null. */
+function redisCommandProblem(words: readonly string[]): string | null {
+  const cmd = (words[0] ?? '').toLowerCase();
+  const sub = (words[1] ?? '').toLowerCase();
+  if (/^(module|debug|shutdown|script|function|eval|evalsha|eval_ro|evalsha_ro|fcall|fcall_ro|migrate|sync|psync|failover|pfdebug)$/.test(cmd))
+    return `${cmd.toUpperCase()} loads code, runs a script, stops the server or talks to another one`;
+  if (cmd === 'config' && sub !== 'get') return `CONFIG ${sub.toUpperCase()} changes where the server writes its files or what it loads`;
+  if ((cmd === 'slaveof' || cmd === 'replicaof') && !(sub === 'no' && (words[2] ?? '').toLowerCase() === 'one'))
+    return `${cmd.toUpperCase()} makes the server a copy of another one`;
+  if (cmd === 'acl' && !/^(whoami|list|users|cat|getuser|genpass|log)$/.test(sub)) return 'ACL changes who may do what';
+  if (cmd === 'cluster' && !/^(info|nodes|slots|shards|myid|keyslot|countkeysinslot|getkeysinslot|links)$/.test(sub))
+    return 'CLUSTER changes how the server joins others';
+  return null;
+}
+
+function redisEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const parsed = parseDbArgs(args, REDIS_OPTIONS);
+  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows to be inert`);
+  for (const o of parsed.options)
+    if ((o.name === 'rdb' || o.name === 'functions-rdb') && o.value !== null) {
+      if (o.value.expands) out.opaque.push(`--${o.name} names a file built at run time`);
+      else fileOrProgram(out, o.value.text, `--${o.name}`, 'write');
+    }
+  const [first, ...rest] = parsed.positional;
+  if (first === undefined) return out;
+  // a single word with spaces in it is standard input handed over as one word: a line, or lines, of commands
+  const lines = parsed.positional.length === 1 && /[\s]/.test(first.text) ? first.text.split(/\r?\n/) : [null];
+  for (const line of lines) {
+    const words = line === null ? [first.text, ...rest.map((w) => w.text)] : line.trim().split(/\s+/);
+    const marks = line === null ? [first, ...rest] : [];
+    if (line !== null) out.statements.push(line);
+    if (first.expands) out.opaque.push('the command is built at run time, so the command the client sends is not the text on the command line');
+    else if (marks.length > 1 && /^(config|acl|cluster|slaveof|replicaof)$/i.test(words[0] ?? '') && marks[1]!.expands)
+      out.opaque.push(`the subcommand of ${words[0]} is built at run time`);
+    else {
+      const why = redisCommandProblem(words);
+      if (why !== null) out.opaque.push(why);
+    }
+  }
+  return out;
+}
+
+// --- clickhouse-client / clickhouse local ------------------------------------------------------------------------
+// ClickHouse accepts ANY server setting as an option (`--max_threads 4`), so its options cannot be a closed positive list;
+// the few that name a program, a script, a configuration or a file are listed instead. What a query can reach is the
+// real surface: its table functions read files, URLs, buckets, other servers and programs by design.
+const CLICKHOUSE_REACHING_OPTION = /^(pager|history-file|config-file|queries-file|query-file|server-logs-file|external|log-file|log-level-file|client-logs-file|ssh-key-file)$/;
+
+function clickhouseEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const statement = (w: DbWord): void => {
+    out.statements.push(w.text);
+    if (w.expands) return void out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
+    const scan = sqlScan(w.text, 'mysql');
+    if ('refused' in scan) return void out.opaque.push(`the SQL carries ${scan.refused}`);
+    const why = isReadStatement(w.text) ? null : sqlReachProblem(scan.code);
+    if (why !== null) out.opaque.push(why);
+  };
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]!;
+    if (!w.text.startsWith('-') || w.text === '-') {
+      // an operand with a statement in it is standard input handed over as a word
+      if (/[\s;]/.test(w.text)) statement(w);
+      continue;
+    }
+    const glued = /^-q(.+)$/.exec(w.text);
+    const name = w.text.replace(/^--?/, '').split('=')[0]!.replace(/_/g, '-');
+    if (glued && !w.text.startsWith('--')) statement({ text: glued[1]!, quoted: w.quoted, expands: w.expands });
+    else if (name === 'q' || name === 'query') {
+      const eq = w.text.indexOf('=');
+      if (eq >= 0) statement({ text: w.text.slice(eq + 1), quoted: w.quoted, expands: w.expands });
+      else if (args[i + 1] !== undefined) statement(args[++i]!);
+    } else if (CLICKHOUSE_REACHING_OPTION.test(name) || (w.text === '-C' && !w.text.startsWith('--')))
+      out.opaque.push(`the option ${w.text.split('=')[0]} names a program, a script, a configuration or a file`);
+  }
+  return out;
+}
+
 /** The words of a segment as the reader wants them: redirections taken out, and each word's expansion mark kept. When
  *  the segment as written does not hold the client (a wrapper was unwrapped into a synthesized form), the normalized
  *  text is read instead, and a `$` or a backtick in it is an expansion. */
@@ -9229,6 +9342,10 @@ function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   if (client === 'psql') return psqlEscape(args);
   if (client === 'mysql' || client === 'mariadb' || client === 'mysqlsh') return mysqlEscape(client, args);
   if (client === 'mongosh' || client === 'mongo') return mongoEscape(args);
+  if (client === 'redis-cli' || client === 'valkey-cli') return redisEscape(args);
+  if (client === 'clickhouse-client') return clickhouseEscape(args);
+  // `clickhouse client` and `clickhouse local` are the two-word spellings; its other subcommands run no query
+  if (client === 'clickhouse' && /^(client|local)$/.test(args[0]?.text ?? '')) return clickhouseEscape(args.slice(1));
   return { opaque: [], writes: [], reads: [], statements: [] };
 }
 
@@ -10034,6 +10151,7 @@ function classifyShellPaths(
   const rawWords = tokenizeMarked(rawSeg);
   const clientAt = rawWords.findIndex((t) => !t.quoted && STATEMENT_FLAG[t.text.replace(/^.*\//, '')] !== undefined);
   let unquotedSeg = seg;
+  let unquotedWords = rawWords.map((w) => w.text);
   if (clientAt >= 0) {
     const flag = STATEMENT_FLAG[rawWords[clientAt]!.text.replace(/^.*\//, '')]!;
     const kept: string[] = [];
@@ -10044,16 +10162,14 @@ function classifyShellPaths(
       if (n > clientAt && flag.test(w) && rawWords[n + 1] !== undefined) n++;
     }
     unquotedSeg = kept.join(' ');
+    unquotedWords = kept;
   }
   // THE CLIENT'S OTHER CHANNELS - a program, a file it writes, native code - are read by ONE grammar (dbClientEscape)
   // rather than found by their spelling. A statement the reader recognised is set aside from the redirection test
   // below, for the same reason a statement flag's value is: `where id < 10` is a comparison, not `< file`.
   const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
   if (dbEscape !== null && dbEscape.statements.length > 0)
-    unquotedSeg = rawWords
-      .filter((w) => !dbEscape.statements.includes(w.text))
-      .map((w) => w.text)
-      .join(' ');
+    unquotedSeg = unquotedWords.filter((w) => !dbEscape.statements.some((st) => w === st || w.endsWith(`=${st}`))).join(' ');
   if (dbEscape !== null)
     for (const why of dbEscape.opaque)
       hits.push({
