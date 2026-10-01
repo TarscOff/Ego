@@ -75,3 +75,17 @@ discipline of decision Q84 (authority changes are never patch releases).
   were ASK `command.unknown` (`gh repo delete`, `gh release delete`, `gh issue reopen`, `gh repo edit`, …) are DENY.
 - A hit is now marked absolute by the capability it names, in one place (`evaluate`), not by each of the code paths
   that construct hits; a path-classified write outside the workspace is labelled "absolute core deny" in the reason.
+- **A shell word is judged by what it resolves to — one resolver for the shell layer** (closure audit 2026-10-01, wave 2).
+  `echo x > d/../settings.json` with `d -> .claude/sub` was ALLOW while `cd d && echo x > ../settings.json` — the same
+  file — was DENY: about forty sites turned a word into a path with `resolve(cwd, word)`, which applies `..` to the text,
+  and the kernel follows `d` first. `authority/paths.ts` now answers "what may this word denote" once — the lexical and
+  the physical reading, as written and trimmed, in every directory the shell may be in, after `~`, `~+`, `~-`, `~user`,
+  `$HOME`, `${HOME}`, `$PWD`, `$OLDPWD` — and every site judges all of them and keeps the worst. A redirection, a writer's
+  operand, an archive extraction, a `find -exec` payload, a git pathspec, an option's value and the file a script reader
+  opens all go through it. Visible changes: a write through `link/..` is judged by the link's target (DENY where it names a
+  protected path); a path through `/proc/self/cwd`, `/proc/self/root` or an open descriptor above 2 (`/dev/fd/3`) asks;
+  `curl -o /dev/null URL` is an ASK like `curl URL` (it was an absolute DENY: an option's value was not read as a discard
+  device the way a redirection was), `wget -O` and `curl -D`/`-c` destinations are judged, and `echo x > /dev/disk0` is
+  DENY (a redirection dropped every path under `/dev`; now only the discard devices are dropped, `/dev/shm` is scratch).
+  A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask. A
+  decision shares one view of the filesystem (the ordinary-development corpus runs in about two thirds of its former time).

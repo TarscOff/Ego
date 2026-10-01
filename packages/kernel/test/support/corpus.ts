@@ -1685,6 +1685,34 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     files: { '.claude/sub/keep': '', dlnk: link('.claude/sub'), 'list.txt': 'package.json\n' },
   },
   {
+    // the file whose bytes RUN is the one the kernel opens, and the kernel follows the link before it applies `..`: reading
+    // the lexical `run.sh` found a harmless or missing file beside the link while the push sat beside its target
+    family: 'command',
+    id: 'a script, makefile, awk program or Dockerfile read through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'sh dlnk/../run.sh',
+      'bash dlnk/../run.sh',
+      './dlnk/../run.sh',
+      'source dlnk/../env.sh',
+      'make -f dlnk/../plan.mk build',
+      'make -C dlnk/.. build',
+      'awk -f dlnk/../prog.awk',
+      'docker build -f dlnk/../Dockerfile .',
+    ],
+    files: {
+      '.claude/sub/keep': '',
+      dlnk: link('.claude/sub'),
+      '.claude/run.sh': '#!/bin/sh\ngit push origin main\n',
+      '.claude/env.sh': 'git push origin main\n',
+      '.claude/plan.mk': 'build:\n\tgit push origin main\n',
+      '.claude/Makefile': 'build:\n\tgit push origin main\n',
+      '.claude/prog.awk': 'BEGIN{system("git push origin main")}\n',
+      '.claude/Dockerfile': 'FROM alpine\nRUN git push origin main\n',
+      'run.sh': '#!/bin/sh\necho ok\n',
+    },
+  },
+  {
     family: 'fs',
     id: 'a destination that only a trimming reader opens',
     floor: 'DENY',

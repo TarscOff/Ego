@@ -11870,9 +11870,10 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // a write to the runtime directory (exit review 10). Only the long spellings count for these.
   const shortO = /^(ls|grep|egrep|fgrep|zgrep|rg|ag|ack|make|gmake|ps|ssh|scp|sftp|nm|lsof|column|mount|sudo|find)$/.test(head) ? '' : 'o';
   // ...AND A TOOL'S OWN SHORT LETTER for a file it writes, where the letter is not the generic `o`: `wget -O FILE` is the
-  // document (and `curl -O` takes no value at all), `curl -D FILE` the response headers, `curl -c FILE` the cookie jar.
-  // Each is scoped to the head that owns it, because `-c` is a command to psql and a flag to tar.
-  const ownShorts = /^(wget|wget2)$/.test(head) ? 'O' : head === 'curl' ? 'Dc' : '';
+  // document (and `curl -O` takes no value at all), `wget -a FILE` the log it appends to, `curl -D FILE` the response
+  // headers, `curl -c FILE` the cookie jar. Each is scoped to the head that owns it, because `-c` is a command to psql and
+  // a flag to tar.
+  const ownShorts = /^(wget|wget2)$/.test(head) ? 'Oa' : head === 'curl' ? 'Dc' : '';
   const outputValues = [
     ...optionValues(tokenize(seg), shortO, OUTPUT_FLAGS),
     ...[...ownShorts].flatMap((letter) => optionValues(tokenize(seg), letter, [])),
@@ -13926,86 +13927,86 @@ function searchToolHits(
         .map((r) => unquoteShellWord(r))
     : [];
   for (const abs of bases) {
-  for (const reach of reaches) {
-    // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
-    // written as `~/.ssh/**` does not match a string that still ends in a slash
-    const cut = reach.search(/[*?[{]/);
-    const rawLiteral = cut < 0 ? reach : reach.slice(0, cut);
-    // `/**/…` has the literal prefix `/`; stripping its trailing slash collapsed it to `.` — the working
-    // directory — so a pattern that reaches the whole filesystem read as an in-workspace search (exit review 2)
-    const literal = rawLiteral === '/' ? '/' : rawLiteral.replace(/\/+$/, '') || '.';
-    const reachReadings = pathCandidates(abs, literal);
-    if (reachReadings.dynamic) {
-      hits.push(unknownHit(table, ctx, `${tool} pattern ${reach} names a directory this kernel cannot resolve`));
-      continue;
+    for (const reach of reaches) {
+      // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
+      // written as `~/.ssh/**` does not match a string that still ends in a slash
+      const cut = reach.search(/[*?[{]/);
+      const rawLiteral = cut < 0 ? reach : reach.slice(0, cut);
+      // `/**/…` has the literal prefix `/`; stripping its trailing slash collapsed it to `.` — the working
+      // directory — so a pattern that reaches the whole filesystem read as an in-workspace search (exit review 2)
+      const literal = rawLiteral === '/' ? '/' : rawLiteral.replace(/\/+$/, '') || '.';
+      const reachReadings = pathCandidates(abs, literal);
+      if (reachReadings.dynamic) {
+        hits.push(unknownHit(table, ctx, `${tool} pattern ${reach} names a directory this kernel cannot resolve`));
+        continue;
+      }
+      if (reachReadings.uncertain !== null) hits.push(unknownHit(table, ctx, `${tool} pattern ${reach}: ${reachReadings.uncertain}`));
+      for (const reading of reachReadings.paths) {
+        const resolvedReach = canonicalPath(reading);
+        // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
+        // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
+        // a pattern anchored at `/` or carrying a `..` segment is not bounded by its literal prefix: `/**/.ssh/*`
+        // has the prefix `/` and reaches everything under it (exit review 2)
+        // a `..` segment ANYWHERE in the pattern escapes the literal prefix wherever that prefix resolves, and a
+        // root anchor is unbounded when the prefix is outside every registered root
+        const unbounded =
+          /(^|\/)\.\.(\/|$)/.test(reach) || (reach.startsWith('/') && repoRootFor(ctx, resolvedReach) === null);
+        // classify what the prefix names FIRST: an unbounded reach must never REPLACE a stronger answer, and
+        // `<home>/.ssh/*` is both unbounded and a credential store
+        const byPath = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
+        const strongerThanOutside =
+          byPath.via.startsWith('matcher path') || !byPath.capability.startsWith('fs.repo');
+        const r =
+          unbounded && !strongerThanOutside
+            ? {
+                capability: 'fs.outside-workspace.read',
+                verdict: verdictFor(table, ctx, 'fs.outside-workspace.read'),
+                via: 'the pattern is not bounded by a directory inside the workspace',
+                absolute: false,
+              }
+            : byPath;
+        // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
+        if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
+          hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
+        // THE PREFIX IS NOT THE ONLY LITERAL PART OF A PATTERN. `**/.env` has NO literal prefix — it reaches the
+        // workspace root, which is ordinary — while its literal TAIL names the file it will actually open, and an
+        // explicit glob overrides both ripgrep's skip-hidden default and .gitignore. So `Grep` with
+        // `glob: '**/.env'` and output_mode "content" PRINTED a credential file at ALLOW (exit review 9). The
+        // tail is classified as the file it names, anywhere the pattern can reach.
+        const tail = reach.split('/').filter(Boolean).pop() ?? '';
+        if (tail && !/[*?[{]/.test(tail)) {
+          const t = classifyPath(table, ctx, 'Read', canonicalPath(`${resolvedReach}/${tail}`));
+          if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
+        } else if (tail && !/^[*?]+$/.test(tail)) {
+          // ...AND A WILDCARD TAIL NAMES A SET. `**/.env*` opens `.env`, `.env.local` and `.env.production`, and the
+          // literal test above skipped it because of the `*` (exit review 10). The set is checked against the names a
+          // credential file is actually given, and the strongest answer for any member that matches is the answer.
+          const re = tailGlobRegExp(tail);
+          if (re)
+            for (const name of SECRET_FILE_NAMES)
+              if (re.test(name)) {
+                const t = classifyPath(table, ctx, 'Read', canonicalPath(`${resolvedReach}/${name}`));
+                if (t.verdict !== 'ALLOW') {
+                  hits.push({ ...t, via: `${tool} pattern ${reach} reaches ${name} (${t.via})` });
+                  break;
+                }
+              }
+        }
+      }
     }
-    if (reachReadings.uncertain !== null) hits.push(unknownHit(table, ctx, `${tool} pattern ${reach}: ${reachReadings.uncertain}`));
-    for (const reading of reachReadings.paths) {
-    const resolvedReach = canonicalPath(reading);
-    // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
-    // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
-    // a pattern anchored at `/` or carrying a `..` segment is not bounded by its literal prefix: `/**/.ssh/*`
-    // has the prefix `/` and reaches everything under it (exit review 2)
-    // a `..` segment ANYWHERE in the pattern escapes the literal prefix wherever that prefix resolves, and a
-    // root anchor is unbounded when the prefix is outside every registered root
-    const unbounded =
-      /(^|\/)\.\.(\/|$)/.test(reach) || (reach.startsWith('/') && repoRootFor(ctx, resolvedReach) === null);
-    // classify what the prefix names FIRST: an unbounded reach must never REPLACE a stronger answer, and
-    // `<home>/.ssh/*` is both unbounded and a credential store
-    const byPath = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
-    const strongerThanOutside =
-      byPath.via.startsWith('matcher path') || !byPath.capability.startsWith('fs.repo');
-    const r =
-      unbounded && !strongerThanOutside
-        ? {
-            capability: 'fs.outside-workspace.read',
-            verdict: verdictFor(table, ctx, 'fs.outside-workspace.read'),
-            via: 'the pattern is not bounded by a directory inside the workspace',
-            absolute: false,
-          }
-        : byPath;
-    // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
-    if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
-      hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
-    // THE PREFIX IS NOT THE ONLY LITERAL PART OF A PATTERN. `**/.env` has NO literal prefix — it reaches the
-    // workspace root, which is ordinary — while its literal TAIL names the file it will actually open, and an
-    // explicit glob overrides both ripgrep's skip-hidden default and .gitignore. So `Grep` with
-    // `glob: '**/.env'` and output_mode "content" PRINTED a credential file at ALLOW (exit review 9). The
-    // tail is classified as the file it names, anywhere the pattern can reach.
-    const tail = reach.split('/').filter(Boolean).pop() ?? '';
-    if (tail && !/[*?[{]/.test(tail)) {
-      const t = classifyPath(table, ctx, 'Read', canonicalPath(`${resolvedReach}/${tail}`));
-      if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
-    } else if (tail && !/^[*?]+$/.test(tail)) {
-      // ...AND A WILDCARD TAIL NAMES A SET. `**/.env*` opens `.env`, `.env.local` and `.env.production`, and the
-      // literal test above skipped it because of the `*` (exit review 10). The set is checked against the names a
-      // credential file is actually given, and the strongest answer for any member that matches is the answer.
-      const re = tailGlobRegExp(tail);
-      if (re)
-        for (const name of SECRET_FILE_NAMES)
-          if (re.test(name)) {
-            const t = classifyPath(table, ctx, 'Read', canonicalPath(`${resolvedReach}/${name}`));
-            if (t.verdict !== 'ALLOW') {
-              hits.push({ ...t, via: `${tool} pattern ${reach} reaches ${name} (${t.via})` });
-              break;
-            }
-          }
-    }
-    }
-  }
-  if (
-    abs === home ||
-    home.startsWith(abs + '/') ||
-    abs === '/' ||
-    reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
-    (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
-  )
-    hits.push({
-      capability: 'fs.credential-store.read',
-      verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
-      via: `${tool} over ${base} can reach credential stores`,
-      absolute: false,
-    });
+    if (
+      abs === home ||
+      home.startsWith(abs + '/') ||
+      abs === '/' ||
+      reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
+      (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
+    )
+      hits.push({
+        capability: 'fs.credential-store.read',
+        verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+        via: `${tool} over ${base} can reach credential stores`,
+        absolute: false,
+      });
   }
   return hits;
 }

@@ -181,6 +181,68 @@ test('A. reading through a link and `..` is judged like the file it reaches', ()
   assert.equal(verdictOf('cat e/../../.env'), verdictOf('cat .env'));
 });
 
+test('A. a credential store reached through a link and `..` is a credential store, for a read and for a write', () => {
+  // the link lives in the workspace and names a directory INSIDE ~/.ssh (that need not exist), so `cred/..` is ~/.ssh itself
+  const dir = workspace({ cred: link(`${HOME}/.ssh/zz-paths-${process.pid}`), 'rel/c2': link(`../cred`) });
+  for (const command of [
+    'cat cred/../id_rsa',
+    'cat cred/../id_ed25519',
+    'cat < cred/../id_rsa',
+    'cp cred/../id_rsa /tmp/leak',
+    'head -c 8 rel/c2/../id_rsa',
+    `cat ${join(dir, 'cred')}/../id_rsa`,
+  ])
+    assert.equal(verdictOf(command, dir), verdictOf(command.replace(/(?:\S*cred|rel\/c2)\/\.\./, '~/.ssh'), dir), command);
+  assert.notEqual(verdictOf('cat cred/../id_rsa', dir), 'ALLOW');
+  // the DIRECTORY itself is not a file a path matcher names, so a recursive read of it asks (as it does through any link);
+  // what must not happen is ALLOW
+  for (const command of ['grep -r KEY cred/..', 'ls cred/..', 'find cred/.. -name id_rsa', 'tar -cf /tmp/x.tar cred/..'])
+    assert.notEqual(verdictOf(command, dir), 'ALLOW', command);
+  for (const command of ['echo x > cred/../authorized_keys', 'cp package.json cred/../authorized_keys', 'tee cred/../config < package.json'])
+    assert.equal(verdictOf(command, dir), 'DENY', command);
+  // the tools surface agrees
+  assert.notEqual(evaluate(table, ctx(dir), { tool: 'Read', input: { file_path: 'cred/../id_rsa' } }).verdict, 'ALLOW');
+  assert.notEqual(evaluate(table, ctx(dir), { tool: 'Grep', input: { path: 'cred/..', pattern: 'KEY' } }).verdict, 'ALLOW');
+});
+
+test('A. the file a reader opens is the physical one: a script, a makefile, an awk program or a Dockerfile behind `link/..` is READ', () => {
+  const PUSH = 'git push origin main\n';
+  const dir = workspace({
+    '.claude/sub/keep': '',
+    d: link('.claude/sub'),
+    '.claude/run.sh': `#!/bin/sh\n${PUSH}`,
+    '.claude/env.sh': PUSH,
+    '.claude/plan.mk': `build:\n\t${PUSH}`,
+    '.claude/Makefile': `build:\n\t${PUSH}`,
+    '.claude/prog.awk': 'BEGIN{system("git push origin main")}\n',
+    '.claude/p.sed': '1e git push origin main\n',
+    '.claude/Dockerfile': `FROM alpine\nRUN ${PUSH}`,
+    // the file the TEXT names: beside the link, harmless
+    'run.sh': '#!/bin/sh\necho ok\n',
+    'Makefile': 'build:\n\ttsc -p .\n',
+  });
+  for (const command of [
+    'sh d/../run.sh',
+    'bash d/../run.sh',
+    './d/../run.sh',
+    'sh ./d//../run.sh',
+    'source d/../env.sh',
+    '. d/../env.sh',
+    'make -f d/../plan.mk build',
+    'make -C d/.. build',
+    'make -C d/.. -f plan.mk build',
+    'awk -f d/../prog.awk',
+    'sed -f d/../p.sed package.json',
+    'docker build -f d/../Dockerfile .',
+    'cd d && sh ../run.sh',
+    'cd d && make -C .. build',
+  ])
+    assert.equal(verdictOf(command, dir), 'DENY', command);
+  // the same words with no link in the way read the file beside them, as before
+  assert.equal(verdictOf('sh run.sh', dir), verdictOf('sh src/../run.sh', dir));
+  assert.equal(verdictOf('make build', dir), verdictOf('make -C src/.. build', dir));
+});
+
 test('B. a link whose target does not exist yet is followed: `..` after it is still the parent of the target', () => {
   // the link names a directory that nobody has created; the shell cannot open through it, but a mkdir earlier in the
   // same command line can make it real, so the target's parent is what is judged
@@ -371,8 +433,31 @@ test('F. one reader decides whether a destination is a discard device, and the r
     'curl -o /dev/stdout https://example.com',
     'curl -o /dev/stderr https://example.com',
     'curl -o /dev/zero https://example.com',
+    'curl -D /dev/null https://example.com',
+    'curl -D /dev/stdout https://example.com',
+    'curl -c /dev/null https://example.com',
+    'curl --dump-header /dev/null https://example.com',
+    'curl --stderr /dev/null https://example.com',
+    'wget -O /dev/stdout https://example.com',
+    'wget -a /dev/null https://example.com',
+    'gcc -o /dev/null foo.c',
+    'git diff --output=/dev/null',
+    'tar -cf /dev/null src',
   ])
     assert.notEqual(verdictOf(command), 'DENY', `${command}: an option-valued discard device is not a write to a path`);
+  // ...and the same options name a file when it is one
+  for (const command of [
+    'curl -D .claude/settings.json https://example.com',
+    'curl -c .git/hooks/pre-commit https://example.com',
+    'curl --cookie-jar .claude/settings.json https://example.com',
+    'curl --dump-header=.claude/settings.json https://example.com',
+    'wget -O .claude/settings.json https://example.com',
+    'wget -O.claude/settings.json https://example.com',
+    'wget -qO.claude/settings.json https://example.com',
+    'wget -a .claude/settings.json https://example.com',
+    'git diff --output=.claude/settings.json',
+  ])
+    assert.equal(verdictOf(command), 'DENY', command);
   assert.equal(verdictOf('curl -o /dev/null https://example.com'), PLAIN);
   assert.equal(verdictOf('cmd --output /dev/null'), verdictOf('cmd'));
   // the device itself is judged the way a redirection judges it, whichever way it is spelled
