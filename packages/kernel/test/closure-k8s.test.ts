@@ -10,6 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluate } from '../src/authority/evaluate.ts';
+import { k8sOptionMayTakeValue, k8sOptionTakesValue, optionShape } from '../src/authority/k8s.ts';
 import { workspace, verdict, table, ctx } from './support/corpus.ts';
 
 type Expect = 'DENY' | 'ASK' | 'ALLOW' | 'GATED';
@@ -500,4 +501,28 @@ test('the lists the matchers keep and the lists the reader keeps are the same li
   // switching context is judged by the context it switches to, as it always was: a local one is ordinary work
   assert.equal(verdict('kubectl config use-context kind-dev', dir), 'ALLOW');
   assert.equal(verdict('kubectl config use-context production', dir), 'DENY');
+});
+
+test('ONE table says which words are options and which are their values', () => {
+  // a value glued to the option, in each of the spellings the tools accept
+  assert.deepEqual(optionShape('kubectl', undefined, '--context=x'), { name: '--context', glued: 'x', next: 'no' });
+  assert.deepEqual(optionShape('kubectl', undefined, '-nfoo'), { name: '-n', glued: 'foo', next: 'no' });
+  assert.deepEqual(optionShape('kubectl', undefined, '-n=foo'), { name: '-n', glued: 'foo', next: 'no' });
+  // a cluster of short options ends in the one that takes the next word
+  assert.deepEqual(optionShape('kubectl', undefined, '-Rf'), { name: '-f', next: 'yes' });
+  assert.deepEqual(optionShape('kubectl', undefined, '-it'), { name: '-it', next: 'no' });
+  // a spelling that means two things is read by the verb it stands in: `logs -f` follows, `get -f` names a file
+  assert.equal(optionShape('kubectl', 'logs', '-f').next, 'no');
+  assert.equal(optionShape('kubectl', 'get', '-f').next, 'yes');
+  assert.equal(optionShape('kubectl', 'config', '--raw').next, 'no');
+  assert.equal(optionShape('kubectl', 'get', '--raw').next, 'yes');
+  // what the table does not know MAY take the next word, and so nothing that needs it to be a flag is granted
+  assert.equal(optionShape('kubectl', undefined, '--no-such-flag').next, 'maybe');
+  assert.equal(k8sOptionMayTakeValue('kubectl', '--no-such-flag'), true);
+  assert.equal(k8sOptionTakesValue('kubectl', '--no-such-flag'), false);
+  // the tools differ where they differ: oc names its kubeconfig --config, helm's --version takes a value
+  assert.equal(k8sOptionTakesValue('oc', '--config'), true);
+  assert.equal(k8sOptionTakesValue('kubectl', '--config'), false);
+  assert.equal(k8sOptionTakesValue('helm', '--version'), true);
+  assert.equal(k8sOptionTakesValue('helm', '--debug'), false);
 });
