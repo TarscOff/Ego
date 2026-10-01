@@ -348,9 +348,12 @@ fails if a bare join of a directory and a word comes back. What it does **not** 
   assigns from something unreadable makes every later use of the name ask, and a leading `~` is the `HOME` the line assigned.
 - `~user` is not looked up (that would be a process): the conventional places a home directory lives are all judged, and
   the word asks. The `/proc` aliases are matched by name and tested here by string, not on a Linux host.
-- The normalizer drops the quoting of an ordinary segment, so an operand with padding or an interior space reaches the
-  operand readers as two words (the redirection reader, which reads the segment as written, keeps it whole). That
-  over-reads; it cannot hide a write.
+- The normalizer drops the quoting of an ordinary segment, so a word with a space in it reaches the operand readers as
+  several words (the redirection reader, which reads the segment as written, keeps it whole). The pieces are judged as the
+  lexical names they are, which over-reads; what they cannot see is a LINK whose name holds the space (`cp x "sp l/f"` with
+  `sp l -> .claude`), so a writer's word with whitespace in it also joins the path loop whole, read from the segment as
+  written. The producers still read the normalised words: `docker build -f "my docs/Dockerfile" .` looks for a Dockerfile
+  called `my`, finds none and is ALLOW (recorded in phase-1-residuals.md, not fixed here).
 - A file that a reader opens itself (a script, a makefile, a response file) is read at its physical path. A check that the
   file is the one that will run at execution time is still a race the kernel cannot close (#26).
 
