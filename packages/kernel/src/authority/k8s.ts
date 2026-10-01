@@ -93,6 +93,9 @@ export interface K8sEffect {
   kubeconfigWrite: string | null;
   /** runs a program the kernel has not read: what */
   program: string | null;
+  /** files the command reads through an option whose value is `KEY=PATH` (`helm --set-file`, `kubectl create --from-file`).
+   *  The path scan of the evaluator reads a word that IS a path; `a=.env` is not one, and the read was invisible */
+  reads: Array<{ option: string; path: string }>;
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -120,6 +123,9 @@ const KUBECTL_GLOBAL_FLAG = [
 /** the cadvisor and kubelet options older kubectl builds list among their globals */
 const KUBECTL_LEGACY_VALUE =
   /^--(storage-driver-[a-z-]+|docker[a-z-]*|event-storage-[a-z-]+|application-metrics-count-limit|container-hints|global-housekeeping-interval|housekeeping-interval|max-housekeeping-interval|boot-id-file|machine-id-file|default-not-ready-toleration-seconds|default-unreachable-toleration-seconds)$/;
+
+/** `oc` takes kubectl's persistent options, and two of its own: `--config` is its spelling of the kubeconfig file */
+const OC_GLOBAL_VALUE = [...KUBECTL_GLOBAL_VALUE, '--config', '--loglevel'] as const;
 
 const HELM_GLOBAL_VALUE = [
   '--burst-limit', '--kube-apiserver', '--kube-as-group', '--kube-as-user', '--kube-ca-file', '--kube-context',
@@ -171,13 +177,16 @@ const FLAG_IN_VERB: Record<string, ReadonlySet<string>> = {
   attach: new Set(['-i', '-t', '-q']),
 };
 
+const globalValues = (head: string): readonly string[] =>
+  head === 'helm' ? HELM_GLOBAL_VALUE : head === 'oc' ? OC_GLOBAL_VALUE : KUBECTL_GLOBAL_VALUE;
+
 type Arity = 'value' | 'flag' | 'unknown';
 
 /** What a spelling of an option is, for this tool and verb: it takes the next word, it takes none, or nobody can tell. */
 export function optionArity(head: string, verb: string | undefined, name: string): Arity {
   if (verb !== undefined && FLAG_IN_VERB[verb]?.has(name)) return 'flag';
   const helm = head === 'helm';
-  if ((helm ? HELM_GLOBAL_VALUE : KUBECTL_GLOBAL_VALUE).includes(name as never)) return 'value';
+  if (globalValues(head).includes(name as never)) return 'value';
   if (!helm && KUBECTL_LEGACY_VALUE.test(name)) return 'value';
   if ((helm ? HELM_GLOBAL_FLAG : KUBECTL_GLOBAL_FLAG).includes(name as never)) return 'flag';
   if (VERB_VALUE.has(name)) return 'value';
@@ -237,7 +246,7 @@ export function k8sGlobalOptions(head: string): { value: RegExp; bool: RegExp } 
   const names = (l: readonly string[]): string => l.map(esc).join('|');
   const legacy = helm ? '' : `|${KUBECTL_LEGACY_VALUE.source.slice(1, -1)}`;
   return {
-    value: new RegExp(`^(${names(helm ? HELM_GLOBAL_VALUE : KUBECTL_GLOBAL_VALUE)}${legacy})$`),
+    value: new RegExp(`^(${names(globalValues(head))}${legacy})$`),
     bool: new RegExp(`^(${names((helm ? HELM_GLOBAL_FLAG : KUBECTL_GLOBAL_FLAG).filter((x) => x !== '-h' && x !== '--help'))})$`),
   };
 }
@@ -325,7 +334,7 @@ const isOptionWord = (w: K8sWord): boolean => w.text.startsWith('-') && w.text.l
 /** the persistent options, in whichever spelling reaches here */
 function isGlobalName(head: string, name: string): boolean {
   const helm = head === 'helm';
-  if ((helm ? HELM_GLOBAL_VALUE : KUBECTL_GLOBAL_VALUE).includes(name as never)) return true;
+  if (globalValues(head).includes(name as never)) return true;
   if ((helm ? HELM_GLOBAL_FLAG : KUBECTL_GLOBAL_FLAG).includes(name as never)) return true;
   return !helm && KUBECTL_LEGACY_VALUE.test(name);
 }
@@ -459,6 +468,12 @@ interface Signal {
 const SECRET_TYPE = /^secrets?(\.[A-Za-z0-9.-]*)?$/i;
 /** a manifest that declares a Secret, in YAML or in JSON, anywhere in the text: over-matching costs one ask, missing it costs a credential */
 const SECRET_KIND = /\bkind["']?\s*:\s*["']?Secret(List)?["']?(\s|,|}|$)/i;
+/** the constructs with which a manifest can say `Secret` without spelling it where `SECRET_KIND` looks: an escape inside a
+ *  string (`"S\u0065cret"`), an anchor or alias (`kind: *k`), a tag (`!!str`). A manifest that uses one is not known to
+ *  declare no Secret, so it is read as one that might */
+const MANIFEST_OBFUSCATION = /\\[uUx0-7]|(^|[\s:[{,-])[&*!][A-Za-z0-9_!]/;
+const declaresSecret = (text: string): string | null =>
+  SECRET_KIND.test(text) ? 'it declares a Secret' : MANIFEST_OBFUSCATION.test(text) ? 'it uses an escape, an anchor or a tag this reader does not follow' : null;
 /** a listing reads this many files before the kernel gives up and treats the source as unread */
 const MANIFEST_FILE_LIMIT = 64;
 /** the output formats with which `helm status` prints the whole release object, manifest and values included */
@@ -474,6 +489,7 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
     kubeconfigDump: null,
     kubeconfigWrite: null,
     program: null,
+    reads: [],
   });
   // `kind` and `k3d` manage their OWN local clusters and are local by construction. minikube also carries kubectl:
   // `minikube kubectl -- ARGS` is kubectl with minikube's cluster as the default and every flag of kubectl after the
@@ -533,7 +549,7 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
 
   // the kubeconfig files the tool will read: the option and the variable are the same signal
   const kubeFiles: Array<{ word: K8sWord | string; label: string }> = [];
-  for (const w of opt('--kubeconfig')) kubeFiles.push({ word: w, label: 'kubeconfig ' });
+  for (const w of opt('--kubeconfig', ...(head === 'oc' ? ['--config'] : []))) kubeFiles.push({ word: w, label: 'kubeconfig ' });
   for (const v of env['KUBECONFIG'] ?? []) for (const f of v.split(':').filter(Boolean)) kubeFiles.push({ word: f, label: 'KUBECONFIG=' });
   const models: KubeModel[] = [];
   const absent: string[] = [];
@@ -665,6 +681,17 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
       secret = secretRead(p, host);
   }
 
+  // the files an option value names as KEY=PATH: `--set-file a=.env` hands helm a file to inline, `--from-file=k=PATH` hands
+  // kubectl one to store. Each is a read of that file, judged like any other
+  const reads: Array<{ option: string; path: string }> = [];
+  if (head === 'helm') {
+    for (const w of opt('--set-file'))
+      for (const pair of w.text.split(',')) reads.push({ option: '--set-file', path: pair.includes('=') ? pair.slice(pair.indexOf('=') + 1) : pair });
+  } else {
+    for (const w of opt('--from-file')) reads.push({ option: '--from-file', path: w.text.includes('=') ? w.text.slice(w.text.indexOf('=') + 1) : w.text });
+    for (const w of opt('--from-env-file')) reads.push({ option: '--from-env-file', path: w.text });
+  }
+
   /* ---- WHAT CHANGES ------------------------------------------------------------------------------------------ */
   let mutating: boolean;
   if (verb === undefined || p.plugin || switchesContext) mutating = true;
@@ -697,6 +724,7 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
     kubeconfigDump,
     kubeconfigWrite,
     program: programs[0] ?? null,
+    reads,
   };
 }
 
@@ -744,11 +772,11 @@ function manifestSecret(source: string, recursive: boolean, host: K8sHost): stri
   if (source === '-') {
     const text = host.stdin();
     if (text === null) return 'standard input is not text this command line wrote';
-    return SECRET_KIND.test(text) ? 'it declares a Secret' : null;
+    return declaresSecret(text);
   }
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(source)) return 'it is fetched from a URL, which is not read';
   const f = host.file(source);
-  if (f.state === 'text') return SECRET_KIND.test(f.text) ? 'it declares a Secret' : f.stale === true ? 'this command line may rewrite it' : null;
+  if (f.state === 'text') return declaresSecret(f.text) ?? (f.stale === true ? 'this command line may rewrite it' : null);
   if (f.state === 'absent') return null;
   if (f.state === 'unread') {
     const files = host.directory(source, recursive);
@@ -757,7 +785,8 @@ function manifestSecret(source: string, recursive: boolean, host: K8sHost): stri
     for (const g of files) {
       const gf = host.file(g);
       if (gf.state === 'text') {
-        if (SECRET_KIND.test(gf.text)) return `${g} declares a Secret`;
+        const why = declaresSecret(gf.text);
+        if (why !== null) return `${g}: ${why}`;
         if (gf.stale === true) return `${g} may be rewritten by this command line`;
       } else if (gf.state !== 'absent') return `${g} cannot be read`;
     }

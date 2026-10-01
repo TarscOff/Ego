@@ -11450,7 +11450,7 @@ function retargetLocalCapability(
   // A CLUSTER COMMAND IS READ ONCE (k8s.ts): which cluster, what it reads, what it changes, what it runs. The target class
   // below is the first of those answers; the others are hits of their own, and the strongest of them all decides
   const effect = kind === 'k8s' ? resolveK8sTarget(norm, targets, rawSeg, envInputs, ctx, env) : undefined;
-  const settle = (h: CapabilityHit): CapabilityHit => (effect === undefined ? h : withClusterEffects(table, ctx, h, norm, effect));
+  const settle = (h: CapabilityHit): CapabilityHit => (effect === undefined ? h : withClusterEffects(table, ctx, h, norm, effect, env));
   const resolved =
     effect ??
     (kind === 'db'
@@ -11491,7 +11491,14 @@ function withClusterEffects(
   decided: CapabilityHit,
   norm: string,
   fx: K8sEffect,
+  env: ExecutionEnvironment | undefined,
 ): CapabilityHit {
+  // a file named as KEY=PATH is a file the tool reads, and it is judged as the Read of that path would be
+  const reads = fx.reads.flatMap(({ option, path }): CapabilityHit[] => {
+    const j = judgeWord(table, ctx, 'Read', env?.cwd ?? ctx.cwd ?? process.cwd(), path);
+    if (j.dynamic) return [unknownHit(table, ctx, `${option} reads ${path}, a file a shell fills in`)];
+    return j.hits.filter((h) => h.verdict !== 'ALLOW').map((h) => ({ ...h, via: `${option} reads ${path} (${h.via})`, segment: norm }));
+  });
   const of = (capability: string, via: string): CapabilityHit[] =>
     capability in table.capabilities
       ? [{ capability, verdict: verdictFor(table, ctx, capability), via, segment: norm, absolute: isAbsoluteCap(table, capability) }]
@@ -11500,6 +11507,7 @@ function withClusterEffects(
     ...(fx.kubeconfigDump ? of('fs.credential-store.read', fx.kubeconfigDump) : []),
     ...(fx.kubeconfigWrite ? of('fs.credential-store.write', fx.kubeconfigWrite) : []),
     ...(fx.program ? [opaqueHit(table, ctx, norm, fx.program, true, 'command.unmodelled-closure')] : []),
+    ...reads,
   ];
   const weight = (h: CapabilityHit): number =>
     VERDICT_RANK[h.verdict] * 10 + (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'admin-governed' ? 1 : 0);

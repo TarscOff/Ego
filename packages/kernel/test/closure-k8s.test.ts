@@ -401,3 +401,98 @@ test('ordinary work against a local cluster, and reading a production one, is no
     files,
   );
 });
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 6. THE NEIGHBOURS THE ONE READER MUST ALSO GIVE (found while closing the above)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('the LAST --list decides, and an option of unknown arity may have taken the word after it', () => {
+  run([
+    [`${PROD} set env deploy/x A=b --list --list=false`, 'DENY'],
+    [`${PROD} set env deploy/x A=b --list=false --list`, 'ALLOW'],
+    [`${PROD} set env deploy/x --list=$X`, 'DENY'],
+    [`${PROD} set env deploy/x '--list'`, 'DENY'],
+    [`${PROD} set env deploy/x -e 'A=b --list'`, 'DENY'],
+    [`${PROD} set env deploy/x -- A=b --list`, 'DENY'],
+    // `--no-such-flag` may take `x` as its value, which moves the type to the next word
+    [`${PROD} get --no-such-flag x $R`, 'DENY'],
+    [`${PROD} get --no-such-flag secrets`, 'DENY'],
+    [`${PROD} get pods $NAME`, 'ALLOW'],
+  ]);
+});
+
+test('a file named as KEY=PATH is a file the tool reads (r11-77)', () => {
+  run(
+    [
+      ['helm template x ./chart --set-file a=.env', 'ASK'],
+      ['helm template x ./chart --set-file a=README.md,b=.env', 'ASK'],
+      ['helm template x ./chart --set-file=a=~/.ssh/id_rsa', 'DENY'],
+      ['helm template x ./chart --set-file a=$F', 'ASK'],
+      ['kubectl --context kind-dev create secret generic x --from-file=k=.env --dry-run=client -o yaml', 'ASK'],
+      ['kubectl --context kind-dev create secret generic x --from-file=k=~/.ssh/id_rsa --dry-run=client -o yaml', 'DENY'],
+      ['kubectl --context kind-dev create secret generic x --from-env-file=.env', 'ASK'],
+      ['helm template x ./chart --set-file a=README.md', 'ALLOW'],
+      ['kubectl --context kind-dev create configmap x --from-file=README.md', 'ALLOW'],
+    ],
+    { '.env': 'TOKEN=abc\n', 'README.md': '# x\n' },
+  );
+});
+
+test('a manifest that can say Secret without spelling it is not known to declare none', () => {
+  const dir = (text: string): Record<string, string> => ({ 's.yaml': text });
+  for (const text of [
+    '{"kind": "S\\u0065cret", "metadata": {"name": "db"}}',
+    'kind: "S\\x65cret"\nmetadata: {name: db}\n',
+    'x: &k Secret\nkind: *k\n',
+    'kind: !!str Secret\n',
+    'kind: Secret\n',
+    '{"kind":"Secret"}',
+    'apiVersion: v1\nkind:\n  Secret\n',
+  ])
+    run([[`${PROD} get -f s.yaml -o yaml`, 'DENY', dir(text)]]);
+  // ...and the ordinary ones are not
+  for (const text of [
+    'kind: ConfigMap\ndata:\n  url: https://a/b?x=1&y=2\n',
+    'kind: SealedSecret\n',
+    'kind: SecretStore\n',
+    'kind: Deployment\nspec:\n  secretName: x\n',
+  ])
+    run([[`${PROD} get -f s.yaml -o yaml`, 'ALLOW', dir(text)]]);
+});
+
+test('oc names its kubeconfig --config, and a file that may be rewritten is read and doubted', () => {
+  run([
+    ['oc --config ./kube.conf --context kind-dev delete pod x', 'DENY', { 'kube.conf': KUBE('https://api.prod.example.com:6443') }],
+    ['oc --config /tmp/other.yaml --context kind-dev delete pod x', 'DENY'],
+    // a kubeconfig an earlier part of the line may have rewritten: the disk says production, so it is production; the disk
+    // says local, and the line may have changed it, so it asks
+    [
+      'define-function ego; kubectl --kubeconfig ./kube.conf --context kind-dev apply -f y.yaml',
+      'DENY',
+      { ...Y, 'kube.conf': KUBE('https://api.prod.example.com:6443') },
+    ],
+    [
+      'define-function ego; kubectl --kubeconfig ./kube.conf --context kind-dev apply -f y.yaml',
+      'ASK',
+      { ...Y, 'kube.conf': KUBE('https://127.0.0.1:35241') },
+    ],
+  ]);
+});
+
+test('the lists the matchers keep and the lists the reader keeps are the same lists', () => {
+  const writers = table.matchers.find((m) => m.capability === 'fs.credential-store.write' && /set-credentials/.test(m.command ?? ''));
+  assert.ok(writers, 'the kubeconfig-writer matcher exists');
+  const re = new RegExp(writers.command!, 'i');
+  // every sub-verb the reader treats as a write of the kubeconfig is one the matcher names, and the ones it leaves alone are not
+  for (const sub of ['set-credentials', 'set-cluster', 'set-context', 'rename-context', 'delete-context', 'delete-cluster', 'delete-user', 'unset', 'set'])
+    assert.ok(re.test(`kubectl config ${sub} x`), sub);
+  for (const sub of ['view', 'get-contexts', 'get-clusters', 'get-users', 'current-context', 'use-context'])
+    assert.ok(!re.test(`kubectl config ${sub} x`), sub);
+  // ...and the reader answers the same way when an option stands in front of the verb, where no anchored regex reads it
+  const dir = workspace();
+  for (const sub of ['set-credentials u --token=t', 'set-cluster c --server=https://k8s.acme.com', 'set-context c', 'unset users.u'])
+    assert.equal(verdict(`kubectl -n x config ${sub}`, dir), 'DENY', sub);
+  // switching context is judged by the context it switches to, as it always was: a local one is ordinary work
+  assert.equal(verdict('kubectl config use-context kind-dev', dir), 'ALLOW');
+  assert.equal(verdict('kubectl config use-context production', dir), 'DENY');
+});
