@@ -8319,6 +8319,9 @@ interface DbWord {
 interface DbEscape {
   /** why this invocation makes the client run something nobody read (each one becomes command.script-opaque) */
   opaque: string[];
+  /** what this reader cannot place - an option it does not know - and so cannot call inert. It asks like the rest, but it is
+   *  not KNOWN to leave the database, so it does not turn a plain SELECT on a production host into a refused act. */
+  unproven: string[];
   /** files the client writes: judged by the path rules, like an output flag */
   writes: string[];
   /** files the client reads into the database: judged as reads, so a credential store stays one */
@@ -8349,6 +8352,9 @@ interface DbOptionSpec {
   stopAtPositional?: boolean;
   /** MySQL accepts `--skip_column_names` for `--skip-column-names`: an underscore is a dash */
   underscoreIsDash?: boolean;
+  /** long options KNOWN to run a program, load a library or read a script of the client's own: they resolve like the rest
+   *  (an abbreviation is the option it abbreviates) but are never ordinary */
+  escaping?: readonly string[];
 }
 interface DbOption {
   name: string;
@@ -8356,14 +8362,18 @@ interface DbOption {
 }
 interface DbArgs {
   options: DbOption[];
+  /** the options of `spec.escaping` that were given, by their full names */
+  escaping: string[];
   positional: DbWord[];
   /** the words that are not an option this client has */
   unknown: string[];
 }
 
+const newDbEscape = (): DbEscape => ({ opaque: [], unproven: [], writes: [], reads: [], statements: [] });
+
 function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
-  const out: DbArgs = { options: [], positional: [], unknown: [] };
-  const longs = [...spec.value, ...spec.flag];
+  const out: DbArgs = { options: [], escaping: [], positional: [], unknown: [] };
+  const longs = [...spec.value, ...spec.flag, ...(spec.escaping ?? [])];
   const takesValue = new Set(spec.value);
   const resolve = (name: string): string | null => {
     if (longs.includes(name)) return name;
@@ -8401,7 +8411,8 @@ function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
     // `--name` and, for Go-style parsers, `-name`
     const asLong = t.startsWith('--') || spec.singleDash === true ? resolve(bare) : null;
     if (asLong !== null && (t.startsWith('--') || bare.length > 1)) {
-      if (takesValue.has(asLong)) takeValue(asLong);
+      if (spec.escaping?.includes(asLong)) out.escaping.push(asLong);
+      else if (takesValue.has(asLong)) takeValue(asLong);
       else out.options.push({ name: asLong, value: glued === null ? null : synthetic(glued) });
       continue;
     }
@@ -8660,13 +8671,13 @@ const SQLITE_OPTIONS: DbOptionSpec = {
 };
 
 function sqliteEscape(args: readonly DbWord[]): DbEscape {
-  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const out: DbEscape = newDbEscape();
   // sqlite3 takes `--name` for `-name`, and `-A`/`-lookaside`/`-pagecache` take values this parser does not model
   const normalised = args.map((w) => (w.text.startsWith('--') && w.text.length > 2 ? { ...w, text: w.text.slice(1) } : w));
   const dashA = normalised.findIndex((w) => w.text === '-A' || w.text === '-lookaside' || w.text === '-pagecache');
   if (dashA >= 0) out.opaque.push(`${normalised[dashA]!.text} runs an archive command or takes arguments this reader does not model`);
   const parsed = parseDbArgs(dashA >= 0 ? normalised.slice(0, dashA) : normalised, SQLITE_OPTIONS);
-  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows`);
+  for (const u of parsed.unknown) out.unproven.push(`the option ${u} is not one this reader knows`);
   for (const o of parsed.options) {
     if (o.name === 'init') out.opaque.push('-init names a script of dot-commands the client runs first');
     else if (o.name === 'nonce') out.opaque.push('-nonce suspends safe mode');
@@ -8902,9 +8913,9 @@ function psqlScript(out: DbEscape, text: string): void {
 }
 
 function psqlEscape(args: readonly DbWord[]): DbEscape {
-  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const out: DbEscape = newDbEscape();
   const parsed = parseDbArgs(args, PSQL_OPTIONS);
-  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows`);
+  for (const u of parsed.unknown) out.unproven.push(`the option ${u} is not one this reader knows`);
   const statement = (w: DbWord): void => {
     out.statements.push(w.text);
     if (w.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
@@ -8948,6 +8959,10 @@ const MYSQL_OPTIONS: DbOptionSpec = {
   shortGlued: 'p',
   abbreviate: true,
   underscoreIsDash: true,
+  escaping: [
+    'pager', 'plugin-dir', 'default-auth', 'defaults-file', 'defaults-extra-file', 'defaults-group-suffix', 'local-infile',
+    'debug', 'debug-check', 'debug-info', 'delimiter',
+  ],
   alias: { D: 'database', e: 'execute', h: 'host', P: 'port', S: 'socket', u: 'user' },
 };
 
@@ -8975,14 +8990,15 @@ function mysqlScript(out: DbEscape, text: string): void {
 }
 
 function mysqlEscape(client: string, args: readonly DbWord[]): DbEscape {
-  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const out: DbEscape = newDbEscape();
   // the shell runs JavaScript or Python unless told it is SQL, and its option set is not the client's: not read here
   if (client === 'mysqlsh') {
     out.opaque.push('mysqlsh runs JavaScript, Python or SQL scripts, and a script is not read');
     return out;
   }
   const parsed = parseDbArgs(args, MYSQL_OPTIONS);
-  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows to be inert`);
+  for (const u of parsed.unknown) out.unproven.push(`the option ${u} is not one this reader knows to be inert`);
+  for (const e of parsed.escaping) out.opaque.push(`--${e} hands the client a program, a library, a script or a configuration it runs`);
   const statement = (w: DbWord): void => {
     out.statements.push(w.text);
     if (w.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
@@ -9196,12 +9212,14 @@ const MONGO_OPTIONS: DbOptionSpec = {
   shortValue: 'up',
   shortFlag: 'h',
   alias: { u: 'username', p: 'password' },
+  escaping: ['file'],
 };
 
 function mongoEscape(args: readonly DbWord[]): DbEscape {
-  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const out: DbEscape = newDbEscape();
   const parsed = parseDbArgs(args, MONGO_OPTIONS);
-  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows to be inert`);
+  for (const u of parsed.unknown) out.unproven.push(`the option ${u} is not one this reader knows to be inert`);
+  for (const e of parsed.escaping) out.opaque.push(`--${e} names a script the shell runs`);
   const script = (w: DbWord): void => {
     out.statements.push(w.text);
     if (w.expands) return void out.opaque.push('the script is built at run time, so the text the shell runs is not the text on the command line');
@@ -9239,6 +9257,7 @@ const REDIS_OPTIONS: DbOptionSpec = {
   shortFlag: 'ce23456x?',
   // the first word that is not an option is the command, and everything after it belongs to the command
   stopAtPositional: true,
+  escaping: ['pipe', 'eval', 'ldb'],
 };
 
 /** Why a redis command is not ordinary work on the dataset, or null. */
@@ -9257,9 +9276,10 @@ function redisCommandProblem(words: readonly string[]): string | null {
 }
 
 function redisEscape(args: readonly DbWord[]): DbEscape {
-  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const out: DbEscape = newDbEscape();
   const parsed = parseDbArgs(args, REDIS_OPTIONS);
-  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows to be inert`);
+  for (const u of parsed.unknown) out.unproven.push(`the option ${u} is not one this reader knows to be inert`);
+  for (const e of parsed.escaping) out.opaque.push(`--${e} reads a script, a protocol stream or a debugger session the client runs`);
   for (const o of parsed.options)
     if ((o.name === 'rdb' || o.name === 'functions-rdb') && o.value !== null) {
       if (o.value.expands) out.opaque.push(`--${o.name} names a file built at run time`);
@@ -9291,7 +9311,7 @@ function redisEscape(args: readonly DbWord[]): DbEscape {
 const CLICKHOUSE_REACHING_OPTION = /^(pager|history-file|config-file|queries-file|query-file|server-logs-file|external|log-file|log-level-file|client-logs-file|ssh-key-file)$/;
 
 function clickhouseEscape(args: readonly DbWord[]): DbEscape {
-  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const out: DbEscape = newDbEscape();
   const statement = (w: DbWord): void => {
     out.statements.push(w.text);
     if (w.expands) return void out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
@@ -9336,7 +9356,7 @@ function dbWordsOf(
 /** The reader. `client` is the head the caller classified; `words` are the segment's words as the shell delivers them. */
 function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   const at = words.findIndex((w) => w.text.replace(/^.*\//, '') === client);
-  if (at < 0) return { opaque: [], writes: [], reads: [], statements: [] };
+  if (at < 0) return newDbEscape();
   const args = words.slice(at + 1);
   if (client === 'sqlite3') return sqliteEscape(args);
   if (client === 'psql') return psqlEscape(args);
@@ -9346,7 +9366,7 @@ function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   if (client === 'clickhouse-client') return clickhouseEscape(args);
   // `clickhouse client` and `clickhouse local` are the two-word spellings; its other subcommands run no query
   if (client === 'clickhouse' && /^(client|local)$/.test(args[0]?.text ?? '')) return clickhouseEscape(args.slice(1));
-  return { opaque: [], writes: [], reads: [], statements: [] };
+  return newDbEscape();
 }
 
 /** redis' INFO, PING, DBSIZE and TTL read server state rather than data - and only when every option on the line is
@@ -10171,7 +10191,7 @@ function classifyShellPaths(
   if (dbEscape !== null && dbEscape.statements.length > 0)
     unquotedSeg = unquotedWords.filter((w) => !dbEscape.statements.some((st) => w === st || w.endsWith(`=${st}`))).join(' ');
   if (dbEscape !== null)
-    for (const why of dbEscape.opaque)
+    for (const why of [...dbEscape.opaque, ...dbEscape.unproven])
       hits.push({
         capability: 'command.script-opaque',
         verdict: verdictFor(table, ctx, 'command.script-opaque'),

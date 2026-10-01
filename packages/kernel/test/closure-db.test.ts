@@ -324,6 +324,8 @@ test('psql: output, meta-commands, startup files and statements that leave the d
   // a program-valued option on a PRODUCTION host is not the read the plain SELECT decision covers
   assert.equal(verdict(`psql -h prod-db.acme.com -U ro -c 'select 1' -o '|cmd'`, dir), 'DENY');
   assert.equal(verdict(`psql -h prod-db.acme.com -U ro -c 'select 1'`, dir), 'ALLOW');
+  // an option nobody listed is not KNOWN to leave the database: a question, never a refusal to look at production
+  assert.equal(verdict(`psql -h prod-db.acme.com -U ro -c 'select 1' --some-new-option`, dir), 'ASK');
   allowed(
     [
       `psql -c "select 1"`,

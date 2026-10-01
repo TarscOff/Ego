@@ -401,6 +401,9 @@ be harmless is ordinary and everything else is opaque:
 - **Environment**: `PSQLRC`, `PSQL_PAGER`, `PSQL_EDITOR`, `PSQL_HISTORY`, `PGSYSCONFDIR`, `LIBMYSQL_PLUGIN_DIR`, the history
   variables and `OPENSSL_CONF` join the enumeration in `ENV_INJECT_RE`.
 - A statement the shell fills in at run time (`-c "$STATEMENT"`) is not read and asks, for every client.
+- An option the reader does not know asks (it cannot be called inert) but is not KNOWN to leave the database, so on a
+  production host it is a question and not a refusal; an option known to run something (`mysql --pager`) or a
+  program-valued output is refused there.
 
 Against a production host the same escape is no longer the plain-SELECT read: it is refused (DENY). Pinned by
 `packages/kernel/test/closure-db.test.ts` and by the corpus classes in `test/support/corpus.ts` (`db` family). Not covered, and
