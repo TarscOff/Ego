@@ -6068,7 +6068,7 @@ function globComponentRe(part: string): RegExp {
  * `incomplete` is true when a directory could not be listed or there are more matches than this reader follows - that is a gap,
  * never an empty set.
  */
-function expandNamePattern(baseDir: string, word: string, limit = 64): { names: string[]; incomplete: boolean } {
+function expandNamePattern(baseDir: string, word: string, limit = 512): { names: string[]; incomplete: boolean } {
   const parts = word.split('/');
   const names: string[] = [];
   let incomplete = false;
@@ -7011,33 +7011,49 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
  * (`%.mk: %.in`), a suffix rule (`.in.mk:`), a wildcard target (`gen*:`), a computed target and `.DEFAULT` (closure audit
  * wave 2, RC-MK: `-include gen.mk` with `%.mk: %.in` copied evil text in and ran it).
  *
- * `names` are the spellings the file goes by (relative to the make directory, `./`-prefixed, absolute). A target built from a
- * variable is compared when its value is known; a value nobody can read leaves the question open and is NOT counted - counting
- * it would make the include of every C project that builds `$(OBJS): %.o: %.c` ask - and that is recorded as a residual.
- * Returns the rule's description, or null.
+ * `names` are the spellings the file goes by (relative to the make directory, `./`-prefixed, absolute). An IMPLICIT rule - a
+ * pattern, a suffix rule, a wildcard target - builds the file only when its prerequisites are there or can be made, which
+ * `available` answers (a file on the disk or written earlier on the line, or a target of the makefile): `%: %.sh` does not
+ * remake a `Makefile` that has no `Makefile.sh`, and asking about it would make every old-style makefile ask. A rule with the
+ * file's own name, and `.DEFAULT`, apply whatever they depend on. A target built from a variable is compared when its value is
+ * known; a value nobody can read leaves the question open and is NOT counted - counting it would make the include of every C
+ * project that builds `$(OBJS): %.o: %.c` ask - and that is recorded as a residual. Returns the rule's description, or null.
  */
-function remadeBy(model: Pick<MakeFileModel, 'rules' | 'vars'>, names: readonly string[]): string | null {
+function remadeBy(
+  model: Pick<MakeFileModel, 'rules' | 'vars'>,
+  names: readonly string[],
+  available: (prerequisite: string) => boolean,
+): string | null {
   const bare = names.map((n) => n.replace(/^(?:\.\/+)+/, ''));
+  const dirOf = (n: string): string => (n.includes('/') ? n.slice(0, n.lastIndexOf('/') + 1) : '');
+  const allThere = (prereqs: readonly string[]): boolean => prereqs.every((p) => p === '|' || p.includes('$') || available(p));
   const hit = (key: string): string | null => {
     const t = key.replace(/^(?:\.\/+)+/, '');
+    const prereqs = model.rules.get(key)?.prereqs ?? [];
     if (t === '.DEFAULT') return 'a .DEFAULT rule';
-    if (/^\.[A-Za-z0-9_+-]+\.[A-Za-z0-9_+-]+$/.test(t)) {
-      const second = t.slice(t.lastIndexOf('.'));
-      return bare.some((n) => n.endsWith(second) && n.length > second.length) ? `the suffix rule ${t}` : null;
+    // a suffix rule `.in.mk` builds `x.mk` from `x.in`; a single-suffix rule `.c` builds `x` from `x.c`
+    const dbl = /^(\.[A-Za-z0-9_+-]+)(\.[A-Za-z0-9_+-]+)$/.exec(t);
+    if (dbl) {
+      const ok = bare.some((n) => n.endsWith(dbl[2]!) && n.length > dbl[2]!.length && available(n.slice(0, n.length - dbl[2]!.length) + dbl[1]!));
+      return ok ? `the suffix rule ${t}` : null;
     }
-    if (/^\.[A-Za-z0-9_+-]+$/.test(t)) return bare.some((n) => !n.slice(n.lastIndexOf('/') + 1).includes('.')) ? `the suffix rule ${t}` : null;
+    if (/^\.[A-Za-z0-9_+-]+$/.test(t))
+      return bare.some((n) => !n.slice(n.lastIndexOf('/') + 1).includes('.') && available(n + t)) ? `the suffix rule ${t}` : null;
     if (t.includes('%')) {
       const [pre, post] = t.split('%') as [string, string];
-      // a pattern without a slash is matched against the file part and the directory is put back
       const ok = bare.some((n) => {
+        // a pattern without a slash is matched against the file part and the directory is put back
         const subject = t.includes('/') ? n : n.slice(n.lastIndexOf('/') + 1);
-        return subject.startsWith(pre) && subject.endsWith(post) && subject.length > pre.length + post.length;
+        if (!(subject.startsWith(pre) && subject.endsWith(post) && subject.length > pre.length + post.length)) return false;
+        const stem = subject.slice(pre.length, subject.length - post.length);
+        const dir = t.includes('/') ? '' : dirOf(n);
+        return allThere(prereqs.map((p) => (p.includes('/') ? '' : dir) + p.replace(/%/g, stem)));
       });
       return ok ? `the pattern rule ${t}` : null;
     }
     if (MAKE_WILDCARD.test(t)) {
       const re = globComponentRe(t);
-      return bare.some((n) => re.test(n)) ? `the wildcard target ${t}` : null;
+      return bare.some((n) => re.test(n)) && allThere(prereqs) ? `the wildcard target ${t}` : null;
     }
     return bare.includes(t) ? `a rule for ${t}` : null;
   };
@@ -8675,7 +8691,11 @@ function resolveScriptCommand(
       const includes = [...merged.sources.filter((s) => !paths.includes(s)), ...merged.pendingIncludes.filter((f) => !MAKE_WILDCARD.test(f))];
       for (const [path, root] of [...paths.map((p) => [p, true] as const), ...includes.map((p) => [p, false] as const)]) {
         const names = makefileNames(makeDir, path);
-        const by = remadeBy(merged, names);
+        const by = remadeBy(merged, names, (prereq) => {
+          const abs = isAbsolute(prereq) ? prereq : join(makeDir, prereq);
+          // on the disk, written earlier on the line, made by a literal rule, or something make runs at parse time may have made
+          return fileExists(abs) || stale(abs) || merged.rules.has(prereq) || merged.parseRan.length > 0;
+        });
         if (by === null) continue;
         remade.push({ path, name: names[0]!, by, root });
         const target = names.find((n) => merged.rules.has(n) || merged.rules.has(n.replace(/^(?:\.\/+)+/, ''))) ?? names[0]!;

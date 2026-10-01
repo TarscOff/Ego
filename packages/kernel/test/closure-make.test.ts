@@ -182,7 +182,9 @@ test('B. an include built by a rule of the makefile is a pre-image of what runs 
     ['a .DEFAULT rule', 'make all', { Makefile: top('-include gen.mk', '.DEFAULT:\n\tcp gen.in $@\n'), ...gen }, 'ASK'],
     ['the include in a directory', 'make all', { Makefile: top('-include sub/gen.mk', 'sub/%.mk: sub/%.in\n\tcp $< $@\n'), 'sub/gen.in': 'all::\n\techo x\n' }, 'ASK'],
     ['an include of an include', 'make all', { Makefile: top('include more.mk', ''), 'more.mk': '-include gen.mk\n%.mk: %.in\n\tcp $< $@\n', ...gen }, 'ASK'],
-    ['a glob include that the rule can fill', 'make all', { Makefile: top('-include gen*.mk', '%.mk: %.in\n\tcp $< $@\n'), 'gen1.mk': 'all::\n\techo one\n', ...gen }, 'ASK'],
+    ['a glob include whose match the rule can rebuild', 'make all', { Makefile: top('-include gen*.mk', '%.mk: %.in\n\tcp $< $@\n'), 'gen1.mk': 'all::\n\techo one\n', 'gen1.in': 'all::\n\techo two\n' }, 'ASK'],
+    // (the glob is expanded before make remakes anything: a match the rule has no source for is read as it is)
+    ['a glob include whose match the rule cannot rebuild', 'make all', { Makefile: top('-include gen*.mk', '%.mk: %.in\n\tcp $< $@\n'), 'gen1.mk': 'all::\n\techo one\n', ...gen }, 'ALLOW'],
     [
       'the recipe that remakes it is read, and it pushes',
       'make all',
@@ -200,6 +202,13 @@ test('B. an include no rule can build is read as it is, and nothing is gated', (
     ['a dependency include with an unrelated pattern rule', 'make all', { Makefile: '-include deps.d\nall:\n\techo ok\n%.o: %.c\n\tcc -c $<\n', 'a.c': 'int a;' }, 'ALLOW'],
     ['an optional include that is not there', 'make all', { Makefile: '-include local.mk\nall:\n\techo ok\n' }, 'ALLOW'],
     ['an include with a suffix rule for other files', 'make all', { Makefile: 'include config.mk\n.c.o:\n\tcc -c $<\nall:\n\techo ok\n', 'config.mk': 'X = 1\n' }, 'ALLOW'],
+    // an implicit rule builds a file only when its prerequisites are there or can be made: a rule that cannot apply is not a remake
+    ['a match-anything rule with no source for the makefile', 'make all', { Makefile: 'all:\n\techo ok\n%: %.sh\n\tsh $<\n' }, 'ALLOW'],
+    ['a single-suffix rule with no source for the makefile', 'make all', { Makefile: 'all:\n\techo ok\n.c:\n\tcc -o $@ $<\n' }, 'ALLOW'],
+    ['a pattern rule whose source is not there', 'make all', { Makefile: '-include gen.mk\nall::\n\techo ok\n%.mk: %.in\n\tcp $< $@\n' }, 'ALLOW'],
+    ['...but one the same command line writes', 'cp base.in gen.in && make all', { Makefile: '-include gen.mk\nall::\n\techo ok\n%.mk: %.in\n\tcp $< $@\n', 'base.in': 'all::\n\techo x\n' }, 'ASK'],
+    ['...or one that a rule of the makefile makes', 'make all', { Makefile: '-include gen.mk\nall::\n\techo ok\n%.mk: %.in\n\tcp $< $@\ngen.in:\n\tprintf "all::\\\\n\\\\techo x\\\\n" > $@\n' }, 'ASK'],
+    ['a suffix rule whose source is not there', 'make all', { Makefile: '.SUFFIXES: .in .mk\n-include gen.mk\nall::\n\techo ok\n.in.mk:\n\tcp $< $@\n' }, 'ALLOW'],
     ['an optional include that holds the act, with no rule to remake it', 'make all', { Makefile: '-include gen.mk\nall::\n\techo ok\n', 'gen.mk': EVIL.replace('all:', 'all::') }, 'DENY'],
   ]);
 });
@@ -345,6 +354,16 @@ test('E. a glob no file matches yet is stale if an earlier segment writes one', 
     ['a directory made on the way', "mkdir s && printf 'all:\\n\\tgit push origin main\\n' > s/evil.mk && make -f 's*/evil.mk'", files, 'ASK'],
     ['a glob behind a variable', 'make -f "$X"*.mk', files, 'ASK'],
     ['a glob behind a command substitution', 'make -f $(echo ev)*.mk', files, 'ASK'],
+  ]);
+});
+
+test('E. a pattern with more matches than this reader follows is a gap, not an empty set', () => {
+  const many: Record<string, string> = { Makefile: OK };
+  for (let i = 0; i < 600; i++) many[`gen/m${i}.mk`] = OK;
+  check([
+    ['-f', "make -f 'gen/m*.mk'", many, 'ASK'],
+    ['an include', 'make all', { ...many, Makefile: 'include gen/m*.mk\nall::\n\techo ok\n' }, 'ASK'],
+    ['a few hundred are read, and read as what they are', 'make all', { ...Object.fromEntries(Object.entries(many).slice(0, 301)), Makefile: '-include gen/m*.mk\nall:\n\techo ok\n' }, 'ALLOW'],
   ]);
 });
 
