@@ -70,6 +70,10 @@ export function withPathCache<T>(body: () => T): T {
  */
 export function canonicalPath(p: string): string {
   const abs = resolve(p);
+  // A PATH LONGER THAN THE KERNEL OPENS IS NOT WALKED. `open` answers ENAMETOOLONG for it, so there is no file for the walk to
+  // find, and the walk below recurses once per component and asks the disk at each: a twenty-thousand-component word took
+  // seconds and blew the stack - an exception in the hook is a refusal, but a hook that outlives its host's patience is not
+  if (abs.length > PATH_MAX) return abs;
   const known = cache?.get(abs);
   if (known !== undefined) return known;
   const out = canonicalWalk(abs, { left: MAX_LINK_HOPS });

@@ -12296,6 +12296,19 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // other command's word is read the same way when it looks like a path. The pieces stay judged too: they over-read, which
   // only ever adds a hit.
   const wholeWords = new Set<string>();
+  // ...and the words of a command a CARRIER hands to a shell (`sh -c 'cp x "sp l/f"'`, `trap`, a herestring) are the carried
+  // text's own: the carrier's quoting hid them one level up, exactly as normalization does
+  const carriedTexts = new Set<string>();
+  const wordsAsWritten = (text: string, depth = 0): string[] => {
+    const words = tokenize(text);
+    if (depth >= 4) return words;
+    for (const body of carriedShellBodies(text)) {
+      carriedTexts.add(body);
+      // (a loop, not a spread: a carried script of a hundred thousand words is more arguments than a call can take)
+      for (const inner of wordsAsWritten(expandBraces(body), depth + 1)) words.push(inner);
+    }
+    return words;
+  };
   const wholeIsDest = (value: string): boolean => {
     const pieces = value.split(/[ \t\n]+/).filter(Boolean);
     if (dest === 'ALL') return true;
@@ -12306,7 +12319,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     return dest !== null && pieces.includes(dest);
   };
   if (!containerPaths)
-    for (const word of tokenize(rawSeg)) {
+    for (const word of wordsAsWritten(rawSeg)) {
+      if (carriedTexts.has(word)) continue; // a command line handed to a shell, not a name
       const value = pathValueOf(word);
       if (!value || !/[ \t\n]/.test(hostTrim(value)) || patternWords.includes(value)) continue;
       // a word with a glob or a substitution in it is text more often than a name (`select * from t`), and its pieces

@@ -590,6 +590,13 @@ test('G. the resolver returns the lexical reading AND the physical one, bounded 
   assert.ok(Date.now() - started < 3000, 'a chain of sixty links is bounded by the shared link budget');
   // a very deep `..` chain does not climb above the root
   assert.deepEqual(pathCandidates('/', '../../../../etc/x').paths, ['/etc/x']);
+  // a path longer than the kernel opens (ENAMETOOLONG) is not walked: no stack overflow, no seconds spent asking the disk
+  const longStarted = Date.now();
+  const long = pathCandidates(dir, `${'a/'.repeat(30000)}z`);
+  assert.ok(long.paths.length >= 1 && Date.now() - longStarted < 2000, `thirty thousand components took ${Date.now() - longStarted} ms`);
+  const longVerdictStarted = Date.now();
+  assert.ok(['ALLOW', 'ASK', 'DENY'].includes(verdictOf(`echo x > ${'a/'.repeat(8000)}z`)));
+  assert.ok(Date.now() - longVerdictStarted < 15000, 'a redirection to a path of eight thousand components is decided in bounded time');
   assert.equal(pathCandidates(dir, '/proc/self/cwd/a').uncertain !== null, true);
   assert.equal(pathCandidates(dir, '/dev/fd/3').uncertain !== null, true);
   assert.equal(pathCandidates(dir, '/dev/fd/1').uncertain, null);
