@@ -1316,6 +1316,48 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       `mysql -h prod-db.acme.com -e 'describe analyze delete t1 from t1 join t2 on t1.a=t2.a'`,
       `psql -h prod-db.acme.com -U -l -c 'drop table t'`,
       `redis-cli -h prod-cache.acme.com -c DEL ttl user:1`,
+      // closure audit wave 3 (RC-DB, sa10-34): the statement option's OTHER spelling. clickhouse's short `-q` was not read
+      // once `--query` had given a read, and the same holds for every client that has a short option, a glued value, an
+      // abbreviation or a repetition
+      `clickhouse-client --host prod-ch.acme.com --query 'show tables' -q 'drop table t'`,
+      `clickhouse-client --host prod-ch.acme.com -q 'select 1' --query='drop table t'`,
+      `clickhouse-client --host prod-ch.acme.com --query='select 1' -q'drop table t'`,
+      `clickhouse-client --host prod-ch.acme.com --query 'select 1' --que 'truncate table t'`,
+      `clickhouse client --host prod-ch.acme.com -q 'select 1' -q 'alter table t delete where 1'`,
+      `mysql -h prod-db.acme.com -e'show tables' -e'drop table t'`,
+      `psql -h prod-db.acme.com -c'select 1' -c'delete from t'`,
+      `influx -host prod-influx.acme.com -execute 'show databases' -execute 'drop database x'`,
+    ],
+  },
+  {
+    family: 'db',
+    // a statement that drops a DATABASE (or schema, or keyspace) is the drop capability whichever option carried it: glued to
+    // a short option, behind an abbreviation, one of several. A matcher over the text wants a word boundary the glued form lacks
+    id: 'a statement that drops a database, however the option carries it',
+    floor: 'ASK',
+    cases: [
+      `mysql -uroot -e'DROP DATABASE app'`,
+      `mysql -uroot -e"drop schema app"`,
+      `mysql --exe='DROP DATABASE app'`,
+      `mariadb -e 'select 1' -e'drop database if exists app'`,
+      `psql -c'DROP DATABASE app'`,
+      `psql --comm 'drop schema public cascade'`,
+      `clickhouse-client -q'DROP DATABASE app'`,
+      `clickhouse-client --query='drop database app'`,
+      `cqlsh -e 'drop keyspace ks'`,
+    ],
+  },
+  {
+    family: 'db',
+    // closure audit wave 3 (RC-DB, r11-86): a connection URL held in a variable that a FLAG names
+    id: 'a production database named by a variable a migration runner is told to read',
+    floor: 'DENY',
+    cases: [
+      'PROD_URL=postgres://u@prod-db.acme.com/app dbmate --env PROD_URL up',
+      'PROD_URL=postgres://u@prod-db.acme.com/app dbmate -e PROD_URL drop',
+      'PROD_URL=postgres://u@prod-db.acme.com/app dbmate --env=PROD_URL migrate',
+      'export PROD_URL=postgres://u@prod-db.acme.com/app; dbmate --env PROD_URL up',
+      'knex migrate:latest --env production',
     ],
   },
   {

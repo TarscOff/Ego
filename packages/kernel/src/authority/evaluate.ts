@@ -8826,6 +8826,17 @@ const DB_CLIENT_HEADS = new Set([
   // ordinary unknown commands (exit review 9).
   'flyway', 'liquibase', 'sqitch', 'alembic', 'dbmate', 'goose', 'atlas',
 ]);
+/** THE MIGRATION RUNNERS THAT ARE TOLD WHERE THEIR TARGET IS BY A NAME, and what the name is of. dbmate's `--env NAME` (`-e`)
+ *  names the VARIABLE that holds the database URL; knex, sequelize and atlas take the name of an ENVIRONMENT block of their own
+ *  configuration file. The name is data about the target and is read like one (resolveDbTarget); the value of a variable
+ *  that is not on the command line is the ambient environment, and asks. */
+const DB_NAMED_TARGET_OPTIONS: Readonly<Record<string, { short: string; long: readonly string[]; names: 'variable' | 'environment' }>> = {
+  dbmate: { short: 'e', long: ['--env'], names: 'variable' },
+  knex: { short: '', long: ['--env'], names: 'environment' },
+  sequelize: { short: '', long: ['--env'], names: 'environment' },
+  'sequelize-cli': { short: '', long: ['--env'], names: 'environment' },
+  atlas: { short: '', long: ['--env'], names: 'environment' },
+};
 const DB_EXECUTES_UNREAD =
   // `\!` is psql's shell escape. Inside DOUBLE quotes the backslash is consumed before this test ever sees it,
   // so the de-escaped form — a `-c` value that BEGINS with `!` — is matched too. Matching a bare `!` anywhere
@@ -9789,36 +9800,6 @@ function looksLikeDbTarget(t: string): boolean {
   if (/^[A-Za-z0-9][A-Za-z0-9._-]*(:\d+)?\/[A-Za-z0-9._-]+$/.test(t) && !/\.(sql|js|py|rb|json|txt|sh)$/i.test(t))
     return true;
   return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z0-9-]*(:\d+)?(\/\S*)?$/.test(t) && !/\.(sql|js|py|rb|json|txt)$/i.test(t);
-}
-
-/** Every statement a database client will RUN, from any flag it accepts - including the abbreviations its option
- *  parser accepts (`mysql --exe`, `psql --comm`) - and whether any came from a FILE, which nobody has read. */
-function dbStatements(tokens: string[]): { statements: string[]; fromFile: boolean } {
-  const LONGS = ['command', 'execute', 'eval', 'query', 'init-command', 'defaults-command', 'file', 'init-file', 'queries-file', 'execute-file'];
-  const FILES = new Set(['file', 'init-file', 'queries-file', 'execute-file']);
-  const statements: string[] = [];
-  let fromFile = false;
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    if (t.startsWith('--') && t.length > 3) {
-      const eq = t.indexOf('=');
-      const name = t.slice(2, eq < 0 ? undefined : eq);
-      // an EXACT name is never ambiguous: `--execute` is not an abbreviation of `--execute-file`
-      const hit = LONGS.includes(name) ? [name] : LONGS.filter((l) => l.startsWith(name));
-      if (hit.length) {
-        // an ambiguous abbreviation is refused by the client, so ANY candidate that reads a file counts as one
-        const value = eq >= 0 ? t.slice(eq + 1) : tokens[i + 1];
-        if (hit.some((l) => FILES.has(l))) fromFile = true;
-        if (hit.some((l) => !FILES.has(l)) && value !== undefined) statements.push(value);
-        if (eq < 0) i++;
-        continue;
-      }
-    }
-  }
-  statements.push(...optionValues(tokens, 'c', []), ...optionValues(tokens, 'e', []));
-  if (optionValues(tokens, 'f', []).length) fromFile = true;
-  // the Go-style single-dash spellings were normalised to the double-dash ones by the caller
-  return { statements: [...new Set(statements)], fromFile };
 }
 
 /** The functions a SELECT may call and still be a read: pure in PostgreSQL and in MySQL alike, named in ONE place.
@@ -11064,8 +11045,25 @@ function redisEscape(args: readonly DbWord[]): DbEscape {
 // real surface: its table functions read files, URLs, buckets, other servers and programs by design.
 const CLICKHOUSE_REACHING_OPTION = /^(pager|history-file|config-file|queries-file|query-file|server-logs-file|external|log-file|log-level-file|client-logs-file|ssh-key-file)$/;
 
+/** What a long option's name, as written, can be. ClickHouse parses its options with boost::program_options, which accepts
+ *  any prefix of a long name (`--que` is `--query`), a value glued with `=`, and `-` or `_` between words. An abbreviation
+ *  that two options share is refused by the client; here it is read as BOTH, because the other reading is the one that
+ *  hides a statement (sa10-34: the statement given by the SHORT option was the one nobody read). */
+function clickhouseLongName(written: string): { statement: boolean; file: boolean } {
+  const name = written.replace(/_/g, '-');
+  return {
+    statement: name !== '' && 'query'.startsWith(name),
+    // an EXACT name is never an abbreviation: `--query` is not short for `--query-file`
+    file: name !== 'query' && name.length >= 4 && ('queries-file'.startsWith(name) || 'query-file'.startsWith(name)),
+  };
+}
+/** the short options that take no value, so a cluster (`-nq 'select 1'`: boost allows them stuck together) goes on past them */
+const CLICKHOUSE_SHORT_FLAGS = 'ntvVEmM';
+
 function clickhouseEscape(args: readonly DbWord[]): DbEscape {
   const out: DbEscape = newDbEscape();
+  const reaches = (w: DbWord): void =>
+    void out.opaque.push(`the option ${w.text.split('=')[0]} names a program, a script, a configuration or a file`);
   const statement = (w: DbWord): void => {
     out.statements.push(w.text);
     if (w.expands) return void out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
@@ -11081,15 +11079,82 @@ function clickhouseEscape(args: readonly DbWord[]): DbEscape {
       if (/[\s;]/.test(w.text)) statement(w);
       continue;
     }
-    const glued = /^-q(.+)$/.exec(w.text);
-    const name = w.text.replace(/^--?/, '').split('=')[0]!.replace(/_/g, '-');
-    if (glued && !w.text.startsWith('--')) statement({ text: glued[1]!, quoted: w.quoted, expands: w.expands });
-    else if (name === 'q' || name === 'query') {
+    if (w.text.startsWith('--')) {
       const eq = w.text.indexOf('=');
-      if (eq >= 0) statement({ text: w.text.slice(eq + 1), quoted: w.quoted, expands: w.expands });
-      else if (args[i + 1] !== undefined) statement(args[++i]!);
-    } else if (CLICKHOUSE_REACHING_OPTION.test(name) || (w.text === '-C' && !w.text.startsWith('--')))
-      out.opaque.push(`the option ${w.text.split('=')[0]} names a program, a script, a configuration or a file`);
+      const written = w.text.slice(2, eq < 0 ? undefined : eq);
+      const known = clickhouseLongName(written);
+      // EVERY statement is read - the client runs them in turn - whichever option spelling carried it: `--query 'show
+      // tables' -q 'drop table t'` is two statements, and the read exception needs both of them to be reads
+      if (known.statement) {
+        if (eq >= 0) statement({ text: w.text.slice(eq + 1), quoted: w.quoted, expands: w.expands });
+        else if (args[i + 1] !== undefined) statement(args[++i]!);
+      }
+      if (known.file || CLICKHOUSE_REACHING_OPTION.test(written.replace(/_/g, '-'))) reaches(w);
+      continue;
+    }
+    // a cluster of short options: `-q` takes the rest of the word, or the next word, as its value; a letter this reader
+    // does not know ends the cluster, because it may take the rest of the word as its own value (`-hprod-queries`)
+    for (let k = 1; k < w.text.length; k++) {
+      const c = w.text[k]!;
+      if (c === 'q') {
+        const glued = w.text.slice(k + 1).replace(/^=/, '');
+        if (glued !== '') statement({ text: glued, quoted: w.quoted, expands: w.expands });
+        else if (args[i + 1] !== undefined) statement(args[++i]!);
+        break;
+      }
+      if (c === 'C') {
+        reaches(w);
+        break;
+      }
+      if (!CLICKHOUSE_SHORT_FLAGS.includes(c)) break;
+    }
+  }
+  return out;
+}
+
+// --- cqlsh / influx ------------------------------------------------------------------------------------------------
+// Two clients whose business here is the statements they are handed. Their option sets are not modelled closed, so an
+// option this reader does not know is ignored rather than asked about; what it reads is every spelling of the statement
+// option, and the options that hand the client a file to run.
+const CQLSH_OPTIONS: DbOptionSpec = {
+  value: [
+    'execute', 'file', 'keyspace', 'username', 'password', 'cqlshrc', 'credentials', 'browser', 'encoding', 'connect-timeout',
+    'request-timeout', 'protocol-version', 'cqlversion', 'secure-connect-bundle', 'consistency-level', 'serial-consistency-level',
+  ],
+  flag: ['color', 'no-color', 'ssl', 'tty', 'debug', 'coverage', 'no-file-io', 'disable-history', 'version', 'help'],
+  shortValue: 'efukbp',
+  shortFlag: 'Ctvh',
+  abbreviate: true,
+  alias: { e: 'execute', f: 'file', u: 'username', p: 'password', k: 'keyspace', b: 'secure-connect-bundle' },
+};
+function cqlshEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = newDbEscape();
+  const parsed = parseDbArgs(args, CQLSH_OPTIONS);
+  for (const o of parsed.options) {
+    if (o.value === null) continue;
+    if (o.name === 'execute') {
+      out.statements.push(o.value.text);
+      if (o.value.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
+    } else if (o.name === 'file') out.opaque.push('-f names a script the client runs');
+  }
+  return out;
+}
+const INFLUX_OPTIONS: DbOptionSpec = {
+  value: ['execute', 'import', 'path', 'host', 'port', 'username', 'password', 'database', 'format', 'precision', 'pps', 'type'],
+  flag: ['ssl', 'unsafeSsl', 'compressed', 'pretty', 'version', 'help'],
+  shortValue: '',
+  shortFlag: '',
+  singleDash: true,
+};
+function influxEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = newDbEscape();
+  const parsed = parseDbArgs(args, INFLUX_OPTIONS);
+  for (const o of parsed.options) {
+    if (o.name === 'import') out.opaque.push('-import loads a file of statements and points');
+    else if (o.name === 'execute' && o.value !== null) {
+      out.statements.push(o.value.text);
+      if (o.value.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
+    }
   }
   return out;
 }
@@ -11107,6 +11172,45 @@ function dbWordsOf(
   return commandWords(tokenizeMarked(normalized)).map((w) => ({ text: w.text, quoted: w.quoted, expands: /[$`]/.test(w.text) }));
 }
 
+/** ONE READER OF "WHAT SQL WILL THIS CLIENT RUN", for every question that asks it: whether a production invocation is a read
+ *  (`resolveDbTarget`), whether a statement drops a database (`dbDropsDatabase`, below), what to set aside from the
+ *  redirection test (`classifyShellPaths`). The segment is read AS WRITTEN - a statement is one quoted word there - and
+ *  the client's own grammar says which of its options carry a statement, in every spelling it accepts: the long name and
+ *  its abbreviations, the short letter, the value glued to either, the option given twice. The statements are the UNION of
+ *  all of them. Each question used to keep its own scan of the line, and they disagreed in the direction that released the
+ *  act: a second statement given by clickhouse's `-q` was not read once `--query` had given a read (sa10-34), and mysql's
+ *  `-e'DROP DATABASE app'` hid its words from a matcher that wanted a word boundary (r11-84). */
+function dbStatements(
+  client: string,
+  raw: ReadonlyArray<{ text: string; quoted: boolean; expands?: boolean }>,
+  normalized: string,
+): DbEscape {
+  return dbClientEscape(client, dbWordsOf(client, raw, normalized));
+}
+
+/** The objects whose DROP is "drop a database" (`db.local.drop`): a database, a schema (MySQL's synonym for one, and in
+ *  PostgreSQL everything the database holds) and a keyspace (Cassandra's). A table, an index or a view is DDL on the
+ *  database's own contents (`db.local.schema`) and stays ordinary work. One list, read by the statement reader below and
+ *  mirrored by the `db.local.drop` matcher for the forms that carry their statement outside an option (a here-string). */
+const DB_DROPPED_OBJECTS: ReadonlySet<string> = new Set(['database', 'schema', 'keyspace']);
+
+/** Whether any of the statements a client will run drops a database. String literals are blanked first (`select 'drop
+ *  database x'` drops nothing), and a statement the scan refuses (a comment can hide the words from this reader and not from
+ *  the engine) is not judged here - the client's escape reader has already made it opaque, which asks as well. */
+function dbDropsDatabase(client: string, statements: readonly string[]): boolean {
+  // the dialect the CLIENT reads: a `#` or a backslash means something else to PostgreSQL than to MySQL
+  const dialect: SqlDialect = client === 'psql' ? 'pg' : 'mysql';
+  for (const text of statements) {
+    const scan = sqlScan(text, dialect);
+    if ('refused' in scan) continue;
+    for (const chunk of scan.code.toLowerCase().split(';')) {
+      const words = chunk.trim().split(/\s+/);
+      if (words[0] === 'drop' && DB_DROPPED_OBJECTS.has(words[1] ?? '')) return true;
+    }
+  }
+  return false;
+}
+
 /** The reader. `client` is the head the caller classified; `words` are the segment's words as the shell delivers them. */
 function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   const at = words.findIndex((w) => w.text.replace(/^.*\//, '') === client);
@@ -11120,6 +11224,8 @@ function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   if (client === 'clickhouse-client') return clickhouseEscape(args);
   // `clickhouse client` and `clickhouse local` are the two-word spellings; its other subcommands run no query
   if (client === 'clickhouse' && /^(client|local)$/.test(args[0]?.text ?? '')) return clickhouseEscape(args.slice(1));
+  if (client === 'cqlsh') return cqlshEscape(args);
+  if (client === 'influx') return influxEscape(args);
   return newDbEscape();
 }
 
@@ -11159,39 +11265,36 @@ function resolveDbTarget(
   // inspects a plan, and refusing it absolutely leaves no way to look (exit review 9). The statement must be
   // wholly read-only — one write clause anywhere in it and the whole thing acts.
   const line = rawSeg ?? requote(tokens);
-  // read from the RAW segment when there is one: there the statement is still the single quoted word it was
-  // written as, so a `;` inside it is visible and the whole statement can be judged
-  // `-e` IS mysql's SHORT `--execute`, and only `-c` was read as a short statement flag — so every read-only
-  // statement spelled the mysql way was judged as an unrestricted connection (self-attack on exit review 9).
-  // A GO-STYLE SINGLE-DASH LONG OPTION IS NOT A CLUSTER. influx spells it `-execute`, and the short-flag scan read it
-  // as `-e -x -e -c ute` and pulled a statement called `ute` out of it - so the read-only test failed on a
-  // statement the operator never wrote (exit review 10). Written with the double dash the scan cannot misread it.
-  const stmtTokens = (rawSeg === undefined ? tokens : tokenizeMarked(rawSeg).map((t) => t.text)).map((t) =>
-    /^-(execute|eval|query|command|init-command|init-file)(=|$)/.test(t) ? `-${t}` : t,
-  );
+  // THE STATEMENTS ARE THE CLIENT'S OWN GRAMMAR'S ANSWER, read from the RAW segment: there the statement is still the single
+  // quoted word it was written as, so a `;` inside it is visible and the whole statement can be judged. This used to be a
+  // second scan of the line with its own idea of which options carry a statement (`-c`, `-e`, and a list of long names), and
+  // the two readers disagreed about every client whose short option is something else: clickhouse spells it `-q`, so
+  // `--query 'show tables' -q 'drop table t'` was ONE read and a production DROP TABLE at ALLOW (closure audit, sa10-34).
+  // Now there is one: dbStatements asks the client's grammar, which knows every option that carries a statement (and its
+  // abbreviations, its glued forms, its repetitions), and the exception needs ALL of them to be reads.
   // `--init-command` RUNS BEFORE EVERYTHING ELSE, so a read-only `-e` says nothing about what the session does:
   // `mysql -h prod-db --init-command="DROP TABLE users" -e "SHOW TABLES"` drops the table and then lists
-  // (exit review 10). Every statement the client will run is collected, and the exception needs ALL of them to
-  // be read-only.
-  const { statements, fromFile } = dbStatements(stmtTokens);
-  const readOnlyStatement =
-    statements.length > 0 && !fromFile && statements.every((q) => isReadStatement(q));
+  // (exit review 10).
+  const client = head.replace(/^.*\//, '');
+  const probe = isProbeInvocation(line);
+  const reading = probe ? newDbEscape() : dbStatements(client, tokenizeMarked(line), line);
+  const statements = reading.statements;
+  // A SCRIPT THE CLIENT IS HANDED (`psql -f`, `--queries-file`, `source`) is in `opaque`, and a read that carries one is not a
+  // read, so no file-ness needs to be tracked on its own
+  const readOnlyStatement = statements.length > 0 && reading.opaque.length === 0 && statements.every((q) => isReadStatement(q));
   // psql's `-l` LISTS THE DATABASES and connects to run nothing else - and only when it is a FLAG: in `psql -U -l -c
   // 'drop table t'` the `-l` is the user NAME, and a statement anywhere on the line makes the exception moot
   const PSQL_VALUE_SHORT = /^-[cdfFhLoPpRTUv]$/;
   const listsOnly =
     head === 'psql' &&
     statements.length === 0 &&
-    !fromFile &&
     tokens.some((t, i) => (t === '-l' || t === '--list') && !(i > 0 && PSQL_VALUE_SHORT.test(tokens[i - 1] ?? '')));
   const redisRead = /^(redis-cli|valkey-cli)$/.test(head) && redisReadOnly(tokens);
   // A READ THAT CARRIES AN ESCAPE IS NOT A READ. The exception above is a claim about the whole invocation: a plain
   // SELECT whose output is piped to a program, or whose session starts from a script, acts - and against a production
   // host `psql -h prod -c 'select 1' -o '|cmd'` was the allowed read plus an unread program (independent audit, item 5).
-  const client = head.replace(/^.*\//, '');
-  const escapes =
-    !isProbeInvocation(line) && dbClientEscape(client, dbWordsOf(client, tokenizeMarked(line), line)).opaque.length > 0;
-  const executes = escapes || (!isProbeInvocation(line) && !readOnlyStatement && !listsOnly && !redisRead);
+  const escapes = reading.opaque.length > 0;
+  const executes = escapes || (!probe && !readOnlyStatement && !listsOnly && !redisRead);
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
   const signals: Array<{ cls: TargetClass; target: string }> = [];
@@ -11220,6 +11323,31 @@ function resolveDbTarget(
     else if (/^(PGURI|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL)$/.test(k))
       push(endpointHost(v.replace(/^jdbc:/, '')), `${k}=`);
     else if (k === 'PGSERVICE') signals.push({ cls: 'UNCLASSIFIED', target: `PGSERVICE=${v}` });
+
+  // A VARIABLE (OR AN ENVIRONMENT) THAT A FLAG NAMES IS THE TARGET IT HOLDS. `dbmate --env PROD_URL up` does not connect to
+  // anything called PROD_URL: the flag names the variable that holds the connection string, and `PROD_URL=postgres://u@prod-db/
+  // app dbmate --env PROD_URL up` was the production migration at ALLOW because the only assignments this resolver read
+  // were the ones whose NAMES it had listed (r11-86). A variable whose value is on the command line is followed to it and
+  // read like any URL on the line; one whose value is not is the ambient environment, which nobody here can read, so it asks.
+  // An environment NAME (`knex --env production`) is judged by the name, like a namespace.
+  const namedValues: string[] = [];
+  const toolAt = tokens.findIndex((t, i) => i < 4 && DB_NAMED_TARGET_OPTIONS[t.replace(/^.*\//, '')] !== undefined);
+  if (toolAt >= 0) {
+    const spec = DB_NAMED_TARGET_OPTIONS[tokens[toolAt]!.replace(/^.*\//, '')]!;
+    for (const name of optionValues(tokens.slice(toolAt), spec.short, [...spec.long])) {
+      if (isOpaqueTarget(name)) signals.push({ cls: 'UNCLASSIFIED', target: `${name} (named by an option of ${tokens[toolAt]})` });
+      else if (hasProductionMarker(name, targets.productionMarkers)) signals.push({ cls: 'PRODUCTION', target: `${spec.names} ${name}` });
+      else if (spec.names === 'variable') {
+        const value = envInputs[`\0env:${name}`] ?? envInputs[name];
+        if (value === undefined)
+          signals.push({ cls: 'UNCLASSIFIED', target: `$${name} (named by an option of ${tokens[toolAt]}; its value is not on the command line)` });
+        else if (/^sqlite3?:/i.test(value)) signals.push({ cls: 'LOCAL', target: `$${name} (a sqlite file)` });
+        else if (isOpaqueTarget(value)) signals.push({ cls: 'UNCLASSIFIED', target: `$${name} (its value is built at run time)` });
+        else if (/:\/\//.test(value)) namedValues.push(value);
+        else push(value, `$${name}`);
+      }
+    }
+  }
 
   // `\c [DBNAME [USER [HOST [PORT]]]]` RECONNECTS THE SESSION, so everything after it runs on that host. The
   // host is a WORD INSIDE a `-c` value, not a token of the command line, and only the short `\c - - HOST` form
@@ -11250,7 +11378,8 @@ function resolveDbTarget(
     if (words[2] !== undefined && words[2] !== '-') push(words[2], '\\connect host');
   }
 
-  for (const t of tokens) {
+  // (the connection strings that a flag-named variable holds are read here like any other word of the line)
+  for (const t of [...tokens, ...namedValues]) {
     // a URI anywhere in the token, not only at its start: `-url=jdbc:postgresql://prod-db/app` hid the host
     for (const m of t.matchAll(/[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]*@)?\[?([^\]:/?\s]+)\]?/gi)) {
       if (isOpaqueTarget(m[0]!)) signals.push({ cls: 'UNCLASSIFIED', target: m[0]! });
@@ -11351,6 +11480,32 @@ function resolveDbTarget(
   if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { cls: worst.cls, target: worst.target, executes };
+}
+
+/** A STATEMENT THAT DROPS A DATABASE IS THE DROP CAPABILITY, however the client was handed it. The `db.local.drop` matcher
+ *  reads the normalized TEXT of the line, and a statement that is glued to its option (`mysql -e'DROP DATABASE app'`) has no
+ *  word boundary in front of `DROP` there, so the drop was the plain `db.local.query` ALLOW (r11-84). The statements are
+ *  read by the client's own grammar (dbStatements), once, for every spelling of every statement option; a client that is
+ *  asked to drop a database by any of them is dropping one. The upgrade only ever raises, and the target resolution that
+ *  follows still decides WHERE (a production host is refused outright, whatever the capability was). */
+function upgradeToDbDrop(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  hit: CapabilityHit,
+  norm: string,
+  rawSeg: string,
+): CapabilityHit {
+  if (hit.capability !== 'db.local.query' || !('db.local.drop' in table.capabilities)) return hit;
+  const client = commandHead(norm);
+  if (!DB_CLIENT_HEADS.has(client)) return hit;
+  if (!dbDropsDatabase(client, dbStatements(client, tokenizeMarked(rawSeg), norm).statements)) return hit;
+  return {
+    ...hit,
+    capability: 'db.local.drop',
+    verdict: verdictFor(table, ctx, 'db.local.drop'),
+    via: `${hit.via}; a statement of the client drops a database`,
+    absolute: isAbsoluteCap(table, 'db.local.drop'),
+  };
 }
 
 /** Re-judges a capability that ASSERTS a local target against the target the command actually names (Q98). */
@@ -11948,13 +12103,19 @@ function classifyNormalized(
       outer = retargetLocalCapability(
         table,
         ctx,
-        {
-          capability: m.capability,
-          verdict: verdictFor(table, ctx, m.capability),
-          via: `matcher /${m.command}/`,
-          segment: norm,
-          absolute: isAbsoluteCap(table, m.capability),
-        },
+        upgradeToDbDrop(
+          table,
+          ctx,
+          {
+            capability: m.capability,
+            verdict: verdictFor(table, ctx, m.capability),
+            via: `matcher /${m.command}/`,
+            segment: norm,
+            absolute: isAbsoluteCap(table, m.capability),
+          },
+          norm,
+          state.env.rawSegment ?? norm,
+        ),
         norm,
         state.env.envInputs,
         state.env.rawSegment ?? norm,
@@ -12281,7 +12442,7 @@ function classifyShellPaths(
   // statement that names no directory is not a path; one that does (`/etc/hostname`, `~/.ssh/id_rsa`) is still scanned,
   // beside the reader that knows which server-side functions open a file.
   const rawWords = tokenizeMarked(rawSeg);
-  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
+  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbStatements(head, rawWords, seg) : null;
   const statementWords = new Set(
     (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
   );
@@ -12332,41 +12493,18 @@ function classifyShellPaths(
   // client rather than folded into the shared pattern (exit review 10).
   const redisReadsScript = /^(redis-cli|valkey-cli)$/.test(head) && tokens.some((t) => t === '--eval' || t === '-x');
   // `mysql < file` feeds the client a script; `where a < 1` inside the statement is a comparison. Only a `<` that the
-  // shell sees is the former, so the VALUE of the client's own statement flag is set aside before the test - and
-  // nothing else: the segment may have been re-quoted from tokens (a wrapper stripped), so a quote around a word says
-  // nothing about whether it was a statement. The flag is the client's own (`mysql -c` is `--comments`, and
-  // `redis-cli -e` is a boolean), and a client not named here keeps the text as it is.
-  const STATEMENT_FLAG: Record<string, RegExp> = {
-    psql: /^(-c|--command)$/,
-    mysql: /^(-e|--execute)$/,
-    mariadb: /^(-e|--execute)$/,
-    mysqlsh: /^(-e|--execute)$/,
-    cqlsh: /^(-e|--execute)$/,
-    'clickhouse-client': /^(-q|--query)$/,
-    influx: /^(-execute|--execute)$/,
-    mongosh: /^--eval$/,
-    mongo: /^--eval$/,
-  };
-  const clientAt = rawWords.findIndex((t) => !t.quoted && STATEMENT_FLAG[t.text.replace(/^.*\//, '')] !== undefined);
+  // shell sees is the former, so every statement the client's grammar found is set aside before the test - and nothing
+  // else: the segment may have been re-quoted from tokens (a wrapper stripped), so a quote around a word says nothing about
+  // whether it was a statement. THE STATEMENTS ARE THE READER'S (dbStatements), not a table of which flag carries one
+  // that this site kept for itself: that table knew `-q` for clickhouse and not `-e'…'` glued, and it was the second scan
+  // of the same dimension (closure audit, RC-DB). A statement is set aside whether it stands alone (`-e`'s next word),
+  // is glued to its option (`-eSQL`) or follows an `=` (`--execute=SQL`).
   let unquotedSeg = seg;
-  let unquotedWords = rawWords.map((w) => w.text);
-  if (clientAt >= 0) {
-    const flag = STATEMENT_FLAG[rawWords[clientAt]!.text.replace(/^.*\//, '')]!;
-    const kept: string[] = [];
-    for (let n = 0; n < rawWords.length; n++) {
-      const w = rawWords[n]!.text;
-      if (n > clientAt && /^--?[a-z-]+=/.test(w) && flag.test(w.slice(0, w.indexOf('=')))) continue;
-      kept.push(w);
-      if (n > clientAt && flag.test(w) && rawWords[n + 1] !== undefined) n++;
-    }
-    unquotedSeg = kept.join(' ');
-    unquotedWords = kept;
-  }
-  // THE CLIENT'S OTHER CHANNELS - a program, a file it writes, native code - are read by ONE grammar (dbClientEscape)
-  // rather than found by their spelling. A statement the reader recognised is set aside from the redirection test
-  // below, for the same reason a statement flag's value is: `where id < 10` is a comparison, not `< file`.
   if (dbEscape !== null && dbEscape.statements.length > 0)
-    unquotedSeg = unquotedWords.filter((w) => !dbEscape.statements.some((st) => w === st || w.endsWith(`=${st}`))).join(' ');
+    unquotedSeg = rawWords
+      .map((w) => w.text)
+      .filter((w) => !dbEscape.statements.some((st) => w === st || (w.startsWith('-') && w.length > st.length && w.endsWith(st))))
+      .join(' ');
   // A FILE THE CLIENT WRITES IS JUDGED AS A WRITE, NOT TAKEN FOR A PROGRAM IT RUNS. The modelled clients report theirs
   // (`DbEscape.writes`); the dump tools have no grammar and their output option is read here. The redirection targets
   // are the shell's, and are read with the quoting still on the line.
