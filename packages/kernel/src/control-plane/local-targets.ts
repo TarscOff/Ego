@@ -138,6 +138,18 @@ export function refuseLocalTarget(kind: LocalTargetKind, name: string, markers: 
   return null;
 }
 
+/**
+ * What to tell a person whose operation was refused because its target is a shared system: how a HUMAN makes it a
+ * development target. Only for a named context or host that the registry would take - never for production, never for
+ * an unresolved variable. The words are for the human at the terminal; an agent shell cannot run the command (init
+ * refuses it there), so naming it grants nothing.
+ */
+export function declareHint(kind: LocalTargetKind, resolvedTarget: string): string {
+  const m = /^(?:context|host) (\S+)$/.exec(resolvedTarget);
+  if (!m || refuseLocalTarget(kind, m[1]!, []) !== null) return '';
+  return `; if ${m[1]} is a ${LOCAL_TARGET_NOUN[kind]} your team develops against, a human declares it with \`ego init --local-target ${kind}:${m[1]}\``;
+}
+
 /** Whether a production marker a layer adds is acceptable: a plain lowercase token. It is compiled into a pattern. */
 export const refuseMarker = (m: string): string | null =>
   MARKER_SHAPE.test(m)

@@ -2,6 +2,7 @@
 // converts a thrown error into exit 2 with a one-line message).
 import { join, resolve, sep } from 'node:path';
 import { evaluate, type EvaluationContext } from '../authority/evaluate.ts';
+import { approvalPresentation, externalAskHit, renderApproval } from '../authority/approval.ts';
 import { evaluateBudget, applyBudgetExtension, type BudgetCounters } from '../authority/budget.ts';
 import type { ExecutionBudgets } from '../control-plane/types.ts';
 import { ensurePolicyCache, type PolicyCache } from '../policy/cache.ts';
@@ -220,9 +221,7 @@ function handleLocked(
         const mode = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {}).find((m) => m === marker);
         if (!mode) notes.push(`EGO: unknown mode "${marker}" ignored.`);
         else if (mode === 'EGO_MAINTENANCE' && !inEgo)
-          notes.push(
-            'EGO: EGO_MAINTENANCE is available only in the EGO source repository; mode unchanged.',
-          );
+          notes.push('EGO: EGO_MAINTENANCE is available only in the EGO source repository; mode unchanged.');
         else if (mode === 'BENCHMARK')
           notes.push(
             'EGO: BENCHMARK mode is entered by `harness benchmark run`, not by prompt; mode unchanged.',
@@ -370,6 +369,21 @@ function handleLocked(
       if (action === 'deny') {
         const cap = evaluation.decisive?.capability ?? 'unknown';
         decision.userMessage = `EGO refused ${tool.name}: ${cap} is DENY. \`ego explain capability ${cap}\` explains why.`;
+      }
+      // TASK_APPROVAL (issue #16 section 8): an ASK on an operation that leaves this machine tells the human WHAT they
+      // are approving - action, target, branch or cluster or database, a bounded summary, why, how reversible - instead
+      // of the capability id and the matcher that fired. A local ASK keeps the evaluator's own short reason.
+      if (action === 'ask') {
+        const hit = externalAskHit(cache.table, evaluation.hits);
+        const presented = hit
+          ? approvalPresentation(cache.table, ctx, { tool: tool.name, input: tool.input }, hit, {
+              summary: summary.replace(/^[^:]*: /, ''),
+            })
+          : null;
+        if (hit && presented) {
+          decision.reason = renderApproval(presented, ctx, hit.capability);
+          decision.details = { ...decision.details, approval: presented };
+        }
       }
       return decision;
     }

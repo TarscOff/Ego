@@ -12,6 +12,7 @@ import { VERDICT_RANK } from '../control-plane/types.ts';
 import {
   containerLocalPatterns,
   dbClientLocalPatterns,
+  declareHint,
   hasProductionMarker,
   kubeLocalPatterns,
 } from '../control-plane/local-targets.ts';
@@ -51,6 +52,9 @@ export interface CapabilityHit {
   effectOf?: string;
   /** opacity that means "something WILL run that could not be read", as opposed to "the target does not exist" */
   opaqueUnread?: boolean;
+  /** WHERE a Kubernetes, database or container operation lands, as the target resolver classified it. The hit carried
+   *  this only inside its `via` sentence, which is for a person; the approval presentation reads it from here */
+  target?: { cls: TargetClass; name: string };
 }
 
 export interface Evaluation {
@@ -10602,9 +10606,10 @@ function retargetLocalCapability(
     via:
       resolved.cls === 'UNCLASSIFIED'
         ? `TARGET_UNCLASSIFIED: ${resolved.target} could not be resolved to a declared local development target (${targets.file})`
-        : `target ${resolved.target} is ${resolved.cls}, not a declared local development target (${targets.file})`,
+        : `target ${resolved.target} is ${resolved.cls}, not a declared local development target (${targets.file})${resolved.cls === 'EXTERNAL' ? declareHint(kind === 'k8s' ? 'kube' : kind, resolved.target) : ''}`,
     segment: norm,
     absolute: isAbsoluteCap(table, capability),
+    target: { cls: resolved.cls, name: resolved.target },
   };
 }
 

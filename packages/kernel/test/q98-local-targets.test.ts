@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { main } from '../../cli/src/main.ts';
 import { initProject } from '../src/project/init.ts';
 import { addToFrontmatterList } from '../src/project/local-surfaces.ts';
+import { approvalPresentation, externalAskHit, impactOf } from '../src/authority/approval.ts';
 import { evaluate } from '../src/authority/evaluate.ts';
 import { diffAuthorityTables, classifyAuthorityChanges } from '../src/authority/compile.ts';
 import { ensurePolicyCache, readPolicyCache, type PolicyCache } from '../src/policy/cache.ts';
@@ -546,6 +547,7 @@ function repo(files: Record<string, string> = {}): string {
   spawnSync('git', ['init', '-q'], { env: gitEnv(), cwd: dir });
   spawnSync('git', ['config', 'user.email', 't@example.com'], { env: gitEnv(), cwd: dir });
   spawnSync('git', ['config', 'user.name', 't'], { env: gitEnv(), cwd: dir });
+  spawnSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/demo.git'], { env: gitEnv(), cwd: dir });
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'demo', version: '1.0.0' }));
   for (const [name, content] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, name)), { recursive: true });
@@ -963,4 +965,462 @@ test('adding to a layer file keeps its comments and every other entry, in each s
   );
   assert.throws(() => add('no frontmatter', 'db_local_hosts', 'x'), /no frontmatter/);
   assert.throws(() => add('---\ndb_local_hosts: nope\n---\n', 'db_local_hosts', 'x'), /not a list/);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 8. TASK_APPROVAL: WHAT A HUMAN IS ASKED TO APPROVE (issue #16 section 8)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** An organization that enables the admin-governed forge and Git writes at the ASK ceiling - the road to an ASK on
+ *  `git push`, `gh pr create` and the rest. */
+const ORG_ENABLES = `---
+schema: ego.capabilities/1
+id: organization
+family: organization
+---
+# Organization
+
+## Requires human approval
+
+- [x] \`git.remote.push\` — feature branches, reviewed
+- [x] \`git.remote.push.force\` — with a lease
+- [x] \`forge.pr.create\` — open a pull request
+- [x] \`forge.pr.merge\` — merge
+- [x] \`forge.api.mutate\` — the API escape hatch
+- [x] \`forge.issue.create\` — file an issue
+`;
+
+async function hookAsk(
+  dir: string,
+  env: NodeJS.ProcessEnv,
+  command: string,
+): Promise<{ decision: string; reason: string }> {
+  const r = await ego(
+    ['hook', 'claude-code', 'PreToolUse'],
+    dir,
+    env,
+    JSON.stringify({
+      session_id: 'q98-approval',
+      cwd: dir,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+    }),
+  );
+  const out = JSON.parse(r.out).hookSpecificOutput as {
+    permissionDecision: string;
+    permissionDecisionReason: string;
+  };
+  return { decision: out.permissionDecision, reason: out.permissionDecisionReason };
+}
+
+/** the value of `  <field>: ...` in a presentation */
+const field = (reason: string, name: string): string | undefined =>
+  new RegExp(`^ {2}${name}: (.*)$`, 'm').exec(reason)?.[1];
+
+test('an ASK on an external effect shows action, target, where, effect, why, impact and task (Q98 section 8)', async () => {
+  const dir = repo({ 'policies/organization/permissions.md': ORG_ENABLES });
+  const env = humanEnv(mkdtempSync(join(PARENT, 'home-')));
+  assert.equal((await ego(['init'], dir, env)).code, 0);
+
+  const cases: Array<{
+    command: string;
+    capability: string;
+    target: RegExp;
+    where: RegExp | null;
+    impact: RegExp;
+    why: RegExp;
+  }> = [
+    {
+      command: 'git push origin feature/login',
+      capability: 'git.remote.push',
+      target: /^GitHub repository acme\/demo$/,
+      where: /^ref feature\/login$/,
+      impact: /^changes shared state/,
+      why: /^admin-governed: the organization policy enabled it \(policies\/organization\/permissions\.md\) with ASK as the ceiling/,
+    },
+    {
+      command: 'git push -u origin HEAD',
+      capability: 'git.remote.push',
+      target: /^GitHub repository acme\/demo$/,
+      where: /^ref HEAD$/,
+      impact: /^changes shared state/,
+      why: /admin-governed/,
+    },
+    {
+      command: 'git push',
+      capability: 'git.remote.push',
+      target: /configured upstream \(not resolved\)|GitHub repository acme\/demo/,
+      where: /^branch: the current branch \(not resolved by EGO\)$/,
+      impact: /^changes shared state/,
+      why: /admin-governed/,
+    },
+    {
+      command: 'git push --force-with-lease origin main',
+      capability: 'git.remote.push.force',
+      target: /^GitHub repository acme\/demo$/,
+      where: /^ref main$/,
+      impact: /^high-impact: destroys or overwrites shared state; hard or impossible to undo$/,
+      why: /admin-governed/,
+    },
+    {
+      command:
+        'gh pr create --title "Add login" --body "see ticket" --base main --head feature/login --repo acme/other',
+      capability: 'forge.pr.create',
+      target: /^GitHub repository acme\/other$/,
+      where: /^base main, head feature\/login$/,
+      impact: /^changes shared state|^reversible/,
+      why: /admin-governed/,
+    },
+    {
+      command: 'gh pr merge 12 --squash -R acme/app',
+      capability: 'forge.pr.merge',
+      target: /^GitHub repository acme\/app$/,
+      where: /^PR\/MR 12$/,
+      impact: /^hard to undo/,
+      why: /admin-governed/,
+    },
+    {
+      command: 'gh api -X POST repos/acme/app/issues -f title=x',
+      capability: 'forge.api.mutate',
+      target: /^GitHub repository acme\/app$/,
+      where: null,
+      impact: /^changes shared state/,
+      why: /admin-governed/,
+    },
+    {
+      command: 'gh issue comment 5 --body hi --repo acme/app',
+      capability: 'forge.issue.comment',
+      target: /^GitHub repository acme\/app$/,
+      where: /^item 5$/,
+      impact: /^reversible: can be edited or removed afterwards/,
+      why: /^the kernel asks for every operation of this kind that leaves the machine/,
+    },
+    {
+      command: 'kubectl apply -f k8s/dev.yaml -n payments',
+      capability: 'k8s.target.unclassified',
+      target: /^cluster: the ambient kubeconfig context \(TARGET_UNCLASSIFIED - could not be resolved\)$/,
+      where: /^tool kubectl, namespace payments$/,
+      impact: /^unknown, treated as high-impact/,
+      why: /^TARGET_UNCLASSIFIED: the target is not named/,
+    },
+    {
+      command: 'psql $DATABASE_URL -c "delete from users"',
+      capability: 'db.target.unclassified',
+      target: /^database: \$DATABASE_URL \(TARGET_UNCLASSIFIED - could not be resolved\)$/,
+      where: /^tool psql$/,
+      impact: /^unknown, treated as high-impact/,
+      why: /TARGET_UNCLASSIFIED/,
+    },
+    {
+      command: 'curl -X POST https://api.example.com/v1/items -d name=x',
+      capability: 'network.external-write',
+      target: /^api\.example\.com\/v1\/items$/,
+      where: /^tool curl, method POST$/,
+      impact: /^changes shared state/,
+      why: /^the kernel asks/,
+    },
+    {
+      command: 'docker push registry.acme.com/team/app:1.2',
+      capability: 'container.registry.push',
+      target: /^container registry registry\.acme\.com$/,
+      where: /^image registry\.acme\.com\/team\/app:1\.2$/,
+      impact: /^hard to undo/,
+      why: /^the kernel asks/,
+    },
+  ];
+  for (const c of cases) {
+    const { decision, reason } = await hookAsk(dir, env, c.command);
+    assert.equal(decision, 'ask', c.command);
+    assert.match(
+      reason,
+      new RegExp(`^EGO: ${c.capability.replace(/\./g, '\\.')} requires human approval in profile STANDARD`),
+      c.command,
+    );
+    assert.match(reason, /This approves this one operation only\./, c.command);
+    assert.match(
+      field(reason, 'action') ?? '',
+      new RegExp(`^${c.capability.replace(/\./g, '\\.')} - \\S`),
+      c.command,
+    );
+    assert.match(field(reason, 'target') ?? '', c.target, `${c.command}\n${reason}`);
+    if (c.where) assert.match(field(reason, 'where') ?? '', c.where, `${c.command}\n${reason}`);
+    else assert.equal(field(reason, 'where'), undefined, `${c.command}\n${reason}`);
+    assert.ok((field(reason, 'effect') ?? '').length > 0, c.command);
+    assert.match(field(reason, 'why') ?? '', c.why, `${c.command}\n${reason}`);
+    assert.match(field(reason, 'impact') ?? '', c.impact, `${c.command}\n${reason}`);
+    // no audit reference is invented: phase 1 has no task and no claim, and the line says so
+    assert.match(reason, /^ {2}task: none \(phase 2: durable tasks do not exist yet\)$/m, c.command);
+    assert.doesNotMatch(reason, /audit|ledger|claim id|#\d{2,}/i, c.command);
+    // compact: it is a prompt
+    assert.ok(reason.split('\n').length <= 9, `${c.command}: ${reason.split('\n').length} lines`);
+    assert.ok(reason.length <= 1100, `${c.command}: ${reason.length} chars`);
+  }
+});
+
+test('the presentation masks credentials and bounds the effect summary; a local ASK keeps the short reason; a DENY has no approval block', async () => {
+  const dir = repo({ 'policies/organization/permissions.md': ORG_ENABLES });
+  const env = humanEnv(mkdtempSync(join(PARENT, 'home-')));
+  await ego(['init'], dir, env);
+
+  const secret = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz12';
+  const masked = await hookAsk(
+    dir,
+    env,
+    `curl -X POST https://deploy:${secret}@api.example.com/v1/items -H "Authorization: Bearer ${secret}" --token ${secret} -d name=x`,
+  );
+  assert.equal(masked.decision, 'ask');
+  assert.doesNotMatch(masked.reason, new RegExp(secret));
+  assert.match(
+    field(masked.reason, 'target') ?? '',
+    /^api\.example\.com\/v1\/items$/,
+    'no userinfo in the target',
+  );
+
+  const long = await hookAsk(
+    dir,
+    env,
+    `gh issue create --repo acme/app --title x --body "${'A very long body. '.repeat(300)}"`,
+  );
+  assert.equal(long.decision, 'ask');
+  assert.ok((field(long.reason, 'effect') ?? '').length <= 150);
+  assert.ok(long.reason.length <= 1100);
+
+  // an ASK that stays on this machine keeps the evaluator's own reason and carries no presentation
+  const local = await hookAsk(dir, env, 'pytest -q');
+  assert.equal(local.decision, 'ask');
+  assert.match(local.reason, /requires human approval in profile STANDARD/);
+  assert.equal(field(local.reason, 'target'), undefined);
+  assert.doesNotMatch(local.reason, /This approves this one operation only/);
+
+  // a refusal is not a request for approval
+  const denied = await hookAsk(dir, env, 'kubectl --context acme-eks delete ns payments');
+  assert.equal(denied.decision, 'deny');
+  assert.equal(field(denied.reason, 'target'), undefined);
+});
+
+test('the presentation builder: one function, every family, nothing for a local effect, no secret in the effect', () => {
+  const dir = workspace({});
+  const cache = asHuman(dir);
+  const req = (command: string) => ({ tool: 'Bash', input: { command } });
+  const hitOf = (command: string) => {
+    const r = judge(cache, dir, command);
+    return { r, hit: externalAskHit(cache.table, r.hits) };
+  };
+  const present = (command: string, opts = {}) => {
+    const { hit } = hitOf(command);
+    assert.ok(hit, `${command}: an external ASK was expected`);
+    return approvalPresentation(cache.table, ctx(dir), req(command), hit, {
+      remoteUrl: () => null,
+      ...opts,
+    })!;
+  };
+
+  // a local effect is not presented
+  assert.equal(externalAskHit(cache.table, judge(cache, dir, 'pytest -q').hits), null);
+  assert.equal(externalAskHit(cache.table, judge(cache, dir, 'git commit -m x').hits), null);
+  assert.equal(
+    approvalPresentation(cache.table, ctx(dir), req('ls'), {
+      capability: 'command.read-only',
+      verdict: 'ALLOW',
+      via: '',
+      absolute: false,
+    }),
+    null,
+  );
+
+  // the task is the caller's: absent, it says so; given, it is shown
+  assert.match(present('gh issue comment 5 --body hi --repo acme/app').task, /^task: none \(phase 2/);
+  assert.equal(present('gh issue comment 5 --body hi --repo acme/app', { task: 'T-17' }).task, 'task: T-17');
+
+  // the summary is the ledger's when given, and masked either way
+  const p = present('gh issue comment 5 --body hi --repo acme/app', {
+    summary: 'gh issue comment 5 --token ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+  });
+  assert.doesNotMatch(p.effect, /ghp_/);
+
+  // an MCP call names its server and tool (the hit is synthetic: no MCP call can ASK before the trust resolver, #10)
+  const mcp = approvalPresentation(
+    cache.table,
+    ctx(dir),
+    { tool: 'mcp__linear__create_issue', input: { title: 'x' } },
+    { capability: 'mcp.remote.narrow-write', verdict: 'ASK', via: 'x', absolute: false },
+  )!;
+  assert.equal(mcp.target, 'MCP server linear');
+  assert.equal(mcp.where, 'tool create_issue');
+
+  // reversibility is derived from the capability id, with the target-unresolved case first
+  for (const [id, re] of [
+    ['k8s.target.unclassified', /^unknown/],
+    ['forge.repo.delete', /^high-impact/],
+    ['git.remote.branch.delete', /^high-impact/],
+    ['git.remote.push.force', /^high-impact/],
+    ['forge.pr.merge', /^hard to undo/],
+    ['forge.release.publish', /^hard to undo/],
+    ['container.registry.push', /^hard to undo/],
+    ['git.remote.push', /^changes shared state/],
+    ['forge.issue.close', /^changes shared state/],
+    ['forge.issue.comment', /^reversible/],
+  ] as const)
+    assert.match(impactOf(id), re, id);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 9. THE SECTION-11 SCENARIOS THIS REGISTRY DECIDES, END TO END (tests 4, 5, 22)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('a refusal for a shared target tells a human how to declare it - and never offers it for production or an unresolved name', () => {
+  const dir = workspace({});
+  const c = asHuman(dir);
+  const reasonOf = (cmd: string) => judge(c, dir, cmd).reason;
+  assert.match(
+    reasonOf('kubectl --context team-dev apply -f a.yaml'),
+    /is EXTERNAL, not a declared local development target \(.*\); if team-dev is a kube context your team develops against, a human declares it with `ego init --local-target kube:team-dev`/,
+  );
+  assert.match(
+    reasonOf('psql -h devdb.corp.internal -c "delete from t"'),
+    /`ego init --local-target db:devdb\.corp\.internal`/,
+  );
+  assert.match(
+    reasonOf('docker --context team-docker run alpine true'),
+    /`ego init --local-target container:team-docker`/,
+  );
+  for (const cmd of [
+    'kubectl --context acme-prod-eks apply -f a.yaml', // production is never offered
+    'kubectl --context "$CTX" apply -f a.yaml', // unresolved: there is no name to declare
+    'kubectl --server https://k8s.acme.com apply -f a.yaml', // an endpoint is not a context
+    'kubectl apply -f a.yaml',
+  ])
+    assert.doesNotMatch(reasonOf(cmd), /ego init --local-target/, cmd);
+});
+
+test('Q98 test 5: a migration against a declared development database needs no ASK, in every spelling the migrators have', () => {
+  const dir = workspace({ [PROJECT_FILE]: layerFile({ db_local_hosts: ['devdb.corp.internal'] }) });
+  const c = asHuman(dir);
+  for (const cmd of [
+    'flyway migrate -url=jdbc:postgresql://devdb.corp.internal:5432/app',
+    'flyway -url=jdbc:postgresql://devdb.corp.internal:5432/app migrate',
+    'dbmate --url postgres://devdb.corp.internal/app up',
+    'DATABASE_URL=postgres://devdb.corp.internal/app dbmate up',
+    'liquibase update --url=jdbc:postgresql://devdb.corp.internal:5432/app',
+  ]) {
+    assert.equal(cap(c, dir, cmd), 'db.local.migrate', cmd);
+    assert.equal(verdictOf(c, dir, cmd), 'ALLOW', cmd);
+  }
+  for (const cmd of [
+    'psql -h devdb.corp.internal -c "create table t (id int)"',
+    'mysql -h devdb.corp.internal -e "alter table t add c int"',
+    'redis-cli -h devdb.corp.internal flushall',
+    'mongosh mongodb://devdb.corp.internal/app --eval "db.x.drop()"',
+  ])
+    assert.equal(verdictOf(c, dir, cmd), 'ALLOW', cmd);
+  // the same migrator pointed anywhere else is somebody else's database, and one that says production is production
+  assert.equal(
+    cap(c, dir, 'flyway migrate -url=jdbc:postgresql://other.corp.internal:5432/app'),
+    'db.nonlocal.mutate',
+  );
+  assert.equal(
+    cap(c, dir, 'flyway migrate -url=jdbc:postgresql://prod-db.corp.internal:5432/app'),
+    'production.database.mutate',
+  );
+  assert.equal(
+    cap(c, dir, 'dbmate --url postgres://devdb.corp.internal.evil.test/app up'),
+    'db.nonlocal.mutate',
+    'a host that merely begins with a declared one is not it',
+  );
+});
+
+test('Q98 test 4: kubectl and helm against a declared cluster need no ASK, and every other signal still decides', () => {
+  const dir = workspace({
+    [PROJECT_FILE]: layerFile({
+      k8s_local_contexts: ['team-dev'],
+      container_local_contexts: ['team-docker'],
+    }),
+  });
+  const c = asHuman(dir);
+  for (const cmd of [
+    'kubectl --context team-dev apply -f k8s/',
+    'kubectl --context=team-dev apply -k overlays/dev',
+    'kubectl --context TEAM-DEV apply -f a.yaml',
+    'kubectl --context team-dev rollout restart deploy/api',
+    'kubectl --context team-dev delete -f k8s/dev.yaml',
+    'helm --kube-context team-dev upgrade --install app ./chart',
+    'helm upgrade --install app ./chart --kube-context=team-dev',
+    'kustomize build overlays/dev | kubectl --context team-dev apply -f -',
+    'docker --context team-docker run --rm alpine true',
+    'docker --context team-docker compose up -d',
+  ])
+    assert.equal(verdictOf(c, dir, cmd), 'ALLOW', cmd);
+  // deleting a cluster-level resource is the same declared gate it is for kind
+  assert.equal(cap(c, dir, 'kubectl --context team-dev delete ns scratch'), 'k8s.local.delete');
+  // a second signal that points elsewhere outranks the declared context
+  for (const [cmd, capability] of [
+    ['kubectl --context team-dev --context prod-eks apply -f a.yaml', 'production.k8s.mutate'],
+    ['kubectl --context team-dev -n production apply -f a.yaml', 'production.k8s.mutate'],
+    ['kubectl --context team-dev apply -f a.yaml --server https://k8s.acme.com', 'k8s.nonlocal.mutate'],
+    ['KUBECONFIG=/tmp/x kubectl --context team-dev apply -f a.yaml', 'k8s.nonlocal.mutate'],
+    ['kubectl --context team-dev-2 apply -f a.yaml', 'k8s.nonlocal.mutate'],
+    ['docker --context team-docker -H tcp://prod-engine:2375 run alpine true', 'production.deploy'],
+    ['docker --context team-docker system prune -af', 'container.prune'],
+  ] as const)
+    assert.equal(cap(c, dir, cmd), capability, cmd);
+});
+
+test('Q98 test 22: the everyday local workflow completes with no prompt once the team has declared its targets, and the prompts are the accounted ones before', () => {
+  const dir = workspace({
+    'package.json': JSON.stringify({
+      scripts: { lint: 'eslint .', build: 'tsc -p .', typecheck: 'tsc --noEmit' },
+    }),
+    [PROJECT_FILE]: layerFile({ k8s_local_contexts: ['team-dev'], db_local_hosts: ['devdb.corp.internal'] }),
+    'k8s/dev.yaml': 'kind: Deployment\n',
+    'chart/Chart.yaml': 'name: app\n',
+  });
+  const flow: Array<{ tool: string; input: Record<string, unknown>; needsTarget?: true }> = [
+    { tool: 'Write', input: { file_path: join(dir, 'src', 'login.ts'), content: 'x' } },
+    { tool: 'Edit', input: { file_path: join(dir, 'package.json'), old_string: 'a', new_string: 'b' } },
+    { tool: 'Read', input: { file_path: join(dir, 'package.json') } },
+    ...[
+      'git checkout -b feat/login',
+      'npm run lint',
+      'npm run build',
+      'git add -A',
+      'git commit -m "feat: login"',
+      'docker compose up -d',
+      'docker compose logs db',
+      'docker compose down',
+      'kind create cluster --name dev',
+      'kubectl --context kind-dev apply -f k8s/dev.yaml',
+    ].map((command) => ({ tool: 'Bash', input: { command } })),
+    // the part that needs the team's own targets
+    ...[
+      'kubectl --context team-dev apply -f k8s/dev.yaml',
+      'kubectl --context team-dev rollout restart deploy/api',
+      'helm upgrade --install app ./chart --kube-context team-dev',
+      'flyway migrate -url=jdbc:postgresql://devdb.corp.internal:5432/app',
+      'psql -h devdb.corp.internal -d app -c "alter table t add column d int"',
+    ].map((command) => ({ tool: 'Bash', input: { command }, needsTarget: true as const })),
+  ];
+  const prompts = (cache: PolicyCache): string[] =>
+    flow
+      .map((s) => ({ s, r: evaluate(cache.table, ctx(dir), { tool: s.tool, input: s.input }) }))
+      .filter(({ r }) => r.verdict !== 'ALLOW')
+      .map(({ s, r }) => `${r.verdict} ${r.decisive?.capability}: ${JSON.stringify(s.input).slice(0, 60)}`);
+
+  // before a human accepts the file: exactly the five operations on the team's targets are refused, nothing else
+  const pending = asHook(dir);
+  assert.deepEqual(
+    prompts(pending).map((p) => p.split(':')[0]),
+    [
+      'DENY k8s.nonlocal.mutate',
+      'DENY k8s.nonlocal.mutate',
+      'DENY k8s.nonlocal.mutate',
+      'DENY db.nonlocal.mutate',
+      'DENY db.nonlocal.mutate',
+    ],
+  );
+  // after: no prompt at all, and the same on the third repetition as on the first (nothing accumulates)
+  const accepted = asHuman(dir);
+  for (let i = 0; i < 3; i++) assert.deepEqual(prompts(accepted), [], `repetition ${i + 1}`);
+  // a hook reading the accepted cache says the same
+  assert.deepEqual(prompts(asHook(dir)), []);
 });
