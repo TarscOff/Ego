@@ -361,6 +361,33 @@ test('D. one path spelled many ways is one path', () => {
   assert.notEqual(verdictOf('cat ~nobody-such-user/notes.txt'), 'ALLOW');
 });
 
+test('D. a leading tilde is $HOME: a HOME the line assigns is the home the tilde means', () => {
+  // the process's own home is INSIDE the workspace here, so a tilde that kept meaning it would be an ordinary repository
+  // path - and `export HOME=/etc; echo x > ~/passwd` would write /etc/passwd at ALLOW
+  const dir = workspace({ 'home/keep': '' });
+  const saved = process.env.HOME;
+  process.env.HOME = join(dir, 'home');
+  try {
+    assert.equal(verdictOf('echo x > ~/note.txt', dir), 'ALLOW', 'the control: the process home is an ordinary place here');
+    for (const command of [
+      'export HOME=/etc; echo x > ~/passwd',
+      'HOME=/etc; cp package.json ~/passwd',
+      'export HOME=/etc && tee ~/cron.d/x < package.json',
+      'HOME=/etc; touch ~/passwd',
+      'HOME=/etc; echo x >~/passwd',
+    ])
+      assert.equal(verdictOf(command, dir), 'DENY', command);
+    for (const command of ['HOME=$(echo /etc); echo x > ~/passwd', 'export HOME=$X; cp package.json ~/passwd'])
+      assert.notEqual(verdictOf(command, dir), 'ALLOW', command);
+    // a tilde that is not the start of a word is not expanded by the shell (an assignment to HOME asks on its own, so the
+    // comparison is with the same line writing an ordinary name)
+    assert.equal(verdictOf("HOME=/etc; echo x > 'a~/passwd'", dir), verdictOf('HOME=/etc; echo x > a.txt', dir));
+  } finally {
+    if (saved === undefined) delete process.env.HOME;
+    else process.env.HOME = saved;
+  }
+});
+
 test('D. padding that survived quoting: the path as written AND the trimmed one are judged', () => {
   for (const command of [
     'echo x > " /etc/cron.d/x"',

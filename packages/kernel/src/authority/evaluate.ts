@@ -3520,9 +3520,15 @@ export function cwdTimeline(
 
 /** Replace `$NAME` and `${NAME}` with the literal value the same command line assigned earlier, outside single quotes - what the shell
  *  does, for the values this analyzer can prove. `f=.claude/settings.json; tee $f` writes that file, and judging the
- *  word `$f` left a governed write with no path to judge (exit review 11). An unknown name is left alone. */
+ *  word `$f` left a governed write with no path to judge (exit review 11). An unknown name is left alone.
+ *
+ *  A LEADING `~` IS `$HOME`: once the line has assigned HOME, `export HOME=/etc; echo x > ~/cron.d/x` writes `/etc/cron.d/x`,
+ *  and the path reader (which expands a tilde to the home directory the process started with) would judge the wrong file.
+ *  The tilde at the start of a word is therefore replaced by the value the line gave HOME - a value this kernel cannot read
+ *  is a word that asks (see where the assignment is recorded). */
 function substituteKnownVars(text: string, vars: ReadonlyMap<string, string>): string {
-  if (vars.size === 0 || !text.includes('$')) return text;
+  const tildeIsHome = vars.has('HOME') && text.includes('~');
+  if (vars.size === 0 || (!text.includes('$') && !tildeIsHome)) return text;
   let out = '';
   let q = false;
   for (let i = 0; i < text.length; i++) {
@@ -3535,6 +3541,10 @@ function substituteKnownVars(text: string, vars: ReadonlyMap<string, string>): s
     if (c === "'" ) {
       q = !q;
       out += c;
+      continue;
+    }
+    if (c === '~' && !q && tildeIsHome && (i === 0 || /[\s;&|(<>]/.test(text[i - 1]!)) && (i + 1 === text.length || /[/\s;&|)<>]/.test(text[i + 1]!))) {
+      out += vars.get('HOME')!;
       continue;
     }
     if (c === '$' && !q) {

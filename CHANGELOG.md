@@ -87,5 +87,5 @@ discipline of decision Q84 (authority changes are never patch releases).
   `curl -o /dev/null URL` is an ASK like `curl URL` (it was an absolute DENY: an option's value was not read as a discard
   device the way a redirection was), `wget -O` and `curl -D`/`-c` destinations are judged, and `echo x > /dev/disk0` is
   DENY (a redirection dropped every path under `/dev`; now only the discard devices are dropped, `/dev/shm` is scratch).
-  A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask. A
+  A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask, and a leading `~` is the HOME the line assigned (`export HOME=/etc; echo x > ~/passwd`). A
   decision shares one view of the filesystem (the ordinary-development corpus runs in about two thirds of its former time).

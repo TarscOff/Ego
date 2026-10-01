@@ -345,7 +345,7 @@ fails if a bare join of a directory and a word comes back. What it does **not** 
 
 - `~-` and `$OLDPWD` are known only after a `cd` in the same command line (the previous directory of the shell the command
   started in is the environment's); before one they are a dynamic word and ask. A `HOME`, `PWD` or `OLDPWD` the line itself
-  assigns from something unreadable makes every later use of the name ask.
+  assigns from something unreadable makes every later use of the name ask, and a leading `~` is the `HOME` the line assigned.
 - `~user` is not looked up (that would be a process): the conventional places a home directory lives are all judged, and
   the word asks. The `/proc` aliases are matched by name and tested here by string, not on a Linux host.
 - The normalizer drops the quoting of an ordinary segment, so an operand with padding or an interior space reaches the
