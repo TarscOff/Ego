@@ -193,8 +193,9 @@ export function parseOptions(g: Grammar, argv: readonly string[], from = 0): Par
       continue;
     }
     const sign: '-' | '+' = plus ? '+' : '-';
-    if (g.numeric && /^-\d+$/.test(w)) {
-      add('#', w.slice(1), '-', i);
+    // (`nice -10` raises the niceness by ten and `nice --10` lowers it: both are the number)
+    if (g.numeric && /^--?\d+$/.test(w)) {
+      add('#', w.replace(/^-+/, ''), '-', i);
       continue;
     }
     // ---- a long option: `--name`, `--name=value`, `--name value`, any unique prefix of a long name -----------------

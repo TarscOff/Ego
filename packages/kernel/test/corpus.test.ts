@@ -77,7 +77,8 @@ test('ordinary development is gated in exactly the places that are accounted for
       if (got === 'ALLOW' && accounted) stale.push(`[${ecosystem}] ${c} is now ALLOW — remove it from EXPECTED_GATES`);
     }
   // 103 + the 20 everyday database commands the database-client grammar must leave alone (closure-db.test.ts)
-  assert.equal(total, 123, 'the ordinary corpus changed size; update the count deliberately');
+  // + the 34 carrier and option spellings the strict parsers must leave alone (closure-options.test.ts)
+  assert.equal(total, 157, 'the ordinary corpus changed size; update the count deliberately');
   assert.deepEqual(unexpected, [], `ordinary development gated without a reason:\n  ${unexpected.join('\n  ')}`);
   assert.deepEqual(stale, [], `EXPECTED_GATES is out of date:\n  ${stale.join('\n  ')}`);
 });

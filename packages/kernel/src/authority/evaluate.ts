@@ -1272,7 +1272,14 @@ export function emitterTail(text: string): string {
     const before = out;
     out = out.replace(/^(?:if|then|else|elif|while|until|do|!|time|coproc)\s+/, '');
     out = out.replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+/, '');
-    out = out.replace(/^(?:command|builtin|exec|env|nohup|stdbuf\s+-\S+|nice(?:\s+-n\s+\S+)?|timeout\s+\S+)\s+/, '');
+    // the transparent carriers come off by the one carrier reader (carriers.ts), each by exactly its own options: a regex of the few
+    // spellings its author had met took `timeout -s` for the whole wrapper and left `KILL 5 echo …` as the command
+    const marked = tokenizeMarked(out);
+    const peeled = peelCarriers(marked.map((t) => t.text), 0, {
+      leadingAssignments: false,
+      stopAt: (_name: string, spec: Carrier) => spec.retains === true || spec.payload === true,
+    });
+    if (peeled.steps.length > 0 && peeled.at < marked.length && peeled.shellString === null) out = out.slice(marked[peeled.at]!.at);
     if (out === before) return out;
   }
 }
@@ -1698,23 +1705,9 @@ function normalizeSegmentInner(segment: string): string[] {
   // (normalizeTail), so the chain stops at them. This was a loop over a set of names and a regex of value-taking options per
   // wrapper, and a second, different copy of it served every reader of the line as written (independent review 11: RC-CAR).
   const keepsHead = (_name: string, spec: Carrier): boolean => spec.retains === true || spec.payload === true;
-  const steps: PeelStep[] = [];
-  const leading: string[] = [];
-  let peeled: Peeled;
-  for (let from = 0; ; ) {
-    peeled = peelCarriers(tokens, from, { stopAt: keepsHead, leadingAssignments: false });
-    steps.push(...peeled.steps);
-    leading.push(...peeled.leading);
-    // `watch`'s argument - and `sem`'s - is a SHELL STRING, run by `sh -c`: what follows the first `;` or `&&` in `watch 'git
-    // status; git push origin main'` is a command of its own, and reading the string as one command by its first word judged
-    // `git status` and nothing else (exit review 10). A string with no shell syntax in it is the command itself, read on.
-    if (peeled.shellString !== null && !/[;&|<>$`(]|\n/.test(peeled.shellString)) {
-      from = peeled.shellAt;
-      continue;
-    }
-    break;
-  }
-  if (peeled.shellString !== null) return [...extra, ...splitShellSegments(peeled.shellString).flatMap(normalizeSegment)];
+  const peeled: Peeled = peelCarriers(tokens, 0, { stopAt: keepsHead, leadingAssignments: false });
+  const steps: PeelStep[] = peeled.steps;
+  const leading: string[] = peeled.leading;
   // `command -v NAME` / `-V NAME` LOOKS THE NAME UP and prints where it is; it does not run it. Stripping
   // `command` as a transparent wrapper classified the idiom every script uses to test whether a tool exists as
   // RUNNING that tool, so `command -v node` asked (exit review 4). ...and behind a wrapper too: `timeout 5 command -v
@@ -1743,6 +1736,14 @@ function normalizeSegmentInner(segment: string): string[] {
     const own = steps.find((st) => st.carrier === owned.carrier);
     return /^(flock|su|runuser)$/.test(owned.carrier) && own ? [...extra, ...bodies, tokens.slice(own.at).join(' ')] : [...extra, ...bodies];
   }
+  // `watch`'s argument - and `sem`'s - is a SHELL STRING, run by `sh -c`: what follows the first `;` or `&&` in `watch 'git
+  // status; git push origin main'` is a command of its own, and reading the string as one command by its first word judged
+  // `git status` and nothing else (exit review 10). A string with no shell syntax in it is a command line like any other, and is
+  // normalized as one: `watch -n 5 'SWIFT_EXEC=/tmp/evil swift build'` has an assignment in front of its command, which read as
+  // ONE word is no assignment at all (the generated cross-product). What the outer line assigned to it (`PGHOST=prod watch psql`)
+  // goes with it.
+  if (peeled.shellString !== null)
+    return [...extra, ...splitShellSegments((targetEnv.length ? targetEnv.join(' ') + ' ' : '') + peeled.shellString).flatMap(normalizeSegment)];
   const idx = peeled.at;
   let rest = tokens.slice(idx);
   if (rest.length === 0) return extra;
@@ -1897,7 +1898,10 @@ function matchPayloads(cmd: readonly string[], roots: readonly string[], named: 
     // (the root form stays too: a search root that is itself governed is a deny whatever the matches are)
     if (writes && placed) out.push(requote(words.map((c) => (isMatch(c) ? root : c))));
     // `-execdir` and `-okdir` run the payload IN THE DIRECTORY OF EACH MATCH, which is somewhere inside the search root: its
-    // relative operands are judged under the root, which is governed wherever any of its files is
+    // relative operands are judged under the root, which is governed wherever any of its files is. That reading prefixes EVERY
+    // bare word, the subcommand and the flags' values among them (`podman ./login -u ./bot`), so a rule that reads the words as
+    // they are written never matches it: the payload AS WRITTEN is classified too (the generated cross-product)
+    if (inMatchDir) out.push(requote(words.map((c) => (isMatch(c) ? (writes ? '$FIND_MATCH' : root) : c))));
     out.push(
       requote(
         words.map((c, k) =>
@@ -5417,6 +5421,18 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
  *  (`go build -o`, `curl -o`) are matched by their own rules. */
 const OUTPUT_FLAG_RE =
   /^(?:--(?:outfile|out-file|out-dir|outdir|output-dir|output-directory|output-path|output-file|output|dist-dir|dest|destination|emit-to|out)|--file|-D|--directory)(?:=(.*))?$/;
+
+/** Whether an earlier unit of this command wrote this path, or an ancestor of it, or something nobody could enumerate. */
+function writtenEarlier(written: ReadonlySet<string>, abs: string): boolean {
+  if (written.has('\0any')) return true;
+  const c = foldName(canonicalPath(abs));
+  for (const w of written) {
+    if (w.startsWith('\0')) continue;
+    const f = foldName(w);
+    if (c === f || c.startsWith(f + '/')) return true;
+  }
+  return false;
+}
 
 /** True when a segment writes an UNENUMERABLE set of files: an archive extraction, or a recursive copy whose
  *  destination is a directory. The per-path ledger cannot express either, and `tar -xf p.tar -C sub && make -C sub
@@ -12188,6 +12204,9 @@ function classifyShellPaths(
     // `plugins` entry runs ./pl.js - independent review 11, r11-208)
     for (const c of effects.configs) {
       if (/[$`*?]/.test(c)) continue;
+      // a file that is not there - and that no earlier unit of this command writes - is nothing for the tool to load
+      const cfgAt = openedPath(cwd, c);
+      if (cfgAt !== null && !fileExists(cfgAt) && !writtenEarlier(written, cfgAt)) continue;
       if (/\.(c|m)?[jt]s$|\.py$|\.rb$/.test(c)) runs(`the configuration ${c} is a script the command runs`);
       else {
         const text = readWordFile(ctx, cwd, c);
@@ -12206,7 +12225,8 @@ function classifyShellPaths(
         if (local !== undefined) runs(`the module ${mod} is imported from the working directory first, where ${local} is what runs`);
       }
     for (const w of [...effects.writes, ...effects.writeDirs]) {
-      if (!w || /[$`]/.test(w) || discardWord(cwd, w, old)) continue;
+      // (`-` is standard output: `wget -qO- URL`)
+      if (!w || w === '-' || /[$`]/.test(w) || discardWord(cwd, w, old)) continue;
       extraDests.add(w);
       if (!paths.some((q) => q.raw === w)) paths.push(...pathEntries(cwd, w, old));
     }
@@ -12484,8 +12504,19 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // destination is judged here, on its own, rather than through the coarse "every operand is a write" switch —
   // which would have made reading a governed file a write and reintroduced the defect closed one commit ago.
   for (const w of sedWrittenFiles(rawSeg, ctx, cwd)) {
+    // a name built at run time (`w $OUT`) is a file nobody can judge: an approvable question, never a silent yes
+    if (/[$`]/.test(w)) {
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: `sed writes ${w}, a path built at run time`,
+        segment: seg,
+        absolute: false,
+      });
+      continue;
+    }
     // a device sink is a DISCARD, exactly as it is for `> /dev/null` (self-attack on exit review 9)
-    if (/[$`]/.test(w) || discardWord(cwd, w)) continue;
+    if (discardWord(cwd, w)) continue;
     judgeInto(hits, table, ctx, 'Write', cwd, w, seg, (v) => `sed writes ${w} (${v})`, old);
   }
   // ...AND A SED SCRIPT'S `r FILE` / `R FILE` READ A FILE INTO THE OUTPUT: `sed 'r ~/.ssh/id_rsa' f` prints a key as surely as `cat` does
@@ -13969,7 +14000,12 @@ function analyzeSegments(
       // the BODY is brace-expanded before these questions are asked of it: the carrier's quoting keeps the
       // braces literal at this level and the inner shell expands them, so `git commit -m x -{n..n}` only looks
       // like a hook bypass once it has been through the same expansion the inner shell performs
-      const body = expandBraces(rawBody);
+      // ...and a nesting the expander gives up on is not an absence of what it holds: a body that overflows is reported, exactly as
+      // the same words at the top of a line are (`env -S`, `watch`, `su -c` carry the same string `sh -c` does)
+      const bodyOverflow = { hit: false };
+      const body = expandBraces(rawBody, bodyOverflow);
+      if (bodyOverflow.hit)
+        hits.push(opaqueHit(table, ctx, seg, 'a brace expansion produces more words than this kernel enumerates'));
       // the condition is asked of the body AND of every body IT carries: `bash -c "flock l --command 'cd d && tee f'"` has
       // nothing to re-read at the first level and everything at the second
       const needsReentry = (b: string, depth = 0): boolean =>

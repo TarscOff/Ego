@@ -271,6 +271,76 @@ const PYTHON_GRAMMAR = gnu(
 );
 const PYTHON_ROLES: Record<string, Role> = { m: 'pythonModule' };
 
+// ---- the network and copy tools: the files they write besides the one they were asked for -------------------------------------------
+// wget's long options are matched by any unique prefix (`--output-doc=`, `--directory=`), rsync's too, and cargo's `--target-dir` takes
+// `=` or a space: a regex of the spellings its author had met named none of them (independent review 11, RC-WRT).
+const WGET_GRAMMAR = gnu([
+  '-O|--output-document:v', '-o|--output-file:v', '-a|--append-output:v', '-P|--directory-prefix:v', '--save-cookies:v', '--load-cookies:v',
+  '-i|--input-file:v', '--post-file:v', '--ca-certificate:v', '--certificate:v', '--private-key:v', '--config:v', '--hsts-file:v', '--warc-file:v',
+  '--rejected-log:v', '-e|--execute:v', '-q|--quiet', '-v|--verbose', '-r|--recursive', '-N|--timestamping', '-c|--continue', '-nc|--no-clobber',
+  '-nd|--no-directories', '-x|--force-directories', '-nH|--no-host-directories', '--save-headers', '-U|--user-agent:v', '--header:v', '-t|--tries:v',
+  '-T|--timeout:v', '--no-check-certificate', '--no-verbose', '-S|--server-response', '--spider', '-b|--background', '-l|--level:v', '-np|--no-parent',
+  '-A|--accept:v', '-R|--reject:v', '--user:v', '--password:v', '--http-user:v', '--http-password:v', '--limit-rate:v', '-h|--help', '-V|--version',
+]);
+const WGET_ROLES: Record<string, Role> = {
+  'output-document': 'write',
+  'output-file': 'write',
+  'append-output': 'write',
+  'directory-prefix': 'writeDir',
+  'save-cookies': 'write',
+  'hsts-file': 'write',
+  'warc-file': 'write',
+  'rejected-log': 'write',
+  'load-cookies': 'read',
+  'input-file': 'read',
+  'post-file': 'read',
+  'ca-certificate': 'read',
+  certificate: 'read',
+  'private-key': 'read',
+  config: 'read',
+};
+const RSYNC_GRAMMAR = gnu([
+  '--log-file:v', '--backup-dir:v', '--write-batch:v', '--only-write-batch:v', '--read-batch:v', '-T|--temp-dir:v', '--partial-dir:v', '--link-dest:v',
+  '--compare-dest:v', '--copy-dest:v', '-e|--rsh:v', '--rsync-path:v', '--files-from:v', '--exclude-from:v', '--include-from:v', '--password-file:v',
+  '--config:v', '--exclude:v', '--include:v', '-f|--filter:v', '--bwlimit:v', '--port:v', '--timeout:v', '--chmod:v', '--chown:v', '--suffix:v',
+  '-a|--archive', '-r|--recursive', '-v|--verbose', '-q|--quiet', '-z|--compress', '-n|--dry-run', '-u|--update', '-c|--checksum', '-t|--times', '-p|--perms',
+  '-o|--owner', '-g|--group', '-l|--links', '-H|--hard-links', '-P', '--progress', '--partial', '--delete', '--delete-after', '--delete-before', '--delete-during',
+  '--delete-excluded', '--remove-source-files', '-b|--backup', '--inplace', '--append', '-i|--itemize-changes', '-h|--human-readable', '--stats', '-x|--one-file-system',
+  '-W|--whole-file', '-m|--prune-empty-dirs', '--numeric-ids', '--size-only', '--ignore-existing', '--existing', '--help', '--version',
+]);
+const RSYNC_ROLES: Record<string, Role> = {
+  'log-file': 'write',
+  'backup-dir': 'writeDir',
+  'write-batch': 'write',
+  'only-write-batch': 'write',
+  'temp-dir': 'writeDir',
+  'partial-dir': 'writeDir',
+  rsh: 'program',
+  'rsync-path': 'program',
+  'read-batch': 'read',
+  'files-from': 'read',
+  'exclude-from': 'read',
+  'include-from': 'read',
+  'password-file': 'read',
+  config: 'read',
+};
+const CARGO_GRAMMAR = gnu([
+  '--target-dir:v', '--out-dir:v', '--artifact-dir:v', '--root:v', '--manifest-path:v', '--lockfile-path:v', '--path:v', '--timings:o', '--config:v',
+  '-Z:v', '--message-format:v', '-j|--jobs:v', '-p|--package:v', '--workspace', '--all', '--exclude:v', '--lib', '--bin:v', '--bins', '--example:v',
+  '--examples', '--test:v', '--tests', '--bench:v', '--benches', '--all-targets', '-F|--features:v', '--all-features', '--no-default-features', '--target:v',
+  '-r|--release', '--profile:v', '--ignore-rust-version', '--locked', '--offline', '--frozen', '-v|--verbose', '-q|--quiet', '--color:v', '--keep-going',
+  '--registry:v', '--index:v', '--git:v', '--branch:v', '--tag:v', '--rev:v', '--force', '-f', '--no-track', '--list', '--version:v', '--help', '--version',
+]);
+const CARGO_ROLES: Record<string, Role> = {
+  'target-dir': 'writeDir',
+  'out-dir': 'writeDir',
+  'artifact-dir': 'writeDir',
+  root: 'writeDir',
+  'lockfile-path': 'write',
+  'manifest-path': 'read',
+  path: 'read',
+};
+
 // ---- git subcommands that write, and the options that name where --------------------------------------------------------------
 const GIT_CHECKOUT_INDEX = gnu(['-a|--all', '-f|--force', '-n|--no-create', '-q|--quiet', '-u|--index', '--prefix:v', '--stage:v', '--temp', '-z', '--stdin', '--ignore-skip-worktree-bits']);
 const GIT_ARCHIVE = gnu(['-l|--list', '-v|--verbose', '--format:v', '-0', '-1', '-2', '-3', '-4', '-5', '-6', '-7', '-8', '-9', '--worktree-attributes', '--mtime:v', '-o|--output:v', '--remote:v', '--exec:v', '--prefix:v', '--add-file:v', '--add-virtual-file:v']);
@@ -293,6 +363,9 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
   sed: { grammar: SED_GRAMMAR, roles: {}, complete: true },
   go: { grammar: GO_GRAMMAR, roles: GO_ROLES },
   cc: { grammar: CC_GRAMMAR, roles: CC_ROLES },
+  wget: { grammar: WGET_GRAMMAR, roles: WGET_ROLES },
+  rsync: { grammar: RSYNC_GRAMMAR, roles: RSYNC_ROLES },
+  cargo: { grammar: CARGO_GRAMMAR, roles: CARGO_ROLES },
   eslint: { grammar: ESLINT_GRAMMAR, roles: ESLINT_ROLES },
   prettier: { grammar: PRETTIER_GRAMMAR, roles: PRETTIER_ROLES },
   pylint: { grammar: PYLINT_GRAMMAR, roles: PYLINT_ROLES },
@@ -317,7 +390,15 @@ export function toolTableFor(head: string, argv: readonly string[]): { key: stri
   if (base === 'tar' || base === 'gtar' || base === 'bsdtar') return { key: 'tar', table: TOOL_TABLES['tar']!, from: 1 };
   if (base === 'sort' || base === 'gsort') return { key: 'sort', table: TOOL_TABLES['sort']!, from: 1 };
   if (base === 'sed' || base === 'gsed') return { key: 'sed', table: TOOL_TABLES['sed']!, from: 1 };
-  if (base === 'eslint' || base === 'prettier' || base === 'pylint') return { key: base, table: TOOL_TABLES[base]!, from: 1 };
+  if (base === 'eslint' || base === 'prettier' || base === 'pylint' || base === 'rsync') return { key: base, table: TOOL_TABLES[base]!, from: 1 };
+  if (base === 'wget' || base === 'wget2') return { key: 'wget', table: TOOL_TABLES['wget']!, from: 1 };
+  if (base === 'cargo') {
+    // `cargo +nightly build`: a toolchain selector comes first
+    const at = argv[1]?.startsWith('+') ? 2 : 1;
+    return /^(build|b|run|r|test|t|check|c|install|doc|d|bench|clippy|rustc|rustdoc|publish|package|clean|fetch|vendor|metadata|tree|update|fix|add|remove|rm|uninstall|miri|nextest|llvm-cov)$/.test(argv[at] ?? '')
+      ? { key: 'cargo', table: TOOL_TABLES['cargo']!, from: at + 1 }
+      : null;
+  }
   if (/^(python|python2|python3|pypy|pypy3)(\.\d+)?$/.test(base)) return { key: 'python', table: TOOL_TABLES['python']!, from: 1 };
   if (base === 'go') {
     const sub = argv[1];
