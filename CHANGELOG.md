@@ -170,7 +170,8 @@ discipline of decision Q84 (authority changes are never patch releases).
   down --volumes=true`, `podman pod rm|prune`, `podman machine rm|reset`, `nerdctl namespace rm` and `colima delete` are
   destruction like `docker rm`. A command after `--` in a plugin verb (`docker pass run -- psql -h prod-db …`) is
   analysed as the command it is, also behind `sudo`, `env` or `sh -c`. Ordinary container development (`docker ps`,
-  `run`, `build`, `compose up`, `logs`, `exec`'s ASK) is unchanged.
+  `run`, `build`, `compose up`, `logs`; `docker exec` still asks) is unchanged, and so is the accepted behaviour that a
+  plain `docker compose up` does not read the compose file.
 - Provenance `file` names and the target-resolution reason no longer lose their first character when the control-plane
   root is given with a trailing slash (`ermissions/…`).
 - **A shell word is judged by what it resolves to — one resolver for the shell layer** (closure audit 2026-10-01, wave 2).
