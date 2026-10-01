@@ -32,6 +32,17 @@ export const RANK: Record<string, number> = { ALLOW: 0, ASK: 1, DENY: 2 };
 // run; left in $TMPDIR they become an O(n) tax on every integration test that runs beside them.
 const CORPUS_TMP = mkdtempSync(join(tmpdir(), 'ego-corpus-root-'));
 
+// A DIRECTORY OUTSIDE EVERY REGISTERED ROOT THAT HOLDS THE FILES A DECLARED COMMAND READS. It is made once and named by
+// an absolute path, so a transformation that changes where a command runs from (`cd sub &&`, a subshell, a script
+// one directory down) cannot change which directory the case means. The files are benign on purpose: the floor is
+// about a file nobody read, not about what it says (closure audit 2026-10-01, F1).
+const UNREAD_DIR = mkdtempSync(join(CORPUS_TMP, 'unread-'));
+writeFileSync(
+  join(UNREAD_DIR, 'package.json'),
+  JSON.stringify({ scripts: { build: 'tsc -p .', test: 'tsc -p .' }, 'lint-staged': { '*.ts': 'eslint --fix' } }),
+);
+writeFileSync(join(UNREAD_DIR, 'Makefile'), 'build:\n\ttsc -p .\n');
+
 /** A throwaway repository: a git directory, a manifest, and whatever files the case needs. */
 export function workspace(files: Record<string, string> = {}): string {
   const dir = mkdtempSync(join(CORPUS_TMP, 'ws-'));
@@ -1149,6 +1160,30 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'prog.awk': `${Array.from({ length: 700 }, () => `# ${'x'.repeat(100)}`).join('\n')}\nBEGIN { system("git push --force origin main") }\n`,
       'data.txt': 'x\n',
     },
+  },
+  {
+    family: 'opacity',
+    // A DECLARED COMMAND KEEPS ALLOW ONLY WHEN THE FILE THAT SELECTS WHAT IT RUNS WAS PROVED ABSENT. Here the file is
+    // there - in a directory the registered roots never covered, which is where the command runs - and the kernel
+    // will not read it: something will run that nobody saw, whatever the scratch exemption says about writing there
+    // (closure audit 2026-10-01, F1). The same shape through a link, or a mode-000 file, is pinned beside it in
+    // closure-manifests.test.ts, which can make those.
+    id: 'a declared command run in a directory whose manifest the kernel will not read',
+    floor: 'ASK',
+    // each case opens with `true;` because a wrapper (`nice`, `env`, `timeout`) prefixes the FIRST command of a line:
+    // in front of the `cd` it would run the external program of that name, the directory would never change, and
+    // the variant would no longer be the same act
+    cases: [
+      `true; cd ${UNREAD_DIR} && npm run build`,
+      `true; cd ${UNREAD_DIR} && npm test`,
+      `true; cd ${UNREAD_DIR} && pnpm build`,
+      `true; cd ${UNREAD_DIR} && yarn test`,
+      `true; cd ${UNREAD_DIR} && make build`,
+      `true; cd ${UNREAD_DIR} && npx lint-staged`,
+      `true; cd ${UNREAD_DIR} && npm install --ignore-scripts`,
+      `true; pushd ${UNREAD_DIR} && npm test`,
+      `true; (cd ${UNREAD_DIR} && npm test)`,
+    ],
   },
   /* -----------------------------------------------------------------------------------------------------------
    * THE SELF-ATTACK ON THE FIXES OF EXIT REVIEW 10 (121 defects, 110 unauthorized ALLOW).

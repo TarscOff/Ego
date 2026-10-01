@@ -104,6 +104,19 @@ someone remembering. `PARTIAL` is what makes this more than a rename: a body may
 lines are still analysed **and** the unresolved remainder is reported, instead of one unparsable recipe line
 discarding the whole target, or a partly-parsed makefile passing for a complete one.
 
+**`ABSENT_VERIFIED` is earned from the filesystem, and by one reader.** "Which file selects what runs" — the
+manifest of `npm`/`pnpm`/`yarn`, the Makefile, the `lint-staged` configuration, the `.npmrc`/`.yarnrc.yml` beside a
+manifest — is answered by a single search (`locateUp`) used by every producer. It decides by **existence**, not by
+whether EGO can read the file: the entry is looked at as a link, in every directory of the physical walk upward
+**including the one the command runs in, wherever that is** (the OS temp directory the scratch exemption covers,
+and a directory reached through a link, are not exceptions), and it is absent only when the operating system says
+`ENOENT` or `ENOTDIR` — a directory that cannot be searched, a link loop or an I/O error is "could not tell", which
+is not absence. A file that exists and is outside the registered roots, behind a link that leads there, without read
+permission, too large or unparsable is `UNREADABLE`. A candidate that is merely not there *yet* is stale if the same
+command writes it (`mkdir sub && printf … > sub/package.json && cd sub && npm run build`), exactly as for a Makefile.
+Where a tool merges or picks per input (yarn's `.yarnrc.yml`, `lint-staged`'s per-file configuration), every file on
+the way up is read, not the first name found.
+
 EGO does **not** reimplement GNU make, the shell, npm or git. It models a subset and records every construct it does
 not model; the unmodelled part fails safe.
 
