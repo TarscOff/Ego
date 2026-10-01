@@ -2821,7 +2821,9 @@ function requoteBraceResult(w: string): string {
   const toks = tokenize(w);
   const bare = toks.length === 1 ? toks[0]! : unquoteShellWord(w);
   if (bare === '') return "''";
-  return /[ \t\n\r;&|<>()`$"'\\*?[\]]/.test(bare) ? `'${bare.split("'").join(`'\\''`)}'` : bare;
+  // (a glob character is NOT quoted back in: the word was unquoted where the shell expanded the braces, so it is still a pattern for
+  //  the pathname expansion that follows - quoting it made `make -f ev*.m{k..k}` name the literal file `ev*.mk`)
+  return /[ \t\n\r;&|<>()`$"'\\]/.test(bare) ? `'${bare.split("'").join(`'\\''`)}'` : bare;
 }
 
 /** Expand every unquoted brace group in a SEGMENT, word by word. Segmentation has already happened, exactly as

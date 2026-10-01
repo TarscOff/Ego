@@ -351,6 +351,10 @@ test('E. the glob is the same one behind every wrapper, and reads what the shell
     // (the shell compares names as written: `E*` does not match `evil`, on any filesystem)
     ['a pattern of the wrong case', "make -f 'E*.mk'", files, 'ALLOW'],
     ['outside the workspace', 'make -f /etc/ma*.mk', { Makefile: OK }, 'ASK'],
+    // (the shell expands braces first and the result is a pattern like any other)
+    ['a brace range in a glob word', 'make -f ev*.m{k..k}', files, 'DENY'],
+    ['a brace range at the front of a glob word', 'make -f {e..e}v*.mk', files, 'DENY'],
+    ['a brace range in a glob -C', 'make -C su{b..b}* all', { Makefile: OK, 'sub/Makefile': EVIL }, 'DENY'],
     ['a glob include: a question mark', 'make all', { Makefile: 'include ev?l.mk\nall::\n\techo ok\n', 'evil.mk': gen }, 'DENY'],
     ['a glob include: a bracket class', 'make all', { Makefile: '-include ev[a-z]l.mk\nall::\n\techo ok\n', 'evil.mk': gen }, 'DENY'],
     ['a glob include: a directory component', 'make all', { Makefile: 'include s*/x.mk\nall::\n\techo ok\n', 'sub/x.mk': gen }, 'DENY'],
