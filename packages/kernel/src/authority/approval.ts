@@ -66,14 +66,16 @@ export function approvalPresentation(
   if (!cap || cap.effect !== 'external') return null;
   const seg = (hit.segment ?? commandOf(request)).trim();
   const tokens = seg.split(/\s+/).filter(Boolean);
-  const head = (tokens[0] ?? '').replace(/^.*\//, '');
+  // a shell command's head is its program; any other tool is named by the host (WebFetch, an MCP tool)
+  const isShell = request.tool === 'Bash' || request.tool === 'shell';
+  const head = isShell ? (tokens[0] ?? '').replace(/^.*\//, '') : request.tool;
   const remoteUrl = opts.remoteUrl ?? ((name: string) => readRemoteUrl(ctx, name));
   const where = resolveWhere(hit, request, head, tokens, remoteUrl);
   return {
     action: `${hit.capability} - ${shortDescription(cap.description)}`,
     target: where.target,
     where: where.where,
-    effect: bounded(mask(opts.summary ?? seg), EFFECT_MAX),
+    effect: bounded(mask(opts.summary ?? (seg || inputSummary(request))), EFFECT_MAX),
     why: whyAsked(table, ctx, hit),
     impact: impactOf(hit.capability),
     task: opts.task ? `task: ${opts.task}` : 'task: none (phase 2: durable tasks do not exist yet)',
@@ -108,6 +110,12 @@ function commandOf(request: ToolRequest): string {
   return '';
 }
 
+/** What a call with no command or URL does, said by its arguments: an MCP tool's input, or a shell call with none. */
+function inputSummary(request: ToolRequest): string {
+  const args = JSON.stringify(request.input) ?? '{}';
+  return `${request.tool} ${args === '{}' ? '(no arguments)' : args}`;
+}
+
 const bounded = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const oneLine = (s: string): string => s.replace(/[\r\n\t]+/g, ' ').replace(/[^\x20-\x7e]/g, '?');
 
@@ -118,6 +126,10 @@ function mask(s: string): string {
   return oneLine(s)
     .replace(/(:\/\/)[^/@\s]*@/g, '$1***@')
     .replace(/(--?(?:token|password|passwd|secret|api-?key|auth|bearer)[= ])\S+/gi, '$1***')
+    .replace(
+      /("?(?:token|password|passwd|secret|api[_-]?key|authorization|credential)s?"?\s*[:=]\s*)"[^"]*"/gi,
+      '$1"***"',
+    )
     .replace(/(\b(?:Authorization|X-Api-Key)\s*:\s*)(?:Bearer\s+|Basic\s+|token\s+)?\S+/gi, '$1***');
 }
 
@@ -388,6 +400,18 @@ const IMPACT: Array<[RegExp, string]> = [
   [
     /\.unclassified$/,
     'unknown, treated as high-impact: the target is unresolved, so the effect cannot be bounded',
+  ],
+  [
+    /(^|[.-])(read|discover|inspect|fetch)$/,
+    'a read: nothing changes on the other side, though what is sent (a URL, a query) is disclosed to it',
+  ],
+  [
+    /^network\.(internal-dev|localhost)$/,
+    'a connection to a development endpoint on the network; what it changes depends on the request',
+  ],
+  [
+    /^git\.remote\.configure$/,
+    'changes where later pushes and fetches go (local configuration); reversible by editing it back',
   ],
   [
     /(^|\.)(delete|destroy|drop|purge)(\.|$)|\.force$|^production\./,

@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { main } from '../../cli/src/main.ts';
 import { initProject } from '../src/project/init.ts';
-import { addToFrontmatterList } from '../src/project/local-surfaces.ts';
+import { addToFrontmatterList, detectLocalSurfaces } from '../src/project/local-surfaces.ts';
 import { approvalPresentation, externalAskHit, impactOf } from '../src/authority/approval.ts';
 import { evaluate } from '../src/authority/evaluate.ts';
 import { diffAuthorityTables, classifyAuthorityChanges } from '../src/authority/compile.ts';
@@ -1248,6 +1248,15 @@ test('the presentation builder: one function, every family, nothing for a local 
   )!;
   assert.equal(mcp.target, 'MCP server linear');
   assert.equal(mcp.where, 'tool create_issue');
+  // ...and what it was handed is shown, with a secret-looking value masked
+  const withSecret = approvalPresentation(
+    cache.table,
+    ctx(dir),
+    { tool: 'mcp__linear__create_issue', input: { title: 'x', api_key: 'abc-secret-123' } },
+    { capability: 'mcp.remote.narrow-write', verdict: 'ASK', via: 'x', absolute: false },
+  )!;
+  assert.match(withSecret.effect, /title/);
+  assert.doesNotMatch(withSecret.effect, /abc-secret-123/);
 
   // reversibility is derived from the capability id, with the target-unresolved case first
   for (const [id, re] of [
@@ -1423,4 +1432,175 @@ test('Q98 test 22: the everyday local workflow completes with no prompt once the
   for (let i = 0; i < 3; i++) assert.deepEqual(prompts(accepted), [], `repetition ${i + 1}`);
   // a hook reading the accepted cache says the same
   assert.deepEqual(prompts(asHook(dir)), []);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 10. NEIGHBOURS OF THE REGISTRY'S OWN GUARDS
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('a wildcard declaration never reaches a production-marked name, in any family', () => {
+  const dir = workspace({
+    [PROJECT_FILE]: layerFile({
+      k8s_local_contexts: ['team-*'],
+      db_local_hosts: ['*.dev.acme.test'],
+      container_local_contexts: ['team-*'],
+    }),
+  });
+  const c = asHuman(dir);
+  // the wildcard is taken, and works for what it matches
+  assert.equal(cap(c, dir, 'kubectl --context team-eu apply -f a.yaml'), 'k8s.local.apply');
+  assert.equal(cap(c, dir, 'psql -h pg.dev.acme.test -c "drop table t"'), 'db.local.query');
+  assert.equal(verdictOf(c, dir, 'docker --context team-eu run alpine true'), 'ALLOW');
+  // ...and a name it also matches that says production is production
+  assert.equal(cap(c, dir, 'kubectl --context team-prod apply -f a.yaml'), 'production.k8s.mutate');
+  assert.equal(cap(c, dir, 'kubectl --context team-production-eu apply -f a.yaml'), 'production.k8s.mutate');
+  assert.equal(cap(c, dir, 'kubectl --context team-eu -n prod apply -f a.yaml'), 'production.k8s.mutate');
+  assert.equal(cap(c, dir, 'psql -h prod.dev.acme.test -c "drop table t"'), 'production.database.mutate');
+  assert.equal(cap(c, dir, 'psql -h pg.live.dev.acme.test -c "drop table t"'), 'production.database.mutate');
+  assert.equal(cap(c, dir, 'docker --context team-prd run alpine true'), 'production.deploy');
+  // a layer's own marker applies to what its other declarations match
+  const marked = workspace({
+    [PROJECT_FILE]: layerFile({ k8s_local_contexts: ['team-*'], production_markers: ['canary'] }),
+  });
+  assert.equal(
+    cap(asHuman(marked), marked, 'kubectl --context team-canary apply -f a.yaml'),
+    'production.k8s.mutate',
+  );
+});
+
+test('a layer file that is a link, sits under a link, is huge or declares thousands of targets is bounded', () => {
+  // `.harness` itself is the link: the last path component is a plain file, and the path is not
+  const outside = mkdtempSync(join(PARENT, 'outside-'));
+  writeFileSync(join(outside, 'local-targets.md'), layerFile({ k8s_local_contexts: ['linked-dev'] }));
+  const viaDir = workspace({});
+  symlinkSync(outside, join(viaDir, '.harness'));
+  const t = asHuman(viaDir).table.localTargets;
+  assert.deepEqual(t.declared, []);
+  assert.match(t.ignored[0]!.reason, /outside the repository/);
+  // the same link, pointing at somewhere inside the repository, is the repository's own file
+  const inside = workspace({ 'config/local-targets.md': layerFile({ k8s_local_contexts: ['inner-dev'] }) });
+  mkdirSync(join(inside, '.harness'), { recursive: true });
+  symlinkSync(join(inside, 'config', 'local-targets.md'), join(inside, PROJECT_FILE));
+  assert.deepEqual(
+    asHuman(inside).table.localTargets.declared.map((d) => d.name),
+    ['inner-dev'],
+  );
+
+  // not a list of names any more
+  const huge = workspace({
+    [PROJECT_FILE]: layerFile({ k8s_local_contexts: ['team-dev'] }) + 'x'.repeat(70 * 1024),
+  });
+  const h = asHuman(huge).table.localTargets;
+  assert.deepEqual(h.declared, []);
+  assert.match(h.ignored[0]!.reason, /larger than 64 KiB/);
+
+  // every command is compared against every declaration, so the number is bounded
+  const many = workspace({
+    [PROJECT_FILE]: layerFile({
+      k8s_local_contexts: Array.from({ length: 600 }, (_, i) => `dev-cluster-${i}`),
+    }),
+  });
+  const m = asHuman(many).table.localTargets;
+  assert.equal(m.declared.length, 500);
+  assert.match(m.ignored[0]!.reason, /declares 600 targets; only the first 500 are taken/);
+});
+
+test('an organization marker also narrows what the project declared, and a project cannot undo it', () => {
+  const dir = workspace({
+    [ORG_FILE]: layerFile({ production_markers: ['sandbox-eu'] }),
+    [PROJECT_FILE]: layerFile({
+      k8s_local_contexts: ['sandbox-eu-1', 'sandbox-us-1'],
+      production_markers: [],
+    }),
+  });
+  const c = asHuman(dir);
+  assert.deepEqual(
+    c.table.localTargets.declared.map((d) => d.name),
+    ['sandbox-us-1'],
+  );
+  assert.equal(cap(c, dir, 'kubectl --context sandbox-eu-1 apply -f a.yaml'), 'production.k8s.mutate');
+  assert.equal(cap(c, dir, 'kubectl --context sandbox-us-1 apply -f a.yaml'), 'k8s.local.apply');
+});
+
+test('detection is linear in a hostile repository: files built to make a reader backtrack are read in well under a second each', () => {
+  const dir = repo({
+    'skaffold.yaml': '\n'.repeat(190_000),
+    'skaffold.dev.yaml': ' \n'.repeat(95_000) + 'kubeContext: x',
+    'kind-config.yaml': 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\n' + ' \n'.repeat(90_000),
+    'k3d.yaml': 'apiVersion: k3d.io/v1alpha5\nmetadata:\n' + '  label: y\n'.repeat(18_000),
+    'k3d-2.yaml': 'apiVersion: k3d.io/v1alpha5\n' + 'metadata:\n'.repeat(18_000),
+    Tiltfile: 'allow_k8s_contexts(' + "'a'".repeat(60_000),
+    'docker-compose.yml': 'services:\n' + '  s:\n    ports: [' + '"1:1", '.repeat(20_000) + ']\n',
+    '.env.example': 'DATABASE_URL=' + 'x'.repeat(190_000) + '\n',
+    '.devcontainer/devcontainer.json': '/*'.repeat(90_000),
+  });
+  const started = Date.now();
+  const s = detectLocalSurfaces(dir, asHuman(workspace({})).table.localTargets);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 5_000, `${elapsed} ms to read nine hostile files`);
+  assert.ok(Array.isArray(s.proposals));
+});
+
+test('the very first init can adopt a target: the pin, the file, the accepted table and the diff come from one run', async () => {
+  const dir = repo({});
+  const env = humanEnv(mkdtempSync(join(PARENT, 'home-')));
+  const r = await ego(['init', '--local-target', 'kube:team-dev'], dir, env);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /initialized/);
+  assert.match(r.out, /adopted LOCAL_DEV target\(s\) into \.harness\/local-targets\.md: kube:team-dev/);
+  assert.match(r.out, /WIDENS local-target-added \(kube context "team-dev"/);
+  assert.equal(await hookVerdict(dir, env, 'kubectl --context team-dev apply -f a.yaml'), 'allow');
+  assert.equal((await ego(['check'], dir, env)).code, 0);
+  // the file a human is handed to read is the template with the entry in it, comments and all
+  const text = readFileSync(join(dir, '.harness', 'local-targets.md'), 'utf8');
+  assert.match(text, /^---\nschema: ego\.local-targets\/1\n/);
+  assert.match(text, /k8s_local_contexts:\n {2}- 'team-dev'\n/);
+  assert.match(text, /Declaring a target local WIDENS what EGO allows/);
+});
+
+test('every external capability can be presented: nothing is empty, nothing is unbounded, a read says it is a read', () => {
+  const dir = workspace({});
+  const cache = asHuman(dir);
+  const shapes = [
+    { tool: 'Bash', input: { command: 'tool --opt value https://user:pw@host.example.com/path?q=1' } },
+    { tool: 'Bash', input: { command: 'x'.repeat(5000) } },
+    { tool: 'WebFetch', input: { url: 'https://docs.example.com/a/b' } },
+    { tool: 'mcp__server__do_thing', input: { a: 1 } },
+    { tool: 'Bash', input: {} },
+  ];
+  let presented = 0;
+  for (const [id, c] of Object.entries(cache.table.capabilities)) {
+    if (c.effect !== 'external') continue;
+    for (const request of shapes) {
+      const p = approvalPresentation(cache.table, ctx(dir), request, {
+        capability: id,
+        verdict: 'ASK',
+        via: 'synthetic',
+        absolute: false,
+      });
+      assert.ok(p, `${id}`);
+      for (const [name, value] of Object.entries(p)) {
+        if (name === 'where' && value === null) continue;
+        assert.ok(typeof value === 'string' && value.length > 0, `${id} ${request.tool}: ${name} is empty`);
+        assert.ok(
+          (value as string).length <= 400,
+          `${id} ${request.tool}: ${name} is ${(value as string).length} chars`,
+        );
+        assert.doesNotMatch(value as string, /pw@|[\r\n]/, `${id} ${request.tool}: ${name}`);
+      }
+      presented++;
+    }
+  }
+  assert.ok(presented > 100, `${presented} presentations`);
+
+  // a fetch is presented as a fetch: the host, the tool, the method - and not as a write
+  const fetch = { tool: 'WebFetch', input: { url: 'https://docs.example.com/a/b' } };
+  const r = evaluate(cache.table, ctx(dir), fetch);
+  const hit = externalAskHit(cache.table, r.hits);
+  assert.ok(hit, 'a public fetch asks in STANDARD');
+  const p = approvalPresentation(cache.table, ctx(dir), fetch, hit)!;
+  assert.equal(p.target, 'docs.example.com/a/b');
+  assert.equal(p.where, 'tool WebFetch, method GET');
+  assert.match(p.impact, /^a read: nothing changes on the other side/);
+  assert.match(impactOf('git.remote.configure'), /^changes where later pushes and fetches go/);
 });

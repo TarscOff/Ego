@@ -23,7 +23,7 @@
 // This module owns the rules; `compile.ts` calls `mergeLocalTargets`, `evaluate.ts` reads the pattern lists through
 // the accessors below and the production-marker test through `hasProductionMarker`, so that "is this name
 // production" and "what is local for this tool" each have exactly one reader.
-import { lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { parseMarkdown, optionalString } from '../util/markdown.ts';
 import { readText } from '../util/fs.ts';
@@ -170,11 +170,17 @@ export interface LocalTargetsLayerDoc {
   refused?: string;
 }
 
+/** A layer file is a short list of names. Anything bigger is not one, and is not read. */
+const MAX_FILE_BYTES = 64 * 1024;
+/** More declarations than this in one file are not taken: every command is compared against every one of them. */
+const MAX_ENTRIES = 500;
+
 /**
- * Reads a layer file. Null when there is none. A file that is a link out of the repository, or not a regular file, is
- * NOT READ and says why: the file is a statement about what this checkout's own tools may do, and a link is how a
- * file somebody else controls becomes part of it. A malformed file throws, like every other layer: a registry that
- * silently read nothing would be a refusal nobody could see.
+ * Reads a layer file. Null when there is none. A file that resolves outside the repository (through a link in the file
+ * itself or in a directory above it), is not a regular file, or is too large is NOT READ and says why: the file is a
+ * statement about what this checkout's own tools may do, and a link is how a file somebody else controls becomes part
+ * of it. A malformed file throws, like every other layer: a registry that silently read nothing would be a refusal
+ * nobody could see.
  */
 export function loadLocalTargetsLayer(
   projectRoot: string,
@@ -183,27 +189,43 @@ export function loadLocalTargetsLayer(
 ): LocalTargetsLayerDoc | null {
   const file = relFile.split(sep).join('/');
   const full = join(projectRoot, relFile);
-  let st;
   try {
-    st = lstatSync(full);
+    lstatSync(full);
   } catch {
     return null;
   }
-  const doc: LocalTargetsLayerDoc = { layer, file, entries: [], markers: [] };
-  if (st.isSymbolicLink()) {
-    let real: string;
-    let root: string;
-    try {
-      real = realpathSync(full);
-      root = realpathSync(projectRoot);
-    } catch {
-      return { ...doc, refused: 'is a symbolic link whose target does not exist' };
-    }
-    if (!real.startsWith(root + sep))
-      return { ...doc, refused: 'is a symbolic link that resolves outside the repository' };
-  } else if (!st.isFile()) return { ...doc, refused: 'is not a regular file' };
+  const refused = (why: string): LocalTargetsLayerDoc => ({
+    layer,
+    file,
+    entries: [],
+    markers: [],
+    refused: why,
+  });
+  let real: string;
+  let root: string;
+  try {
+    real = realpathSync(full);
+    root = realpathSync(projectRoot);
+  } catch {
+    return refused('is a symbolic link whose target does not exist');
+  }
+  // the PATH is resolved, not just the last component: `.harness` may itself be the link
+  if (!real.startsWith(root + sep))
+    return refused('resolves outside the repository (it is, or sits under, a symbolic link)');
+  const st = statSync(real);
+  if (!st.isFile()) return refused('is not a regular file');
+  if (st.size > MAX_FILE_BYTES) return refused(`is larger than ${MAX_FILE_BYTES / 1024} KiB`);
+  return parseLocalTargetsLayerText(file, readText(real), layer);
+}
 
-  const parsed = parseMarkdown(full, readText(full));
+/** The text of a layer file as a document. Throws `ControlPlaneValidationError` for a file that is not one. */
+export function parseLocalTargetsLayerText(
+  file: string,
+  text: string,
+  layer: LocalTargetLayer,
+): LocalTargetsLayerDoc {
+  const doc: LocalTargetsLayerDoc = { layer, file, entries: [], markers: [] };
+  const parsed = parseMarkdown(file, text);
   const problems: string[] = [];
   if (optionalString(parsed, 'schema') !== 'ego.local-targets/1')
     problems.push(`${file}: schema must be ego.local-targets/1`);
@@ -263,7 +285,15 @@ export function mergeLocalTargets(base: LocalTargets, layers: LocalTargetsLayerD
   const declared = new Map<string, DeclaredLocalTarget>();
   for (const l of ordered) {
     if (l.refused) continue;
-    for (const e of l.entries) {
+    if (l.entries.length > MAX_ENTRIES)
+      ignored.push({
+        kind: 'file',
+        name: l.file,
+        layer: l.layer,
+        file: l.file,
+        reason: `declares ${l.entries.length} targets; only the first ${MAX_ENTRIES} are taken`,
+      });
+    for (const e of l.entries.slice(0, MAX_ENTRIES)) {
       const why = refuseLocalTarget(e.kind, e.name, productionMarkers);
       if (why) {
         ignored.push({ kind: e.kind, name: e.name, layer: l.layer, file: l.file, reason: why });

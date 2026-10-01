@@ -23,6 +23,7 @@ import {
   kubeLocalPatterns,
   loadLocalTargetsLayer,
   mergeLocalTargets,
+  parseLocalTargetsLayerText,
   refuseLocalTarget,
   type LocalTargetsLayerDoc,
 } from '../control-plane/local-targets.ts';
@@ -218,6 +219,21 @@ export function envExampleHosts(text: string): Array<{ key: string; host: string
   return out;
 }
 
+/** The scalar value of `child:` directly under the top-level `parent:` key, read line by line (a regular expression
+ *  over a hostile file is how a configuration reader becomes a denial of service). */
+function childScalar(text: string, parent: string, child: string): string | null {
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.trimEnd() === `${parent}:`);
+  if (at < 0) return null;
+  for (const l of lines.slice(at + 1)) {
+    if (l.trim() === '' || l.trimStart().startsWith('#')) continue;
+    if (!/^[ \t]/.test(l)) return null; // the block ended
+    const m = new RegExp(`^[ \\t]+${child}:[ \\t]*["']?([A-Za-z0-9_.-]+)`).exec(l);
+    if (m) return m[1]!;
+  }
+  return null;
+}
+
 /** Strips line and block comments from JSONC (a devcontainer file is written that way), leaving strings alone. */
 function jsonc(text: string): string {
   let out = '';
@@ -359,14 +375,12 @@ export function detectLocalSurfaces(projectRoot: string, targets: LocalTargets):
   // ---- kind and k3d cluster configs: the cluster they create is named in the file
   for (const f of candidates(projectRoot, (n) => /\.ya?ml$/.test(n) && /(kind|k3d)/i.test(n))) {
     const text = readRepoFile(projectRoot, f) ?? '';
-    if (/^kind:\s*Cluster\s*$/m.test(text) && /kind\.x-k8s\.io/.test(text)) {
-      const name = /^name:\s*["']?([A-Za-z0-9_.-]+)/m.exec(text)?.[1] ?? 'kind';
+    if (/^kind:[ \t]*Cluster[ \t]*\r?$/m.test(text) && /kind\.x-k8s\.io/.test(text)) {
+      const name = /^name:[ \t]*["']?([A-Za-z0-9_.-]+)/m.exec(text)?.[1] ?? 'kind';
       detected.push(`${f}: kind cluster ${safe(name)} (context kind-${safe(name)})`);
       note('kube', `kind-${name}`, `${f}: kind cluster "${safe(name)}"`);
-    } else if (/^apiVersion:\s*k3d\.io\//m.test(text)) {
-      const name =
-        /^metadata:\s*\n(?:[ \t]+.*\n)*?[ \t]+name:\s*["']?([A-Za-z0-9_.-]+)/m.exec(text)?.[1] ??
-        'k3s-default';
+    } else if (/^apiVersion:[ \t]*k3d\.io\//m.test(text)) {
+      const name = childScalar(text, 'metadata', 'name') ?? 'k3s-default';
       detected.push(`${f}: k3d cluster ${safe(name)} (context k3d-${safe(name)})`);
       note('kube', `k3d-${name}`, `${f}: k3d cluster "${safe(name)}"`);
     }
@@ -375,20 +389,20 @@ export function detectLocalSurfaces(projectRoot: string, targets: LocalTargets):
   // ---- Skaffold and Tilt name the context a deploy is allowed to use
   for (const f of candidates(projectRoot, (n) => /^skaffold(\.[A-Za-z0-9_-]+)?\.ya?ml$/.test(n))) {
     const text = readRepoFile(projectRoot, f) ?? '';
-    const names: string[] = [];
-    for (const m of text.matchAll(/^\s*(?:-\s*)?kubeContext:\s*(\S+)\s*$/gm)) {
-      const v = unquote(m[1]!);
-      if (!names.includes(v)) names.push(v);
-    }
+    const seen = new Set<string>();
+    for (const m of text.matchAll(/^[ \t]*(?:-[ \t]*)?kubeContext:[ \t]*(\S+)[ \t]*\r?$/gm))
+      seen.add(unquote(m[1]!));
+    const names = [...seen];
     if (names.length === 0) continue;
     detected.push(`${f}: kubeContext ${names.slice(0, 4).map(safe).join(', ')}`);
     for (const n of names) note('kube', n, `${f}: kubeContext`);
   }
   for (const f of candidates(projectRoot, (n) => n === 'Tiltfile')) {
     const text = readRepoFile(projectRoot, f) ?? '';
-    const names: string[] = [];
+    const seen = new Set<string>();
     for (const call of text.matchAll(/allow_k8s_contexts\s*\(([^)]*)\)/g))
-      for (const q of call[1]!.matchAll(/(['"])([^'"]+)\1/g)) if (!names.includes(q[2]!)) names.push(q[2]!);
+      for (const q of call[1]!.matchAll(/(['"])([^'"]+)\1/g)) seen.add(q[2]!);
+    const names = [...seen];
     if (names.length === 0) continue;
     detected.push(`${f}: allow_k8s_contexts ${names.slice(0, 4).map(safe).join(', ')}`);
     for (const n of names) note('kube', n, `${f}: allow_k8s_contexts`);
@@ -578,6 +592,13 @@ export function writeAdoption(projectRoot: string, add: LocalTargetSpec[]): stri
   const path = join(projectRoot, PROJECT_LOCAL_TARGETS_FILE);
   let text = readTextIfExists(path) ?? LOCAL_TARGETS_TEMPLATE;
   for (const s of add) text = addToFrontmatterList(text, KEYS[s.kind], s.name);
+  // an edit that does not produce the file it meant to is not written
+  const written = parseLocalTargetsLayerText(PROJECT_LOCAL_TARGETS_FILE, text, 'project').entries;
+  for (const s of add)
+    if (!written.some((e) => e.kind === s.kind && e.name === s.name))
+      throw new Error(
+        `refused: editing ${PROJECT_LOCAL_TARGETS_FILE} would not have produced the declaration ${s.kind}:${s.name}; add it by hand`,
+      );
   ensureDir(dirname(path));
   writeAtomic(path, text.endsWith('\n') ? text : `${text}\n`);
   return PROJECT_LOCAL_TARGETS_FILE;
