@@ -374,4 +374,53 @@ test('a package manager reads every rc file beside the manifest, not the first o
   gated('cd sub && yarn build', rc({ 'sub/.yarnrc.yml': 'enableTelemetry: false\n', '.yarnrc.yml': 'yarnPath: ./evil.cjs\n' }), 'merged');
   // an rc file that sets nothing of the kind is not a reason to ask
   assert.equal(run('yarn build', rc({ '.npmrc': 'registry=https://registry.npmjs.org/\n', '.yarnrc.yml': 'enableTelemetry: false\n' })).verdict, 'ALLOW');
+  // the classic `.yarnrc` spells the same instruction `yarn-path "file"`: no colon, a space, and a quoted value
+  gated('yarn build', rc({ '.yarnrc': 'yarn-path "./evil.js"\n' }), 'yarn-path');
+  gated('yarn build', rc({ '.yarnrc': 'yarn-path ./evil.js\n' }), 'yarn-path, bare');
+  assert.equal(run('yarn build', rc({ '.yarnrc': '--install.silent true\n' })).verdict, 'ALLOW');
+});
+
+test('npm resolves a subcommand by its own table, so every spelling of an install is the install', () => {
+  // The matcher that grants `npm install` its class is a prefix test, and the producer claimed only the spellings a
+  // list remembered: `npm ic` (an alias of `ci`), `npm install-clean`, `npm install-t` (a unique prefix of
+  // `install-test`) and `npm installTest` ran the install - and every lifecycle script in the tree - at ALLOW,
+  // over the very `preinstall` that `npm install` is denied for.
+  const spellings: Array<[string, string]> = [
+    ['npm ic', 'npm ci'],
+    ['npm install-clean', 'npm ci'],
+    ['npm isntall-clean', 'npm ci'],
+    ['npm install-cl', 'npm ci'],
+    ['npm install-t', 'npm install-test'],
+    ['npm install-te', 'npm install-test'],
+    ['npm installTest', 'npm install-test'],
+    ['npm install-ci', 'npm install-ci-test'],
+    ['npm install-ci-t', 'npm install-ci-test'],
+    ['npm installCiTest', 'npm install-ci-test'],
+    ['npm cit', 'npm install-ci-test'],
+    ['npm it', 'npm install-test'],
+  ];
+  const hostile = JSON.stringify({ scripts: { preinstall: RECIPE } });
+  const fixtures: Array<[string, () => string, string]> = [
+    ['a hostile preinstall', () => workspace({ 'package.json': hostile }), ''],
+    ['a hostile preinstall, scripts ignored', () => workspace({ 'package.json': hostile }), ' --ignore-scripts'],
+    ['a benign manifest', () => workspace({ 'package.json': JSON.stringify({ scripts: { test: 'tsc' } }) }), ''],
+    ['a benign manifest, scripts ignored', () => workspace({ 'package.json': JSON.stringify({ scripts: { test: 'tsc' } }) }), ' --ignore-scripts'],
+  ];
+  for (const [alias, canonical] of spellings)
+    for (const [what, make, flags] of fixtures) {
+      const dir = make();
+      const got = run(alias + flags, dir);
+      const want = run(canonical + flags, dir);
+      assert.equal(got.verdict, want.verdict, `${alias}${flags} with ${what} must be judged as ${canonical}${flags}`);
+      assert.equal(got.decisive?.capability, want.decisive?.capability, `${alias}${flags} with ${what}`);
+    }
+  // ...the hostile preinstall is READ for all of them, and an unread manifest is a question for all of them
+  // (`sit` is also `install-ci-test`, but no matcher grants it a class, so it was never ALLOW - the producer claims it too)
+  for (const alias of [...spellings.map(([a]) => a), 'npm sit']) {
+    assert.equal(run(alias, workspace({ 'package.json': hostile })).decisive?.capability, 'git.remote.push.force', alias);
+    gated(`cd ${outside({ 'package.json': hostile })} && ${alias}`, workspace(), alias);
+  }
+  // a word that is not a command of npm's is not claimed, and the commands that do not rebuild the tree are untouched
+  for (const c of ['npm init -y', 'npm ls', 'npm outdated', 'npm uninstall left-pad', 'npm view react version'])
+    assert.equal(run(c, workspace({ 'package.json': hostile })).verdict, 'ALLOW', c);
 });

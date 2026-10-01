@@ -3744,6 +3744,61 @@ const LINT_STAGED_CONFIGS: readonly string[] = [
 /** the configuration files a package manager reads beside the manifest, from the package directory upwards */
 const RC_FILES: readonly string[] = ['.npmrc', '.yarnrc.yml', '.yarnrc'];
 
+/** HOW NPM RESOLVES A SUBCOMMAND (lib/utils/cmd-list.js): the exact name, then an alias, then ANY UNIQUE PREFIX of a
+ *  name or an alias, then camelCase turned into kebab-case. The table is npm's own, kept whole because an abbreviation
+ *  is only valid while nothing else shares its prefix. It exists so that the producer can ask what a word MEANS rather
+ *  than whether it is spelled like one of the spellings somebody remembered: `ic`, `install-clean`, `install-t`,
+ *  `install-ci` and `installTest` all reify the tree and run its lifecycle scripts, and the matcher that grants
+ *  `npm install` its class is a prefix test, so every one of them kept ALLOW over a `preinstall` nobody read. */
+const NPM_COMMANDS: readonly string[] = [
+  'access', 'adduser', 'approve-scripts', 'audit', 'bugs', 'cache', 'ci', 'completion', 'config', 'dedupe',
+  'deny-scripts', 'deprecate', 'diff', 'dist-tag', 'docs', 'doctor', 'edit', 'exec', 'explain', 'explore',
+  'find-dupes', 'fund', 'get', 'help', 'help-search', 'init', 'install', 'install-ci-test', 'install-test', 'link',
+  'll', 'login', 'logout', 'ls', 'org', 'outdated', 'owner', 'pack', 'ping', 'pkg', 'prefix', 'profile', 'prune',
+  'publish', 'query', 'rebuild', 'repo', 'restart', 'root', 'run', 'sbom', 'search', 'set', 'shrinkwrap', 'stage',
+  'star', 'stars', 'start', 'stop', 'team', 'test', 'token', 'trust', 'undeprecate', 'uninstall', 'unpublish',
+  'unstar', 'update', 'version', 'view', 'whoami',
+];
+const NPM_ALIASES: Readonly<Record<string, string>> = {
+  author: 'owner', home: 'docs', issues: 'bugs', info: 'view', show: 'view', find: 'search', add: 'install',
+  unlink: 'uninstall', remove: 'uninstall', rm: 'uninstall', r: 'uninstall', un: 'uninstall', rb: 'rebuild',
+  list: 'ls', ln: 'link', create: 'init', i: 'install', it: 'install-test', cit: 'install-ci-test', u: 'update',
+  up: 'update', c: 'config', s: 'search', se: 'search', tst: 'test', t: 'test', ddp: 'dedupe', v: 'view',
+  'run-script': 'run', 'clean-install': 'ci', 'clean-install-test': 'install-ci-test', x: 'exec', why: 'explain',
+  la: 'll', verison: 'version', ic: 'ci', innit: 'init', in: 'install', ins: 'install', inst: 'install',
+  insta: 'install', instal: 'install', isnt: 'install', isnta: 'install', isntal: 'install', isntall: 'install',
+  'install-clean': 'ci', 'isntall-clean': 'ci', hlep: 'help', 'dist-tags': 'dist-tag', upgrade: 'update',
+  udpate: 'update', rum: 'run', sit: 'install-ci-test', urn: 'run', ogr: 'org', 'add-user': 'adduser',
+};
+/** the commands that rebuild the dependency tree, and with it run every lifecycle script in it */
+const NPM_REIFYING: ReadonlySet<string> = new Set(['install', 'ci', 'install-test', 'install-ci-test', 'update', 'rebuild']);
+const NPM_ABBREVS: ReadonlyMap<string, string> = (() => {
+  const words = [...NPM_COMMANDS, ...Object.keys(NPM_ALIASES)];
+  const owners = new Map<string, Set<string>>();
+  for (const w of words)
+    for (let n = 1; n <= w.length; n++) {
+      const p = w.slice(0, n);
+      if (!owners.has(p)) owners.set(p, new Set());
+      owners.get(p)!.add(w);
+    }
+  const out = new Map<string, string>();
+  for (const [p, ws] of owners) {
+    if (words.includes(p)) out.set(p, p);
+    else if (ws.size === 1) out.set(p, [...ws][0]!);
+  }
+  return out;
+})();
+/** the command npm runs for this word, or undefined when npm would not run one */
+function npmCommand(word: string): string | undefined {
+  const w = word.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+  if (NPM_COMMANDS.includes(w)) return w;
+  const aliasOf = (k: string): string | undefined => (Object.hasOwn(NPM_ALIASES, k) ? NPM_ALIASES[k] : undefined);
+  if (aliasOf(w) !== undefined) return aliasOf(w);
+  let a = NPM_ABBREVS.get(w);
+  while (a !== undefined && aliasOf(a) !== undefined) a = aliasOf(a);
+  return a;
+}
+
 function defaultReadFile(abs: string): string | null {
   try {
     const st = statSync(abs);
@@ -6522,7 +6577,13 @@ function resolveScriptCommand(
       'install-test', 'it', 'install-ci-test', 'cit', 'clean-install', 'clean-install-test',
       'ci', 'add', 'update', 'up', 'upgrade', 'udpate', 'rebuild', 'rb',
     ]);
-    if (INSTALL_SUBS.has(sub) || (head === 'yarn' && sub === '')) {
+    // ...AND NPM'S OWN RESOLUTION decides what an npm word means, not the list above: that list holds the spellings
+    // somebody remembered, and `npm ic`, `npm install-clean` and `npm install-t` ran the install without being on it
+    if (
+      INSTALL_SUBS.has(sub) ||
+      (head === 'npm' && NPM_REIFYING.has(npmCommand(sub) ?? '')) ||
+      (head === 'yarn' && sub === '')
+    ) {
       const pkgPath0 = findUp(ctx, cwd, 'package.json', true);
       const pkgPath = pkgPath0 === SEARCH_EXHAUSTED ? null : pkgPath0;
       if (pkgPath0 === SEARCH_EXHAUSTED)
@@ -6725,7 +6786,13 @@ function resolveScriptCommand(
       };
     const rcRebinds = rcFiles.filter((f) => {
       const rcText = readInsideWorkspace(ctx, f);
-      return rcText === null || /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText);
+      // `yarn-path` is the classic `.yarnrc` spelling of `yarnPath`: no colon, a space and a quoted value, and it hands
+      // every `yarn` command to the program it names
+      return (
+        rcText === null ||
+        /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText) ||
+        /^\s*yarn-path(\s*[:=]|\s+\S)/m.test(rcText)
+      );
     });
     return {
       kind: 'npm-script',
