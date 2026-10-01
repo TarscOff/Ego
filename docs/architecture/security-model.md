@@ -389,6 +389,47 @@ fails if a bare join of a directory and a word comes back. What it does **not** 
 - A file that a reader opens itself (a script, a makefile, a response file) is read at its physical path. A check that the
   file is the one that will run at execution time is still a race the kernel cannot close (#26).
 
+## A wrapper is peeled by its own options, and a tool's options are read by the parser the tool has
+
+What a command writes, which flags it was given and where it runs all depend on locating the command, and a command that is
+carried — `timeout -s KILL 5 sed …`, `env --unset A sed …`, `find . -exec sed … \;`, `yarn exec git -C control-plane
+checkout …`, `watch 'git commit -nm x'`, `env -S'git commit -m x' -n` — is only found by consuming exactly the carrier's
+**own** options: `timeout -s` takes a value, so does `env -u` in three spellings (`-u A`, `-uA`, `--unset A`), and `env -S`
+hands env a command line to which the words after it are appended. The kernel had five readers of that fact (the
+normalizer's wrapper loop, the head finder the raw-text scanners use, a copy of it in the awk scanner, the
+environment-input scan, the directory finder), each with a regex of the wrappers and options its author had met, and
+every disagreement between them was a way to carry a governed effect past one.
+
+Two modules now answer, and every reader uses them:
+
+- [`authority/carriers.ts`](../../packages/kernel/src/authority/carriers.ts) is the **one table of carriers** — their own
+  options with the arity of each, the operands they take (`timeout`'s duration, `flock`'s lock file), the `NAME=value` words
+  they accept, the command *strings* they hand to a shell (`env -S`, `su -c`, `flock -c`, `watch`'s argument) — and
+  `peelCarriers` the one reader, iterated to a fixed point. A **strict** carrier that meets an own option its table does
+  not list, or a chain nested past twelve, leaves the position of the carried command unknown: the segment asks
+  (`command.script-opaque`) instead of guessing. A **lenient** carrier (the rarely used wrappers, listed from their
+  documentation in part) reads an unknown option as a flag, which is what the old loop did for all of them; completing a
+  row and dropping `lenient` is the whole change that makes that carrier ask.
+- [`authority/options.ts`](../../packages/kernel/src/authority/options.ts) is the **option parser** (GNU clusters, glued
+  values, `--name[=value]` by any unique prefix, Go's `-name=value`, a compiler's `-MFfile`, the shells' `+n`) and
+  [`authority/tools.ts`](../../packages/kernel/src/authority/tools.ts) holds **one table per modelled tool** — tar, sort,
+  sed, awk, the shells, go, cargo, the C compilers, wget, rsync, eslint, prettier, pylint, python and the git subcommands
+  that write — in which each option's value is marked as what it **is**: a file written, a directory written into, a file
+  read, a program, code, a configuration, a Python module. `toolEffects` is the question "where does this write and what does
+  it run", asked of the parse; the flag questions (`bash -n +n`, `sed -i`, tar's mode) are asked of the parse too. A table that
+  lists every long option of its tool (`complete`) also rewrites an abbreviation to its full name before the text matchers
+  read the line (`tar --use=./x` is `--use-compress-program=./x`; an ambiguous prefix is left alone, as the tool would refuse
+  it). [`authority/sed.ts`](../../packages/kernel/src/authority/sed.ts) reads a sed script as a script — the file of `w`, `W`
+  and the `w` flag of `s` may be glued to the letter, and ends at the end of the line.
+
+What this does **not** establish: a tool whose options no table lists is still read by the regexes it always was; a table is
+the tool's *documented* option set and an option added to the tool tomorrow is `unknown` to the parser until its row is
+extended (the parse reports it, so a reader can ask rather than guess — the strict carriers do). `bun test`, `deno test` and
+`go test` execute repository-defined code and ask by design; an option that names a program or module a bounded runner
+loads (`clang --ld-path=./x`, `eslint -f ./fmt.js`, `prettier --config ./evil.json`, `pylint --init-hook "…"`,
+`python3 -m venv` with a `venv.py` beside it) asks too, and the closure of the packages such a runner imports from its
+dependencies is not modelled (a containment concern, #26).
+
 ## The producer contract: true by construction, not by vigilance
 
 Four independent challenges exposed the same meta-defect in the repairs themselves, not in the rules: a rule would be
