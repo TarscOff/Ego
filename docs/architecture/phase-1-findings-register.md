@@ -311,7 +311,7 @@ self-attacks) or recorded 0. `cause` is the cause group of the residuals table:
 - **F** Proportionality
 - **G** Environment and bounded-command tables
 - **H** Overlay and profile edges
-- **S** Shell structure and lexing (the closed classes 1, 2 and 5; two cwd/quoting neighbours are OPEN)
+- **S** Shell structure and lexing (classes 1, 2 and 5 by origin; 4 rows are OPEN: a redirection glued to a flag, 'pushd -n', an ANSI-C newline in a name)
 
 The cause of a review-11 row is the row of the residuals table whose lens list holds its lens, resolved by the command where the lens sits in two rows;
 rows of earlier reviews take the cause of the same lens or, failing that, of their class. `kind` UA = unauthorized ALLOW, OG = over-gated DENY. `now/floor` = the
