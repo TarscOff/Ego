@@ -43,8 +43,8 @@ narrow:
 ---
 # HIGH_ASSURANCE
 
-The strongest assurance EGO is designed to give, and a design that asks for more than the code yet provides. This page
-has two halves, as STRICT's does: what is enforced today, and what is declared and not enforced. Assurance is meant to
+The strongest assurance EGO is designed to give. The design asks for more than the code yet provides, so this page has
+two halves, as STRICT's does: what is enforced today, and what is declared and not enforced. Assurance is meant to
 come from enforcement and evidence, not from more prompt text, which is why the context budget is the same as
 STRICT's. Today what separates this profile from STRICT is its own `narrow` list, which is not inherited from STRICT's,
 and its tighter budgets.
