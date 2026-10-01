@@ -407,9 +407,69 @@ be harmless is ordinary and everything else is opaque:
 
 Against a production host the same escape is no longer the plain-SELECT read: it is refused (DENY). Pinned by
 `packages/kernel/test/closure-db.test.ts` and by the corpus classes in `test/support/corpus.ts` (`db` family). Not covered, and
-still ASK for another reason: `cqlsh`, `influx`, `pg_dump`/`pg_restore`/`pgbench`, `mysqldump`/`mysqladmin` and `clickhouse
+still ASK for another reason: `cqlsh`, `influx`, `pg_dumpall`/`pg_restore`/`pgbench`, `mysqladmin` and `clickhouse
 local` are unmodelled producers (`command.unmodelled-closure`); `flyway`/`liquibase` apply a migration FILE and are the
-`db.local.migrate` class.
+`db.local.migrate` class. (`pg_dump` and `mysqldump` are the plain-client class; since the second wave below they ask only
+for what they do, not because the file they write is called `dump.sql`.)
+
+### CLOSED in the second wave of the audit of 2026-10-01: the producer and profile leftovers of the first wave
+
+Pinned by `packages/kernel/test/closure-producers.test.ts`.
+
+- **make names are make's, not the shell's** (closure audit F20). A rule's targets, its prerequisites, an `include` and a
+  `.DEFAULT_GOAL` were each split on whitespace by a regular expression that also cut the head at the first colon, `=` or `#`:
+  `a\ b:` registered the targets `a\` and `b`, `a\:b:` and `a\#b:` were not rules, and `make 'a b'` found no rule, so the goal came out
+  absent and its recipe ran at ALLOW. One reader (`readMakeNames`) now answers "what are the names here" for all four, checked
+  against GNU make 3.81: a run of backslashes in front of a blank, colon or hash halves and an odd one out escapes it, a backslash in
+  front of anything else stays; a command-line goal is one name whatever it holds. A wildcard in a target or a prerequisite (`dep*:`)
+  names whatever files exist, so it is a rule the text does not name (blind, like a pattern rule). Not modelled: make's tilde
+  expansion of a goal.
+- **`npm_config_<name>` is the key `<name>`** (npm lowercases the variable and turns the underscores after the first character into
+  hyphens, the prefix in any case). The variable family was an enumeration of the dangerous names and `node-options` was not on it:
+  `npm_config_node_options='--require ./evil.js' npm run build` was ALLOW. The variable is now read by the keys npm accepts, the other
+  way round: a short list of keys that execute nothing and redirect nothing (presentation, notices, install policy, network
+  limits) stays ordinary, an empty value is ignored as npm ignores it, and every other key asks. The keys that name a program or a
+  module (`onload-script`, `init-module`, `node-gyp`, `editor`, `git`, `browser`, `viewer`, `scripts-prepend-node-path` beside
+  `script-shell`, `shell` and `node-options`) are one table read by the flag, the `.npmrc` and the variable spellings. The flag and
+  `.npmrc` readers remain a list of the keys that run something, because most `--words` before a script name are options of the
+  command and not configuration keys.
+- **`lint-staged` reads the configurations below the working directory.** Since 13 it uses the configuration nearest to each staged
+  file, found with `git ls-files` (tracked, and untracked-not-ignored), so a `.lintstagedrc` under `packages/a` runs on the files staged
+  there even when it is started at the root. The classifier does not start git for this (a repository can name a program in its own
+  configuration, `core.fsmonitor`): the tracked paths are read from the index file (layouts 2, 3 and 4, a worktree's `.git` file followed;
+  a sparse or split index is a problem, not a short list) and the untracked ones from a walk that skips only what the ignore files
+  provably exclude and the nested repositories git lists as one entry. Bounds: 20000 config-named tracked files, 20000 untracked entries
+  the walk looks at (tracked entries are free), 128 MiB of index and 2M listed entries; a reached bound, an unreadable index or a
+  directory that cannot be listed is an ask that says so, never "nothing there". A configuration, an ignore file or a directory the
+  command writes below the working directory earlier in the same command makes the answer STALE. `--shell <path>` is an unresolved gap.
+  `pnpm lint-staged` and `yarn lint-staged` (the binary, when no script has that name) are resolved as `lint-staged`; they used to keep
+  the class of an unbounded matcher prefix and never read the configuration.
+- **A stricter profile is never looser than a weaker one.** `narrow` is not inherited, so `git merge --no-ff topic` was ASK under
+  STRICT and ALLOW under HIGH_ASSURANCE. The compiler now refuses a control plane in which STANDARD <= STRICT <= HIGH_ASSURANCE fails for
+  any capability in any mode (`PROFILE_ORDER`); on the shipped plane it found exactly `git.local.merge` and `git.local.cherry-pick`, which
+  `high-assurance.md` now lists.
+- **A dry run that a word of the shell could undo is not a dry run.** `kubectl --context production apply -f x.yaml --dry-run=client
+  $FLAG` was ALLOW although `$FLAG` may be `--dry-run=none`. Against a target that is not a declared local one the line is judged as the
+  act when a word the shell fills in stands where a flag can stand: after a verb that takes no names (`apply`, `replace`, `create -f`,
+  `delete -f`), after the operands `helm upgrade|install|rollback|test|push` take, or as the name of an option. The value of an option that
+  takes one, a word that starts with a literal non-dash character and a name slot are not flags. **Residual, recorded:** a verb that names any
+  number of objects (`delete TYPE NAME...`, `label`, `helm uninstall`) cannot tell a name from a flag by position, so `kubectl --context
+  production delete --dry-run=client pod x $MORE` is read as names - which is what keeps `pod $NAME`, the ordinary preview of a delete, out
+  of the refusals.
+- **Database proportionality.** The net that asks when a client "runs an unread program" matched a file NAME by extension anywhere on
+  the line, so `pg_dump app > dump.sql` and `sqlite3 app.db .dump > dump.sql` asked because their output file ends in `.sql`. The
+  extension is now a statement about what a client READS: a redirection target and the value of an output option are subtracted
+  one-for-one and judged as writes by the path rules (so `pg_dump app -f .git/hooks/pre-commit` is a write to a hook, not a pass, and
+  `mysqldump app -r .git/hooks/pre-commit`, which was ALLOW, is no longer). A client's option is spelled as it is (`-Fc` is a format, not
+  `-f`). A statement is data for the path scan: a word of it that names no directory is not a path, so the SQL operator `~` was no longer the
+  home directory. And `~`, `~*`, `!~`, `!~*` are accepted by the plain-SELECT grammar, with the backslashes of a single-quoted literal (not an
+  escape string, not in front of a quote) read as data, so `select ... where code ~ '^\d+$'` against a production host is the read it is
+  and not an absolute refusal.
+- **Recorded, not closed.** A bare `c` in a statement followed by three words is read as psql's `\c` reconnect (`... where c = 1 and d = 2` on a
+  statement that is not a read): the host it names is a word of the SQL. `kubectl ... apply --help $FLAG` is not recognised as a probe. `oc` is
+  not a bounded command. The nested-configuration walk does not read `core.excludesFile`; a directory it cannot prove ignored it walks.
+  The matcher `pnpm\s+(build|lint)` / `yarn\s+(build|lint)` in `matchers.md` has no word boundary, so `pnpm lint-anything` keeps the build
+  class whenever no script has that name (only `lint-staged` is resolved; the others fall back to a binary EGO does not model).
 
 ### The decision (OPEN - not taken here)
 
