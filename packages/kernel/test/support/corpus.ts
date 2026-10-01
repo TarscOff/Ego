@@ -1292,6 +1292,66 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     files: { 'x.yaml': 'kind: Deployment\n' },
   },
   {
+    family: 'command',
+    // a function shadows the real program only while a definition that ran in the PARENT shell stands
+    id: 'a function definition that binds nothing in the parent shell: a pipeline stage, a group in a pipeline, a background job, a short-circuit, a substitution',
+    floor: 'DENY',
+    // each starts with a plain command, so that a wrapper (`sudo`, `env`, `time`…) has one to wrap: nothing can wrap a definition
+    cases: [
+      'true; git() { echo hi; } | cat; git push origin main',
+      'true; kubectl() { :; } | cat; kubectl --context production delete pod x',
+      'true; echo x | git() { true; }; git push origin main',
+      'true; { git() { true; }; } | cat; git push origin main',
+      'true; echo x | { git() { true; }; }; git push origin main',
+      'true; { echo a; git() { true; }; } & git push origin main',
+      'true; git() { true; } & git push origin main',
+      'true; false && { echo a; git() { true; }; }; git push origin main',
+      'true; true || git() { true; }; git push origin main',
+      'true; echo $(git() { true; }); git push origin main',
+      'true; git() { echo hi; } | cat\ngit push origin main',
+    ],
+  },
+  {
+    family: 'command',
+    // ...and it stops shadowing the moment anything the shell runs removes it
+    id: 'a function binding removed by a callee, a sourced file, eval, a trap or a hook function before the real program is called',
+    floor: 'DENY',
+    cases: [
+      'true; f() { unset -f git; }; git() { true; }; f; git push origin main',
+      'true; git() { true; }; f() { g; }; g() { unset -f git; }; f; git push origin main',
+      'true; git() { true; }; f() { builtin unset -f git; }; f; git push origin main',
+      'true; git() { true; }; source ./u.sh; git push origin main',
+      'true; git() { true; }; . ./u.sh; git push origin main',
+      'true; git() { true; }; source ./missing.sh; git push origin main',
+      'true; git() { true; }; f() { source ./u.sh; }; f; git push origin main',
+      "true; git() { true; }; eval 'unset -f git'; git push origin main",
+      "true; git() { true; }; trap 'unset -f git' DEBUG; git push origin main",
+      'true; TRAPDEBUG() { unset -f git; }; git() { true; }; git push origin main',
+      'true; git() { true; }; unfunction git; git push origin main',
+      'true; git() { true; }; unset -f $NAME; git push origin main',
+      "true; git() { true; }; alias git='command git'; git push origin main",
+      'true; kubectl() { :; }; f() { unset -f kubectl; }; f; kubectl --context production delete pod x',
+    ],
+    files: { 'u.sh': 'unset -f git\n' },
+  },
+  {
+    family: 'fs',
+    // the same reader decides whether `cd` is a function: a definition that is not there leaves the builtin to move the shell
+    id: 'a directory change that is the builtin because the function that shadowed it never bound, followed by a write the new directory governs',
+    floor: 'DENY',
+    cases: [
+      'true; cd() { true; } | cat; cd control-plane; tee permissions/matchers.md',
+      'true; echo x | cd() { true; }; cd control-plane; tee permissions/matchers.md',
+      'true; { cd() { true; }; } | cat; cd control-plane; tee permissions/matchers.md',
+      'true; f() { unset -f cd; }; cd() { true; }; f; cd control-plane; tee permissions/matchers.md',
+      "true; cd() { true; }; eval 'unset -f cd'; cd control-plane; tee permissions/matchers.md",
+      'true; false && cd() { true; }; cd control-plane; tee permissions/matchers.md',
+      'true; { cd control-plane; tee permissions/matchers.md; } | cat',
+      'true; cd control-plane && tee permissions/matchers.md &',
+    ],
+    files: { 'control-plane/permissions/matchers.md': 'x\n' },
+  },
+  {
     family: 'git',
     // nothing after `--` is an option, so a word that looks like the dry-run flag there is a path beside the governed one
     id: 'a governed file removed or moved with a dry-run-looking word after `--`',
