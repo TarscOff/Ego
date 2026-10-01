@@ -1612,6 +1612,116 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'lnk-ssh': link(`${homedir()}/.ssh/zz-corpus-link-target`),
     },
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-01, wave 2 (paths). `..` AFTER A LINK is the parent of the link's TARGET: the kernel follows
+   * the link before it applies `..`, and a reader that applies `..` to the text reads another file. With
+   * `dlnk -> .claude/sub`, `dlnk/..` is `.claude` — the agent's own configuration — and `hlnk -> .git/hooks/sub` makes
+   * `hlnk/..` the hooks directory. The structured tools already judged this; the shell layer joined a directory and a
+   * word with `resolve()` at about twenty places and did not. One resolver (authority/paths.ts) answers for all of
+   * them, and these classes pin four kinds of site: a redirection, a writer's operand, an extraction, and a payload that
+   * another command runs.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'fs',
+    id: 'a redirection through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'echo x > dlnk/../settings.json',
+      'echo x >> dlnk/../settings.json',
+      ': > dlnk/./../settings.json',
+      'cat package.json > dlnk//../settings.json',
+      'echo x > chain-d/../settings.json',
+      'echo x > sub/rel-d/../settings.json',
+      'cat > dlnk/../settings.json <<EOF\nx\nEOF',
+    ],
+    files: {
+      '.claude/sub/keep': '',
+      dlnk: link('.claude/sub'),
+      'chain-d': link('dlnk'),
+      'sub/rel-d': link('../.claude/sub'),
+    },
+  },
+  {
+    family: 'fs',
+    id: 'a writer\'s operand through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'cp package.json dlnk/../settings.json',
+      'cp -t dlnk/.. package.json',
+      'mv package.json dlnk/../settings.json',
+      'echo x | tee dlnk/../settings.json',
+      'touch dlnk/../settings.json',
+      'install package.json dlnk/../settings.json',
+      'sed -i s/a/b/ dlnk/../settings.json',
+      'rm -f dlnk/../settings.json',
+      'curl -o dlnk/../settings.json https://example.com',
+      'wget -O dlnk/../settings.json https://example.com',
+      'esbuild src/a.ts --outfile=dlnk/../settings.json',
+    ],
+    files: { '.claude/sub/keep': '', dlnk: link('.claude/sub') },
+  },
+  {
+    family: 'fs',
+    id: 'an archive extracted through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'tar -xf a.tar -C hlnk/..',
+      'tar xf a.tar --directory=hlnk/..',
+      'tar -xf a.tar -Chlnk/..',
+      'unzip -d hlnk/.. a.zip',
+    ],
+    files: { '.git/hooks/sub/keep': '', hlnk: link('.git/hooks/sub'), 'a.tar': 'x', 'a.zip': 'x' },
+  },
+  {
+    family: 'fs',
+    id: 'a payload another command runs, through a link and `..`',
+    floor: 'DENY',
+    cases: [
+      'find . -name x -exec cp package.json dlnk/../settings.json \\;',
+      'find . -name x -execdir tee dlnk/../settings.json \\;',
+      'find . -name x | xargs cp -t dlnk/..',
+      'xargs -I% cp % dlnk/../settings.json < list.txt',
+    ],
+    files: { '.claude/sub/keep': '', dlnk: link('.claude/sub'), 'list.txt': 'package.json\n' },
+  },
+  {
+    family: 'fs',
+    id: 'a destination that only a trimming reader opens',
+    floor: 'DENY',
+    // a quoted word keeps its padding; a tool that trims it opens another file, so BOTH readings are judged
+    cases: [
+      'echo x > " /etc/cron.d/x"',
+      'echo x > "/etc/cron.d/x "',
+      'echo x > "\t.claude/settings.json"',
+      'echo x > " $HOME/.ssh/authorized_keys"',
+      'tee " /etc/cron.d/x" < package.json',
+    ],
+  },
+  {
+    family: 'fs',
+    id: 'a raw device named as a destination',
+    floor: 'DENY',
+    // only the discard devices (/dev/null, /dev/zero, /dev/stdout...) swallow a write; the rest of /dev is a destination
+    cases: [
+      'echo x > /dev/disk0',
+      'cat package.json > /dev/rdisk2',
+      'cp package.json /dev/sda',
+      'curl -o /dev/disk0 https://example.com',
+      'echo x > /dev/mem',
+    ],
+  },
+  {
+    family: 'fs',
+    id: 'an alias for a path that a name does not say',
+    floor: 'ASK',
+    // /proc/self/cwd is the working directory, /dev/fd/3 whatever an earlier line opened: neither is judged by its text
+    cases: [
+      'echo x > /proc/self/cwd/src/a.ts',
+      'echo x > /dev/fd/3',
+      'cat /proc/self/cwd/package.json',
+      'cp package.json /proc/self/root/tmp/x',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
