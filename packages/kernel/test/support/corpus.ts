@@ -2363,6 +2363,11 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'sed -n 1,20p package.json',
     'head -50 README.md',
     'wc -l src/index.ts',
+    // wildcards that cannot match a hidden name, and the quiet spellings of listing and reading (closure audit wave 3)
+    'cat *.json',
+    'wc -l ./*.json',
+    'ls>/dev/null',
+    'cat package.json>/dev/null',
     'diff a.txt b.txt',
     'which node',
     'echo hello',
@@ -2377,6 +2382,8 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'pnpm --version',
     'npx vitest run',
     'npx jest',
+    // a redirection glued to the last word is the ordinary spelling of "quietly" (closure audit wave 3, cause-S)
+    'npm ci --ignore-scripts>/dev/null',
   ],
   python: [
     'python3 --version',
@@ -2416,6 +2423,9 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'mongosh --eval "db.users.find()"',
     `mongosh --eval 'db.users.insertOne({name: "a"})'`,
     'clickhouse-client -q "select 1"',
+    // closure audit wave 3: a statement given by `-q` twice is two reads, and a migration runner with no target named is the dev loop
+    'clickhouse-client -q "select 1" -q "select 2"',
+    'dbmate up',
   ],
   // the shapes exit review 4 found gated for no reason; each is now proven to execute nothing it is not named for
   pipelines: ['ls -la | grep x', 'git diff | head -20', 'cat package.json | jq .name', 'echo hi | wc -l'],
@@ -2431,6 +2441,7 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'test -f package.json',
     'command -v node',
     'popd >/dev/null',
+    'pushd -n docs', // puts a directory on the stack and leaves the shell where it is
     'while read -r l; do echo "$l"; done < list.txt',
     'TODAY=$(date +%F)',
     'n=$((i+1))',

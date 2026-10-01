@@ -516,8 +516,8 @@ export function directoryCandidates(base: string, word: string, physicalOnly = f
 
 /** How many directory entries one expansion may read before it is read as unbounded (a few milliseconds of `readdir`). */
 export const GLOB_ENTRY_BUDGET = 20000;
-/** How many names one expansion may return (each is classified by the caller). */
-const GLOB_RESULT_BUDGET = 1000;
+/** How many names one expansion may return (each is classified by the caller: a few tenths of a millisecond apiece). */
+const GLOB_RESULT_BUDGET = 2000;
 /** A recursive `**` does not descend into a dependency tree: what a package ships is not the user's secret, and the tree is
  *  larger than every budget. (A wildcard written INTO it, `node_modules/*`, is expanded like any other.) */
 const GLOB_SKIPPED_DIRS: ReadonlySet<string> = new Set(['node_modules']);
@@ -537,11 +537,14 @@ const POSIX_CLASSES: Readonly<Record<string, string>> = {
   alpha: 'a-zA-Z', digit: '0-9', alnum: 'a-zA-Z0-9', upper: 'A-Z', lower: 'a-z', space: '\\s', punct: '!-\\/:-@\\[-`{-~', xdigit: '0-9a-fA-F', word: 'a-zA-Z0-9_',
 };
 const escapeRe = (c: string): string => c.replace(/[\\^$.|?*+()[\]{}/-]/g, '\\$&');
-const hasWildcard = (seg: string): boolean => /[*?[(|]/.test(seg);
+/** `^x`, `x~y`, `x#` and `<1-9>` are patterns only where the shell reads extended ones */
+const EXTENDED_PATTERN = /[\^#<]|.~/;
+const hasWildcard = (seg: string, extended = false): boolean => /[*?[(|]/.test(seg) || (extended && EXTENDED_PATTERN.test(seg));
 
 /** One path segment of a glob as a regular expression, or null for syntax this does not enumerate (an extended glob, `a|b`,
  *  a character class it cannot read). */
-function segmentRegExp(seg: string): RegExp | null {
+function segmentRegExp(seg: string, ignoreCase = false, extended = false): RegExp | null {
+  if (extended && EXTENDED_PATTERN.test(seg)) return null;
   let re = '';
   for (let i = 0; i < seg.length; i++) {
     const c = seg[i]!;
@@ -583,7 +586,7 @@ function segmentRegExp(seg: string): RegExp | null {
     else re += escapeRe(c);
   }
   try {
-    return new RegExp(`^${re}$`, 's');
+    return new RegExp(`^${re}$`, ignoreCase ? 'si' : 's');
   } catch {
     return null;
   }
@@ -601,7 +604,14 @@ export function globMatches(
   cwds: string | readonly string[],
   word: string,
   old: readonly string[] | undefined,
-  options: { dotfiles: boolean; keep?: (path: string) => boolean },
+  options: {
+    dotfiles: boolean;
+    /** the shell matches a name whatever its case (`shopt -s nocaseglob`, zsh's `unsetopt CASE_GLOB`) */
+    ignoreCase?: boolean;
+    /** the shell reads extended patterns (`^x`, `x~y`, `x#`, `<1-9>`): a word that uses one is not enumerated here */
+    extended?: boolean;
+    keep?: (path: string) => boolean;
+  },
 ): GlobMatches {
   const none: GlobMatches = { paths: [], directories: new Set(), bounded: false, dynamic: true };
   const dirs = directoriesOf(cwds);
@@ -618,7 +628,8 @@ export function globMatches(
   const budget = { entries: GLOB_ENTRY_BUDGET, bounded: false };
   const found = new Set<string>();
   const directories = new Set<string>();
-  for (const t of texts) for (const base of isAbsolute(t) ? [sep] : dirs) expandGlobText(base, t, dotfiles, budget, found, directories);
+  const style = { ignoreCase: options.ignoreCase === true, extended: options.extended === true };
+  for (const t of texts) for (const base of isAbsolute(t) ? [sep] : dirs) expandGlobText(base, t, dotfiles, style, budget, found, directories);
   const keep = options.keep;
   const paths = keep === undefined ? [...found] : [...found].filter(keep);
   return { paths: paths.slice(0, GLOB_RESULT_BUDGET), directories, bounded: budget.bounded || paths.length > GLOB_RESULT_BUDGET, dynamic: false };
@@ -628,6 +639,7 @@ function expandGlobText(
   root: string,
   text: string,
   dotfiles: boolean,
+  style: { ignoreCase: boolean; extended: boolean },
   budget: { entries: number; bounded: boolean },
   found: Set<string>,
   directories: Set<string>,
@@ -677,11 +689,11 @@ function expandGlobText(
       frontier = [...next];
       continue;
     }
-    if (!hasWildcard(seg)) {
+    if (!hasWildcard(seg, style.extended)) {
       frontier = frontier.map((p) => join(p, seg));
       continue;
     }
-    const re = segmentRegExp(seg);
+    const re = segmentRegExp(seg, style.ignoreCase, style.extended);
     if (re === null) {
       budget.bounded = true;
       return;

@@ -2702,6 +2702,14 @@ function separateGluedRedirections(text: string): string {
     // a here-string's text is the word AFTER its operator: `bash<<<'git push'` is the script `git push`, and the readers of a
     // here-string take the next word whole, which a glued one is not
     if (out.startsWith('<<<', p) && p + 3 < out.length && !/\s/.test(out[p + 3]!)) out = `${out.slice(0, p + 3)} ${out.slice(p + 3)}`;
+    else if (!out.startsWith('<<', p)) {
+      // ...and a target that STARTS with a quote is its own word: `>"/dev/null"` tokenizes as ONE quoted word, which hides the
+      // operator from the readers that cut a word at one (`cd control-plane >"/dev/null"` was a `cd` with two operands). A
+      // here-document's delimiter keeps its quote - whether it is quoted decides whether the body expands
+      let e = p;
+      while (e < out.length && /[<>&|!]/.test(out[e]!)) e++;
+      if (e > p && /['"]/.test(out[e] ?? '')) out = `${out.slice(0, e)} ${out.slice(e)}`;
+    }
     const before = out[p - 1];
     if (before === undefined || /[\s;&|({]/.test(before)) continue;
     // a run of digits that is a word by itself is the descriptor of this operator: the word ends in front of THEM
@@ -3180,7 +3188,7 @@ interface StatementHead {
   viaCommand: boolean;
 }
 function statementHead(text: string): StatementHead {
-  const t = commandWords(tokenizeMarked(expandBraces(text))).map((x) => x.text);
+  const t = commandWords(tokenizeMarked(separateGluedRedirections(expandBraces(text)))).map((x) => x.text);
   let i = 0;
   let bypass = false;
   let viaCommand = false;
@@ -3554,7 +3562,7 @@ export function cwdTimeline(
   let mayStop = false;
   for (let i = 0; i < stages.length; i++) {
     const st = stages[i]!;
-    const text = expandBraces(st.text).trim();
+    const text = separateGluedRedirections(expandBraces(st.text)).trim();
     if (st.text.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
       fnDepth++;
       out.push({ dirs: [...now].filter((d) => d !== CWD_UNKNOWN), unknown: now.has(CWD_UNKNOWN), dynamicCd: false });
@@ -3914,7 +3922,19 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
   );
 }
 
+/** A pattern is compiled once: the same few dozen protected-path globs are asked of every path a decision judges, and a wildcard
+ *  operand that matches a thousand names asks them a thousand times. (The expression carries no `g`/`y` flag, so it holds no state.) */
+const globRegExps = new Map<string, RegExp>();
+
 export function globToRegExp(glob: string): RegExp {
+  const known = globRegExps.get(glob);
+  if (known !== undefined) return known;
+  const compiled = compileGlob(glob);
+  if (globRegExps.size < 4096) globRegExps.set(glob, compiled);
+  return compiled;
+}
+
+function compileGlob(glob: string): RegExp {
   let re = '^';
   for (let i = 0; i < glob.length; i++) {
     const ch = glob[i]!;
@@ -12605,6 +12625,19 @@ function pathTokens(segment: string, cwd: string, old?: readonly string[]): Path
 /** A line that makes a shell's wildcard match a name that begins with a dot: bash's `shopt -s dotglob` and a GLOBIGNORE (any
  *  value turns it on), zsh's `setopt glob_dots` in the spellings its option parser accepts (case and underscores are ignored). */
 const DOTGLOB_RE = /dot_?glob|glob_?dots|globignore/i;
+/** `shopt -s nocaseglob` and zsh's `unsetopt CASE_GLOB`: a pattern matches a name whatever its case */
+const NOCASEGLOB_RE = /case_?glob/i;
+/** `shopt -s extglob` and zsh's `setopt EXTENDED_GLOB`: `@(a|b)`, `^x`, `x~y` and `x#` mean something a plain pattern does not */
+const EXTGLOB_RE = /ext_?glob|extended_?glob/i;
+
+/** How the shell that runs a unit matches a wildcard, read from the unit itself. */
+function shellGlobOptions(units: readonly string[]): { dotfiles: boolean; ignoreCase: boolean; extended: boolean } {
+  return {
+    dotfiles: units.some((s) => DOTGLOB_RE.test(s)),
+    ignoreCase: units.some((s) => NOCASEGLOB_RE.test(s)),
+    extended: units.some((s) => EXTGLOB_RE.test(s)),
+  };
+}
 /** a zsh glob qualifier list that carries `D`: this one pattern matches names that begin with a dot */
 const ZSH_DOT_QUALIFIER_RE = /\([A-Za-z0-9^.,:@/*%=+<>-]*D[A-Za-z0-9^.,:@/*%=+<>-]*\)$/;
 
@@ -12642,8 +12675,8 @@ function classifyShellPaths(
   rawSeg: string = seg,
   /** the directories `~-` and `$OLDPWD` may name here, when the command line has one */
   old?: readonly string[],
-  /** the line makes a wildcard match names that begin with a dot (see DOTGLOB_RE) */
-  dotGlob = false,
+  /** how the shell matches a wildcard on this line: dotfiles, case, extended patterns (see shellGlobOptions) */
+  shellGlob: { dotfiles: boolean; ignoreCase: boolean; extended: boolean } = { dotfiles: false, ignoreCase: false, extended: false },
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   // operands are read with the redirections taken out (`cp x f 2>&1`: the destination is `f`); the regex tests below keep
@@ -13518,7 +13551,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   const judgeGlob = (raw: string): void => {
     if (expandedGlobs.has(raw)) return;
     expandedGlobs.add(raw);
-    const set = globMatches(cwd, raw, old, { dotfiles: dotGlob });
+    const set = globMatches(cwd, raw, old, shellGlob);
     if (set.bounded)
       hits.push({
         capability: 'command.unknown',
@@ -13540,7 +13573,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // `dotglob`/`GLOB_DOTS` on, or a zsh `(D)` qualifier, it matches `.env` as surely as `.e*` does
   for (const t of tokens.slice(1)) {
     const v = pathValueOf(t);
-    if (v && /[*?[]/.test(v) && !isPathLike(v) && (dotGlob || ZSH_DOT_QUALIFIER_RE.test(v)) && !patternWords.includes(v)) judgeGlob(v);
+    if (v && /[*?[]/.test(v) && !isPathLike(v) && (shellGlob.dotfiles || ZSH_DOT_QUALIFIER_RE.test(v)) && !patternWords.includes(v)) judgeGlob(v);
   }
   if (paths.length === 0) return hits;
   for (const p of paths) {
@@ -14269,7 +14302,7 @@ function analyzeSegments(
   segments = segments.map(externalText);
   // WHETHER A WILDCARD MATCHES A NAME THAT BEGINS WITH A DOT is the shell's option, and a line may set it: bash `shopt -s
   // dotglob` or any GLOBIGNORE, zsh `setopt glob_dots`. Read from the whole unit, because the option outlives the line it is on
-  const dotGlob = segments.some((s) => DOTGLOB_RE.test(s));
+  const shellGlob = shellGlobOptions(segments);
   // TRANSITIVE FRESHNESS: the ledger belongs to the COMMAND, not to one producer, and is mutated in place. A copy
   // here is what made `./configure && make build` reuse the Makefile configure had just rewritten — the write
   // happened one level down and never came back out (challenge 6, findings 6, 13, 19).
@@ -14722,7 +14755,7 @@ function analyzeSegments(
           written,
           seg,
           point.old,
-          dotGlob,
+          shellGlob,
         ))
           hits.push(h);
     }

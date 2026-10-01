@@ -498,6 +498,12 @@ test('RC-PTH: a wildcard operand is judged by the names it can match in the dire
       'GLOBIGNORE=x; cat *',
       'cat *(D)',
       'cat sub/*(D)',
+      // ...and the options that change what a pattern means: case, and the extended patterns a group or `^` spells
+      'shopt -s nocaseglob; cat .E*',
+      'setopt no_case_glob; cat .E*',
+      'cat .(env|foo)',
+      'shopt -s extglob; cat .@(env|x)',
+      'setopt extended_glob; cat ./.^x',
     ],
     dir,
   );
