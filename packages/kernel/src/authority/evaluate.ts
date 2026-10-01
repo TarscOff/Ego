@@ -166,7 +166,7 @@ const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'
  *  documents and this list lacks is the same defect again.
  */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|(?:npm|NPM)_config_[A-Za-z_]+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|REDISCLI_RCFILE|PSQLRC|PSQL_PAGER|PSQL_EDITOR|PSQL_EDITOR_LINENUMBER_ARG|PSQL_HISTORY|PGSYSCONFDIR|PGLOCALEDIR|PGSSLKEY|PGSSLCERT|PGSSLCRL|PGSSLCRLDIR|LIBMYSQL_PLUGIN_DIR|LIBMYSQL_PLUGINS|MYSQL_HISTFILE|MYSQL_TEST_LOGIN_FILE|MYSQL_DEBUG|SQLITE_HISTORY|SQLITE_TMPDIR|REDISCLI_HISTFILE|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES|CLICKHOUSE_CONFIG|CQLSH_[A-Z_]*|MONGOSH_[A-Z_]*|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|[Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_\w+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|REDISCLI_RCFILE|PSQLRC|PSQL_PAGER|PSQL_EDITOR|PSQL_EDITOR_LINENUMBER_ARG|PSQL_HISTORY|PGSYSCONFDIR|PGLOCALEDIR|PGSSLKEY|PGSSLCERT|PGSSLCRL|PGSSLCRLDIR|LIBMYSQL_PLUGIN_DIR|LIBMYSQL_PLUGINS|MYSQL_HISTFILE|MYSQL_TEST_LOGIN_FILE|MYSQL_DEBUG|SQLITE_HISTORY|SQLITE_TMPDIR|REDISCLI_HISTFILE|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES|CLICKHOUSE_CONFIG|CQLSH_[A-Z_]*|MONGOSH_[A-Z_]*|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
 
 /** Options of a governed variable that actually LOAD CODE. `NODE_OPTIONS=--max-old-space-size=4096 npm test` is
  *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
@@ -191,11 +191,66 @@ function envInjects(name: string, assignment: string): boolean {
   // a flags variable is inert unless its value reaches for a linker, a plugin or a wrapper program
   if (/^(?:RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*RUSTFLAGS)$/.test(name))
     return /linker|link-arg|wrapper|-Z|plugin|codegen-backend|--config|--emit/.test(value0);
-  // npm reads `npm_config_*` case-insensitively; most settings are harmless (`loglevel`, `color`), and these are not
-  if (/^npm_config_/i.test(name))
-    return /script[-_]shell|^npm_config_shell$|userconfig|globalconfig|prefix|cache|init[-_]module|node[-_]gyp|editor|git$|onload|scripts[-_]prepend|foreground|ignore[-_]scripts|registry|proxy|cafile|ca$|tmp/i.test(name);
+  // `npm_config_<name>` IS the npm configuration key `<name>`, so what it does is a property of the KEY: read by the
+  // names npm accepts, not by a list of the dangerous ones (see NPM_CONFIG_INERT)
+  if (/^npm_config_/i.test(name)) {
+    // npm drops a variable whose value is empty; nothing is set
+    if (value0.trim() === '') return false;
+    return !NPM_CONFIG_INERT.has(npmConfigKey(name));
+  }
   return true;
 }
+
+/**
+ * NPM CONFIGURATION, READ BY THE KEYS NPM ACCEPTS. One key reaches npm as a flag (`--node-options`), as an `.npmrc`
+ * line (`node-options=`) or as a variable (`npm_config_node_options`), and the three were read by three separate lists
+ * of the dangerous names. The variable's list asked for `ignore-scripts` and `foreground-scripts` and not for
+ * `node-options` - the key whose flag and rc spellings the manifest reader had refused for a round - so
+ * `npm_config_node_options='--require ./evil.js' npm run build` was ALLOW (closure audit F20).
+ *
+ * A VARIABLE NAMED `npm_config_X` IS THE KEY `X` BY CONSTRUCTION - npm's loader takes the prefix in any case, turns
+ * every underscore after the first character into a hyphen and lower-cases the rest - so for the variable the question
+ * is answered the other way round: the keys below are the ones that execute nothing, redirect nothing and open no
+ * connection, and every other key asks. A key missing here costs an approvable ask; a key missing from a list of the
+ * dangerous ones was an unreviewed program (`onload-script` and `init-module` load a module, `node-gyp`, `git`,
+ * `editor` and `browser` name a program, `store-dir` and `pnpmfile` are pnpm's, which reads the same prefix).
+ * A flag is a different question: most `--words` before the script name are the options of the COMMAND, not
+ * configuration keys, so the flag and the rc readers name the keys that run something (NPM_CONFIG_RUNS) and nothing else.
+ */
+const NPM_CONFIG_INERT: ReadonlySet<string> = new Set([
+  // presentation: what is printed and how
+  'color', 'loglevel', 'progress', 'unicode', 'timing', 'json', 'parseable', 'long', 'heading', 'logs-max',
+  // notices and reports
+  'update-notifier', 'fund', 'audit', 'audit-level',
+  // resolution and install policy that selects what is installed and runs nothing of its own
+  'legacy-peer-deps', 'strict-peer-deps', 'package-lock', 'package-lock-only', 'lockfile-version', 'save', 'save-dev',
+  'save-prod', 'save-optional', 'save-peer', 'save-bundle', 'save-exact', 'save-prefix', 'global-style',
+  'legacy-bundling', 'install-strategy', 'install-links', 'bin-links', 'prefer-dedupe', 'prefer-offline',
+  'prefer-online', 'offline', 'engine-strict', 'omit', 'include', 'production', 'omit-lockfile-registry-resolved',
+  // which workspace, and what a dry run would do
+  'workspaces', 'workspace', 'include-workspace-root', 'workspaces-update', 'if-present', 'dry-run', 'depth', 'all',
+  // limits of the network client
+  'maxsockets', 'fetch-retries', 'fetch-retry-factor', 'fetch-retry-mintimeout', 'fetch-retry-maxtimeout',
+  'fetch-timeout',
+]);
+/** npm's name for a key that reached it as a variable: the prefix in any case, then underscores after the first
+ *  character as hyphens, lower-cased (a key that starts `//` is a registry credential and is kept as written) */
+function npmConfigKey(envName: string): string {
+  const rest = envName.replace(/^npm_config_/i, '');
+  return rest.startsWith('//') ? rest : rest.replace(/(?!^)_/g, '-').toLowerCase();
+}
+/** Keys that name a program, a module or a shell that npm, or a script it starts, will RUN: the ones a flag or an
+ *  `.npmrc` line may not set without the resolver saying it did not see what runs. */
+const NPM_CONFIG_RUNS: readonly string[] = [
+  'script-shell', 'shell', 'node-options', 'onload-script', 'init-module', 'node-gyp', 'editor', 'git', 'browser',
+  'viewer', 'scripts-prepend-node-path',
+];
+/** ...as a flag (the flag also keeps the settings that relocate npm's configuration or turn script output on) ... */
+const NPM_RUNS_FLAG = new RegExp(
+  `^--(${NPM_CONFIG_RUNS.join('|')}|ignore-scripts=false|foreground-scripts|userconfig|globalconfig|prefix)(=|$)`,
+);
+/** ...and as a line of an rc file (plus the yarn berry spellings that hand the package manager to a program) */
+const NPM_RUNS_RC = new RegExp(`^\\s*(${NPM_CONFIG_RUNS.join('|')}|scriptShell|yarnPath|plugins)\\s*[:=]`, 'm');
 /** NODE_OPTIONS members that execute nothing and open nothing */
 const NODE_OPTIONS_INERT =
   /^--(max-old-space-size|max-semi-space-size|stack-size|stack-trace-limit|enable-source-maps|no-warnings|trace-warnings|trace-deprecation|no-deprecation|throw-deprecation|unhandled-rejections|dns-result-order|openssl-legacy-provider|use-openssl-ca|use-bundled-ca|preserve-symlinks|preserve-symlinks-main|experimental-strip-types|experimental-transform-types|no-experimental-fetch|no-experimental-global-navigator|disable-warning|title|max-http-header-size|abort-on-uncaught-exception|experimental-default-type|no-network-family-autoselection)(=[\w.,:/-]*)?$|^[0-9]+$/;
@@ -4575,7 +4630,7 @@ const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   ],
   'npm-script': [
     PROGRAM_NAMING_ENV,
-    /^(npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/,
+    /^(npm_config_\w+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/,
   ],
   'shell-script': [PROGRAM_NAMING_ENV, /^(SHELL|BASH_ENV|ENV|PATH|CDPATH)$/],
   'git-ambient': [PROGRAM_NAMING_ENV, /^(GIT_[A-Z_]+|PATH)$/],
@@ -4729,7 +4784,7 @@ function endpointEnvHit(seg: string): string | null {
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*(RUNNER|LINKER|AR)|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_\w+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*(RUNNER|LINKER|AR)|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string, allAssignments = false): Record<string, string> {
   const out: Record<string, string> = {};
@@ -7415,9 +7470,7 @@ function resolveScriptCommand(
     );
     // npm accepts its configuration as flags anywhere on the line, including AFTER the script name, and
     // `--script-shell` re-points the interpreter of every script (challenge 8, finding 3)
-    const npmFlags = tokens.filter((t) =>
-      /^--(script-shell|node-options|shell|ignore-scripts=false|foreground-scripts|userconfig|globalconfig|prefix)(=|$)/.test(t),
-    );
+    const npmFlags = tokens.filter((t) => NPM_RUNS_FLAG.test(t));
     // the same settings live in `.npmrc` / `.yarnrc.yml`, which npm reads from the package directory upwards.
     // A flag on the command line was modelled and the FILE that sets the identical key was not (challenge 8).
     // A CONFIGURATION FILE THIS COMMAND REWRITES IS NOT THE ONE npm WILL READ. `printf 'script-shell=/tmp/evil.sh'
@@ -7447,7 +7500,7 @@ function resolveScriptCommand(
       // every `yarn` command to the program it names
       return (
         rcText === null ||
-        /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText) ||
+        NPM_RUNS_RC.test(rcText) ||
         /^\s*yarn-path(\s*[:=]|\s+\S)/m.test(rcText)
       );
     });

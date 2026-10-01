@@ -140,3 +140,101 @@ test('make: a wildcard in a target or prerequisite names no literal target, so t
   // a makefile without any of it is unchanged
   assert.equal(v('make deploy', { Makefile: 'deploy:\n\techo hi\n' }), 'ALLOW');
 });
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 2. THE ENVIRONMENT SPELLING OF AN npm OPTION IS THE OPTION
+ *
+ * npm turns every `npm_config_<name>` variable into the configuration key `<name>` (prefix in any case, the
+ * underscores after the first character become hyphens, the rest is lower-cased), so `npm_config_node_options` is
+ * `--node-options` and `NPM_CONFIG_ONLOAD_SCRIPT` is `--onload-script`. The reading of that family was an
+ * enumeration of the dangerous names - and `node-options`, the one the flag and the `.npmrc` readers already knew,
+ * was not on it. What is accepted now is a short list of keys known to execute nothing and redirect nothing;
+ * every other key asks.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const BUILD = { 'package.json': JSON.stringify({ scripts: { build: 'tsc -p .', test: 'tsc -p .' } }), 'evil.js': '1' };
+
+test('npm: the environment spelling of a key that loads code is the key', () => {
+  const rows: string[] = [
+    "npm_config_node_options='--require ./evil.js' npm run build",
+    "NPM_CONFIG_NODE_OPTIONS='--require ./evil.js' npm run build",
+    "Npm_Config_Node_Options='--require ./evil.js' npm run build",
+    "NPM_config_node_options='--require ./evil.js' npm run build",
+    "npm_config_node_options='--require ./evil.js' npm test",
+    "npm_config_node_options='--require ./evil.js' pnpm build",
+    "npm_config_node_options='--require ./evil.js' yarn build",
+    "npm_config_node_options='--require ./evil.js' npx tsc",
+    "env npm_config_node_options='--require ./evil.js' npm run build",
+    "env -i npm_config_node_options='--require ./evil.js' npm run build",
+    "export npm_config_node_options='--require ./evil.js' && npm run build",
+    "npm_config_node_options='--require ./evil.js'; npm run build",
+    'npm_config_onload_script=./evil.js npm run build',
+    'npm_config_init_module=./evil.js npm run build',
+    'npm_config_node_gyp=./evil.sh npm run build',
+    'npm_config_scripts_prepend_node_path=true npm run build',
+    'npm_config_editor=./evil.sh npm run build',
+    'npm_config_git=./evil.sh npm run build',
+    'npm_config_browser=./evil.sh npm run build',
+    'npm_config_script_shell=./evil.sh npm run build',
+    'npm_config_shell=./evil.sh npm run build',
+  ];
+  const wrong: string[] = [];
+  for (const command of rows) {
+    const got = v(command, BUILD);
+    if (got === 'ALLOW') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('npm: a key nobody listed asks, because the family is read by what npm accepts and not by what was thought of', () => {
+  const wrong: string[] = [];
+  for (const name of ['npm_config_somethingnew', 'npm_config_unsafe_perm', 'npm_config_x1', 'npm_config_user_agent', 'npm_config_yes', 'npm_config_store_dir', 'npm_config_pnpmfile'])
+    if (v(`${name}=1 npm run build`, BUILD) === 'ALLOW') wrong.push(name);
+  assert.deepEqual(wrong, []);
+});
+
+test('npm: the keys that execute nothing and redirect nothing stay ordinary', () => {
+  const ordinary = [
+    'npm_config_loglevel=silent npm run build',
+    'npm_config_loglevel=warn npm test',
+    'npm_config_color=false npm test',
+    'NPM_CONFIG_COLOR=false npm test',
+    'npm_config_progress=false npm run build',
+    'npm_config_update_notifier=false npm run build',
+    'npm_config_fund=false npm_config_audit=false npm run build',
+    'npm_config_legacy_peer_deps=true npm run build',
+    'npm_config_engine_strict=true npm run build',
+    'npm_config_prefer_offline=true npm run build',
+    'npm_config_fetch_retries=5 npm run build',
+    'npm_config_omit=dev npm run build',
+    'npm_config_json=true npm test',
+    // npm ignores an empty value: nothing is set
+    'npm_config_node_options= npm run build',
+  ];
+  const wrong: string[] = [];
+  for (const command of ordinary) {
+    const got = v(command, BUILD);
+    if (got !== 'ALLOW') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('npm: a key that runs code is one key whether it arrives as a flag, as an .npmrc line or as a variable', () => {
+  const keys = ['onload-script', 'node-gyp', 'init-module', 'editor', 'git', 'browser', 'scripts-prepend-node-path', 'node-options', 'script-shell', 'shell'];
+  const wrong: string[] = [];
+  for (const key of keys) {
+    const spellings: Array<[string, string, Record<string, string>]> = [
+      ['flag', `npm run build --${key}=./x`, BUILD],
+      ['rc', 'npm run build', { ...BUILD, '.npmrc': `${key}=./x\n` }],
+      ['variable', `npm_config_${key.replaceAll('-', '_')}=./x npm run build`, BUILD],
+    ];
+    for (const [how, command, files] of spellings) {
+      const got = v(command, files);
+      if (got === 'ALLOW') wrong.push(`${key} as a ${how}: ${command} -> ${got}`);
+    }
+  }
+  assert.deepEqual(wrong, []);
+  // the same file with harmless keys stays ordinary
+  assert.equal(v('npm run build', { ...BUILD, '.npmrc': 'loglevel=silent\nfund=false\naudit=false\n' }), 'ALLOW');
+  assert.equal(v('npm run build --loglevel=silent --if-present', BUILD), 'ALLOW');
+});
