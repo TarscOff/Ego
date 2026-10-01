@@ -28,7 +28,7 @@
 // than it must — a word with no `..` has no physical reading of its own (the classifier canonicalises the lexical one),
 // so ordinary work pays for no filesystem call it did not already make.
 import { homedir, userInfo } from 'node:os';
-import { readlinkSync, realpathSync } from 'node:fs';
+import { readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 /** How many links one path resolution may follow before it is read as a loop (Linux stops at 40). */
@@ -235,6 +235,15 @@ export function isDiscardDevice(path: string): boolean {
  *  (exit review 7). */
 export function isNetworkDevice(path: string): boolean {
   return path.startsWith('/') && NET_DEVICE_RE.test(resolve(path));
+}
+
+/** The connection a `/dev/tcp/HOST/PORT` (or `/dev/udp/…`) path opens, or null when the path is not one. The path is the word
+ *  the SHELL sees - quotes and escapes already removed - because bash intercepts the name inside its own redirection code,
+ *  after quote removal: `/dev/"tcp"/evil.test/80` is `/dev/tcp/evil.test/80` (r11-200). */
+export function networkDevice(path: string): { proto: string; host: string; port: string } | null {
+  if (!path.startsWith('/')) return null;
+  const m = NET_DEVICE_RE.exec(resolve(path));
+  return m === null ? null : { proto: m[1]!, host: m[2]!, port: m[3]! };
 }
 
 /** True when an absolute path is `/dev` or lies under it, AFTER resolution (`/dev/..` is `/`, and a nine-character prefix
@@ -491,4 +500,215 @@ export function directoryCandidates(base: string, word: string, physicalOnly = f
   const physical = r.physical[0] ?? logical;
   if (physicalOnly) return [physical];
   return physical === logical ? [logical] : [logical, physical];
+}
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * The SET of names a wildcard can match
+ *
+ * A glob word was judged by its LITERAL PREFIX: `.e*` is `.e`, a name that does not exist, so `cat .e*` read `.env` at
+ * ALLOW (r11-95), and a search tool's `glob: "*"` — which, like every explicit glob, overrides the tool's skip-hidden
+ * default — printed it (r11-96). A wildcard denotes the names that exist and match it, so that is what it is judged by:
+ * the directory is read, the segment is matched, the matches are classified like any other path.
+ *
+ * THE EXPANSION IS BOUNDED, and a bound is a question rather than an absence: after GLOB_ENTRY_BUDGET entries read, or
+ * on syntax this does not enumerate (an extended glob), `bounded` says the set is a lower bound and the caller asks.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** How many directory entries one expansion may read before it is read as unbounded (a few milliseconds of `readdir`). */
+export const GLOB_ENTRY_BUDGET = 20000;
+/** How many names one expansion may return (each is classified by the caller: a few tenths of a millisecond apiece). */
+const GLOB_RESULT_BUDGET = 2000;
+/** A recursive `**` does not descend into a dependency tree: what a package ships is not the user's secret, and the tree is
+ *  larger than every budget. (A wildcard written INTO it, `node_modules/*`, is expanded like any other.) */
+const GLOB_SKIPPED_DIRS: ReadonlySet<string> = new Set(['node_modules']);
+
+export interface GlobMatches {
+  /** absolute paths of the names that exist and match (a literal segment after a wildcard is appended whether or not it exists) */
+  readonly paths: string[];
+  /** which of them are directories: a directory's CONTENTS are what a rule about it describes */
+  readonly directories: ReadonlySet<string>;
+  /** the expansion stopped at a budget or met syntax it does not enumerate: `paths` is a lower bound */
+  readonly bounded: boolean;
+  /** the word has a part nobody can know (`$VAR`, a substitution): nothing was expanded */
+  readonly dynamic: boolean;
+}
+
+const POSIX_CLASSES: Readonly<Record<string, string>> = {
+  alpha: 'a-zA-Z', digit: '0-9', alnum: 'a-zA-Z0-9', upper: 'A-Z', lower: 'a-z', space: '\\s', punct: '!-\\/:-@\\[-`{-~', xdigit: '0-9a-fA-F', word: 'a-zA-Z0-9_',
+};
+const escapeRe = (c: string): string => c.replace(/[\\^$.|?*+()[\]{}/-]/g, '\\$&');
+/** `^x`, `x~y`, `x#` and `<1-9>` are patterns only where the shell reads extended ones */
+const EXTENDED_PATTERN = /[\^#<]|.~/;
+const hasWildcard = (seg: string, extended = false): boolean => /[*?[(|]/.test(seg) || (extended && EXTENDED_PATTERN.test(seg));
+
+/** One path segment of a glob as a regular expression, or null for syntax this does not enumerate (an extended glob, `a|b`,
+ *  a character class it cannot read). */
+function segmentRegExp(seg: string, ignoreCase = false, extended = false): RegExp | null {
+  if (extended && EXTENDED_PATTERN.test(seg)) return null;
+  let re = '';
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]!;
+    if (c === '\\') {
+      re += escapeRe(seg[++i] ?? '\\');
+    } else if (c === '*') {
+      while (seg[i + 1] === '*') i++;
+      re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else if (c === '[') {
+      let j = i + 1;
+      const negated = seg[j] === '!' || seg[j] === '^';
+      if (negated) j++;
+      const bodyAt = j;
+      if (seg[j] === ']') j++;
+      for (; j < seg.length && seg[j] !== ']'; j++)
+        if (seg[j] === '[' && seg[j + 1] === ':') {
+          const end = seg.indexOf(':]', j + 2);
+          if (end < 0) return null;
+          j = end + 1;
+        }
+      if (j >= seg.length) re += '\\[';
+      else {
+        let body = '';
+        const raw = seg.slice(bodyAt, j);
+        for (let k = 0; k < raw.length; k++) {
+          if (raw[k] === '[' && raw[k + 1] === ':') {
+            const end = raw.indexOf(':]', k + 2);
+            const named = POSIX_CLASSES[raw.slice(k + 2, end)];
+            if (named === undefined) return null;
+            body += named;
+            k = end + 1;
+          } else body += raw[k] === '\\' || raw[k] === ']' || raw[k] === '^' ? `\\${raw[k]}` : raw[k]!;
+        }
+        re += `[${negated ? '^' : ''}${body}]`;
+        i = j;
+      }
+    } else if (c === '(' || c === ')' || c === '|') return null;
+    else re += escapeRe(c);
+  }
+  try {
+    return new RegExp(`^${re}$`, ignoreCase ? 'si' : 's');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The names a glob WORD matches, in each directory the shell may be in. `dotfiles` is whether a wildcard matches a name that
+ * begins with a dot: a shell's does not (unless `dotglob`/`GLOB_DOTS` is set, or zsh's `(D)` qualifier is on the word); a
+ * search tool's explicit glob does (it overrides the hidden-file default). A segment that itself begins with a literal dot
+ * (`.e*`) always may. Braces are the caller's to expand first. `keep` narrows the answer to the names the caller will judge
+ * (a catch-all over a tree matches every file in it, and only the hidden ones can be credentials), before the result budget
+ * is spent: a name it drops is not "bounded", it is not asked about.
+ */
+export function globMatches(
+  cwds: string | readonly string[],
+  word: string,
+  old: readonly string[] | undefined,
+  options: {
+    dotfiles: boolean;
+    /** the shell matches a name whatever its case (`shopt -s nocaseglob`, zsh's `unsetopt CASE_GLOB`) */
+    ignoreCase?: boolean;
+    /** the shell reads extended patterns (`^x`, `x~y`, `x#`, `<1-9>`): a word that uses one is not enumerated here */
+    extended?: boolean;
+    keep?: (path: string) => boolean;
+  },
+): GlobMatches {
+  const none: GlobMatches = { paths: [], directories: new Set(), bounded: false, dynamic: true };
+  const dirs = directoriesOf(cwds);
+  let text = word;
+  let dotfiles = options.dotfiles;
+  // zsh's glob qualifiers: `.e*(N)`, `*(D)`. `D` is "match dotfiles"; the others only select by type or by flag
+  const qualifier = /\(([A-Za-z0-9^.,:@/*%=+<>-]*)\)$/.exec(text);
+  if (qualifier !== null && qualifier.index > 0) {
+    text = text.slice(0, qualifier.index);
+    if (qualifier[1]!.includes('D')) dotfiles = true;
+  }
+  const texts = expandStart(text, dirs, old, { uncertain: null });
+  if (texts === null || texts.some((x) => /[$`]/.test(x))) return none;
+  const budget = { entries: GLOB_ENTRY_BUDGET, bounded: false };
+  const found = new Set<string>();
+  const directories = new Set<string>();
+  const style = { ignoreCase: options.ignoreCase === true, extended: options.extended === true };
+  for (const t of texts) for (const base of isAbsolute(t) ? [sep] : dirs) expandGlobText(base, t, dotfiles, style, budget, found, directories);
+  const keep = options.keep;
+  const paths = keep === undefined ? [...found] : [...found].filter(keep);
+  return { paths: paths.slice(0, GLOB_RESULT_BUDGET), directories, bounded: budget.bounded || paths.length > GLOB_RESULT_BUDGET, dynamic: false };
+}
+
+function expandGlobText(
+  root: string,
+  text: string,
+  dotfiles: boolean,
+  style: { ignoreCase: boolean; extended: boolean },
+  budget: { entries: number; bounded: boolean },
+  found: Set<string>,
+  directories: Set<string>,
+): void {
+  const segments = text.split('/').filter((s) => s !== '' && s !== '.');
+  let frontier: string[] = [root];
+  /** the entries of a directory, or none when it cannot be read; each one read is paid for */
+  const entriesOf = (dir: string): Array<{ name: string; directory: boolean }> | null => {
+    let list;
+    try {
+      list = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    budget.entries -= list.length;
+    if (budget.entries < 0) {
+      budget.bounded = true;
+      return null;
+    }
+    return list.map((e) => ({ name: e.name, directory: e.isDirectory() }));
+  };
+  for (let idx = 0; idx < segments.length && !budget.bounded; idx++) {
+    const seg = segments[idx]!;
+    const last = idx === segments.length - 1;
+    if (seg === '..') {
+      frontier = frontier.map((p) => dirname(p));
+      continue;
+    }
+    if (seg === '**') {
+      // zero or more directories; as the LAST segment it is every name below
+      const next = new Set<string>();
+      const queue = [...frontier];
+      for (const p of frontier) next.add(p);
+      while (queue.length > 0 && !budget.bounded) {
+        const dir = queue.shift()!;
+        for (const e of entriesOf(dir) ?? []) {
+          const here = join(dir, e.name);
+          if (last) {
+            next.add(here);
+            if (e.directory) directories.add(here);
+          }
+          if (!e.directory || GLOB_SKIPPED_DIRS.has(e.name) || (!dotfiles && e.name.startsWith('.'))) continue;
+          if (!last) next.add(here);
+          queue.push(here);
+        }
+      }
+      frontier = [...next];
+      continue;
+    }
+    if (!hasWildcard(seg, style.extended)) {
+      frontier = frontier.map((p) => join(p, seg));
+      continue;
+    }
+    const re = segmentRegExp(seg, style.ignoreCase, style.extended);
+    if (re === null) {
+      budget.bounded = true;
+      return;
+    }
+    const next: string[] = [];
+    for (const p of frontier) {
+      for (const e of entriesOf(p) ?? []) {
+        if (e.name.startsWith('.') && !dotfiles && !seg.startsWith('.')) continue;
+        if (!re.test(e.name)) continue;
+        const here = join(p, e.name);
+        if (e.directory) directories.add(here);
+        next.push(here);
+      }
+    }
+    frontier = next;
+  }
+  for (const p of frontier) found.add(p);
 }

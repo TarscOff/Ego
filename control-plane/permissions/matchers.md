@@ -823,9 +823,14 @@ matchers:
     tool: Bash
     command: '^git\s+worktree\s+(remove|prune)\b'
   # --- local runtime ---
+  # DROPPING A DATABASE is decided by the evaluator's reader of the client's statements (`dbStatements` +
+  # `dbDropsDatabase`, one list of dropped objects: database, schema, keyspace), which sees a statement however its option
+  # spells it - glued (`mysql -e'DROP DATABASE app'`), abbreviated, repeated, in a cluster. This pattern is the TEXT net
+  # for the forms that carry the statement outside an option (a here-string); it carries no word boundary in front of DROP
+  # because the glued form has none (r11-84), and it lists the same objects as the reader.
   - capability: db.local.drop
     tool: Bash
-    command: '^(dropdb|psql\b.*\bDROP\s+DATABASE|mysql\b.*\bDROP\s+DATABASE)'
+    command: '^(dropdb|(psql|mysql|mariadb|clickhouse-client|clickhouse\s+client|cqlsh)\b.*DROP\s+(DATABASE|SCHEMA|KEYSPACE)\b)'
   - capability: db.local.migrate
     tool: Bash
     command: '^(npx\s+)?(typeorm|prisma\s+migrate|alembic|flyway|liquibase|knex\s+migrate|sequelize\s+db:migrate|dbmate)\b'

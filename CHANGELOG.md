@@ -264,3 +264,31 @@ discipline of decision Q84 (authority changes are never patch releases).
   execution; an option that NAMES a program or module a bounded runner loads (`clang --ld-path=./x`, `gcc -fuse-ld=./x`,
   `eslint -f ./fmt.js`, `prettier --config ./evil.json`, `pylint --init-hook "…"`, `python3 -m venv` with a `venv.py` beside
   it) asks; `bun test` is bun's own runner, not the package script of the same name, and asks like `go test`.
+- **Five readers answer five dimensions the findings kept reopening** (closure audit 2026-10-01, wave 3: database
+  statements, wildcard reach, redirections, wrapper nests, the directory stack).
+  *One reader of the statements a database client runs.* `clickhouse-client --host prod-ch --query 'show tables' -q 'drop
+  table t'` was a production DROP TABLE at ALLOW: the production exception for reads kept its own scan of the line for
+  statements (`-c`, `-e`, a list of long names), which did not know clickhouse's short `-q`. The client's own grammar now
+  answers, for every option spelling together (long name and its abbreviations, short letter, value glued to either,
+  repeated, clustered), and `cqlsh` and `influx` have one beside psql, mysql, sqlite3, mongo, redis and clickhouse. A plain
+  read given by `-q` against a production host is ALLOW like every plain read (it was an absolute DENY). A statement that
+  drops a DATABASE, SCHEMA or KEYSPACE is `db.local.drop` (ASK) however its option carries it (`mysql -e'DROP DATABASE
+  app'` had no word boundary for the matcher; the matcher stays as the text net for a here-string). A variable a flag NAMES
+  is followed to its value (`dbmate --env PROD_URL`: DENY at a production URL, ASK when the value is not on the line, DENY
+  when the name carries a production marker); `knex|sequelize|atlas --env production` is judged by the environment name;
+  `flyway -url="$X"` and `liquibase --url=$X` ask (the connection string is built at run time).
+  *Wildcards are judged by the names they match.* `cat .e*`, `.??*`, `.e?v`, `Grep` with `glob: "*"` and the like read or
+  printed `.env` at ALLOW; the directory is read (bounded: a reached bound asks) and every match is classified. A bare
+  wildcard is judged once `dotglob`/`GLOB_DOTS`/GLOBIGNORE or a zsh `(D)` qualifier is on the line. A Glob/Grep brace
+  expansion refused for its budget asks on the tool surface as it does in a Bash word. `Glob "*"` and `Grep` with a
+  catch-all glob in a directory that holds a hidden credential file now ask; in one that does not they are unchanged.
+  *One reader of redirections.* An operator glued to a word ends it (`find . -delete>/dev/null`, `git checkout
+  -f>/dev/null` were ALLOW where the spaced forms ask; `ls>/dev/null` was an unknown command; `bash<<<'git push'` is the
+  script it spells), the matchers that describe the act also read it without its redirections (`git checkout . >/dev/null`
+  was ALLOW; `terraform apply -auto-approve > --help` took its target for a help flag), a `/dev/tcp` name is read after
+  quote removal (`/dev/"tcp"/h/80`), and zsh's `>!`, `>>!`, `&>!`, `>&!` are judged in both readings (`echo x >! /etc/hosts`
+  was ALLOW). `sh run.sh </dev/null` runs run.sh.
+  *A nest deeper than a walk goes is unproved.* Nine `env`s before `-C ~/.ssh` ended the directory walk silently
+  (now read to 64, and beyond that the directory is unproved); the carrier, http-client and git-config-include walks say
+  so too. *The directory stack is edited by the option*: `pushd -n DIR` and `popd -n` leave the directory, `+N`/`-N` and
+  unknown options make it unknown, `dirs -c` empties the stack (pinned against bash and zsh).

