@@ -1,16 +1,18 @@
 # Phase-1 residual reconciliation
 
-Decision of 2026-09-23. Eight independent challenges produced findings faster than they could be argued about, and
+Decision of 2026-09-23, restated on 2026-10-01. Eight independent challenges produced findings faster than they could be argued about, and
 the backlog had stopped distinguishing three different things: a hole, a decision, and a boundary EGO has not built.
-Every remaining HIGH/MEDIUM finding is classified here as **exactly one** of four kinds, and a finding in the last
-three is no longer counted as an unresolved security defect.
+Every finding is either CLOSED or carries **exactly one** of four dispositions, and only a MUST_FIX counts as an unresolved Phase-1 defect.
+The per-finding record is [`phase-1-findings-register.md`](phase-1-findings-register.md); this document keeps the reasoning behind the dispositions.
+Until 2026-10-01 this paragraph read "every remaining HIGH/MEDIUM finding is classified here", which was not true of the ~225 open review-11
+findings, recorded by cause only; the register is what makes it true.
 
 | Kind | Meaning | Counted as an unresolved defect? |
 |---|---|:--:|
 | **MUST_FIX** | a real unauthorized effect can still reach ALLOW | yes |
 | **ACCEPTED_PRODUCT_BEHAVIOR** | intentionally permitted by an explicit prior product decision | no — but the boundary and the residual risk are stated |
-| **UNKNOWN_PRODUCER / FAIL-SAFE** | EGO does not model the closure, so ASK/DENY applies | no — this is the contract working |
-| **CONTAINMENT_DEPENDENCY** | the semantic action is permitted; its blast radius belongs to issue #26 | no — but #26 owes a named guarantee |
+| **UNKNOWN_PRODUCER / FAIL-SAFE** (`FAIL_SAFE` in the register) | EGO does not model the closure, or errs towards refusal (an over-gated DENY), so ASK/DENY applies | no — this is the contract working; an over-gated DENY is a class-11 debt, not a security defect |
+| **CONTAINMENT_DEPENDENCY** | the semantic action is permitted; its blast radius belongs to issue #26 | no — but #26 owes a named guarantee, and a CRITICAL row is never recorded this way |
 
 Nothing here may claim containment that is not implemented. **No profile provides OS-level containment today**, so
 every CONTAINMENT_DEPENDENCY below is an accepted risk *now* and a requirement *later*, not a protection in force.
@@ -119,35 +121,25 @@ edit, so the promise had nothing behind it.
 | a makefile larger than the read ceiling, an unreadable `include`, a `$(VAR)`-headed recipe | the source could not be read, or is built at runtime | ASK |
 | `mvn -v`, `gradle --version` | **every invocation form of an unmodelled producer asks, including its version probe.** The opacity is a property of the HEAD — EGO cannot say what `mvn` executes — and the control plane's vocabulary names heads, not invocation forms. Carving out a flag would be a per-spelling exception to a by-construction rule, which is the defect this phase removed. Where the same head is NOT a producer (`yarn`, `pnpm`, `bun`, `deno`, `pip list`), the version probe is ALLOW | ASK |
 
-**Proportionality cost, measured rather than asserted — including where it is worst.**
+**Proportionality cost, re-measured on 2026-10-01 (`0111e63`).** The ordinary-development corpus of
+`packages/kernel/test/support/corpus.ts` (`ORDINARY`) holds 123 commands in 11 groups (git, shell, node, python, go, rust, jvm, database,
+pipelines, structure, inspection). **14 of them gate (11.4%)**, and each is named with its reason in `EXPECTED_GATES`:
 
-| Measured on | Ordinary commands | Gated | What gates |
-|---|---:|---:|---|
-| TypeScript monorepo, Go, Python/poetry, Rust, husky | 79 | 8 (10%) | `npm test`, `make test`, `pytest`, `go test`, `cargo test` — every one a test command |
-| C/C++ with CMake and a real Makefile | — | see note | `cmake`/`ninja` drive a build and gate; `--version` and `-t targets` do not |
-| Java/Maven, Ruby, PHP, LFS repository | 66 | 12, of which 9 non-test | `mvn`/`gradle`/`rake` (task runners), `bundle`/`composer`/`gem` (installs), `composer dump-autoload`, `git lfs pull` |
-| **This repository (EGO itself)** | 44 | **7 (16%)** | see below |
-| **Seven ecosystems, pinned as a test** (git, shell, node, python, go, rust, jvm) | 73 | **13 (18%)** | 8 test runners, 1 install (`pip install`), 4 unmodelled task runner (`mvn`, `gradle`) |
+| Gated | Commands | Why |
+|---|---|---|
+| 8 test runners | `npx vitest run`, `npx jest`, `pytest`, `pytest -q tests/`, `go test ./...`, `cargo test`, `mvn test`, `./gradlew test` | they execute repository code located by pattern |
+| 1 install | `pip install -r requirements.txt` | acquiring and running third-party code |
+| 4 JVM builds and probes | `mvn -v`, `mvn -q compile`, `gradle --version`, `./gradlew build` | unmodelled producers ask in every invocation form, version probes included |
+| 1 network read | `aws s3 cp s3://my-fixtures/data.json ./data.json` | a download from a cloud store |
 
-The last row is the one that is now ENFORCED rather than measured once: `packages/kernel/test/corpus.test.ts`
-asserts the EXACT set of gated commands and fails if a command gates without an entry in `EXPECTED_GATES` naming
-the reason, or if one listed there quietly becomes ALLOW. A rising gate rate can no longer arrive unnoticed.
+`corpus.test.ts` asserts the EXACT set and fails if a command gates without an entry in `EXPECTED_GATES`, or if one listed there quietly becomes
+ALLOW, so a rising gate rate cannot arrive unnoticed. Git, shell, database, pipeline and structural commands (78 of the 123) never gate.
 
-The third row is the honest one, and an earlier version of this document left it out. On EGO's own checkout the
-gates are `npm test` and `node --test …` (test runners), `npm run lint` and `eslint packages` (this repository has
-an executable `eslint.config.js`, so eslint imports and runs it), `npm run build` and `if npm run build; …` (the
-build script is `node scripts/build.mjs`, an interpreter running a program file — a gate that predates all of this
-work), and `git rebase` (its own capability, also pre-existing).
-
-These rows are the ecosystems that were measured, not every ecosystem. A repository whose loop is mostly test,
-lint and install commands gates more than one whose loop is mostly build, status and diff — the rate is a
-property of the LOOP, not of EGO, and quoting a single number for it would be the overstatement this document
-exists to avoid. What is invariant across all of them is WHICH KINDS of command gate: test runners, project task
-runners, dependency installs, and tools whose configuration is executable.
-
-So the measured rate is **10% on the five-ecosystem sample and 16% here**, and the difference is entirely EGO's own
-executable lint configuration and its `node`-driven build. Quoting only the lower number would have been true of
-the sample and misleading about the tool.
+The earlier version of this section quoted four ad-hoc samples (10% on a five-ecosystem sample, 16% on EGO's own checkout, 18% on seven
+ecosystems, and a C/C++ note). Their scripts no longer exist, so none of them can be re-run; they are retired, for the reason given in "A validation gate
+that lives in a temporary directory is not a gate". What is invariant, and is what the corpus pins, is WHICH KINDS of command gate: test runners,
+project task runners, dependency installs, and tools whose configuration is executable. The rate is a property of the LOOP, not of EGO: a repository
+whose loop is mostly test, lint and install commands gates more than one whose loop is mostly build, status and diff.
 
 ## Closed after exit review 4 (2026-09-24)
 
@@ -194,7 +186,7 @@ safety property, and asserting a literal the shell would not produce is not evid
 
 ## Closed after exit review 7 (2026-09-24)
 
-Every finding the review produced is resolved. The six that outlived the first pass are recorded by CAUSE, because
+Every finding the review produced was resolved at the time. Re-measured on `0111e63` (register): 82 of the 110 recorded findings are CLOSED and 28 cannot be replayed, because the review-7 data kept the command and not the Makefile, manifest or hook it ran against. The six that outlived the first pass are recorded by CAUSE, because
 three of them were one cause and that one is now pinned by a property rather than by three lines.
 
 | Cause | The general statement |
@@ -257,9 +249,7 @@ this list.
 
 ## Closed after exit review 8 (2026-09-28)
 
-Every unauthorized ALLOW the review produced is resolved. What remains below the reviewer's floor at HEAD 161c610
-is 19 rows where EGO ASKS and the reviewer wanted DENY — the designed human gate — and 26 proportionality rows
-where EGO asks about something the reviewer would allow. Neither is an unauthorized ALLOW.
+All 131 unauthorized ALLOWs of the review are CLOSED on `0111e63` (replayed 2026-10-01; register), 6 of them now ASK where the reviewer wanted DENY, which is the designed human gate. This paragraph used to read "Every unauthorized ALLOW the review produced is resolved", measured at HEAD 161c610; it was not true of `c54d8b2`, where the 2026-10-01 audit reported the fourth spelling of the function-binding finding (`git() { echo hi; } | cat`, newline, `git push origin main`, CRITICAL, r8-39) ALLOW again. It is DENY on `0111e63`. The DENY-arriving-as-ASK rows were 19 at 161c610 and are 6 here (the rest are DENY now); the 26 proportionality rows counted at 161c610 are not in the review-8 data file and are not re-measured.
 
 The review's own lesson, recorded by CAUSE rather than by instance:
 
@@ -280,8 +270,7 @@ an INPUT and not the script; and `/` excluded from the ancestor test because `/`
 
 ## Closed after exit review 9 (2026-09-29)
 
-Every unauthorized ALLOW of exit review 9 is resolved, and so is every defect of the self-attack on its own
-fixes. Four findings stand REFUTED by settled decisions, each pinned by a test that failed when the change was
+Of the 86 findings of exit review 9, 84 are CLOSED on `0111e63` and 2 are settled decisions recorded below (`git branch -m`, `helm get values` on production). Of the 50 findings of the self-attack on its fixes, 47 are CLOSED and 3 are OPEN: a make expansion (`$Vx` after a conditional value, LOW, MUST_FIX), a copy of a hook script OUT of `.claude` that is still refused (MEDIUM, FAIL_SAFE) and writes under `.claude/plugins/` that are ALLOW (MEDIUM, MUST_FIX). The sentence that stood here, "every unauthorized ALLOW of exit review 9 is resolved, and so is every defect of the self-attack", was true of the first and not of the second. Four findings stand REFUTED by settled decisions, each pinned by a test that failed when the change was
 attempted: renaming a LOCAL branch (`git branch -m`), merging a NAMED branch, `helm get values` against
 production being a credential dump (exit review 7), and `rsync` into `.git/hooks` keeping its
 `fs.git-internals.write` classification rather than the narrower hook one.
@@ -306,7 +295,7 @@ a test within minutes of being written, two of them by the generated cross-produ
 ## Closed after exit review 10 (2026-09-30)
 
 179 findings (100 unauthorized ALLOW, 79 over-gated DENY) and the eleven more that freezing them into the corpus
-found. Every one is closed, refuted, or recorded below. Recorded by CAUSE; the instances are in the build log and
+found. On `0111e63`: all 100 unauthorized ALLOWs are CLOSED; of the 79 over-gated DENYs 75 are CLOSED and 4 are OPEN as FAIL_SAFE (r10-83 and r10-174: reads of the cluster tools refused in PRODUCTION_ADVISORY; r10-173: a heredoc delimiter that is a regular-expression metacharacter makes the evaluator throw, which the hook turns into a block; r10-178: `ssh -Q cipher` refused under HIGH_ASSURANCE). The sentence that stood here, "Every one is closed, refuted, or recorded below", did not record those four. Recorded by CAUSE; the instances are in the build log and
 in `packages/kernel/test/exit-review-10.test.ts`.
 
 | Cause | The general statement |
@@ -323,19 +312,19 @@ in `packages/kernel/test/exit-review-10.test.ts`.
 
 ### Recorded, not closed
 
-- **OPEN PRODUCT DECISION — `SELECT` against a production database.** `psql -h prod-db.acme.com -U ro -c 'SELECT
-  1'` is an absolute DENY. A SELECT can call `pg_terminate_backend()`, `setval()`, `lo_import()` or take a
-  `FOR UPDATE` lock, and EGO does not parse SQL, so the exception for read statements is a short allowlist
-  (`\d…`, `SHOW`, `EXPLAIN` without `ANALYZE`, `-l`). The exit reviewer expects ASK for a plain SELECT. Making it
-  ASK is a one-line change with a real cost — a mutating function call becomes approvable instead of refused. It
-  is recorded as OPEN, not as ACCEPTED_PRODUCT_BEHAVIOR.
+- **DECIDED 2026-09-30 (commit `c54d8b2`) — `SELECT` against a production database is a read.** `psql -h prod-db.acme.com -U ro -c 'SELECT 1'`
+  is ALLOW by a strict positive grammar (`isPlainSelect`). INTO, FOR UPDATE, LOCK IN SHARE MODE, PROCEDURE, WITH, a comment of any kind, a
+  user-variable assignment, a dollar-quoted body, a qualified or quoted call, any function not on the pure list and a statement over 4,000
+  characters stay the act they are (DENY). This bullet used to record the question as OPEN and expected ASK; the owner decided it the other way, and
+  it is pinned by `select-read.test.ts`. A SELECT can still reach a function nobody listed - that residual is the pure-function list, which is
+  a short allowlist, not a blocklist.
 - **DENY → ASK by design.** A brace nesting past 8 (the expander reports it), an awk program file past the read
   bound, and a `cd` inside a branch, loop or function followed by a relative write. The kernel cannot say which
   word, program or directory it is looking at, so it asks. Each is asserted as `ASK`, not left unpinned.
 
 ## Closed after the self-attack on the fixes of exit review 10 (2026-09-30)
 
-121 confirmed (110 unauthorized ALLOW, 11 over-gated DENY), from ten lenses; every one closed, refuted or recorded. By CAUSE:
+121 confirmed (110 unauthorized ALLOW, 11 over-gated DENY), from ten lenses. Re-measured on `0111e63`: 107 CLOSED, 14 OPEN - 13 unauthorized ALLOW (10 reached only through spellings the reviewer listed beside the reported one, whose reported spelling is fixed; 3 by the reported spelling itself: sa10-63, sa10-96, sa10-107) and 1 over-gated DENY (`flock … bash -n`). Two of the open rows are CRITICAL (sa10-33, sa10-34); see "CRITICAL rows that remain". The sentence that stood here, "every one closed, refuted or recorded", was not true, and `git rm -f --ignore-unmatch -- -n …` (sa10-32), which the audit found ALLOW, is CLOSED on this tree. By CAUSE:
 
 | Cause | The general statement |
 |---|---|
@@ -355,22 +344,62 @@ in `packages/kernel/test/exit-review-10.test.ts`.
 - An `env -C`/`git -C` in play disables the alternative-directory judgement for that segment (the directory it names is judged on its own).
 - `CGO_ENABLED=0 go build` asks: `CGO_*` is in the execution-input list a producer gate reads. Unchanged from before this pass.
 
-## OPEN after exit review 11 (2026-09-30) - and the decision this document owes the product owner
+## OPEN after exit review 11 (re-measured 2026-10-01)
 
-258 findings (209 unauthorized ALLOW, 49 over-gated DENY), zero new classes. About 30 were fixed in the same sitting
-(listed in the build log). **The remaining ~225 are OPEN**, and they are recorded by cause rather than by instance because
-the instances are not the point:
+Exit review 11 reported 258 findings (209 unauthorized ALLOW, 49 over-gated DENY) and no new class. The first version of this section recorded
+about 225 of them as OPEN "by cause only", with no severity and no disposition per finding. That was an estimate, and it is replaced by a measurement:
+[`phase-1-findings-register.md`](phase-1-findings-register.md) replays every per-finding record of exit reviews 7-11 and of the two self-attacks (935 rows)
+on the tree after closure wave 1 (`0111e63`) and records, for each row, the reviewer's severity, the taxonomy class, the cause group, the status on
+this tree and, for an OPEN row, one disposition with its reason. Every number below is computed from that table by script.
 
-| Cause (lens counts in brackets) | What is open |
-|---|---|
-| **A table is wrong by omission** (runners 13, policy-layer 13, containers 13, k8s-cloud 13, db 8) | tools that run a program named by their OWN option or config: `clang --ld-path`, `gcc -fuse-ld`, `prettier --config`, `eslint -f ./x.js`, `pylint --init-hook`, `npm --script-shell`, `yarn-path`, `bun test`, `python -m black`; `docker buildx bake` (≈10 spellings: the bake file names Dockerfiles and targets), `docker pass`, `docker debug --host`, `buildx create --driver remote`; `kubectl --cluster`, `config view --flatten`, `get -f s.yaml` of a Secret, `--kubeconfig` with a kind context; `dbmate --env`. (The database-client rows - `sqlite3 … writefile()/edit()`, `psql -o '\|cmd'`, `mysql -e'…'` - are CLOSED, see below.) |
-| **A path is judged by its spelling, not by the file** (fs-paths 14, hostapi 7, absolutes 12, errors 4) | a symlink whose NAME contains a glob character; `git checkout-index --prefix=.git/hooks/`; `tar --extr`/`--use=`; `cat .e*` and other wildcard shell operands that reach credential stores; `echo x > /dev/disk0`. (A leading space in a tool `file_path` and a write through a symlink to a path that does not exist yet were in this row; both are closed - see "Structured tool surface" below.) |
-| **A reached bound is still not an absence, on surfaces that were not wired** (limits 8, expansion-new 14) | `env env env …` nested past the depth cap, a `cd` chain past the path cap, `flock -c "flock -c …"` nested past four, a brace budget over 64 in `Glob`/`Grep` (the overflow report was wired only into the Bash loop). |
-| **Carried commands and producers** (carriers 14, producers-deep 14, claims 14) | `find … -exec` payloads of several kinds; `timeout -s KILL`, `env --unset A` before `sed 'w …'`; `yarn exec git -C …`; `watch 'git commit -nm x'`; a Dockerfile written in the same command before `docker buildx bake`; `lint-staged` config written or chosen by a variable; a `make -f ev*.mk` glob; `DF=x; docker build -f "$DF"` (a variable assigned earlier names the file). |
-| **Variables a line assigned** (claims, carriers, crossproduct) | partly closed (literals substituted; a run-time writer operand asks). Still open: `O=--context; docker $O production rm -f app`, `R=secret; kubectl get $R`, a variable holding a SUBCOMMAND or an OPTION. |
-| **Proportionality** (proportionality 14, exceptions 4, profiles 13) | 49 over-gated DENY, most of them a dry run or a listing with a redirection or an extra flag: `git push --help >/dev/null`, `git push -vn`, `git grep core.hooksPath`, `git config --file … --get`, `gh api -X GET`, `cat ~/.ego/trust/keys.json` (a READ of the trust store), `grep -rn '~/.ssh' docs`, `find . -name '*.tmp' -exec rm {} \;` (pre-existing). |
-| **Environment and bounded-command tables** (markers 8, bounded 1, policy-layer) | `printf -v PATH …`, `read PATH`, `HELM_PLUGINS=`, `git -c man.man.path=… log --help`, `bash -n +n`, `node version`. |
-| **Overlay and profile edges** (overlay 6, profiles 13, taxonomy 10) | an overlay-protected path after the overlay's matcher is deleted from the tree; `service-account.json`/`secrets/*` patterns; STRICT not narrowing `git pull --no-ff`. |
+**Exit review 11 on this tree.** 258 rows: 67 CLOSED, 191 OPEN (144 unauthorized ALLOW, 47 over-gated DENY), 0 not replayable.
+
+| Severity | UA rows | UA CLOSED | UA OPEN | of those MUST_FIX | CONTAINMENT_DEPENDENCY | OG rows | OG OPEN |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| CRITICAL | 16 | 16 | 0 | 0 | 0 | 1 | 1 |
+| HIGH | 119 | 37 | 82 | 75 | 7 | 15 | 14 |
+| MEDIUM | 66 | 9 | 57 | 49 | 8 | 23 | 22 |
+| LOW | 8 | 3 | 5 | 5 | 0 | 10 | 10 |
+
+Closure wave 1 therefore moved review 11 from "about 225 OPEN" to 191 OPEN: every CRITICAL spelling the review reported is closed, the database-client escape family (`writefile()`, `\o |cmd`, `pager`, `.shell`) is closed, and so are the leading-space and dangling-symlink forms of the structured tools; the
+rest of the review (producers, container verbs, the Kubernetes resolver, option spellings, mode and overlay edges) is as the reviewers left it.
+
+**All reviews, by cause group.** 214 rows are OPEN across the seven datasets (exit reviews 7-11, self-attacks 9 and 10); severity is the reviewers', disposition is this register's.
+
+| Cause | OPEN | C | H | M | L | MUST_FIX | CONTAINMENT_DEPENDENCY | FAIL_SAFE | ACCEPTED_PRODUCT_BEHAVIOR | What is open |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|
+| **A** A table is wrong by omission | 55 | 0 | 31 | 22 | 2 | 42 | 12 | 0 | 1 | Kubernetes/Helm resolver gaps (`--cluster`, kubeconfig content, `get -f` of a Secret, a plugin verb), docker verbs that fall into the `container.run` catch-all (`bake`, `debug`, `pass`, `builder create --driver remote`, a quoted `'exec'`), `DROP DATABASE` and `dbmate --env`, and runner options that name a program (`eslint -f`, `pylint --init-hook`, `clang --ld-path`, `bun test`: CONTAINMENT_DEPENDENCY) |
+| **B** A path is judged by its spelling, not by the file | 27 | 0 | 12 | 13 | 2 | 26 | 1 | 0 | 0 | a path judged by its spelling: `..` after a symlink, a bracket symlink name, `cat .e*`, a catch-all Grep glob, `/dev/disk0`, `.claude/plugins/`; destinations a table lacks (`sed w.file`, `sort --o`, `go build -o=`, `tar --extr`, compiler `-MF`/`-Xlinker`, `git checkout-index --prefix`) |
+| **C** A reached bound is still not an absence | 4 | 0 | 3 | 1 | 0 | 4 | 0 | 0 | 0 | a bound met and not reported on a surface that was not wired: Glob brace budget over 64, `env` nested nine deep, a git include chain of six |
+| **D** Carried commands and producers | 36 | 0 | 23 | 10 | 3 | 33 | 3 | 0 | 0 | producers and carriers: make regenerating a makefile or reading a wildcard `-f`, `buildx bake`, nested `lint-staged` configuration, `find -exec` / `timeout -s` / `env --unset` / `yarn exec` / `watch` / glued `env -S` hiding a command |
+| **E** Variables a line assigned | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | a resource named by a command substitution (`kubectl get $(echo secret)`); the variable forms themselves are closed |
+| **F** Proportionality | 58 | 3 | 17 | 26 | 12 | 5 | 0 | 52 | 1 | over-gated DENY (class 11) and the exceptions that let an operator look and hide the act (`sed -n 'w…'`, `sort --o`, `set env … 'A=b --list'`, a second `-q` statement) |
+| **G** Environment and bounded-command tables | 13 | 0 | 8 | 4 | 1 | 13 | 0 | 0 | 0 | program-valued variables and aliases (`printf -v PATH`, `--script-shell`, `env 'EDITOR=…'`, `node version`), git `-c` program and identity keys, a quote inside `/dev/"tcp"/` |
+| **H** Overlay and profile edges | 16 | 0 | 4 | 11 | 1 | 16 | 0 | 0 | 0 | overlay protections that nothing consults or that a deleted file silently drops; mode and profile override lists that name capabilities (STRICT pull/merge, advisory branch/format/db/build, pre-promotion build) |
+| **S** Shell structure and lexing | 4 | 0 | 3 | 1 | 0 | 4 | 0 | 0 | 0 | a redirection glued to `-delete` / `-f`, `pushd -n`, an ANSI-C newline in a control-plane name |
+
+**The dispositions.**
+
+- **MUST_FIX (144).** 3 CRITICAL, 79 HIGH, 54 MEDIUM, 8 LOW. The effect reaches a floor (production, the control plane, a hook, a credential store, `--no-verify`, a push) or the gap is in a *modelled* tool's own documented option; "in doubt" is MUST_FIX. They fall into 18 root causes, each a second reader of a question that has a first one; the register names the single reader that would close each.
+- **CONTAINMENT_DEPENDENCY (16).** A runner, compiler or tool is told to load a program (`eslint -f ./x.js`, `pylint --init-hook`, `rustc -C linker=`, `javac --processor-path`, `clang --ld-path`, `rubocop -r`, `bun test`, `python3 -m`, a cargo alias, a shareable prettier configuration, `xargs rg --pre`) or a producer fetches a remote resource (`kustomize build`). Running the tool is ordinary work and its option set is open-ended, so the classifier cannot be complete; the named spellings should still be added to the table, but only the OS sandbox of issue #26 bounds the class. 7 HIGH, 8 MEDIUM, 1 LOW.
+- **FAIL_SAFE (52).** Every one is an over-gated DENY (or an evaluator crash the hook turns into a block): `git push --help>/dev/null`, `git push -vn`, `gh api -X GET`, `curl -s -o /dev/null http://localhost:3000`, `go build -o /dev/null`, `grep -rn claude src/`, every read of the cluster tools in PRODUCTION_ADVISORY. Wrong in the safe direction, not a security defect, but a class-11 debt: an absolute DENY over looking removes the human gate instead of raising it (see "Looking at something is not doing it" above).
+- **ACCEPTED_PRODUCT_BEHAVIOR (2).** r9-24, r9-40: renaming a local branch (`git branch -m`) and `helm get values` against production, both REFUTED by decisions recorded in the sections above.
+
+### CRITICAL rows that remain
+
+For every one of the 184 replayable CRITICAL unauthorized-ALLOW rows the reported spelling no longer reaches ALLOW: 182 are CLOSED outright (5 of them now ASK where the reviewer wanted DENY). **3 CRITICAL rows are nevertheless OPEN through a neighbour the reviewer listed beside the reported spelling, and 7 cannot be replayed.** The criterion's condition 4 ("no CRITICAL finding is unresolved") does not hold:
+
+- **r11-142** (over-gated DENY): CRITICAL over-gated: the reported spelling is fixed, direct neighbours (`grep ... "hook claude-code PreToolUse"`, `echo "ego hook ..."`) are still an absolute DENY. Register: RC-PROP.
+- **sa10-33** (unauthorized ALLOW): CRITICAL: `set env deploy/x 'A=b --list'` on production reads the quoted value as the read-only `--list` flag. Register: RC-K8S.
+- **sa10-34** (unauthorized ALLOW): CRITICAL: a second statement given as `-q` is not read when `--query` already gave a read; production DROP TABLE. Register: RC-DB.
+- r7-4, r7-5, r7-7, r7-8, r7-9, r7-32, r7-33 (review 7, unauthorized ALLOW): the review-7 data kept the command and not the fixture it needed (a Makefile, a manifest, a hook). The same families are CLOSED in review 8 with their fixtures (`make deploy` r8-8..12, `npm run build prodk` r8-16..18, nested `make` r8-95..96); nothing proves these seven, so they are not called closed.
+
+### What the earlier text of this section got wrong
+
+- "About 225 of the 258 are OPEN" - measured: 191 OPEN, 67 CLOSED.
+- The table listed the database-client rows and the structured-tool rows as "CLOSED, see below"; both are CLOSED on this tree (re-replayed) and stay recorded in the two sections below.
+- It named no severity and no disposition for any row; the register does.
+
 
 ### CLOSED after the audit of 2026-10-01: the database-client family (class: a known client and an operand it does not bound)
 
@@ -411,25 +440,47 @@ still ASK for another reason: `cqlsh`, `influx`, `pg_dump`/`pg_restore`/`pgbench
 local` are unmodelled producers (`command.unmodelled-closure`); `flyway`/`liquibase` apply a migration FILE and are the
 `db.local.migrate` class.
 
-### The decision (OPEN - not taken here)
+### The decision (taken by the product owner on 2026-10-01)
 
 Twelve reviews establish two things. **The architecture is closed**: eleven classes, none added since review 1 of this series,
-and each is enforced as a general property over a generated cross-product (40,000+ combinations) that has found defects no
-reviewer reported. **The instance set is not**: 187 → 136 → 190 → 121 → 258, each round closing exactly what it was shown.
+and each is enforced as a general property over a generated cross-product that has found defects no reviewer reported. **The instance set is not**:
+187 → 136 → 190 → 121 → 258, each round closing exactly what it was shown.
 
-The kernel's failure mode is an **unauthorized ALLOW for an input nobody listed**, because it allows by default and denies
-by pattern. Three honest options, none of which this phase can choose:
+The kernel's failure mode is an **unauthorized ALLOW for an input nobody listed**, because it allows by default and denies by pattern. Three options were put to the
+owner on 2026-09-30:
 
-1. **Amend the exit criterion to the one the taxonomy already states** - class closure, a generated cross-product that
-   holds, and every KNOWN finding closed or recorded - and close Phase 1 with the residual stated as a containment
-   dependency (issue #26: the classifier is defense in depth, the boundary is the OS sandbox). Cheapest; true to the data.
-2. **Invert the default for the highest-risk surfaces**: ALLOW only for a short positive list of command shapes with
-   strict grammars (the way a SQL read is now a grammar, not a blocklist), ASK for everything else. Unknown becomes a
-   question instead of a yes, and the unauthorized-ALLOW set becomes bounded by construction. The cost is proportionality:
-   ordinary commands outside the list ask until they are added, and the list is itself a product surface.
-3. **Keep the loop.** One cycle costs about 40M subagent tokens for the review alone, an hour of wall-clock for it, and several hours of
-   fixing; the evidence is that it will produce another ~200 findings. It is the option the current criterion implies, and it is reported here as one that has not converged
-   in five cycles.
+1. **CHOSEN (2026-10-01): amend the exit criterion** to the one the taxonomy already states - class closure, a generated cross-product that holds, and every KNOWN
+   finding closed or recorded - and close Phase 1 with the residual stated as a containment dependency (issue #26: the classifier is defence in depth, the
+   boundary is the OS sandbox). Cheapest; true to the data.
+2. *Not chosen.* Invert the default for the highest-risk surfaces: ALLOW only for a short positive list of command shapes with strict grammars (the way a SQL read is
+   now a grammar, not a blocklist), ASK for everything else. It would bound the unauthorized-ALLOW set by construction at the cost of proportionality, and the list is itself a
+   product surface. It stays available; nothing here forecloses it.
+3. *Not chosen.* Keep the loop. One cycle costs about 40M subagent tokens for the review alone, an hour of wall-clock for it and several hours of fixing, and the
+   evidence is that it produces another ~200 findings; it has not converged in five cycles.
+
+**A second decision, taken the day before and implemented in `c54d8b2`: a plain `SELECT` against a production database is a read.** `psql -h prod-db.acme.com -U ro -c
+'SELECT 1'` is ALLOW by a strict positive grammar (`isPlainSelect`); the earlier text of this document recorded it as an OPEN product decision and expected ASK. INTO, FOR
+UPDATE, LOCK IN SHARE MODE, PROCEDURE, WITH, a comment of any kind, a user-variable assignment, a dollar-quoted body, a qualified or quoted call, any function not on the
+pure list and a statement over 4,000 characters stay the act they are (DENY); re-checked on `0111e63`.
+
+**The amended exit criterion** replaces "a fresh independent review finds no unauthorized ALLOW", which was not met (twelve reviews ran) and is replaced, not satisfied.
+Phase 1 closes only when ALL of the following hold:
+
+1. The class list is closed: twelve consecutive independent reviews produced no new class ([`phase-1-taxonomy.md`](phase-1-taxonomy.md), eleven classes).
+2. Every class is enforced as a general property by the generated cross-product (`packages/kernel/test/support/corpus.ts`), and that suite passes.
+3. Every KNOWN finding is either closed and pinned by a deterministic test, or recorded with class, severity and disposition ([`phase-1-findings-register.md`](phase-1-findings-register.md)).
+4. No CRITICAL finding is unresolved.
+5. The residual - an unauthorized ALLOW for an input nobody listed - is stated as a containment dependency owned by issue #26: the classifier is defence in depth, the OS sandbox is the boundary.
+
+**Status on `0111e63` plus this register (2026-10-01).**
+
+- (1) holds, as far as the taxonomy document records it. (2) was not re-run by the register (no source changed); the corpus now asserts 56,377 combinations (see below).
+- (3) is met in form for the 935 rows the data kept: each is CLOSED or carries a class, a severity and a disposition. It is not met in the strong sense of "pinned by a deterministic test per finding": of 693 CLOSED rows, 294 have the reported spelling literally in a test file; for the other 399 no test file contains it, so they may be pinned by a differently spelled test of the same class (`closure-db.test.ts` pins `writefile` with other arguments) or by the generated cross-product, and this register cannot tell which. 28 review-7 rows could not be replayed, and the 83 findings of contract-challenge rounds 10-12 kept a severity and no command; both are recorded, neither is closed.
+- (4) is NOT met: 3 CRITICAL rows are OPEN through a listed neighbour (see "CRITICAL rows that remain") and 7 CRITICAL review-7 rows are not replayable.
+- (5) is stated here and in the register; it is not yet recorded on issue #26 or on issue #1 (read-only check, 2026-10-01: neither carries the amended criterion); writing to those issues is the owner's act, not this register's.
+
+Phase 1 therefore stays OPEN, now for the reasons of the amended criterion and no longer for "a fresh review found something".
+
 
 ## A validation gate that lives in a temporary directory is not a gate
 
@@ -439,11 +490,12 @@ gate it represented no longer exists. Recorded because the lesson generalises: e
 not evidence.
 
 The permanent replacement is `packages/kernel/test/support/corpus.ts`, which is IN THE REPOSITORY and GENERATED
-rather than accumulated — 67 root semantic classes × 97 transformations × 60 producers, asserting **23,924**
-combinations, and growing by one line per new transformation.
+rather than accumulated — 119 root semantic classes (537 canonical spellings) × 98 transformations × 68 producers, asserting **56,377**
+combinations (537 canonical, 48,341 transformed, 7,376 producer-carried, 123 ordinary; measured 2026-10-01 on `0111e63` with the counting script the
+audit used), and growing by one line per new transformation.
 
 The proportionality probe that lived beside those corpora is gone too, and it is not missed: `corpus.test.ts`
-enforces the same property in the repository, over 103 ordinary commands across seven ecosystems, and every one
+enforces the same property in the repository, over 123 ordinary commands in 11 groups, and every one
 that gates is named with its reason in `EXPECTED_GATES`. A gate that only exists while a shell session is open is
 the same non-gate twice.
 
@@ -508,6 +560,8 @@ The semantic action is intentionally permitted. What it may reach is issue #26's
 | `docker compose up` | see above | the four guarantees listed above |
 | `go build`, `tsc`, `javac`, the C/C++ toolchain, **with their default flags** | compile source to objects and execute nothing else. The flags that make them run a program — `-B`, `-wrapper`, `-fplugin=`, `-specs=`, `-toolexec`, `-processor` — are classified as unbounded program operands and gate; the row was written before they were, and was false until then | writes confined to the checkout and the runtime root |
 | an approved ASK | a human approved a specific action, not an unbounded session | the approval's blast radius is bounded by the profile, not by the classifier |
+| a runner, compiler or linter told to load a program: `eslint -f ./x.js`, `prettier --config`, `pylint --init-hook`, `rustc -C linker=`, `javac --processor-path`, `clang --ld-path`, `rubocop -r`, `bun test`, `python3 -m <module>`, a cargo alias (15 register rows, root cause RC-RUN) | running the tool is ordinary work and its option and configuration set is open-ended, so no table is complete; the named spellings are added anyway | the program a tool is told to load runs under the profile's filesystem, credential and network boundary |
+| `kustomize build .` where `kustomization.yaml` lists a REMOTE resource (LOW, recorded since exit review 10) | the kernel asks only when a URL is on the command line | build steps that fetch run under the profile's network boundary |
 
 `cargo run` is NOT in that row: it builds and then EXECUTES the result, so it gates as an unmodelled closure like
 any other runner. An earlier revision of this table listed it as permitted, which the code never did.
@@ -539,6 +593,8 @@ shapes; the MCP trust wording in the host matrix, the `ego init` template and th
 
 ## What this changes about the exit criterion
 
-A finding is an **unresolved Phase-1 defect** only when it is MUST_FIX. A finding classified into one of the other
-three is a *recorded decision*, a *working fail-safe*, or a *named requirement on #26* — and counting those as
-defects is what made the previous rounds look like they were not converging when the contract was in fact holding.
+Under the criterion amended on 2026-10-01 (see "The decision") a finding is an **unresolved Phase-1 defect** only when it is a MUST_FIX row of
+[`phase-1-findings-register.md`](phase-1-findings-register.md). A row classified into one of the other three is a *recorded decision*, a *working
+fail-safe* or a *named requirement on #26*, and counting those as defects is what made the previous rounds look as though they were not converging when the
+contract was in fact holding. The converse is what the previous version of this paragraph allowed: a MUST_FIX recorded under a kind that is not counted. A
+CRITICAL row is never recorded away; it stays MUST_FIX until it is CLOSED and pinned.
