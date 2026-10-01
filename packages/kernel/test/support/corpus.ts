@@ -1269,6 +1269,71 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     ],
     files: { '.git/config': '[core]\n\thooksPath = githooks\n', 'githooks/pre-commit': '#!/bin/sh\n', 'scripts/pre-commit': '#!/bin/sh\n' },
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE OF THE SHELL-STRUCTURE FINDINGS (independent audit of 2026-10-01). Each class is the CAUSE an earlier fix
+   * had closed at one spelling, written so that every neighbour of that spelling is a case of it.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'k8s',
+    // the LAST dry-run flag decides: a bare `--dry-run` takes no value, so the flag after it is a flag - and it can undo it
+    id: 'a production act whose dry-run flag is undone by the flag after it, however that one is spelled',
+    floor: 'DENY',
+    cases: [
+      'kubectl --context production apply -f x.yaml --dry-run --dry-run=none',
+      'kubectl --context production delete pod x --dry-run --dry-run=none',
+      'kubectl --context production apply -f x.yaml --dry-run --dry-run=false',
+      'kubectl --context production apply -f x.yaml --dry-run=server --dry-run=none',
+      'kubectl --context production apply -f x.yaml --dry-run=client "--dry-run=none"',
+      "kubectl --context production scale deploy/api --replicas=0 --dry-run=client --dry-run='none'",
+      'helm --kube-context production upgrade r ./chart --dry-run --dry-run=none',
+      'helm --kube-context production uninstall r --dry-run=client --dry-run=false',
+      'oc --context production delete pod x --dry-run --dry-run=none',
+    ],
+    files: { 'x.yaml': 'kind: Deployment\n' },
+  },
+  {
+    family: 'git',
+    // nothing after `--` is an option, so a word that looks like the dry-run flag there is a path beside the governed one
+    id: 'a governed file removed or moved with a dry-run-looking word after `--`',
+    floor: 'DENY',
+    cases: [
+      'git rm -f --ignore-unmatch -- -n control-plane/permissions/absolute-denies.md',
+      'git rm -rf -- -n control-plane',
+      'git rm -f -- -n -- control-plane/permissions/absolute-denies.md',
+      'git rm -- --dry-run control-plane/permissions/absolute-denies.md',
+      'git mv -- -n control-plane/permissions/absolute-denies.md elsewhere.md',
+      'git rm -n --no-dry-run control-plane/permissions/absolute-denies.md',
+      'rsync -a -- -n src/ .harness/generated/',
+      'rsync -a --dry-run --no-dry-run src/ .harness/generated/',
+    ],
+    files: { 'control-plane/permissions/absolute-denies.md': 'x\n', 'src/a.txt': 'x\n' },
+  },
+  {
+    family: 'git',
+    // a matcher can only ask whether a dry-run flag is PRESENT; the normalized text says which one decides
+    id: 'a push whose dry-run flag is undone by a later one, is the value of a push option, or is the name of a remote',
+    floor: 'DENY',
+    cases: [
+      'git push -n --no-dry-run origin main',
+      'git push --force --dry-run --no-dry-run origin main',
+      'git push --dry-run=false origin main',
+      'git send-pack -n --no-dry-run origin main',
+      'git push -o -n origin main',
+      'git push --push-option -n origin main',
+      'git push -- -n main',
+    ],
+  },
+  {
+    family: 'production',
+    id: 'a cloud or deploy act whose dry-run flag is undone by a later one',
+    floor: 'DENY',
+    cases: [
+      'aws ec2 terminate-instances --instance-ids i-1 --profile production --dry-run --no-dry-run',
+      'aws ec2 terminate-instances --instance-ids i-1 --dry-run --no-dry-run',
+      'argocd app sync prod --dry-run=false',
+      'argocd app sync prod --dry-run --dry-run=false',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *

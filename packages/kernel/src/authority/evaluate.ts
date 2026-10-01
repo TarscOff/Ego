@@ -1734,7 +1734,7 @@ function normalizeSegmentInner(segment: string): string[] {
   }
   if (targetEnv.length && TARGET_ENV_HEADS.has(head)) rest = [...rest, ...targetEnv];
   const stripped = stripToolGlobalOptions(head, rest);
-  rest = stripped.rest;
+  rest = canonicalDryRun(stripped.rest);
   extra.push(...stripped.extra);
   // A CARRIER'S INNER SHELL RUNS ITS OWN EXPANSION PASS. `sh -c "echo x > .harnes{s..s}/runtime/pin.json"`
   // keeps the braces QUOTED at the outer level — where a real shell does not expand them either — and the inner
@@ -7525,44 +7525,190 @@ function isProbeInvocation(seg: string): boolean {
 /** A DRY RUN PERFORMS THE ACT'S CHECKS AND NOT THE ACT. `kubectl apply --dry-run=client`, `helm upgrade
  *  --dry-run`, `git push --dry-run` and `aws … --dry-run` are how an operator finds out what WOULD happen, and
  *  each was refused absolutely (exit review 9). The gate that remains is the ordinary one: a dry run against a
- *  production target still reaches it, and a human can still say no. */
+ *  production target still reaches it, and a human can still say no.
+ *
+ *  WHETHER A LINE IS A DRY RUN IS DECIDED BY THE LAST DRY-RUN FLAG THE TOOL SEES, and ONE reader says which that is,
+ *  for every tool that has one. Each tool kept its own scan - a stateful one for kubectl and helm, and
+ *  `some(t => t === '--dry-run' || /^-[a-z]*n/.test(t))` for `git rm`, `rsync` and `patch` - and they agreed only on
+ *  the textbook spelling. Everything else was an exception that let an operator LOOK and also hid an ACT:
+ *  `kubectl --context production apply --dry-run --dry-run=none` read the second flag as the VALUE of the first (a
+ *  bare `--dry-run` takes none, so the second is a flag, and it is the one that decides), a quoted `"--dry-run=none"`
+ *  was dropped as data, `git rm -f -- -n control-plane` took the `-n` after `--` for a flag, and `--no-dry-run` was
+ *  nothing at all (audit of 2026-10-01, review-11 #15/#67). */
+interface DryRunGrammar {
+  /** long options (no dashes) that ask for a dry run when they stand alone; `--NAME=VALUE` is read by value */
+  longs: readonly string[];
+  /** the single letter that means the same (`git rm -n`, `rsync -n`), or '' when the tool has none */
+  short: string;
+  /** letters of a short cluster that take a value: what follows one in the cluster is that value, not more flags */
+  shortValued: string;
+  /** options KNOWN to take no value: the word after one is a new word. An option in neither list is of unknown arity
+   *  and may swallow the next word, which is then its value and never a flag. */
+  boolean?: RegExp;
+  /** options KNOWN to take a value, for tools whose option set is fully known: every other option takes none */
+  valued?: RegExp;
+}
+/** the values of `--dry-run=VALUE` that mean "do not act": kubectl's and helm's `client` and `server`, and the
+ *  spellings of true that a boolean flag accepts. Anything else - `none`, `false`, an empty value, a word nobody
+ *  listed - is the flag that says "really do it": the exception is for what is KNOWN to be harmless. */
+const DRY_RUN_VALUES = /^(client|server|true|t|1)$/i;
+
+function dryRunDirection(word: string, g: DryRunGrammar): 'dry' | 'act' | null {
+  if (word.startsWith('--')) {
+    const eq = word.indexOf('=');
+    const name = (eq < 0 ? word.slice(2) : word.slice(2, eq)).toLowerCase();
+    // the negation is a dry-run flag too, and the one that undoes an earlier `--dry-run` (the aws CLI's pair)
+    if (name === 'no-dry-run') return 'act';
+    if (!g.longs.includes(name)) return null;
+    return eq < 0 || DRY_RUN_VALUES.test(word.slice(eq + 1)) ? 'dry' : 'act';
+  }
+  if (g.short !== '' && /^-[A-Za-z0-9@]+$/.test(word)) {
+    for (const c of word.slice(1)) {
+      if (c === g.short) return 'dry';
+      if (g.shortValued.includes(c)) return null; // the rest of the cluster is that option's value
+    }
+  }
+  return null;
+}
+
+/** 'dry' when the last dry-run flag asks for one, 'act' when it says to really do it, null when the line has none - and
+ *  where that flag stands. `words` are the command's own words (any quoting already removed: the shell strips it before
+ *  the tool sees the word, so `"--dry-run=none"` IS the flag). Nothing after `--` is an option. */
+function dryRunDecision(words: readonly string[], g: DryRunGrammar): { state: 'dry' | 'act' | null; at: number } {
+  const dd = words.indexOf('--');
+  const w = dd >= 0 ? words.slice(0, dd) : words;
+  const takesValue = (opt: string | undefined): boolean => {
+    if (opt === undefined || !opt.startsWith('-') || opt === '-' || opt.includes('=')) return false;
+    // a dry-run flag, bare, takes no value: kubectl's and helm's has a default that applies when none follows with
+    // `=`, so `--dry-run none ./chart` is a dry run of a release NAMED none
+    if (dryRunDirection(opt, g) !== null) return false;
+    if (!opt.startsWith('--') && g.shortValued !== '' && /^-[A-Za-z0-9@]+$/.test(opt)) {
+      const valuedAt = [...opt.slice(1)].findIndex((c) => g.shortValued.includes(c));
+      if (valuedAt >= 0) return valuedAt === opt.length - 2; // the value is glued unless the valued letter ends the cluster
+    }
+    return g.valued ? g.valued.test(opt) : !(g.boolean?.test(opt) ?? false);
+  };
+  let last: 'dry' | 'act' | null = null;
+  let at = -1;
+  w.forEach((word, i) => {
+    const direction = dryRunDirection(word, g);
+    if (direction === null) return;
+    // A FLAG IN AN OPTION'S VALUE POSITION IS THAT OPTION'S VALUE (`kubectl set env deploy/x A=1 --field-manager
+    // --dry-run` names a field manager). Where the option before it might take one, a flag that asks for a dry run
+    // is not counted - and one that says "really do it" IS: the act reading is the safe one wherever it is a doubt.
+    if (!takesValue(w[i - 1])) {
+      last = direction;
+      at = i;
+    } else if (direction === 'act') {
+      last = 'act';
+      at = i;
+    }
+  });
+  return { state: last, at };
+}
+function dryRunOf(words: readonly string[], g: DryRunGrammar): 'dry' | 'act' | null {
+  return dryRunDecision(words, g).state;
+}
+
+/** The grammar of the tools whose dry-run flag is read by a MATCHER (a regex over the normalized text) and by nothing
+ *  else - the push family, the cloud CLIs, argocd - or null for every other command. A regex can only ask "is a dry-run
+ *  flag present", which is the question this file spent three review rounds taking apart: `git push -n --no-dry-run`,
+ *  `git push -o -n origin main` (the `-n` is a push option) and `git push -- -n main` (a remote called -n) were all
+ *  read as dry runs, and `aws … --dry-run --no-dry-run` as well. */
+function matcherDryRunGrammar(rest: readonly string[]): DryRunGrammar | null {
+  const head = rest[0] ?? '';
+  const verb = rest[1] ?? '';
+  if (head === 'git' && (verb === 'push' || verb === 'send-pack' || (verb === 'subtree' && rest[2] === 'push'))) return GIT_PUSH_DRY_RUN;
+  if (/^(aws|gcloud|az|terraform|tofu|pulumi|argocd|flux)$/.test(head)) return CLOUD_DRY_RUN;
+  return null;
+}
+
+/** THE NORMALIZED TEXT SAYS WHAT THE TOOL WILL DO, so the matchers that look for a dry-run flag see the same fact the
+ *  code readers see: the flags that decide nothing are taken out (a value, a path after `--`, a flag undone by a later
+ *  one), and when the last flag asks for a dry run exactly that flag is left. Where no matcher reads dry-run flags this
+ *  changes nothing. */
+function canonicalDryRun(rest: string[]): string[] {
+  const g = matcherDryRunGrammar(rest);
+  if (g === null) return rest;
+  const body = rest.slice(1);
+  const { state, at } = dryRunDecision(body, g);
+  const dd = body.indexOf('--');
+  const out: string[] = [rest[0]!];
+  body.forEach((w, i) => {
+    const direction = dryRunDirection(w, g);
+    if (direction === null || (state === 'dry' && i === at && (dd < 0 || i < dd))) {
+      out.push(w);
+      return;
+    }
+    // a cluster keeps its other letters: `-fn` is `--force` and `--dry-run`, and only the second one is taken out
+    if (!w.startsWith('--') && g.short !== '') {
+      const kept = w.replace(g.short, '');
+      if (kept.length > 1) out.push(kept);
+    }
+  });
+  return out;
+}
+
+/** THE OPERANDS OF A COMMAND LINE, with the same two rules the flag reader keeps: a word after `--` is an operand
+ *  whatever it looks like, and the word after an option that takes a value is that value. `git rm -f -- -n x` has two
+ *  paths, `-n` and `x`; filtering on a leading dash dropped the first and kept the reader's view of the line apart from
+ *  the tool's. `valued` is the options that consume the next word; any other option takes none. */
+function operandsOf(words: readonly string[], valued?: RegExp): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === '--') {
+      out.push(...words.slice(i + 1));
+      break;
+    }
+    if (w.startsWith('-') && w !== '-') {
+      if (valued?.test(w)) i++;
+      continue;
+    }
+    out.push(w);
+  }
+  return out;
+}
+
 /** flags that take no value, so the word after them is a new word: what may stand in front of a dry-run flag */
 const BOOLEAN_BEFORE_DRY_RUN =
-  /^(--force|-f|--wait|--atomic|--install|-i|--overwrite|--server-side|--prune|--recursive|-R|--all|-A|--record|--save-config|--show-managed-fields|--skip-crds|--no-hooks|--debug|--create-namespace|--dependency-update|--reuse-values|--reset-values|--cascade|--ignore-not-found|--wait-for-jobs|--enable-helm|--delete|--recursive|--quiet|-q|--verbose)$/;
+  /^(--force|-f|--wait|--atomic|--install|-i|--overwrite|--server-side|--prune|--recursive|-R|--all|-A|--all-namespaces|--record|--save-config|--show-managed-fields|--skip-crds|--no-hooks|--debug|--create-namespace|--dependency-update|--reuse-values|--reset-values|--cascade|--ignore-not-found|--wait-for-jobs|--enable-helm|--delete|--quiet|-q|--verbose|--validate|--force-conflicts|--local|--now|--devel|--replace|--cleanup-on-fail|--keep-history|--disable-openapi-validation|--insecure-skip-tls-verify)$/;
+
+/** kubectl, oc and helm: long options only, and most of their options are of unknown arity */
+const K8S_DRY_RUN: DryRunGrammar = {
+  longs: ['dry-run', 'dryrun', 'server-dry-run', 'what-if', 'no-act'],
+  short: '',
+  shortValued: '',
+  boolean: BOOLEAN_BEFORE_DRY_RUN,
+};
+/** the tools whose whole option set is known: every option not listed as taking a value takes none, so what stands
+ *  after it is an operand. `-n` is the dry run of `git rm`, `git mv` and `rsync`; for `patch` it is `--normal`. */
+const GIT_PATH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: /^--pathspec-from-file$/ };
+/** `git push` and `git send-pack`: `-o` is a push option and the others name a program or a repository */
+const GIT_PUSH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: /^(-o|--push-option|--receive-pack|--exec|--repo)$/ };
+/** the cloud CLIs, argocd and flux: long options only. A `--no-…` flag is a switch by convention (the aws CLI's all are) */
+const CLOUD_DRY_RUN: DryRunGrammar = {
+  longs: ['dry-run', 'dryrun', 'server-dry-run', 'what-if', 'no-act'],
+  short: '',
+  shortValued: '',
+  boolean: /^(--no-[a-z-]+|--recursive|--delete|--quiet|--debug|--force|--yes|--only-show-errors|--wait|--auto-approve|--follow-symlinks)$/,
+};
+const RSYNC_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: 'eBTfM@', valued: VALUE_OPTS_BY_HEAD['rsync']! };
+const PATCH_DRY_RUN: DryRunGrammar = {
+  longs: ['dry-run', 'check'],
+  short: '',
+  shortValued: '',
+  valued: /^(-p|-d|-i|-o|-r|-F|-B|-Y|-z|-V|-g|-D|--strip|--directory|--input|--output|--reject-file|--fuzz|--prefix|--suffix|--basename-prefix|--version-control|--get|--ifdef)$/,
+};
 
 function isDryRun(seg: string): boolean {
-  const t = commandWords(tokenizeMarked(seg))
-    .filter((x) => !x.quoted)
-    .map((x) => x.text);
-  // nothing after a `--` belongs to the tool's own flags
-  const dd = t.indexOf('--');
-  const words = dd >= 0 ? t.slice(0, dd) : t;
   // `--dry-run=none` IS NOT A DRY RUN. It is the EXPLICIT spelling of "really do it": kubectl documents none as
   // the default, and helm's own help says `--dry-run=none` executes the operation normally and persists
   // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
   // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
   // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
-  // THE LAST dry-run flag decides, as it does for the tool: `--dry-run=client --dry-run=none` really applies
-  let verdict = false;
-  words.forEach((w, i) => {
-    const isFlag =
-      w === '--server-dry-run' ||
-      w === '--dryrun' ||
-      w === '--what-if' ||
-      w === '--no-act' ||
-      // a BARE `--dry-run` is a dry run: kubectl's and helm's flag takes its value only with `=`, so the next word is
-      // a positional (`helm upgrade --dry-run none ./chart` upgrades a release NAMED none, as a dry run)
-      w === '--dry-run' ||
-      /^--dry-run=/i.test(w);
-    if (!isFlag) return;
-    // A FLAG IN AN OPTION'S VALUE POSITION IS THAT OPTION'S VALUE. Which options take one is not knowable for every
-    // tool, so the word before must be a positional, a complete `--opt=value`, or an option known to take none
-    // (`kubectl set env deploy/x A=1 --field-manager --dry-run` names a field manager)
-    const prev = words[i - 1];
-    if (!(prev === undefined || !prev.startsWith('-') || prev.includes('=') || BOOLEAN_BEFORE_DRY_RUN.test(prev))) return;
-    verdict = !/^--dry-run=/i.test(w) || /^--dry-run=(client|server|true|1|yes)$/i.test(w);
-  });
-  return verdict;
+  const words = commandWords(tokenizeMarked(seg)).map((x) => x.text);
+  return dryRunOf(words, K8S_DRY_RUN) === 'dry';
 }
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
 const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
@@ -9533,8 +9679,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       const inplace = tokens.some((t) => t === '-i' || t === '--inplace' || /^-[a-zA-Z]*i$/.test(t));
       const operands = bareOperands();
       dest = inplace && operands.length ? operands[operands.length - 1]! : null;
-    } else if (head === 'rsync' && tokens.some((t) => t === '--dry-run' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t))) {
-      // `rsync -n` (`--dry-run`) lists what WOULD be transferred and writes nothing
+    } else if (head === 'rsync' && dryRunOf(tokens.slice(1), RSYNC_DRY_RUN) === 'dry') {
+      // `rsync -n` (`--dry-run`) lists what WOULD be transferred and writes nothing - if it is the LAST such flag, and
+      // a flag at all: after `--` it is a file name, and as the value of `-e` it is a remote-shell command
       dest = null;
     } else if (['cp', 'install', 'rsync', 'scp', 'gcp', 'gmv', 'ditto', 'cpio'].includes(head)) {
       const operands = bareOperands(copyValueOpts(head));
@@ -9595,12 +9742,19 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // `git merge-file A B C` WRITES A IN PLACE — it is plumbing, not the porcelain merge, and `^git\s+merge\b`
       // matched it because `\b` sits between "merge" and "-" (exit review 10). `-p`/`--stdout` prints instead.
       if (sub === 'merge-file') {
-        const specs = tokens.slice(2).filter((t) => !t.startsWith('-'));
-        dest = specs.length && !tokens.some((t) => /^(-p|--stdout)$/.test(t)) ? specs[0]! : null;
+        // `-L LABEL` and `--marker-size N` take a value, which is not a file: reading it as the first operand named
+        // a label as the file written. And `-p` after `--` is a file, not the flag.
+        const words = tokens.slice(2);
+        const specs = operandsOf(words, /^(-L|--marker-size|--diff-algorithm)$/);
+        const options = words.indexOf('--') < 0 ? words : words.slice(0, words.indexOf('--'));
+        dest = specs.length && !options.some((t) => /^(-p|--stdout)$/.test(t)) ? specs[0]! : null;
       } else if (sub === 'rm' || sub === 'mv') {
-        // `git rm -n` and `git mv -n` (`--dry-run`) SHOW what would be removed or moved and touch nothing
-        const dryRunGit = tokens.slice(2).some((t) => t === '--dry-run' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t));
-        const specs = dryRunGit ? [] : [...tokens.slice(2).filter((t) => !t.startsWith('-')), ...fileSpecs];
+        // `git rm -n` and `git mv -n` (`--dry-run`) SHOW what would be removed or moved and touch nothing. The flag is
+        // the last such one BEFORE `--`: after it everything is a path, so `git rm -f -- -n control-plane/x.md` removes
+        // a file called -n AND the governed one (audit of 2026-10-01, self-attack-10 #32)
+        const gitWords = tokens.slice(2);
+        const dryRunGit = dryRunOf(gitWords, GIT_PATH_DRY_RUN) === 'dry';
+        const specs = dryRunGit ? [] : [...operandsOf(gitWords, GIT_PATH_DRY_RUN.valued), ...fileSpecs];
         if (specs.length) {
           gitPathspecs = specs;
           dest = 'ALL_PATHSPECS';
@@ -9642,7 +9796,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     } else if (head === 'patch') {
       // `patch --dry-run` (and `--check`) reports whether the patch applies and modifies nothing
       // `patch -o FILE` / `patch -oFILE` / `patch --output=FILE` writes FILE instead of the patched originals
-      dest = tokens.some((t) => t === '--dry-run' || t === '--check') ? null : (optionValue(tokens, 'o', ['--output']) ?? 'ALL');
+      dest = dryRunOf(tokens.slice(1), PATCH_DRY_RUN) === 'dry' ? null : (optionValue(tokens, 'o', ['--output']) ?? 'ALL');
     } else if (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head)) {
       // A STREAM EDITOR WRITES ITS OPERANDS ONLY IN PLACE. Unconditionally it made every READ of a governed file
       // an absolute deny; never, it let `gawk -i inplace '{print "x"}' .claude/settings.json` rewrite one
