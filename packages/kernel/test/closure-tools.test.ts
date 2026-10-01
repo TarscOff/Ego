@@ -19,6 +19,7 @@ import { runCommand, type ProjectContext } from '../../cli/src/commands.ts';
 import { table, workspace } from './support/corpus.ts';
 
 const HOME = homedir();
+const CRED = `${HOME}/.ssh/authorized_keys`;
 
 type Profile = 'STANDARD' | 'STRICT' | 'HIGH_ASSURANCE';
 const egoHome = mkdtempSync(join(tmpdir(), 'ego-closure-home-'));
@@ -269,5 +270,413 @@ test('a write through a not-yet-existing link is refused through the hook of the
     assert.equal(x.code, 2);
   }
   assert.equal((await hook(p, 'claude-code', cc('Write', { file_path: join(p.root, 'src', 'a.ts'), content: 'x' }))).action, 'allow');
+});
+
+test('`..` after a link names the parent of the link target, not the text before it', () => {
+  const dir = linked({ d: '.claude/sub' }, ['.claude/sub']);
+  // (string concatenation, not `join`: `join` would collapse the `..` before the evaluator ever saw it)
+  for (const p of [`${dir}/d/../settings.json`, 'd/../settings.json', `${dir}/d/./../settings.json`, `${dir}/d//../settings.json`]) {
+    const e = evalIn(dir, 'Write', { file_path: p });
+    assert.equal(e.verdict, 'DENY', `${p}: ${e.verdict} [${caps(e)}]`);
+    assert.ok(e.hits.some((h) => h.capability === 'fs.hook-config.write'), `${p}: [${caps(e)}]`);
+  }
+  // with no link in the way the same shape is the ordinary file it looks like
+  assert.equal(evalIn(dir, 'Write', { file_path: `${dir}/src/../x.ts` }).verdict, 'ALLOW');
+});
+
+test('a path with leading or trailing whitespace, or a NUL, is never judged as if it were trimmed', () => {
+  const dir = workspace();
+  const cases: Array<[string, string]> = [
+    [` ${CRED}`, 'DENY'], // a trimming host opens the credential file; the classifier saw a RELATIVE path
+    [`${CRED} `, 'DENY'],
+    [`\t${CRED}`, 'DENY'],
+    [`\u00a0${CRED}`, 'DENY'],
+    [`${CRED}\n`, 'DENY'],
+    [`${CRED}\0.txt`, 'DENY'], // a C string ends at the NUL
+    [`src/a.ts\0${CRED}`, 'ASK'],
+    [' src/a.ts', 'ASK'],
+    ['src/a.ts ', 'ASK'],
+    ['src/a.ts\r', 'ASK'],
+    ['   ', 'ASK'],
+  ];
+  for (const [path, atLeast] of cases) {
+    for (const [name, mk] of WRITERS.slice(0, 4)) {
+      const [tool, input] = mk(path);
+      const e = evalIn(dir, tool, input);
+      assert.notEqual(e.verdict, 'ALLOW', `${name} ${JSON.stringify(path)}: ${e.verdict} [${caps(e)}]`);
+      if (atLeast === 'DENY')
+        assert.equal(e.verdict, 'DENY', `${name} ${JSON.stringify(path)}: ${e.verdict} [${caps(e)}]`);
+    }
+    const read = evalIn(dir, 'Read', { file_path: path.replace(/authorized_keys/, 'id_rsa') });
+    assert.notEqual(read.verdict, 'ALLOW', `Read ${JSON.stringify(path)}`);
+  }
+  // search tools take the path the same way
+  for (const tool of ['Grep', 'Glob', 'LS']) {
+    for (const path of [` ${HOME}/.ssh`, `${HOME}/.ssh `, '\t~/.ssh']) {
+      const e = evalIn(dir, tool, { path, pattern: '*' });
+      assert.equal(e.verdict, 'DENY', `${tool} ${JSON.stringify(path)}: ${e.verdict} [${caps(e)}]`);
+    }
+    assert.notEqual(evalIn(dir, tool, { path: ' src', pattern: '*' }).verdict, 'ALLOW', `${tool} padded repo path`);
+  }
+  // an ordinary, clean path is not touched by any of this
+  assert.equal(evalIn(dir, 'Write', { file_path: join(dir, 'src', 'a.ts') }).verdict, 'ALLOW');
+  assert.equal(evalIn(dir, 'Read', { file_path: 'src/a.ts' }).verdict, 'ALLOW');
+});
+
+test('a leading-space path is refused through the hook of both hosts', async () => {
+  const p = project('STANDARD');
+  for (const file_path of [` ${CRED}`, `${CRED} `, `\t${CRED}`]) {
+    const a = await hook(p, 'claude-code', cc('Write', { file_path, content: 'x' }));
+    assert.equal(a.action, 'deny', a.reason);
+    assert.match(a.reason, /fs\.credential-store\.write/);
+    const x = await hook(p, 'codex-cli', { tool_name: 'write_file', tool_input: { file_path, content: 'x' } });
+    assert.notEqual(x.action, 'allow', x.reason);
+    assert.equal(x.code, 2);
+  }
+  // an ordinary, clean path is not touched
+  assert.equal((await hook(p, 'claude-code', cc('Write', { file_path: join(p.root, 'src', 'a.ts'), content: 'x' }))).action, 'allow');
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 1. apply_patch HEADERS ARE READ THE WAY THE HOST'S PARSER READS THEM (audit 7)
+ *
+ * The header test was a column-0 regular expression. Codex's own parser trims every line before it looks for a
+ * header, so `  *** Add File: ~/.ssh/authorized_keys` — after a benign Add, after a Delete, directly after an
+ * Update (for its `Move to`) — was invisible to EGO and ALLOW while Codex applied it: an arbitrary-path write.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** every kind of space a parser might trim: ASCII, tab, NBSP, EM SPACE, IDEOGRAPHIC SPACE, NEXT LINE, BOM, VT, FF */
+const PADS = [' ', '  ', '\t', ' \t ', '\u00a0', '\u2003', '\u3000', '\u0085', '\ufeff', '\u000b', '\u000c'];
+test('apply_patch: a header indented by ANY whitespace is still a header (Add, Delete, Move to)', () => {
+  const dir = workspace();
+  for (const pad of PADS) {
+    const shown = JSON.stringify(pad);
+    const spellings: Array<[string, string]> = [
+      ['an Add after a benign Add', patch('*** Add File: ok.txt', '+x', `${pad}*** Add File: ${CRED}`, '+evil')],
+      ['a Delete after a Delete', patch('*** Delete File: a.txt', `${pad}*** Delete File: ${CRED}`)],
+      ['a Move to right after an Update', patch('*** Update File: src/a.ts', `${pad}*** Move to: ${CRED}`, ...BODY)],
+      ['an Add after an Update hunk', patch('*** Update File: src/a.ts', ...BODY, `${pad}*** Add File: ${CRED}`, '+evil')],
+      ['an Update of a credential', patch('*** Add File: ok.txt', '+x', `${pad}*** Update File: ${CRED}`, ...BODY)],
+      // trailing padding on the header line is trimmed too
+      ['a header with trailing padding', patch('*** Add File: ok.txt', '+x', `*** Add File: ${CRED}${pad}`, '+evil')],
+    ];
+    for (const [what, text] of spellings) {
+      const e = evalIn(dir, 'apply_patch', { command: text });
+      assert.equal(e.verdict, 'DENY', `${what}, pad ${shown}: ${e.verdict} [${caps(e)}]`);
+      assert.equal(e.decisive?.capability, 'fs.credential-store.write', `${what}, pad ${shown}`);
+    }
+  }
+});
+
+test('apply_patch: CRLF, lone CR and Unicode line separators do not hide a header', () => {
+  const dir = workspace();
+  const crlf = patch('*** Add File: ok.txt', '+x', `  *** Add File: ${CRED}`, '+evil').replace(/\n/g, '\r\n');
+  assert.equal(evalIn(dir, 'apply_patch', { command: crlf }).decisive?.capability, 'fs.credential-store.write');
+  for (const sep of ['\r', '\u2028', '\u2029']) {
+    const text = patch('*** Add File: ok.txt', '+x', `${sep}  *** Add File: ${CRED}`, '+evil');
+    const e = evalIn(dir, 'apply_patch', { command: text });
+    assert.equal(e.decisive?.capability, 'fs.credential-store.write', `separator ${JSON.stringify(sep)}`);
+  }
+  // the `patch` key is the same operand
+  const viaPatch = evalIn(dir, 'apply_patch', { patch: patch('*** Delete File: a', `\t*** Delete File: ${CRED}`) });
+  assert.equal(viaPatch.verdict, 'DENY');
+});
+
+test('apply_patch: a header the parser does not recognise makes the whole patch unparseable', () => {
+  const dir = workspace();
+  for (const odd of ['*** Rename File: a -> b', '  *** Frobnicate: x', '\t*** Add Files: x', '*** Begin Patch: evil', '*** Update File', '*** Move to']) {
+    const text = patch('*** Add File: ok.txt', '+x', odd);
+    const e = evalIn(dir, 'apply_patch', { command: text });
+    assert.equal(e.verdict, 'DENY', `${JSON.stringify(odd)}: ${e.verdict}`);
+    assert.deepEqual(e.hits, [], 'refused before any path is classified');
+  }
+  // a header that names no path is not a header the host can apply either
+  assert.equal(evalIn(dir, 'apply_patch', { command: patch('*** Add File: ', '+x') }).verdict, 'DENY');
+});
+
+test('apply_patch: what is not a header stays ordinary — content lines and context lines are not refused', () => {
+  const dir = workspace();
+  const ok = (text: string, what: string) => {
+    const e = evalIn(dir, 'apply_patch', { command: text });
+    assert.equal(e.verdict, 'ALLOW', `${what}: ${e.verdict} [${caps(e)}]`);
+  };
+  ok(patch('*** Update File: src/a.ts', ...BODY), 'a plain update');
+  ok(patch('*** Update File: src/a.ts', '@@', ' context', '-old', '+new', '*** End of File'), 'End of File marker');
+  ok(patch('*** Add File: docs/x.md', '+*** Add File: example/in/a/doc', '+  *** nested note'), 'header-looking text in added content');
+  ok(patch('*** Update File: notes.org', '@@', ' *** TODO a heading', '-old', '+new'), 'an org-mode heading as a context line');
+  ok(patch('*** Update File: src/a.ts', '@@', '-*** a removed line', '+*** an added line'), 'removed/added lines');
+  ok(patch('*** Update File: src/a.ts', '*** Move to: src/b.ts', ...BODY), 'a plain rename');
+  ok(`*** Begin Patch\r\n*** Update File: src/a.ts\r\n@@\r\n-a\r\n+b\r\n*** End Patch\r\n`, 'CRLF throughout');
+});
+
+test('apply_patch: a path inside a header is judged as written, not as trimmed', () => {
+  const dir = workspace();
+  // whitespace INSIDE the path survives the host's line trim; whichever way the host reads it, the stricter reading counts
+  const padded = evalIn(dir, 'apply_patch', { command: patch(`*** Add File:  ${CRED}`, '+evil') });
+  assert.equal(padded.verdict, 'DENY');
+  const tab = evalIn(dir, 'apply_patch', { command: patch('*** Add File:\tsrc/a.ts', '+x') });
+  assert.notEqual(tab.verdict, 'ALLOW', 'a path that starts with whitespace is never judged as if it were trimmed');
+  assert.equal(evalIn(dir, 'apply_patch', { command: patch('*** Add File: src/a\0.ts', '+x') }).verdict, 'ASK');
+});
+
+test('apply_patch, through the hook of BOTH hosts: an indented header is refused', async () => {
+  const claudeText = patch('*** Add File: ok.txt', '+x', `  *** Add File: ${CRED}`, '+evil');
+  const moveText = patch('*** Update File: src/a.ts', `\u00a0*** Move to: ${CRED}`, ...BODY);
+  const crlfText = claudeText.replace(/\n/g, '\r\n');
+  for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE'] as const) {
+    const p = project(profile);
+    for (const text of [claudeText, moveText, crlfText]) {
+      const a = await hook(p, 'claude-code', cc('apply_patch', { command: text }));
+      assert.equal(a.action, 'deny', `claude-code ${profile}: ${a.reason}`);
+      assert.equal(a.code, 0, 'claude-code carries the decision in the output');
+      for (const shape of [
+        { tool: 'apply_patch', arguments: text }, // the string form: parsed as `command`
+        { tool_name: 'apply_patch', tool_input: { command: text } },
+      ]) {
+        const x = await hook(p, 'codex-cli', shape);
+        assert.equal(x.action, 'deny', `codex-cli ${profile}: ${x.reason}`);
+        assert.equal(x.code, 2, 'codex-cli refuses with exit 2');
+        assert.match(x.reason, /fs\.credential-store\.write/);
+      }
+    }
+    // the ordinary patch still goes through on both
+    const fine = patch('*** Update File: src/a.ts', ...BODY);
+    assert.equal((await hook(p, 'claude-code', cc('apply_patch', { command: fine }))).action, 'allow');
+    const cx = await hook(p, 'codex-cli', { tool_name: 'apply_patch', tool_input: { command: fine } });
+    assert.equal(cx.action, 'allow');
+    assert.equal(cx.code, 0);
+  }
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 3. ONLY A FETCH HAS A URL (audit 9)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('WebSearch is public egress whatever other keys it carries; only WebFetch consults a url', async () => {
+  const dir = workspace();
+  const local = ['http://localhost:3000', 'http://127.0.0.1:8080/x', 'localhost:3000', 'http://[::1]:1/'];
+  for (const url of local) {
+    const search = { query: 'secret', url };
+    assert.equal(evalIn(dir, 'WebSearch', search, 'HIGH_ASSURANCE').verdict, 'DENY', `HIGH_ASSURANCE ${url}`);
+    for (const profile of ['STANDARD', 'STRICT'] as const) {
+      const e = evalIn(dir, 'WebSearch', search, profile);
+      assert.equal(e.verdict, 'ASK', `${profile} ${url}: ${e.verdict} [${caps(e)}]`);
+      assert.ok(e.hits.some((h) => h.capability === 'network.public-read'), `[${caps(e)}]`);
+      assert.ok(!e.hits.some((h) => h.capability === 'network.localhost'), 'the url is not what the search is judged by');
+    }
+  }
+  // the fetch that really is local is still local, in every profile
+  for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE'] as const)
+    assert.equal(evalIn(dir, 'WebFetch', { url: 'http://localhost:3000', prompt: 'p' }, profile).verdict, 'ALLOW', profile);
+  assert.equal(evalIn(dir, 'WebFetch', { url: 'https://docs.example.com', prompt: 'p' }).verdict, 'ASK');
+  assert.equal(evalIn(dir, 'WebFetch', { url: 'https://docs.example.com', prompt: 'p' }, 'HIGH_ASSURANCE').verdict, 'DENY');
+  // a fetch whose url is not text is not a local fetch either
+  for (const url of [5, ['http://localhost'], null, { a: 1 }]) {
+    const e = evalIn(dir, 'WebFetch', { url }, 'HIGH_ASSURANCE');
+    assert.equal(e.verdict, 'DENY', JSON.stringify(url));
+    assert.notEqual(evalIn(dir, 'WebFetch', { url }).verdict, 'ALLOW', JSON.stringify(url));
+  }
+  // ...through the real hook
+  const p = project('HIGH_ASSURANCE');
+  const a = await hook(p, 'claude-code', cc('WebSearch', { query: 'secret', url: 'http://localhost:3000' }));
+  assert.equal(a.action, 'deny', a.reason);
+  assert.equal((await hook(p, 'claude-code', cc('WebFetch', { url: 'http://localhost:3000', prompt: 'p' }))).action, 'allow');
+  const std = project('STANDARD');
+  assert.equal((await hook(std, 'claude-code', cc('WebSearch', { query: 'q', url: 'http://localhost:3000' }))).action, 'ask');
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 4. AN OPTIONAL OPERAND IS NOT A LICENCE TO GUESS, AND A TOOL HAS ONE OPERAND (audit 13)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('Grep, Glob and LS: an operand that is present and not a string is a call nobody understands, not the working directory', () => {
+  const dir = workspace();
+  const asks = (tool: string, input: Record<string, unknown>, what: string) => {
+    const e = evalIn(dir, tool, input);
+    assert.equal(e.verdict, 'ASK', `${what}: ${e.verdict} [${caps(e)}]`);
+    assert.ok(e.hits.some((h) => h.capability === 'command.unknown'), `${what}: [${caps(e)}]`);
+  };
+  asks('Grep', {}, 'Grep with nothing');
+  asks('Grep', { pattern: 5 }, 'Grep pattern a number');
+  asks('Grep', { pattern: ['x'] }, 'Grep pattern an array');
+  asks('Grep', { pattern: 'x', path: 5 }, 'Grep path a number');
+  asks('Grep', { pattern: 'x', path: [`${HOME}/.ssh`] }, 'Grep path an array');
+  asks('Grep', { pattern: 'x', path: null }, 'Grep path null');
+  asks('Grep', { pattern: 'x', path: { a: 1 } }, 'Grep path an object');
+  asks('Grep', { pattern: 'x', glob: ['**/.env'] }, 'Grep glob an array');
+  asks('Glob', {}, 'Glob with nothing');
+  asks('Glob', { pattern: ['~/.ssh/*'] }, 'Glob pattern an array');
+  asks('Glob', { pattern: '*.ts', path: 7 }, 'Glob path a number');
+  asks('LS', { path: [`${HOME}/.ssh`] }, 'LS path an array');
+  asks('LS', { path: 5 }, 'LS path a number');
+  // the ordinary calls, with the keys the hosts really send, are untouched
+  const ok = (tool: string, input: Record<string, unknown>) => {
+    const e = evalIn(dir, tool, input);
+    assert.equal(e.verdict, 'ALLOW', `${tool} ${JSON.stringify(input)}: ${e.verdict} [${caps(e)}]`);
+  };
+  ok('Grep', { pattern: 'TODO' });
+  ok('Grep', { pattern: 'TODO', path: 'src', glob: '*.ts', output_mode: 'content', '-i': true, '-n': true, type: 'ts', head_limit: 20 });
+  ok('Glob', { pattern: '**/*.ts' });
+  ok('Glob', { pattern: '**/*.ts', path: dir });
+  ok('LS', { path: dir, ignore: ['node_modules'] });
+  ok('LS', {});
+});
+
+test('a tool has ONE operand: a second operand-shaped key is read too and the call asks', () => {
+  const dir = workspace();
+  const ok = join(dir, 'src', 'a.ts');
+  // the key the host does NOT name may be the one it honours: judged both ways, the stricter wins
+  const deny = (tool: string, input: Record<string, unknown>) => {
+    const e = evalIn(dir, tool, input);
+    assert.equal(e.verdict, 'DENY', `${tool} ${JSON.stringify(input)}: ${e.verdict} [${caps(e)}]`);
+  };
+  const ask = (tool: string, input: Record<string, unknown>) => {
+    const e = evalIn(dir, tool, input);
+    assert.equal(e.verdict, 'ASK', `${tool} ${JSON.stringify(input)}: ${e.verdict} [${caps(e)}]`);
+  };
+  deny('NotebookEdit', { file_path: ok, notebook_path: CRED });
+  deny('NotebookEdit', { notebook_path: ok, file_path: CRED });
+  deny('Write', { file_path: ok, notebook_path: CRED });
+  deny('Write', { file_path: ok, path: CRED });
+  deny('Write', { file_path: ok, filePath: CRED });
+  deny('Edit', { file_path: ok, path: CRED });
+  deny('MultiEdit', { file_path: ok, filename: CRED });
+  deny('Read', { file_path: ok, path: `${HOME}/.ssh/id_rsa` });
+  deny('Read', { file_path: ok, file: `${HOME}/.ssh/id_rsa` });
+  deny('Grep', { pattern: 'x', file_path: `${HOME}/.ssh/id_rsa` });
+  deny('Bash', { command: 'ls', cmd: 'git push origin main' });
+  deny('Bash', { command: 'ls', script: 'git push origin main' });
+  deny('Bash', { command: 'ls', argv: ['git', 'push', 'origin', 'main'] });
+  deny('apply_patch', { command: patch('*** Update File: src/a.ts', ...BODY), patch: patch(`*** Add File: ${CRED}`, '+x') });
+  deny('apply_patch', { command: patch(`*** Add File: ${CRED}`, '+x'), patch: patch('*** Update File: src/a.ts', ...BODY) });
+  // ordinary values in the second key still ask: nobody can tell which one the host would honour
+  ask('Write', { file_path: ok, filePath: join(dir, 'src', 'b.ts') });
+  ask('NotebookEdit', { notebook_path: ok, file_path: join(dir, 'src', 'b.ts') });
+  ask('Read', { file_path: ok, path: join(dir, 'src', 'b.ts') });
+  ask('Bash', { command: 'ls', cmd: 'ls' });
+  ask('Bash', { command: 'ls', file_path: ok });
+  ask('WebSearch', { query: 'q', url: 'https://docs.example.com' });
+  ask('WebFetch', { url: 'https://docs.example.com', path: ok });
+  ask('apply_patch', {
+    command: patch('*** Update File: src/a.ts', ...BODY),
+    patch: patch('*** Update File: src/b.ts', ...BODY),
+  });
+  // the same text under two operand keys is one patch
+  const same = patch('*** Update File: src/a.ts', ...BODY);
+  assert.equal(evalIn(dir, 'apply_patch', { command: same, patch: same }).verdict, 'ALLOW');
+  // ...and the operand each tool really has is the only one it is judged by when it is alone
+  assert.equal(evalIn(dir, 'NotebookEdit', { notebook_path: ok, new_source: 'x', cell_id: 'c', edit_mode: 'replace' }).verdict, 'ALLOW');
+  assert.equal(evalIn(dir, 'Write', { file_path: ok, content: 'x' }).verdict, 'ALLOW');
+  assert.equal(evalIn(dir, 'Edit', { file_path: ok, old_string: 'a', new_string: 'b', replace_all: false }).verdict, 'ALLOW');
+  assert.equal(evalIn(dir, 'Read', { file_path: ok, offset: 1, limit: 10 }).verdict, 'ALLOW');
+  assert.equal(evalIn(dir, 'Bash', { command: 'ls', description: 'list', timeout: 1000, run_in_background: false }).verdict, 'ALLOW');
+  // a NotebookEdit that names its path the way a Write does has no operand at all
+  assert.equal(evalIn(dir, 'NotebookEdit', { file_path: ok }).verdict, 'ASK');
+  assert.equal(evalIn(dir, 'Write', { notebook_path: ok }).verdict, 'ASK');
+});
+
+test('a tool operand that is present and is not a string asks, for every tool', () => {
+  const dir = workspace();
+  for (const [tool, key] of [
+    ['Bash', 'command'],
+    ['shell', 'command'],
+    ['Read', 'file_path'],
+    ['Write', 'file_path'],
+    ['Edit', 'file_path'],
+    ['MultiEdit', 'file_path'],
+    ['NotebookEdit', 'notebook_path'],
+  ] as const) {
+    for (const bad of [5, null, true, [`${HOME}/.ssh/authorized_keys`], { a: 1 }]) {
+      const e = evalIn(dir, tool, { [key]: bad });
+      assert.equal(e.verdict, 'ASK', `${tool} ${key}=${JSON.stringify(bad)}: ${e.verdict} [${caps(e)}]`);
+    }
+  }
+  for (const bad of [5, null, [patch('*** Add File: x', '+x')], { a: 1 }])
+    assert.equal(evalIn(dir, 'apply_patch', { command: bad }).verdict, 'DENY', JSON.stringify(bad));
+});
+
+test('operand pollution and shapes are refused through the hook of both hosts', async () => {
+  const p = project('STANDARD');
+  const bad: Array<[string, unknown]> = [
+    ['NotebookEdit', { file_path: 'src/a.ts', notebook_path: CRED }],
+    ['Write', { file_path: 'src/a.ts', path: CRED }],
+    ['Bash', { command: 'ls', cmd: 'git push origin main' }],
+  ];
+  for (const [name, input] of bad) {
+    const a = await hook(p, 'claude-code', cc(name, input));
+    assert.equal(a.action, 'deny', `${name}: ${a.reason}`);
+  }
+  assert.equal((await hook(p, 'claude-code', cc('Grep', { pattern: 'x', path: [`${HOME}/.ssh`] }))).action, 'ask');
+  assert.equal((await hook(p, 'claude-code', cc('Glob', { pattern: ['~/.ssh/*'] }))).action, 'ask');
+  assert.equal((await hook(p, 'claude-code', cc('LS', { path: 5 }))).action, 'ask');
+  assert.equal((await hook(p, 'claude-code', cc('Grep', { pattern: 'x' }))).action, 'allow');
+  const x = await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: 'ls', cmd: 'git push' } });
+  assert.equal(x.action, 'deny');
+  assert.equal(x.code, 2);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 6. HOST TOOLS THAT CANNOT ACT ON ANYTHING (audit 8: the undocumented cost of the fix)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('a tool nobody modelled asks; the few that cannot act on anything are listed by name, and only those', async () => {
+  const dir = workspace();
+  for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE'] as const) {
+    for (const [tool, input] of [
+      ['TodoWrite', { todos: [{ content: 'x', status: 'pending', activeForm: 'x' }] }],
+      ['TodoWrite', {}],
+      ['BashOutput', { bash_id: 'b1' }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const e = evalIn(dir, tool, input, profile);
+      assert.equal(e.verdict, 'ALLOW', `${profile} ${tool}: ${e.verdict}`);
+      assert.deepEqual(e.hits, [], 'no capability: the tool touches no file, network or process');
+      assert.match(e.reason, new RegExp(tool));
+    }
+    for (const tool of [
+      'SomeFutureTool',
+      'Task',
+      'Agent',
+      'Skill',
+      'KillShell',
+      'SlashCommand',
+      // the host's own prompt IS the function of these two; an allow would answer for the human
+      'ExitPlanMode',
+      'AskUserQuestion',
+      // a name has to be spelled exactly
+      'todowrite',
+      'TODOWRITE',
+      'TodoWrite ',
+      ' TodoWrite',
+      'TodoWrite\n',
+      'bashoutput',
+      'TodoWrite\u200b',
+      // names that are properties of every object
+      '__proto__',
+      'constructor',
+      'toString',
+      'hasOwnProperty',
+    ]) {
+      const e = evalIn(dir, tool, { x: 1 }, profile);
+      assert.equal(e.verdict, 'ASK', `${profile} ${JSON.stringify(tool)}: ${e.verdict} [${caps(e)}]`);
+      assert.match(e.reason, /no governed operation could be resolved/);
+    }
+  }
+  // ...through the real hook: claude-code allows the bookkeeping and asks about the rest; codex-cli refuses the rest
+  for (const profile of ['STANDARD', 'HIGH_ASSURANCE'] as const) {
+    const p = project(profile);
+    assert.equal((await hook(p, 'claude-code', cc('TodoWrite', { todos: [] }))).action, 'allow', profile);
+    assert.equal((await hook(p, 'claude-code', cc('BashOutput', { bash_id: 'b' }))).action, 'allow');
+    for (const name of ['Task', 'ExitPlanMode', 'AskUserQuestion', 'SomeFutureTool'])
+      assert.equal((await hook(p, 'claude-code', cc(name, {}))).action, 'ask', `${profile} ${name}`);
+    const cx = await hook(p, 'codex-cli', { tool_name: 'frobnicate', tool_input: { x: 1 } });
+    assert.equal(cx.action, 'deny');
+    assert.equal(cx.code, 2);
+    assert.match(cx.reason, /ASK is refused/);
+    assert.equal((await hook(p, 'codex-cli', { tool_name: 'TodoWrite', tool_input: {} })).action, 'allow');
+  }
+  // before trust promotion the bookkeeping still works and the governed mutation still does not
+  const pre = project('HIGH_ASSURANCE', true);
+  assert.equal((await hook(pre, 'claude-code', cc('TodoWrite', { todos: [] }))).action, 'allow');
+  assert.equal((await hook(pre, 'claude-code', cc('Write', { file_path: join(pre.root, 'a.ts'), content: 'x' }))).action, 'deny');
 });
 

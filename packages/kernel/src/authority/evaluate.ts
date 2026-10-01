@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
+import { argvToCommandLine } from '../util/shell-quote.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
@@ -11300,6 +11301,277 @@ function applyGrants(hit: CapabilityHit, ctx: EvaluationContext): CapabilityHit 
   return hit;
 }
 
+/* ------------------------------------------------------------------------------------------------------------- *
+ * THE STRUCTURED TOOL SURFACE: every call that is not a Bash string.
+ *
+ * Which key of a tool call is its OPERAND is a fact about the host's tool, and it used to be answered a different
+ * way in every branch: one tool read `file_path` and fell back to `notebook_path`, another read `path` and took
+ * anything that was not a string for "the working directory", a third consulted `url` whatever it was called, and the
+ * apply_patch header test was a column-0 regular expression where the host's parser trims. Every one of those is a
+ * spelling in which EGO judges one operand and the host honours another (audit 2026-10-01, items 7, 9, 13, C3). The
+ * table below is the single answer; a shape that falls outside it is ASKED ABOUT, never guessed at.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** The key(s) each modelled tool is classified by. A tool absent from this table is not modelled. */
+const TOOL_OPERANDS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['Bash', ['command']],
+  ['shell', ['command']],
+  ['Read', ['file_path']],
+  ['Write', ['file_path']],
+  ['Edit', ['file_path']],
+  ['MultiEdit', ['file_path']],
+  ['NotebookEdit', ['notebook_path']],
+  ['Grep', ['path', 'pattern', 'glob']],
+  ['Glob', ['path', 'pattern']],
+  ['LS', ['path']],
+  ['WebFetch', ['url']],
+  ['WebSearch', []],
+  ['apply_patch', ['command', 'patch']],
+]);
+/** Other spellings a caller might send for an operand. With the table's own keys they make up the set of names no tool
+ *  may carry beside ITS operand: a second operand-shaped key is a second thing the host might honour. */
+const OPERAND_SYNONYMS = ['cmd', 'script', 'argv', 'filePath', 'file', 'filename', 'uri'];
+const FOREIGN_CANDIDATES: ReadonlySet<string> = new Set([...[...TOOL_OPERANDS.values()].flat(), ...OPERAND_SYNONYMS]);
+const PATH_KEYS: ReadonlySet<string> = new Set(['file_path', 'filePath', 'path', 'notebook_path', 'file', 'filename']);
+
+/**
+ * HOST TOOLS THAT CANNOT ACT ON ANYTHING. A tool the evaluator does not model asks (`command.unknown`): the cost of
+ * answering anything else for a name nobody read is an unauthorized ALLOW the day a host ships a tool that does act.
+ * The price is that the host's own bookkeeping tools prompt too — on claude-code a checklist update interrupts the
+ * human, on codex-cli it is refused outright — and that noise pushes people to switch the hook off, which is worse
+ * than any one of these. So the few tools whose entire effect is inside the host's own memory are listed here BY
+ * NAME, each with the reason, and nothing else is: a name that is not spelled exactly as below (a different case, a
+ * trailing space) is an unmodelled tool and asks.
+ *
+ * NOT listed, on purpose: `ExitPlanMode` and `AskUserQuestion`. They do nothing to the machine, but their whole
+ * function IS the host's prompt to the human (approve the plan, answer the question), and a hook `allow` is rendered
+ * as `permissionDecision: "allow"`, which suppresses that prompt. Asking costs nothing there — the host shows its
+ * dialog anyway — while allowing would let the hook answer for the human. `Task`/`Agent` start a subagent and `Skill`
+ * loads instructions: both act, so both stay ASK.
+ */
+const INERT_HOST_TOOLS: ReadonlyMap<string, string> = new Map([
+  ['TodoWrite', "keeps the agent's own checklist in the host's memory; it touches no file, network or process"],
+  [
+    'BashOutput',
+    'reads the output of a background shell whose start was already judged as a Bash call; it starts nothing',
+  ],
+]);
+
+/** What a host's own string handling treats as padding: `\s`, plus NEXT LINE and MONGOLIAN VOWEL SEPARATOR (the
+ *  Unicode White_Space of Rust's `trim` and of older tables, which JavaScript's `\s` does not cover). */
+const HOST_PADDING = '\\s\\u0085\\u180e';
+const HOST_TRIM = new RegExp(`^[${HOST_PADDING}]+|[${HOST_PADDING}]+$`, 'g');
+
+function unknownHit(table: CompiledAuthorityTable, ctx: EvaluationContext, via: string): CapabilityHit {
+  return { capability: 'command.unknown', verdict: verdictFor(table, ctx, 'command.unknown'), via, absolute: false };
+}
+
+/**
+ * A PATH A TOOL IS HANDED IS JUDGED BY WHAT IT NAMES, NOT BY HOW IT IS SPELLED. Three spellings used to be judged as
+ * something else: `' /Users/me/.ssh/authorized_keys'` (a leading space) is a RELATIVE path to the classifier, so it
+ * was an ordinary repository write, while a host that trims opens the credential file; a NUL ends a C string, so
+ * `src/a.ts\0/../../.ssh/x` may be the first half to one reader and the whole to another; and `d/../x` with `d` a
+ * link names the parent of the link's TARGET, not the text before it. Padding and NUL are never judged as if the
+ * path had been cleaned: every reading is classified and the strictest wins, and the call asks even when all of
+ * them are ordinary, because the readers disagree and a human can tell which one was meant.
+ */
+function toolPathHits(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  kind: 'Read' | 'Write' | 'Edit',
+  raw: string,
+): CapabilityHit[] {
+  const cwd = ctx.cwd ?? process.cwd();
+  const trimmed = raw.replace(HOST_TRIM, '');
+  const nul = raw.indexOf('\0');
+  const readings = new Set<string>([raw]);
+  if (trimmed !== raw) readings.add(trimmed);
+  if (nul >= 0) {
+    readings.add(raw.slice(0, nul));
+    readings.add(raw.replace(/\0/g, ''));
+  }
+  const hits: CapabilityHit[] = [];
+  for (const reading of readings) {
+    hits.push(classifyPath(table, ctx, kind, reading));
+    const homed = expandHome(reading, cwd) ?? reading;
+    if (/(^|\/)\.\.(\/|$)/.test(homed)) hits.push(classifyPath(table, ctx, kind, physicalPath(homed, cwd)));
+  }
+  if (readings.size > 1)
+    hits.push(
+      unknownHit(
+        table,
+        ctx,
+        'the path has leading or trailing whitespace, or a NUL; hosts disagree on whether they clean it, so it is not judged as if they did',
+      ),
+    );
+  return hits;
+}
+
+/** One file operation a patch declares. */
+interface PatchTarget {
+  kind: 'add' | 'update' | 'delete' | 'move';
+  path: string;
+}
+
+/** Every line break a patch reader might split on; splitting on more than the host does can only add header candidates */
+const PATCH_LINE_BREAK = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
+const PATCH_HEADER = /^\*\*\*\s*(add\s+file|update\s+file|delete\s+file|move\s+to)\s*:(?: )?(.*)$/i;
+const PATCH_MARKER = /^\*\*\*\s*(?:begin\s+patch|end\s+patch|end\s+of\s+file)$/i;
+const PATCH_STARS = /^\*\*\*(?:\s|$)/;
+
+/**
+ * THE FILES A PATCH TOUCHES, READ THE WAY THE HOST'S PARSER READS THEM. Codex trims every line before it looks for a
+ * header, so `  *** Add File: ~/.ssh/authorized_keys` — after a benign Add, after a Delete, straight after an Update
+ * (for its `Move to`) — is a header to the host and was invisible to a column-0 expression: an arbitrary-path write
+ * at ALLOW (audit 2026-10-01, item 7). Detection is therefore ONE rule on the trimmed line, applied to every line:
+ *   - trimmed, it is a known header (Add/Update/Delete File, Move to): its path is a write target;
+ *   - trimmed, it is a known marker (Begin Patch, End Patch, End of File): nothing to classify;
+ *   - trimmed, it starts with `*** ` and is anything else: the patch is NOT PARSEABLE and is refused whole — a header
+ *     this reader does not know is a header whose effect it cannot name.
+ * The one exception is a line inside an Update hunk that begins with a space: there every parser reads a context line,
+ * and an org-mode heading (` *** TODO …`) is ordinary content. A KNOWN header spelling is never excused that way — an
+ * extra classification of a context line costs nothing, a missed header is a write.
+ */
+function applyPatchTargets(text: string): { targets: PatchTarget[]; refusal?: string } {
+  const targets: PatchTarget[] = [];
+  let inUpdate = false;
+  for (const raw of text.split(PATCH_LINE_BREAK)) {
+    const line = raw.replace(HOST_TRIM, '');
+    if (!line.startsWith('*')) continue;
+    const header = PATCH_HEADER.exec(line);
+    if (header) {
+      const word = header[1]!.toLowerCase().replace(/\s+/g, ' ');
+      const kind: PatchTarget['kind'] =
+        word === 'add file' ? 'add' : word === 'update file' ? 'update' : word === 'delete file' ? 'delete' : 'move';
+      const path = header[2]!;
+      if (path === '') return { targets, refusal: `a "${word}" header names no path` };
+      targets.push({ kind, path });
+      if (kind !== 'move') inUpdate = kind === 'update';
+      continue;
+    }
+    if (PATCH_MARKER.test(line)) {
+      if (!/end\s+of\s+file/i.test(line)) inUpdate = false;
+      continue;
+    }
+    if (PATCH_STARS.test(line) && !(inUpdate && raw.startsWith(' ')))
+      return { targets, refusal: `unrecognised patch header "${line.slice(0, 40)}"` };
+  }
+  return { targets };
+}
+
+/**
+ * `Grep`, `Glob` and `LS` read file contents or names under a path: the path (default: the working directory) is a
+ * read, and a pattern that names a credential store is judged like one.
+ */
+function searchToolHits(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  tool: 'Grep' | 'Glob' | 'LS',
+  base: string,
+  pattern: string,
+  glob: string,
+): CapabilityHit[] {
+  // the reach is computed from the path as a trimming host would read it; the path as written is classified too
+  const baseJudged = (base.split('\0')[0] ?? '').replace(HOST_TRIM, '') || (ctx.cwd ?? process.cwd());
+  const hits = toolPathHits(table, ctx, 'Read', base);
+  const expanded = expandHome(baseJudged) ?? baseJudged;
+  const home = canonicalPath(homedir()).split(sep).join('/');
+  const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(ctx.cwd ?? process.cwd(), expanded))
+    .split(sep)
+    .join('/');
+  // THE PATTERN DECIDES THE REACH, so the pattern is CANONICALISED and classified like any other path — the
+  // same thing `pathTokens` already does for the shell side. Concatenating `abs + '/' + pattern` and testing
+  // the raw string meant an absolute pattern (`/Users/me/.ssh/*`), a `../` pattern or a `~/` pattern could
+  // never match the home prefix, so the guard was inert on the one operand it was written for: `Glob` with
+  // `path: ~/.ssh` was DENY and `Glob` with `pattern: ~/.ssh/*` — the byte-identical reach — was ALLOW.
+  const reach0 = tool === 'Glob' ? pattern : glob;
+  // A GLOB IS READ THE WAY THE SEARCH TOOL READS IT: braces are alternatives that may hold a slash (`{.env,src/x}`),
+  // and a backslash escapes (`.en\\v` is `.env`) - so each alternative is classified on its own, unescaped
+  // (exit review 10, self-attack)
+  const reaches = reach0
+    ? expandBraces(reach0)
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((r) => unquoteShellWord(r))
+    : [];
+  for (const reach of reaches) {
+    // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
+    // written as `~/.ssh/**` does not match a string that still ends in a slash
+    const cut = reach.search(/[*?[{]/);
+    const rawLiteral = cut < 0 ? reach : reach.slice(0, cut);
+    // `/**/…` has the literal prefix `/`; stripping its trailing slash collapsed it to `.` — the working
+    // directory — so a pattern that reaches the whole filesystem read as an in-workspace search (exit review 2)
+    const literal = rawLiteral === '/' ? '/' : rawLiteral.replace(/\/+$/, '') || '.';
+    const home2 = expandHome(literal);
+    const resolvedReach = canonicalPath(
+      home2 !== null && isAbsolute(home2) ? home2 : resolve(abs, home2 ?? literal),
+    );
+    // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
+    // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
+    // a pattern anchored at `/` or carrying a `..` segment is not bounded by its literal prefix: `/**/.ssh/*`
+    // has the prefix `/` and reaches everything under it (exit review 2)
+    // a `..` segment ANYWHERE in the pattern escapes the literal prefix wherever that prefix resolves, and a
+    // root anchor is unbounded when the prefix is outside every registered root
+    const unbounded =
+      /(^|\/)\.\.(\/|$)/.test(reach) || (reach.startsWith('/') && repoRootFor(ctx, resolvedReach) === null);
+    // classify what the prefix names FIRST: an unbounded reach must never REPLACE a stronger answer, and
+    // `<home>/.ssh/*` is both unbounded and a credential store
+    const byPath = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
+    const strongerThanOutside =
+      byPath.via.startsWith('matcher path') || !byPath.capability.startsWith('fs.repo');
+    const r =
+      unbounded && !strongerThanOutside
+        ? {
+            capability: 'fs.outside-workspace.read',
+            verdict: verdictFor(table, ctx, 'fs.outside-workspace.read'),
+            via: 'the pattern is not bounded by a directory inside the workspace',
+            absolute: false,
+          }
+        : byPath;
+    // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
+    if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
+      hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
+    // THE PREFIX IS NOT THE ONLY LITERAL PART OF A PATTERN. `**/.env` has NO literal prefix — it reaches the
+    // workspace root, which is ordinary — while its literal TAIL names the file it will actually open, and an
+    // explicit glob overrides both ripgrep's skip-hidden default and .gitignore. So `Grep` with
+    // `glob: '**/.env'` and output_mode "content" PRINTED a credential file at ALLOW (exit review 9). The
+    // tail is classified as the file it names, anywhere the pattern can reach.
+    const tail = reach.split('/').filter(Boolean).pop() ?? '';
+    if (tail && !/[*?[{]/.test(tail)) {
+      const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, tail)));
+      if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
+    } else if (tail && !/^[*?]+$/.test(tail)) {
+      // ...AND A WILDCARD TAIL NAMES A SET. `**/.env*` opens `.env`, `.env.local` and `.env.production`, and the
+      // literal test above skipped it because of the `*` (exit review 10). The set is checked against the names a
+      // credential file is actually given, and the strongest answer for any member that matches is the answer.
+      const re = tailGlobRegExp(tail);
+      if (re)
+        for (const name of SECRET_FILE_NAMES)
+          if (re.test(name)) {
+            const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, name)));
+            if (t.verdict !== 'ALLOW') {
+              hits.push({ ...t, via: `${tool} pattern ${reach} reaches ${name} (${t.via})` });
+              break;
+            }
+          }
+    }
+  }
+  if (
+    abs === home ||
+    home.startsWith(abs + '/') ||
+    abs === '/' ||
+    reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
+    (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
+  )
+    hits.push({
+      capability: 'fs.credential-store.read',
+      verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+      via: `${tool} over ${base} can reach credential stores`,
+      absolute: false,
+    });
+  return hits;
+}
+
 export function evaluate(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -11307,156 +11579,95 @@ export function evaluate(
 ): Evaluation {
   let hits: CapabilityHit[] = [];
   const tool = req.tool;
+  const input = req.input;
+  const has = (key: string): boolean => Object.hasOwn(input, key);
+  /** an operand that is present and a string; `undefined` when it is absent, `null` when it is present and is not one */
+  const text = (key: string): string | undefined | null =>
+    !has(key) ? undefined : typeof input[key] === 'string' ? (input[key] as string) : null;
+  const notText = (key: string): CapabilityHit =>
+    unknownHit(table, ctx, `${tool} ${key} is present and is not a string, so no operation can be read from it`);
+  const inert = INERT_HOST_TOOLS.get(tool);
+  if (inert !== undefined)
+    return { verdict: 'ALLOW', hits, reason: `allowed: ${tool} ${inert}` };
+
   if (tool === 'Bash' || tool === 'shell') {
-    const command = typeof req.input['command'] === 'string' ? req.input['command'] : '';
-    hits = classifyCommand(table, ctx, command);
+    const command = text('command');
+    if (command === null) hits = [notText('command')];
+    else if (command !== undefined) hits = classifyCommand(table, ctx, command);
   } else if (tool === 'Read') {
-    const p = typeof req.input['file_path'] === 'string' ? req.input['file_path'] : '';
-    if (p) hits = [classifyPath(table, ctx, 'Read', p)];
+    const p = text('file_path');
+    if (p === null) hits = [notText('file_path')];
+    else if (p) hits = toolPathHits(table, ctx, 'Read', p);
   } else if (tool === 'Grep' || tool === 'Glob' || tool === 'LS') {
-    // search tools read file contents or names under a path: the path (default: the working directory) is a read, and a
-    // pattern that names a credential store is judged like one
-    const base =
-      typeof req.input['path'] === 'string' && req.input['path']
-        ? req.input['path']
-        : (ctx.cwd ?? process.cwd());
-    const expanded = expandHome(base) ?? base;
-    hits = [classifyPath(table, ctx, 'Read', expanded)];
-    const home = canonicalPath(homedir()).split(sep).join('/');
-    const abs = canonicalPath(isAbsolute(expanded) ? expanded : resolve(ctx.cwd ?? process.cwd(), expanded))
-      .split(sep)
-      .join('/');
-    const pattern = typeof req.input['pattern'] === 'string' ? req.input['pattern'] : '';
-    const glob = typeof req.input['glob'] === 'string' ? req.input['glob'] : '';
-    // THE PATTERN DECIDES THE REACH, so the pattern is CANONICALISED and classified like any other path — the
-    // same thing `pathTokens` already does for the shell side. Concatenating `abs + '/' + pattern` and testing
-    // the raw string meant an absolute pattern (`/Users/me/.ssh/*`), a `../` pattern or a `~/` pattern could
-    // never match the home prefix, so the guard was inert on the one operand it was written for: `Glob` with
-    // `path: ~/.ssh` was DENY and `Glob` with `pattern: ~/.ssh/*` — the byte-identical reach — was ALLOW.
-    const reach0 = tool === 'Glob' ? pattern : glob;
-    // A GLOB IS READ THE WAY THE SEARCH TOOL READS IT: braces are alternatives that may hold a slash (`{.env,src/x}`),
-    // and a backslash escapes (`.en\\v` is `.env`) - so each alternative is classified on its own, unescaped
-    // (exit review 10, self-attack)
-    const reaches = reach0
-      ? expandBraces(reach0)
-          .split(/\s+/)
-          .filter(Boolean)
-          .map((r) => unquoteShellWord(r))
-      : [];
-    for (const reach of reaches) {
-      // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
-      // written as `~/.ssh/**` does not match a string that still ends in a slash
-      const cut = reach.search(/[*?[{]/);
-      const rawLiteral = cut < 0 ? reach : reach.slice(0, cut);
-      // `/**/…` has the literal prefix `/`; stripping its trailing slash collapsed it to `.` — the working
-      // directory — so a pattern that reaches the whole filesystem read as an in-workspace search (exit review 2)
-      const literal = rawLiteral === '/' ? '/' : rawLiteral.replace(/\/+$/, '') || '.';
-      const home2 = expandHome(literal);
-      const resolvedReach = canonicalPath(
-        home2 !== null && isAbsolute(home2) ? home2 : resolve(abs, home2 ?? literal),
+    // THE PATH IS OPTIONAL, AND AN OPTIONAL OPERAND IS NOT A LICENCE TO GUESS. Absent means the working directory;
+    // present but not a string means the call is not understood — `Grep {path: ['~/.ssh']}` used to read as "the working
+    // directory" and was ALLOW (audit item 13). `Grep` and `Glob` cannot run without a pattern either.
+    const path = text('path');
+    const pattern = text('pattern');
+    const glob = text('glob');
+    const bad = [
+      path === null && 'path',
+      pattern === null && 'pattern',
+      tool === 'Grep' && glob === null && 'glob',
+      tool !== 'LS' && pattern === undefined && 'pattern',
+    ].filter((k): k is string => typeof k === 'string');
+    if (bad.length) hits = bad.map(notText);
+    else
+      hits = searchToolHits(
+        table,
+        ctx,
+        tool,
+        path || (ctx.cwd ?? process.cwd()),
+        pattern ?? '',
+        tool === 'Grep' ? (glob ?? '') : '',
       );
-      // a wildcard reads INSIDE the literal prefix, so the thing classified is the directory's CONTENTS: a path
-      // matcher written as `~/.ssh/**` describes what is in it, not the directory entry itself
-      // a pattern anchored at `/` or carrying a `..` segment is not bounded by its literal prefix: `/**/.ssh/*`
-      // has the prefix `/` and reaches everything under it (exit review 2)
-      // a `..` segment ANYWHERE in the pattern escapes the literal prefix wherever that prefix resolves, and a
-      // root anchor is unbounded when the prefix is outside every registered root
-      const unbounded =
-        /(^|\/)\.\.(\/|$)/.test(reach) || (reach.startsWith('/') && repoRootFor(ctx, resolvedReach) === null);
-      // classify what the prefix names FIRST: an unbounded reach must never REPLACE a stronger answer, and
-      // `<home>/.ssh/*` is both unbounded and a credential store
-      const byPath = classifyPath(table, ctx, 'Read', cut < 0 ? resolvedReach : resolvedReach + '/');
-      const strongerThanOutside =
-        byPath.via.startsWith('matcher path') || !byPath.capability.startsWith('fs.repo');
-      const r =
-        unbounded && !strongerThanOutside
-          ? {
-              capability: 'fs.outside-workspace.read',
-              verdict: verdictFor(table, ctx, 'fs.outside-workspace.read'),
-              via: 'the pattern is not bounded by a directory inside the workspace',
-              absolute: false,
-            }
-          : byPath;
-      // a reach that leaves every registered root is not the `fs.repo.read` the base claimed it was
-      if (unbounded || r.via.startsWith('matcher path') || !r.capability.startsWith('fs.repo'))
-        hits.push({ ...r, via: `${tool} pattern ${reach} (${r.via})` });
-      // THE PREFIX IS NOT THE ONLY LITERAL PART OF A PATTERN. `**/.env` has NO literal prefix — it reaches the
-      // workspace root, which is ordinary — while its literal TAIL names the file it will actually open, and an
-      // explicit glob overrides both ripgrep's skip-hidden default and .gitignore. So `Grep` with
-      // `glob: '**/.env'` and output_mode "content" PRINTED a credential file at ALLOW (exit review 9). The
-      // tail is classified as the file it names, anywhere the pattern can reach.
-      const tail = reach.split('/').filter(Boolean).pop() ?? '';
-      if (tail && !/[*?[{]/.test(tail)) {
-        const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, tail)));
-        if (t.verdict !== 'ALLOW') hits.push({ ...t, via: `${tool} pattern ${reach} names ${tail} (${t.via})` });
-      } else if (tail && !/^[*?]+$/.test(tail)) {
-        // ...AND A WILDCARD TAIL NAMES A SET. `**/.env*` opens `.env`, `.env.local` and `.env.production`, and the
-        // literal test above skipped it because of the `*` (exit review 10). The set is checked against the names a
-        // credential file is actually given, and the strongest answer for any member that matches is the answer.
-        const re = tailGlobRegExp(tail);
-        if (re)
-          for (const name of SECRET_FILE_NAMES)
-            if (re.test(name)) {
-              const t = classifyPath(table, ctx, 'Read', canonicalPath(resolve(resolvedReach, name)));
-              if (t.verdict !== 'ALLOW') {
-                hits.push({ ...t, via: `${tool} pattern ${reach} reaches ${name} (${t.via})` });
-                break;
-              }
-            }
+  } else if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit') {
+    // ONE operand per tool: `file_path` for the edit tools, `notebook_path` for the notebook tool. Reading `file_path`
+    // first and `notebook_path` second let `NotebookEdit {file_path: 'src/a.ts', notebook_path: '~/.ssh/authorized_keys'}`
+    // be judged as the first and written as the second (audit item 13)
+    const key = tool === 'NotebookEdit' ? 'notebook_path' : 'file_path';
+    const p = text(key);
+    if (p === null) hits = [notText(key)];
+    else if (p) hits = toolPathHits(table, ctx, tool === 'Write' ? 'Write' : 'Edit', p);
+  } else if (tool === 'apply_patch') {
+    // the operand is `command` (what the hosts send) or `patch`; both present and different is two patches, and the
+    // host may apply either, so both are read
+    const bodies = ['command', 'patch'].filter(has);
+    const targets: PatchTarget[] = [];
+    let refusal: string | undefined;
+    for (const key of bodies) {
+      const body = text(key);
+      if (typeof body !== 'string') refusal ??= `apply_patch ${key} is not text`;
+      else {
+        const r = applyPatchTargets(body);
+        targets.push(...r.targets);
+        refusal ??= r.refusal;
       }
     }
-    if (
-      abs === home ||
-      home.startsWith(abs + '/') ||
-      abs === '/' ||
-      reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
-      (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
-    )
-      hits.push({
-        capability: 'fs.credential-store.read',
-        verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
-        via: `${tool} over ${base} can reach credential stores`,
-        absolute: false,
-      });
-  } else if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit') {
-    const p =
-      typeof req.input['file_path'] === 'string'
-        ? req.input['file_path']
-        : typeof req.input['notebook_path'] === 'string'
-          ? req.input['notebook_path']
-          : '';
-    if (p) hits = [classifyPath(table, ctx, tool === 'Write' ? 'Write' : 'Edit', p)];
-  } else if (tool === 'apply_patch') {
-    const patch =
-      typeof req.input['command'] === 'string'
-        ? req.input['command']
-        : typeof req.input['patch'] === 'string'
-          ? req.input['patch']
-          : '';
-    // `*** Move to:` names the DESTINATION of a rename and was never classified: an unconditional, fully
-    // attacker-controlled write to any path, at ALLOW (challenge finding 7)
-    const paths = [...patch.matchAll(/^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+)$/gm)].map((m) =>
-      m[1]!.trim(),
-    );
-    if (paths.length === 0) {
+    if (targets.length === 0 || refusal !== undefined) {
       return {
         verdict: 'DENY',
         hits: [],
-        reason: 'apply_patch with no parseable file headers is denied (paths must be known before execution)',
+        reason: `apply_patch ${refusal ?? 'with no parseable file headers'} is denied (paths must be known before execution)`,
       };
     }
-    hits = paths.map((p) => classifyPath(table, ctx, 'Write', p));
+    // `*** Move to:` names the DESTINATION of a rename and was never classified: an unconditional, fully
+    // attacker-controlled write to any path, at ALLOW (challenge finding 7). Every header kind is a write.
+    hits = targets.flatMap((t) => toolPathHits(table, ctx, 'Write', t.path));
+    if (bodies.length > 1 && new Set(bodies.map((k) => input[k])).size > 1)
+      hits.push(unknownHit(table, ctx, 'apply_patch carries two different patches (command and patch); the host may apply either'));
   } else if (tool === 'WebFetch' || tool === 'WebSearch') {
-    const url = typeof req.input['url'] === 'string' ? req.input['url'] : '';
+    // ONLY A FETCH HAS A URL. Keying the classification on `url` whatever the tool was called let
+    // `WebSearch {query, url: 'http://localhost:3000'}` be `network.localhost` ALLOW — in HIGH_ASSURANCE too — while the
+    // query went to the public search provider (audit item 9)
+    const url = tool === 'WebFetch' ? text('url') : undefined;
     if (url) hits = [classifyUrl(table, ctx, url)];
     else {
       // A search carries no url, but it is still public network egress. It reached ALLOW even in HIGH_ASSURANCE,
       // where `network.public-read` is DENY and egress control is a required containment control (challenge
       // finding 9). `allowed_domains` only FILTERS WHICH RESULTS COME BACK: the query text is still sent to the search
       // provider over the public internet, so a search "limited to localhost" is not localhost traffic (exit review 10)
-      const domains = Array.isArray(req.input['allowed_domains'])
-        ? (req.input['allowed_domains'] as unknown[]).map(String)
-        : [];
+      const domains = Array.isArray(input['allowed_domains']) ? (input['allowed_domains'] as unknown[]).map(String) : [];
       const capability = 'network.public-read';
       hits = [
         {
@@ -11464,13 +11675,18 @@ export function evaluate(
           verdict: verdictFor(table, ctx, capability),
           via: domains.length
             ? `web search limited to ${domains.join(', ')}`
-            : 'web search over the public internet',
+            : tool === 'WebFetch'
+              ? 'fetch of an address that could not be read'
+              : 'web search over the public internet',
           absolute: false,
         },
       ];
+      if (tool === 'WebFetch' && url === null) hits.push(notText('url'));
     }
   } else if (tool.startsWith('mcp__')) {
-    // MCP: resolved by the trust file by the caller (mcp.ts); here only the unknown default applies
+    // MCP: NOTHING RESOLVES A TRUST FILE YET. `.harness/mcp-trust.md` is written by `ego init` and read by no code, so a
+    // server listed there is exactly as unknown as one that is not; the resolver is phase-2 work (issue #10), and until
+    // it exists every MCP tool is `mcp.unknown`.
     hits = [
       {
         capability: 'mcp.unknown',
@@ -11479,6 +11695,34 @@ export function evaluate(
         absolute: false,
       },
     ];
+  }
+  // A SECOND OPERAND-SHAPED KEY IS A SECOND THING THE HOST MIGHT HONOUR. The tool was judged by its own operand above;
+  // any key another tool uses for ITS operand (`path` on a Write, `cmd` on a Bash, `notebook_path` beside `file_path`) is
+  // read too, as the kind of operand it names, and the call asks whatever they say — it is not known which one wins.
+  const own = TOOL_OPERANDS.get(tool);
+  if (own !== undefined) {
+    const foreign = Object.keys(input).filter((k) => FOREIGN_CANDIDATES.has(k) && !own.includes(k));
+    if (foreign.length) {
+      hits.push(
+        unknownHit(
+          table,
+          ctx,
+          `${tool} also carries ${foreign.join(', ')}, which another tool takes as its operand; which one the host honours is not known`,
+        ),
+      );
+      const isShell = tool === 'Bash' || tool === 'shell';
+      const readsPath = tool === 'Read' || tool === 'Grep' || tool === 'Glob' || tool === 'LS';
+      const editsPath = tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit';
+      for (const k of foreign) {
+        const v = input[k];
+        if (isShell) {
+          const line = k === 'argv' ? argvToCommandLine(v) : (k === 'cmd' || k === 'script') && typeof v === 'string' ? v : null;
+          if (line) hits.push(...classifyCommand(table, ctx, line));
+        } else if ((readsPath || editsPath) && PATH_KEYS.has(k) && typeof v === 'string' && v) {
+          hits.push(...toolPathHits(table, ctx, readsPath ? 'Read' : tool === 'Write' ? 'Write' : 'Edit', v));
+        }
+      }
+    }
   }
   hits = hits.map((h) => applyGrants(h, ctx));
   if (hits.length === 0) {
