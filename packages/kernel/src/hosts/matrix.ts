@@ -131,8 +131,8 @@ export const HOST_MATRIX: Record<HostId, HostProfile> = {
         verifiedBy: 'conformance.host.cost',
       },
       'mcp-server-configuration': {
-        status: 'SUPPORTED',
-        note: 'MCP servers declared in host settings; trust comes from .harness/mcp-trust.md',
+        status: 'PARTIAL',
+        note: 'the host can declare MCP servers, but EGO resolves no trust for them yet: .harness/mcp-trust.md is written by `ego init` and read by nothing, so every mcp__ tool is mcp.unknown (DENY) until the resolver lands (phase 2, issue #10)',
         verifiedBy: 'conformance.host.mcp',
       },
       'worktree-isolation': {
@@ -221,7 +221,7 @@ export const HOST_MATRIX: Record<HostId, HostProfile> = {
       'cost-reporting': { status: 'UNVERIFIED', note: 'to verify', verifiedBy: 'conformance.host.cost' },
       'mcp-server-configuration': {
         status: 'UNVERIFIED',
-        note: 'to verify',
+        note: 'to verify; whatever the host allows, EGO resolves no MCP trust yet and every mcp__ tool is mcp.unknown (DENY, exit 2 here) until the resolver lands (phase 2, issue #10)',
         verifiedBy: 'conformance.host.mcp',
       },
       'worktree-isolation': {

@@ -18,6 +18,7 @@ import { selfIdentity, selfVersion } from '../src/launcher/self.ts';
 import { runCommand, type ProjectContext } from '../../cli/src/commands.ts';
 import { parseCodexEvent } from '../../adapter-codex-cli/src/dialect.ts';
 import { argvToCommandLine } from '../src/util/shell-quote.ts';
+import { HOST_MATRIX } from '../src/hosts/matrix.ts';
 import { table, workspace } from './support/corpus.ts';
 
 const HOME = homedir();
@@ -813,5 +814,84 @@ test('codex-cli hook: a flattened argv is judged as what it is', async () => {
     const here = await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: ['bash', '-lc', 'echo x > out.txt'], workdir: p.root } });
     assert.equal(here.action, 'allow', here.reason);
   }
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 7. MCP TRUST HONESTY (audit 10)
+ *
+ * Nothing parses `.harness/mcp-trust.md`: every `mcp__` tool is `mcp.unknown` (DENY). That is the safe behaviour and it
+ * stays. What was untrue is that four places still described a resolver. The first test pins the limitation, so it
+ * fails loudly the day the resolver lands and the pages below are rewritten with it; the rest pin the wording.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('a server LISTED in .harness/mcp-trust.md is still mcp.unknown: nothing reads the file yet', async () => {
+  const trust = [
+    '---',
+    'schema: ego.mcp-trust/1',
+    'id: mcp-trust',
+    'title: MCP server trust',
+    'servers:',
+    '  - id: filesystem',
+    '    scope: local',
+    '    tools:',
+    '      read_file: mcp.local.read',
+    '---',
+    '# MCP server trust',
+    '',
+    '```yaml',
+    'servers:',
+    '  - id: filesystem',
+    '    scope: local',
+    '    tools:',
+    '      read_file: mcp.local.read',
+    '      write_file: mcp.local.write',
+    '```',
+    '',
+  ].join('\n');
+  const dir = workspace({ '.harness/mcp-trust.md': trust });
+  for (const profile of ['STANDARD', 'STRICT', 'HIGH_ASSURANCE'] as const) {
+    for (const tool of ['mcp__filesystem__read_file', 'mcp__filesystem__write_file', 'mcp__filesystem__discover', 'mcp__other__x']) {
+      const e = evalIn(dir, tool, { path: 'src/a.ts' }, profile);
+      assert.equal(e.verdict, 'DENY', `${profile} ${tool}`);
+      assert.equal(e.decisive?.capability, 'mcp.unknown', `${profile} ${tool}: a LISTED server resolves exactly as an unlisted one`);
+    }
+  }
+  const p = project('STANDARD');
+  mkdirSync(join(p.root, '.harness'), { recursive: true });
+  writeFileSync(join(p.root, '.harness', 'mcp-trust.md'), trust);
+  const a = await hook(p, 'claude-code', cc('mcp__filesystem__read_file', { path: 'src/a.ts' }));
+  assert.equal(a.action, 'deny');
+  assert.match(a.reason, /mcp\.unknown/);
+  const x = await hook(p, 'codex-cli', { tool_name: 'mcp__filesystem__read_file', tool_input: { path: 'src/a.ts' } });
+  assert.equal(x.action, 'deny');
+  assert.equal(x.code, 2);
+});
+
+test('nothing describes an MCP trust resolver that does not exist', async () => {
+  const { MCP_TRUST_TEMPLATE } = await import('../src/project/init.ts');
+  // the file `ego init` writes tells the operator that listing a server has no effect today
+  assert.match(MCP_TRUST_TEMPLATE, /NO EFFECT/);
+  assert.match(MCP_TRUST_TEMPLATE, /mcp\.unknown/);
+  assert.match(MCP_TRUST_TEMPLATE, /DENY/);
+  assert.match(MCP_TRUST_TEMPLATE, /#10/);
+
+  // the host matrix does not mark a capability SUPPORTED that rests on the resolver
+  for (const host of Object.values(HOST_MATRIX)) {
+    const c = host.capabilities['mcp-server-configuration'];
+    assert.notEqual(c.status, 'SUPPORTED', `${host.id}: ${c.note}`);
+    assert.doesNotMatch(c.note, /trust comes from/);
+  }
+  assert.match(HOST_MATRIX['claude-code'].capabilities['mcp-server-configuration'].note, /mcp\.unknown/);
+
+  // the capability page says the mcp.local.* / mcp.remote.* classes are not reachable yet
+  const { readFileSync } = await import('node:fs');
+  const page = readFileSync(new URL('../../../control-plane/permissions/capabilities/mcp-and-network.md', import.meta.url), 'utf8');
+  assert.doesNotMatch(page, /are trusted only when listed in the consumer's `\.harness\/mcp-trust\.md`/);
+  assert.match(page, /not (?:yet )?reachable|NOT YET REACHABLE/i);
+  assert.match(page, /issue #10|#10/);
+  assert.match(page, /mcp\.unknown/);
+
+  const source = readFileSync(new URL('../src/authority/evaluate.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /\(mcp\.ts\)/, 'there is no mcp.ts');
 });
 
