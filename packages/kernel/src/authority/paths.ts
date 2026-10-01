@@ -28,7 +28,7 @@
 // than it must — a word with no `..` has no physical reading of its own (the classifier canonicalises the lexical one),
 // so ordinary work pays for no filesystem call it did not already make.
 import { homedir, userInfo } from 'node:os';
-import { readlinkSync, realpathSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { chargeWork } from './work-bound.ts';
 
@@ -517,4 +517,21 @@ export function directoryCandidates(base: string, word: string, physicalOnly = f
   const physical = r.physical[0] ?? logical;
   if (physicalOnly) return [physical];
   return physical === logical ? [logical] : [logical, physical];
+}
+
+/**
+ * Is this word ONE PLAIN NAME - no slash, no quoting, glob or expansion character, not an option - that names an entry of `dir`? A bare
+ * word is a path operand exactly when there is something of that name where the command runs; the scan that took only words that LOOK
+ * like paths never asked about `cat service-account.json` (review 11 #117). It is asked here, with the other readers that join a directory
+ * and a word, because a plain name has no `..` and no link to follow: the join is the whole of its meaning.
+ */
+export function namesAnEntry(dir: string, name: string): boolean {
+  if (!/^[^\s/$`*?[\]{}()<>|&;'"\\=~-][^\s/$`*?[\]{}()<>|&;'"\\=]*$/.test(name)) return false;
+  chargeWork(WALK_STEP_COST);
+  try {
+    lstatSync(join(dir, name));
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -3,6 +3,7 @@
 // `authority_changes` (decision Q84). Deterministic and reproducible: no timestamps, sorted keys.
 import { basename } from 'node:path';
 import { sha256Canonical } from '../util/hash.ts';
+import { overlayPathGlobs } from './overlay-paths.ts';
 import {
   diffLocalTargets,
   mergeLocalTargets,
@@ -332,30 +333,44 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       );
       continue;
     }
-    matchers.push({ ...om, layer: 'overlay' });
+    // A RULE THAT NOTHING CONSULTS IS A PROTECTION THAT DOES NOT EXIST, and it must not compile as one. Each field is read by one kind
+    // of judge: a `command` by the shell classifier (tool Bash), a `path` by the path judge (Read, Write and Edit - the shell layer
+    // asks it too, so a protected path is protected from `cat` and `>` as well), a `url` by the fetch judge (WebFetch). A rule that
+    // pairs a field with a tool that never asks about it (`tool: Bash, path: 'ops/**'`, `tool: WebFetch, command: …`) loaded without
+    // a word and protected nothing (exit review 11, #121). `any` is every tool that reads the field.
+    const where = om.command ?? om.path ?? om.url;
+    if (om.command !== undefined && om.tool !== 'Bash' && om.tool !== 'any') {
+      problems.push(`overlay matcher "${where}" has a command pattern and tool "${om.tool}", which never classifies a command: use tool Bash (or any)`);
+      continue;
+    }
+    if (om.path !== undefined && om.tool !== 'Read' && om.tool !== 'Write' && om.tool !== 'Edit' && om.tool !== 'any') {
+      problems.push(
+        `overlay matcher "${where}" has a path pattern and tool "${om.tool}", which is never asked about a path: use tool Read to protect reading it, Write to protect writing it (the shell and the edit tools both ask), or any`,
+      );
+      continue;
+    }
+    if (om.url !== undefined && om.tool !== 'WebFetch' && om.tool !== 'any') {
+      problems.push(`overlay matcher "${where}" has a url pattern and tool "${om.tool}", which never fetches: use tool WebFetch (or any)`);
+      continue;
+    }
+    // AN OVERLAY ONLY NARROWS, SO IT NEVER REPLACES THE CORE'S ANSWER: a command pattern is ADDITIVE - it contributes its hit beside the
+    // one the core's first matching rule gave, and the strictest wins. Appended after the core's matchers and first-match-wins, a
+    // narrowing for `make deploy` never ran, because the core's `make` rule (an ALLOW) matched first (exit review 11, #120).
+    // The path and url judges combine the two layers the same way (classifyResolved, classifyUrl).
+    // (a matcher that names more than one field is one rule per field: each judge reads its own)
+    if (om.command !== undefined)
+      matchers.push({ capability: om.capability, tool: om.tool, command: om.command, layer: 'overlay', additive: true });
+    if (om.path !== undefined) {
+      // a path rule is read as a `.gitignore` line is (overlay-paths.ts), and protects every way the path is written: the Write and
+      // the Edit tool are one act, and `any` is a read and a write
+      const tools = om.tool === 'any' ? ['Read', 'Write', 'Edit'] : om.tool === 'Read' ? ['Read'] : ['Write', 'Edit'];
+      for (const glob of overlayPathGlobs(om.path))
+        for (const tool of tools) matchers.push({ capability: om.capability, tool, path: glob, layer: 'overlay' });
+    }
+    if (om.url !== undefined) matchers.push({ capability: om.capability, tool: om.tool, url: om.url, layer: 'overlay' });
   }
 
-  const protectedPaths = matchers
-    .filter(
-      (m) =>
-        m.path &&
-        (m.tool === 'Read' || m.tool === 'Write' || m.tool === 'Edit') &&
-        effective[m.capability] === 'DENY',
-    )
-    .map((m) => ({ path: m.path!, tool: m.tool, capability: m.capability }));
-  const preDeniedCommandClasses = [
-    ...new Set(
-      matchers
-        .filter(
-          (m) =>
-            m.command && capabilities[m.capability]?.lock !== 'none' && effective[m.capability] === 'DENY',
-        )
-        .map((m) => m.capability),
-    ),
-  ].sort();
-  const readOnlyCommandPatterns = matchers
-    .filter((m) => m.command && m.capability === 'command.read-only')
-    .map((m) => m.command!);
+  const { protectedPaths, preDeniedCommandClasses, readOnlyCommandPatterns } = deriveMatcherViews(matchers, effective, capabilities);
   const sanitizerLockedMinimums: Record<string, 'block' | 'warn'> = {};
   for (const s of cp.secrets)
     for (const d of s.detectors) if (d.locked) sanitizerLockedMinimums[d.id] = d.severity;
@@ -399,6 +414,40 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     },
   };
   return { ...body, tableHash: sha256Canonical(body) };
+}
+
+/**
+ * The three views of the matcher list the table also carries: the paths whose read or write is DENY, the command classes that are
+ * pre-denied, and the read-only command patterns. They are DERIVED from the matchers, so there is one function that derives them -
+ * the compiler calls it, and so does the cache when it puts back a narrowing a working-tree edit removed.
+ */
+export function deriveMatcherViews(
+  matchers: readonly CompiledMatcher[],
+  effective: Readonly<Record<string, Verdict>>,
+  capabilities: Readonly<Record<string, { lock?: CapabilityLock }>>,
+): Pick<CompiledAuthorityTable, 'protectedPaths' | 'preDeniedCommandClasses' | 'readOnlyCommandPatterns'> {
+  const protectedPaths = matchers
+    .filter(
+      (m) =>
+        m.path &&
+        (m.tool === 'Read' || m.tool === 'Write' || m.tool === 'Edit') &&
+        effective[m.capability] === 'DENY',
+    )
+    .map((m) => ({ path: m.path!, tool: m.tool, capability: m.capability }));
+  const preDeniedCommandClasses = [
+    ...new Set(
+      matchers
+        .filter(
+          (m) =>
+            m.command && capabilities[m.capability]?.lock !== 'none' && effective[m.capability] === 'DENY',
+        )
+        .map((m) => m.capability),
+    ),
+  ].sort();
+  const readOnlyCommandPatterns = matchers
+    .filter((m) => m.command && m.capability === 'command.read-only')
+    .map((m) => m.command!);
+  return { protectedPaths, preDeniedCommandClasses, readOnlyCommandPatterns };
 }
 
 function sortRecord<T>(r: Record<string, T>): Record<string, T> {

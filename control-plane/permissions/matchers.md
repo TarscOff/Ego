@@ -11,6 +11,14 @@ notes: >
   every segment must be allowed for the command to be allowed and the most restrictive verdict wins. `command` patterns
   are regular expressions applied to the normalized segment; `path` patterns are glob-like prefixes applied to the
   resolved path relative to the workspace root or to the home directory (prefix `~/`); `url` patterns match hostnames.
+  A project's overlay (`.harness/overlay/matchers.md`) may only narrow, and its rules do not compete with these for first
+  place: a `command` rule adds its capability beside the one the rule above gave, and a `path` or `url` rule is combined
+  with the core's the same way, the strictest answer deciding. An overlay `path` is read as a `.gitignore` line is - a
+  name with no `/` matches at any depth (`service-account.json`, `*.pem`), a pattern with a `/` is anchored to the
+  workspace root, `dir/**` and `dir/` are the directory itself and everything below it, `{a,b}` is a choice and `[Pp]`
+  a class, `~/` is the home directory and a leading `/` the filesystem - and a rule whose tool never asks about its
+  field (`tool: Bash` with a `path`, `tool: WebFetch` with a `command`) is refused when the overlay is compiled, not
+  accepted as a protection that protects nothing.
 matchers:
   # --- acts whose SPELLING differs from the one already named, placed first because matching is
   # first-match-wins per segment and a friendlier rule for the same head sits below (exit review 6) ---
@@ -333,9 +341,12 @@ matchers:
   # that is in no lockfile and no configuration. The DEFAULT endpoints are not this: a tool reaching its own
   # official host is the ordinary case, and localhost is a local development server (exit review 9).
   # It is a SEND, not a fetch: `network.external-write`, so the grant for fetching ("you can curl it") does not reach it.
+  # `--@scope:registry=URL` is npm's flag for the registry of ONE SCOPE: every package of `@scope` comes from that host, which is the same
+  # redirection as `--registry` for the packages that matter most (self-attack on exit review 10, #96). The environment spelling,
+  # `npm_config_@scope:registry`, is read by ENDPOINT_ENV_NAME in the evaluator; the two are one endpoint written two ways.
   - capability: network.external-write
     tool: Bash
-    command: '^(npm|pnpm|yarn|bun|pip|pip3|uv|poetry|helm|gh|glab|cargo|gem|nuget|composer|go)\b[^|;&]*\s(--registry|--index-url|--extra-index-url|--repo|--hostname|--host|--index|--default-index|--source)(=|\s+)(?!(https?://)?(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|api\.github\.com|github\.com|gitlab\.com|crates\.io|rubygems\.org|proxy\.golang\.org|repo1\.maven\.org|charts\.helm\.sh)([:/\s]|$))\S'
+    command: '^(npm|pnpm|yarn|bun|pip|pip3|uv|poetry|helm|gh|glab|cargo|gem|nuget|composer|go)\b[^|;&]*\s(--registry|--@[\w.~-]+:registry|--index-url|--extra-index-url|--repo|--hostname|--host|--index|--default-index|--source)(=|\s+)(?!(https?://)?(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|api\.github\.com|github\.com|gitlab\.com|crates\.io|rubygems\.org|proxy\.golang\.org|repo1\.maven\.org|charts\.helm\.sh)([:/\s]|$))\S'
   - capability: forge.repo.read
     tool: Bash
     command: '^(gh\s+(repo\s+view|api)|glab\s+(repo\s+view|api))\b'
@@ -1156,6 +1167,11 @@ matchers:
   # command.unknown and asked (challenge 6, finding 36; challenge 8, finding 28). Deliberately EXCLUDES the project
   # task runners — mvn, gradle, bazel, sbt, dotnet build, rake, bundle exec, composer — which execute
   # repository-defined tasks and are producers EGO does not model.
+  # THE WORD `version` IS A SUBCOMMAND ONLY FOR THE TOOLS THAT HAVE ONE (go, cargo, docker, kubectl, helm, terraform, gcloud, az, git-lfs,
+  # bundle, bazel, poetry, uv). After an interpreter it is a SCRIPT PATH - `node version` runs the file named `version` - after `make`
+  # and `rake` a TARGET and TASK, after `npx` a PACKAGE, and `yarn version` / `pnpm version` rewrite package.json: the
+  # alternation that accepted the bare word after every head read all of those as a probe and ALLOWed them, ahead of the
+  # interpreter-script rule, with the file never opened (exit review 11, #107). The flags are the probe for every head.
   # A VERSION PROBE IS NOT A TASK. `yarn|pnpm|bun|deno|npx|rake|sbt|bazel <version>` and `pip list|show|freeze`
   # reached command.unknown while `npm --version` was ALLOW, which is an omission in this list rather than a
   # judgement about those tools (corpus by semantic class, 2026-09-24). The form stays anchored with `\s*$`, so
@@ -1169,7 +1185,7 @@ matchers:
     command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|c\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|rustc|tsc)(?=\s|$)|^swift\s+build\b|^dart\s+compile\b|^python3?\s+-m\s+venv\b'
   - capability: command.read-only
     tool: Bash
-    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs|yarn|pnpm|bun|deno|npx|rake|sbt|bazel)\s+(-v|-V|--version|-version|version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b|^(cmake|ninja)\s+(--version|-t\s+\w+|--help)\b|^pip3?\s+(list|show|freeze)\b'
+    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs|yarn|pnpm|bun|deno|npx|rake|sbt|bazel)\s+(-v|-V|--version|-version)\s*$|^(go|cargo|docker|kubectl|helm|terraform|gcloud|az|git-lfs|bundle|bazel|poetry|uv)\s+version\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b|^(cmake|ninja)\s+(--version|-t\s+\w+|--help)\b|^pip3?\s+(list|show|freeze)\b'
   # Formatters, linters and type checkers with FIXED semantics: they read the workspace and rewrite source
   # files in it, and nothing else. Whole ecosystems had no path to ALLOW for ordinary `gofmt`/`ruff`/`black`/
   # `cargo fmt`, so a control plane that governs them all equally was unusable outside JavaScript (challenge 6,

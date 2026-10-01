@@ -4,7 +4,7 @@
 import { join } from 'node:path';
 import { loadControlPlane, loadOverlayCapabilities } from '../control-plane/load.ts';
 import type { ControlPlane } from '../control-plane/types.ts';
-import { compileAuthority, type CompiledAuthorityTable, type CompiledMatcher } from '../authority/compile.ts';
+import { compileAuthority, deriveMatcherViews, type CompiledAuthorityTable, type CompiledMatcher } from '../authority/compile.ts';
 import { parseMarkdown, optionalString } from '../util/markdown.ts';
 import { isFile, readJsonIfExists, readText, writeJsonAtomic } from '../util/fs.ts';
 import { sha256Hex, sha256Canonical } from '../util/hash.ts';
@@ -230,8 +230,24 @@ export function policyCacheFreshness(
 
 /** Loads the cache, compiling and writing it when missing or stale. Hooks call this: a stale cache is never used silently. */
 /** Every (profile/mode, capability) cell and effective verdict where `next` is wider than `baseline`. */
+/** what makes two matchers the same rule: where it comes from, what it maps to, and the pattern it reads */
+const matcherKey = (m: CompiledMatcher): string =>
+  JSON.stringify([m.layer, m.capability, m.tool, m.command ?? null, m.path ?? null, m.url ?? null, m.additive === true]);
+
+/** the rules of the project's overlay in `baseline` that `next` no longer has: each is a narrowing that was taken away */
+function removedOverlayMatchers(baseline: CompiledAuthorityTable, next: CompiledAuthorityTable): CompiledMatcher[] {
+  const kept = new Set((next.matchers ?? []).map(matcherKey));
+  return (baseline.matchers ?? []).filter((m) => m.layer === 'overlay' && !kept.has(matcherKey(m)));
+}
+
 export function tableWidenings(baseline: CompiledAuthorityTable, next: CompiledAuthorityTable): string[] {
   const out: string[] = [];
+  // A REMOVED NARROWING IS A WIDENING. An overlay rule is a narrowing - it can only add a gate - and the file that holds it is writable by
+  // anything that can write the working tree: the Write tool, `rm`, a checkout or a pull that drops it. Comparing only the verdict cells
+  // missed it entirely (no cell changes when a PATTERN goes), so emptying `.harness/overlay/matchers.md` removed an organization's path and
+  // command rules and the very next hook applied the wider table with nothing pending (exit review 11, #119).
+  for (const m of removedOverlayMatchers(baseline, next))
+    out.push(`overlay matcher removed: ${m.capability} on ${m.tool} ${m.command ?? m.path ?? m.url}`);
   for (const [cap, v] of Object.entries(next.effective)) {
     const b = baseline.effective[cap];
     if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) out.push(`effective ${cap}: ${b} -> ${v}`);
@@ -282,6 +298,12 @@ export function clampToBaseline(
         if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) cells[cap] = b;
       }
     }
+  // a removed overlay narrowing is put back, and the views derived from the matchers with it
+  const restored = removedOverlayMatchers(baseline, t);
+  if (restored.length > 0) {
+    t.matchers = [...t.matchers, ...structuredClone(restored)];
+    Object.assign(t, deriveMatcherViews(t.matchers, t.effective, t.capabilities));
+  }
   // an unaccepted local-target declaration is dropped, and so is the removal of a production marker
   t.localTargets = clampLocalTargets(t.localTargets, baseline.localTargets);
   const { tableHash: _old, ...body } = t;

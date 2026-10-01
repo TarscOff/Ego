@@ -10,6 +10,7 @@ export { canonicalPath, physicalPath } from './paths.ts';
 import {
   canonicalPath,
   descriptorAlias,
+  namesAnEntry,
   directoryCandidates,
   hostTrim,
   isDevPath,
@@ -26,6 +27,7 @@ import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import { WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
+import { assignmentWord, bindingsOf } from './bindings.ts';
 import {
   canonicalGitTokens,
   forcesRefReset,
@@ -53,7 +55,8 @@ import {
  *  characters, so its price is flat. Every spawn the evaluator makes goes through these two. */
 const SPAWN_COST = 100_000;
 const STAGE_COST = 3000;
-const PATH_JUDGE_COST = 400;
+const PATH_JUDGE_COST = 2500;
+const WRITE_COST = 1500;
 /** The longest single command (one stage of a pipeline or list, quoting included) that is read. The longest command in the test
  *  corpus is 190 characters and the longest line of any script in this repository is 122; this is two orders of magnitude over
  *  both, and small enough that a pattern which is quadratic on its input (there may be one we have not found) finishes. */
@@ -1740,8 +1743,10 @@ function normalizeSegmentInner(segment: string): string[] {
   {
     const t0 = tokenize(s);
     const h0 = (t0[0] ?? '').replace(/^.*\//, '');
-    if (/^(awk|gawk|mawk|nawk)$/.test(h0) && t0.some((t, i) => t === '-E' && t0[i + 1] !== undefined))
-      extra.push(`${MARK}awk-program-file`);
+    // (the options are read the way awk's getopt reads them: `-Efile` and `-nEfile` are `-E file`, so they are found by the one reader
+    // of awk's file options and not by a test for the word `-E` - review 11 #205)
+    // (and any of them is a program in a FILE, which has always asked - the matcher for the spaced `-f` says so - whichever way it is spelled)
+    if (/^(awk|gawk|mawk|nawk)$/.test(h0) && awkFileOptions(t0, 1).length > 0) extra.push(`${MARK}awk-program-file`);
   }
   // A REDIRECTION TO `/dev/tcp` OR `/dev/udp` IS A NETWORK CONNECTION, and it needs no network binary. Both
   // directions matter: `> /dev/tcp/h/p` sends whatever the command produces, and `< /dev/tcp/h/p` makes the
@@ -3679,6 +3684,8 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
     }
     const re = globToRegExp(pat);
     if (base) return re.test(posix.startsWith(base + '/') ? posix.slice(base.length + 1) : '\0');
+    // a pattern that starts with `/` is a path on the filesystem, as `~/` is one under the home directory
+    if (pat.startsWith('/')) return re.test(posix);
     // repo-relative patterns: test against every registered root, then against the cwd root
     for (const root of roots) {
       if (posix.startsWith(root + '/') && re.test(posix.slice(root.length + 1))) return true;
@@ -3718,7 +3725,17 @@ export function globToRegExp(glob: string): RegExp {
         i += glob[i + 2] === '/' ? 2 : 1;
       } else re += '[^/]*';
     } else if (ch === '?') re += '[^/]';
-    else if ('\\^$.|+()[]{}'.includes(ch)) re += `\\${ch}`;
+    else if (ch === '[') {
+      // `[Pp]rivate` is a class (an overlay author writes it as a `.gitignore` line has it); an unclosed bracket is a bracket
+      const close = glob.indexOf(']', i + 2);
+      if (close > 0) {
+        let body = glob.slice(i + 1, close);
+        const negated = body[0] === '!' || body[0] === '^';
+        if (negated) body = body.slice(1);
+        re += `[${negated ? '^' : ''}${body.replace(/[\\\]]/g, '\\$&')}]`;
+        i = close;
+      } else re += '\\[';
+    } else if ('\\^$.|+()]{}'.includes(ch)) re += `\\${ch}`;
     else re += ch;
   }
   return new RegExp(re + '$', 'i');
@@ -4100,8 +4117,14 @@ function classifyResolved(
       };
     }
   }
+  // THE CORE'S FIRST MATCHING PATH RULE, AND EVERY RULE OF THE OVERLAY, with the strictest of them deciding. The overlay may only narrow, and
+  // appended after the core's rules under first-match-wins a narrowing was shadowed by any core rule that matched the same path
+  // first - a project that protected a tree the core already asks about got the core's answer, not its own (exit review 11, #120)
+  let coreHit: CapabilityHit | null = null;
+  const overlayHits: CapabilityHit[] = [];
   for (const m of table.matchers) {
     if (!m.path) continue;
+    if (m.layer !== 'overlay' && coreHit !== null) continue;
     // `any` MEANS EVERY TOOL, and it is the SILENT DEFAULT for a matcher that omits `tool:`. `classifyCommand`
     // and `classifyUrl` both honour it; this one did not, so a path rule written without a `tool:` key — the
     // single most likely authoring slip in an overlay, and the only field with a default — compiled clean, was
@@ -4109,14 +4132,17 @@ function classifyResolved(
     // believing `secrets/**` was a credential store got ALLOW for every write to it (exit review 9).
     if (m.tool !== 'any' && m.tool !== tool && !(m.tool === 'Write' && tool === 'Edit')) continue;
     if (matchPathPattern(m.path, abs, ctx)) {
-      return {
+      const hit: CapabilityHit = {
         capability: m.capability,
         verdict: verdictFor(table, ctx, m.capability),
         via: `matcher path ${m.path}`,
         absolute: isAbsoluteCap(table, m.capability),
       };
+      if (m.layer === 'overlay') overlayHits.push(hit);
+      else coreHit = hit;
     }
   }
+  if (coreHit !== null || overlayHits.length > 0) return worstHit([...(coreHit ? [coreHit] : []), ...overlayHits]);
   // ...and the directory `core.hooksPath` names, wherever it is: a rule cannot list a place the repository chose
   if (tool !== 'Read' && 'fs.hook-config.write' in table.capabilities) {
     const posix = canonicalPath(abs).split(sep).join('/');
@@ -5147,10 +5173,15 @@ export function segmentEnvInputs(segment: string, allAssignments = false): Recor
   // (`timeout 60 env VAR=x cmd`). Anchoring on the LEADING position only made the dimension blind to spellings
   // the normalizer already knew how to parse — two readers for one dimension (challenge 8, finding 1).
   const scan = (text: string): void => {
-    let s = text.trim();
-    for (;;) {
+    // THE WORDS THE SHELL HANDS OVER, NOT THE TEXT AS WRITTEN. The scan was a regular expression over the text, and a regular
+    // expression sees `'EDITOR=/tmp/x'` as a word that starts with a quote: `env 'EDITOR=/tmp/x' git commit` bound EDITOR for the
+    // command it opens and nothing recorded it, while the bare spelling asked (self-attack on exit review 10, #86). Quoting is
+    // gone from a word by the time `env` or `export` receives it, so an assignment is one wherever the tokenizer finds it.
+    const words = tokenizeMarked(text).map((w) => w.text);
+    let i = 0;
+    while (i < words.length) {
+      const word = words[i]!;
       // skip wrappers and their options so `timeout 60 env FOO=1 make` is reached
-      const w = /^(\S+)\s+/.exec(s);
       // `sudo`, `doas` and `xargs` are NOT transparent for the verdict — sudo keeps `command.privileged` — but
       // they are transparent for the ENVIRONMENT: `sudo DOCKER_HOST=tcp://prod… docker exec` really does set that
       // variable for the command. Stopping at them left the normalized `docker exec` with no engine to resolve,
@@ -5158,36 +5189,32 @@ export function segmentEnvInputs(segment: string, allAssignments = false): Recor
       // ...and so is a shell KEYWORD: a segment that begins `then`, `do` or `else` holds the same command a bare one
       // does, and the assignment in front of it configures it just the same (exit review 10, cross-product: the
       // linker variable was seen at the top of a line and missed inside every branch)
-      if (w && (WRAPPERS.has(w[1]!) || PREFIX_KEYWORDS.has(w[1]!) || /^(timeout|sudo|doas|xargs|--)$/.test(w[1]!))) {
-        s = s.slice(w[0].length);
+      if (WRAPPERS.has(word) || PREFIX_KEYWORDS.has(word) || /^(timeout|sudo|doas|xargs|--)$/.test(word)) {
+        i++;
         continue;
       }
-      const m = /^([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|\S*)\s+/.exec(s);
-      if (m) {
-          // npm matches `npm_config_*` case-insensitively, so `npm_config_SCRIPT_SHELL` is the same setting
-      const name = /^npm_config_/i.test(m[1]!) ? m[1]!.toLowerCase() : m[1]!;
-      // THE TARGET-SELECTING NAMES ARE ENVIRONMENT INPUTS TOO. `PGHOST`, `MYSQL_HOST`, `KUBECONFIG` and their
-      // siblings live in TARGET_ENV_RE, which the NORMALIZER consults to re-attach an assignment to the segment
-      // it configures. They were absent from this set, so a standalone `export PGHOST=prod-db.acme.com` carried
-      // nothing to the next segment and `export PGHOST=… && psql -c 'DROP TABLE users'` was ALLOW, while the
-      // one-segment spelling was an absolute deny (exit review 7).
-      if (EXECUTION_ENV_INPUTS.test(name) || TARGET_ENV_RE.test(name))
-        out[name] = m[2]!.replace(/^['"]|['"]$/g, '');
-      // ...and EVERY assignment under a private key: a process the command starts inherits all of them, and a `make` two
-      // producers down reads its recipe's variables from its environment (`CMD=… npm run build` reaching `make other`)
-      if (allAssignments) out[`\0env:${name}`] = m[2]!.replace(/^['"]|['"]$/g, '');
-        s = s.slice(m[0].length);
+      const assigned = assignmentWord(word);
+      if (assigned !== null && !assigned.append) {
+        // npm matches `npm_config_*` case-insensitively, so `npm_config_SCRIPT_SHELL` is the same setting
+        const name = /^npm_config_/i.test(assigned.name) ? assigned.name.toLowerCase() : assigned.name;
+        // THE TARGET-SELECTING NAMES ARE ENVIRONMENT INPUTS TOO. `PGHOST`, `MYSQL_HOST`, `KUBECONFIG` and their
+        // siblings live in TARGET_ENV_RE, which the NORMALIZER consults to re-attach an assignment to the segment
+        // it configures. They were absent from this set, so a standalone `export PGHOST=prod-db.acme.com` carried
+        // nothing to the next segment and `export PGHOST=… && psql -c 'DROP TABLE users'` was ALLOW, while the
+        // one-segment spelling was an absolute deny (exit review 7).
+        if (EXECUTION_ENV_INPUTS.test(name) || TARGET_ENV_RE.test(name)) out[name] = assigned.value;
+        // ...and EVERY assignment under a private key: a process the command starts inherits all of them, and a `make` two
+        // producers down reads its recipe's variables from its environment (`CMD=… npm run build` reaching `make other`)
+        if (allAssignments) out[`\0env:${name}`] = assigned.value;
+        i++;
         continue;
       }
       // a numeric or flag operand of a wrapper (`timeout 60`, `env -C dir`, `nice -n 5`)
-      const opt = /^(-\S*|\d+\S*)\s+/.exec(s);
-      if (opt && /^(-|\d)/.test(opt[1]!)) {
-        s = s.slice(opt[0].length);
+      if (/^(-|\d)/.test(word)) {
+        i++;
         // an option's VALUE is not a command either: `sudo -u root -H VAR=x cmd` stopped the scan at `root`
-        if (/^(-u|-g|-p|-C|-U|-r|-t|-D|--user|--group|--prompt|--role|--type|--chdir)$/.test(opt[1]!)) {
-          const val = /^(\S+)\s+/.exec(s);
-          if (val && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(val[1]!)) s = s.slice(val[0].length);
-        }
+        // (`exec -a NAME` and `xargs -a FILE` take a word too: the scan stopped at the alias, so `exec -a x env EDITOR=/tmp/x git commit` bound nothing)
+        if (/^(-u|-g|-p|-C|-U|-r|-t|-D|-a|--user|--group|--prompt|--role|--type|--chdir)$/.test(word) && i < words.length && assignmentWord(words[i]!) === null) i++;
         continue;
       }
       break;
@@ -7802,12 +7829,27 @@ function resolveScriptCommand(
         return resolveScriptCommand(table, ctx, requote(['lint-staged', ...tokens.slice(2)]), env);
       // the manifest was fully read and genuinely has no such script: nothing executes. This is the narrow case
       // where absence is PROVEN, and the only one that keeps a declared ALLOW.
+      // ...UNLESS THE LINE ALSO NAMES THE PROGRAM THAT WOULD RUN IT. `npm test --script-shell=./evil.sh` re-points the interpreter of
+      // every script npm starts for this command, and whether a script of THIS package exists is not the whole of what it starts:
+      // the flag is a claim about execution that does not depend on the manifest, so it is reported on the absent branch too
+      // (review 11 #109; the flag reader sat after the return and was only reached when the script was there)
+      const absentFlags = tokens.filter(npmFlagRuns);
       return {
         kind: 'npm-script',
         key: `npm:${script}`,
         body: null,
-        reason: `script "${script}" not found in package.json`,
-        resolution: 'ABSENT_VERIFIED',
+        reason: `script "${script}" not found in package.json${absentFlags.length ? `, but the line sets ${absentFlags[0]}, which re-points the interpreter npm runs scripts in` : ''}`,
+        // (absence is a positive claim only when nothing on the line can change what npm runs)
+        resolution: absentFlags.length ? 'AMBIENT_UNRESOLVED' : 'ABSENT_VERIFIED',
+        ...(absentFlags.length
+          ? {
+              unresolved: absentFlags.map((f) => ({
+                what: 'binding' as const,
+                where: f,
+                why: 'an npm configuration flag re-points the interpreter npm runs scripts in',
+              })),
+            }
+          : {}),
       };
     }
     // ONE ENTRY PER SCRIPT, NOT PER SEGMENT. Pre-splitting here projected the model away twice over: a pipeline
@@ -11858,7 +11900,11 @@ function classifyNormalized(
   const subject = forgeApiSubject(ctx, norm, state.env);
   // every matcher is an unanchored-or-anchored scan of the subject: the price is paid per TEST, before it runs
   const testCost = 2 + (subject.length >> 3);
+  let decided = false;
   for (const { m, re } of compiled) {
+    // (once the core has decided, only the OVERLAY's rules are still asked: they are additive and sit after every core rule, so a loop
+    // that stopped at the first match never reached them - a project's narrowing for `make deploy` or `*.pem` was dead text)
+    if (decided && m.layer !== 'overlay') continue;
     chargeWork(testCost);
     if (re.test(subject)) {
       // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
@@ -11889,7 +11935,7 @@ function classifyNormalized(
         state.env.envInputs,
         state.env.rawSegment ?? norm,
       );
-      break;
+      decided = true;
     }
   }
   // A NETWORK TOOL IS JUDGED BY WHAT IT SENDS AND TO WHOM: the name alone made a download and a PUT that merges a pull
@@ -12153,11 +12199,17 @@ function pathTokens(segment: string, cwd: string, old?: readonly string[]): Path
   for (const [idx, raw] of allTokens.entries()) {
     if (idx === 0 || idx === patternIndex) continue;
     const tok = pathValueOf(raw);
-    if (!tok || !isPathLike(tok, cwdIsSensitive) || tok === '{}') continue;
+    if (!tok || tok === '{}') continue;
+    // A BARE NAME IS A PATH OPERAND WHEN THERE IS A FILE OF THAT NAME where the command runs. `cat service-account.json` and `cd secrets
+    // && cat db.txt` read a file in the working directory, and the scan took only words that LOOK like paths - a slash, a dot, a
+    // tilde - so a rule that protected a file by its name (an overlay's `service-account.json`) was never asked (review 11 #117). The
+    // existence test keeps the ordinary words out: `echo hello` and the value of `-n 5` name nothing on disk.
+    if (!isPathLike(tok, cwdIsSensitive) && !(cwd !== CWD_UNKNOWN && namesAnEntry(cwd, tok))) continue;
     out.push(...pathEntries(cwd, tok, old));
   }
   return out;
 }
+
 
 function globCouldReachCredentials(abs: string): boolean {
   const home = canonicalPath(homedir()).split(sep).join('/');
@@ -12991,6 +13043,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       PATTERN_FIRST_HEADS.has(head) && !tokens.some((t) => /^-[a-zA-Z]*[ef]$/.test(t) || /^--(regexp|file)=/.test(t))
         ? tokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
         : -1;
+    const searched: string[] = [];
     for (const [ti, t] of tokens.entries()) {
       if (ti === 0 || ti === patternAt || patternWords.includes(t)) continue;
       if (t.startsWith('-')) continue;
@@ -12999,6 +13052,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       for (const e of roots) {
         if (e.abs === null) continue;
         const abs = e.abs.split(sep).join('/');
+        searched.push(abs);
         if (abs === home || home.startsWith(abs.replace(/\/$/, '') + '/')) {
           hits.push({
             capability: 'fs.credential-store.read',
@@ -13006,6 +13060,33 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
             via: `recursive read of ${t} reaches credential stores`,
             segment: seg,
             absolute: false,
+          });
+          break;
+        }
+      }
+    }
+    // A RECURSIVE READ OF A TREE THAT HOLDS A PROTECTED PATH READS THE PROTECTED PATH. A project that declares `secrets/**` a credential
+    // store means `grep -r password .` and `rg password` too, and the rule above looks for HOME only (review 11 #118). The search
+    // roots are the operands - and the working directory for the tools that search it when given none. Only a rule with a literal
+    // place to look for can be tested without walking the disk (`secrets/**`, `config/prod.yml`); a rule that is a NAME at any depth
+    // (`service-account.json`, `*.pem`) has no such place, and is answered when a command names the file.
+    const overlayReads = table.matchers.filter((m) => m.layer === 'overlay' && m.path !== undefined && m.tool === 'Read' && !/^(\*\*|~\/|\/)/.test(m.path));
+    if (overlayReads.length > 0) {
+      const implicit = searched.length === 0 && (['rg', 'ag', 'ack', 'find', 'fd', 'fdfind', 'tree', 'du', 'ls'].includes(head) || RECURSIVE_HEADS.has(head));
+      const searchRoots = implicit ? [canonicalPath(cwd).split(sep).join('/')] : searched;
+      const roots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) => canonicalPath(r).split(sep).join('/'));
+      for (const m of overlayReads) {
+        const prefix = m.path!.split(/[*?[{]/)[0]!.replace(/\/$/, '');
+        if (prefix === '') continue;
+        const guarded = roots.map((r) => foldName(`${r}/${prefix}`));
+        const reached = searchRoots.find((r) => guarded.some((g) => g === foldName(r) || g.startsWith(foldName(r).replace(/\/$/, '') + '/')));
+        if (reached !== undefined) {
+          hits.push({
+            capability: m.capability,
+            verdict: verdictFor(table, ctx, m.capability),
+            via: `recursive read of ${reached.slice(reached.lastIndexOf('/') + 1) || '/'} reaches ${m.path}`,
+            segment: seg,
+            absolute: isAbsoluteCap(table, m.capability),
           });
           break;
         }
@@ -13744,6 +13825,44 @@ function gitPagerCommands(seg: string): string[] {
   return out;
 }
 
+/**
+ * THE FILES AN AWK COMMAND LINE NAMES, read as awk's getopt reads it. `-f FILE` and gawk's `-E FILE` name the program, `-i FILE`
+ * names source it includes and runs, `-l NAME` a library it loads, and a short option takes its value from the rest of its own
+ * word or from the next one: `-Eevil.awk`, `-nEevil.awk` and `-E evil.awk` are one thing. The reader that looked for the whole word
+ * `-E` saw only the last (review 11 #205), and the matcher for `-i` and `-l` needed a blank behind the letter.
+ */
+function awkFileOptions(t: readonly string[], from: number): Array<{ kind: 'program' | 'include' | 'load'; letter: string; value: string }> {
+  const out: Array<{ kind: 'program' | 'include' | 'load'; letter: string; value: string }> = [];
+  for (let j = from; j < t.length; j++) {
+    const w = t[j]!;
+    if (w === '--') break;
+    if (w.startsWith('--')) {
+      const m = /^--(file|source-file|exec|include|load)(?:=([\s\S]*))?$/.exec(w);
+      if (m) {
+        const value = m[2] ?? t[++j] ?? '';
+        out.push({ kind: m[1] === 'include' ? 'include' : m[1] === 'load' ? 'load' : 'program', letter: m[1]!, value });
+      }
+      continue;
+    }
+    if (!w.startsWith('-') || w === '-') continue;
+    // a cluster of short options: the first letter that takes a value takes the rest of the word, else the next word
+    for (let k = 1; k < w.length; k++) {
+      const c = w[k]!;
+      if (/[FvfeEilW]/.test(c)) {
+        const rest = w.slice(k + 1);
+        const value = rest !== '' ? rest : (t[++j] ?? '');
+        if (c === 'f' || c === 'E') out.push({ kind: 'program', letter: c, value });
+        else if (c === 'i') out.push({ kind: 'include', letter: c, value });
+        else if (c === 'l') out.push({ kind: 'load', letter: c, value });
+        break;
+      }
+      // options whose value is optional can only be glued: the rest of the word is theirs
+      if (/[dDopL]/.test(c)) break;
+    }
+  }
+  return out;
+}
+
 function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
   const t = tokenize(seg);
   // THE HEAD IS FOUND WHERE THE COMMAND STARTS, not at token 0: `FOO=bar awk …` and `command awk …` are the same
@@ -13777,14 +13896,16 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
   const fromFiles: string[] = [];
   const unread: string[] = [];
   let sawF = false;
-  for (let j = i + 1; j < t.length; j++) {
-    const w = t[j]!;
-    const f =
-      w === '-f' || w === '--file' || w === '--source-file'
-        ? (t[++j] ?? null)
-        : (/^(?:--file=|--source-file=|-f)(.+)$/.exec(w)?.[1] ?? null);
-    if (f === null) continue;
-    sawF = true;
+  // THE FILES AWK IS HANDED are read by the one reader of its options (awkFileOptions): `-f`, `-E` and `--file` name the program, `-i` and
+  // `--include` name source it also runs, `-l` and `--load` name a library it loads - each spelled spaced, glued or in a cluster
+  for (const opt of awkFileOptions(t, i + 1)) {
+    const f = opt.value;
+    if (opt.kind === 'program') sawF = true;
+    // a library is machine code: it is not read, and it is not nothing
+    if (opt.kind === 'load') {
+      unread.push(f);
+      continue;
+    }
     if (ctx && cwd !== undefined && !/[$`*?]/.test(f)) {
       const text = readWordFile(ctx, cwd, f);
       if (text !== null) fromFiles.push(text);
@@ -13797,9 +13918,10 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
   }
   // an unreadable program file is handed over as a command the analyzer cannot resolve, so the opacity reaches
   // the verdict instead of the program reading as empty
+  // (a file that is only INCLUDED runs beside the inline program, which is then still the first bare operand)
   const program = sawF
     ? fromFiles.join('\n')
-    : t.slice(i + 1).filter((x) => !x.startsWith('-')).join(' ');
+    : [t.slice(i + 1).filter((x) => !x.startsWith('-')).join(' '), ...fromFiles].join('\n');
   if (unread.length) out.push(`${MARK}awk-program-file ${unread[0]!}`);
   const literals = new Map<string, string>();
   for (const m of program.matchAll(/([A-Za-z_]\w*)\s*=\s*"((?:[^"\\]|\\.)*)"/g)) literals.set(m[1]!, m[2]!);
@@ -13939,6 +14061,8 @@ function analyzeSegmentsInto(
      *  (or through a linked ANCESTOR directory), and - since a hard link is a second name the path cannot reveal - a
      *  wildcard when the file being replaced has more than one. */
     const recordWrite = (raw: string): void => {
+      // a write is remembered against every link made so far and asked of the disk twice (its link count): paid for first
+      chargeWork(WRITE_COST + linkPairsNow.length * 50);
       const c = canonicalPath(raw);
       written.add(c);
       for (const [link, target] of linkPairsNow)
@@ -14482,39 +14606,39 @@ function analyzeSegmentsInto(
     let bare = seg.trim();
     for (;;) {
       const kw = /^(\S+)\s+/.exec(bare);
-      if (kw && (PREFIX_KEYWORDS.has(kw[1]!) || /^(export|declare|typeset|local|readonly)$/.test(kw[1]!))) {
+      if (kw && PREFIX_KEYWORDS.has(kw[1]!)) {
         bare = bare.slice(kw[0].length).trim();
-        // `declare -x NAME=value` is `export NAME=value`: the builtin's own options come first
-        bare = bare.replace(/^(-[a-zA-Z]+\s+)+/, '');
         continue;
       }
       break;
     }
-    // EVERY WORD of a standalone assignment list is an assignment, quoted or not: `export A=1 PGHOST=prod-db`,
-    // `export "PGHOST=prod-db"` and `declare -x A=1 B=2` each carry more than the one unquoted word the test accepted
-    // (exit review 10, self-attack)
-    const assignWords = tokenize(bare);
-    if (assignWords.length > 0 && assignWords.every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w))) {
-      for (const w of assignWords) {
-        // a literal value becomes known to the stages that follow - where the assignment is certain to have run
-        const vn = w.slice(0, w.indexOf('='));
-        const vv = w.slice(w.indexOf('=') + 1);
-        if (bindingIsProven && !/[$`*?[{~\\]/.test(vv)) shellVars.set(vn, vv);
-        // THREE NAMES THE PATH READER EXPANDS ON ITS OWN (`$HOME`, `$PWD`, `$OLDPWD`): once the line has given one a value this
-        // kernel cannot read, the reader's answer is no longer the shell's. The name is bound to a word that cannot be
-        // resolved, so every later use asks instead of being read as the home or working directory it used to be
-        else if (/^(HOME|PWD|OLDPWD)$/.test(vn)) shellVars.set(vn, `\${${vn}:-assigned-at-run-time}`);
-        else shellVars.delete(vn);
-        Object.assign(carriedEnv, segmentEnvInputs(w + ' x', true));
-        // A STANDALONE `export NAME=value` IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
-        // emitted the marker and `export LD_AUDIT=./evil.so; cmd` did not, although it re-points every program
-        // for the rest of the shell rather than for one command (exit review 10).
-        const name = w.slice(0, w.indexOf('='));
-        if (ENV_INJECT_RE.test(name) && envInjects(name, w))
-          hits.push(
-            ...classifyNormalized(table, ctx, compiled, `${MARK}env-inject ${name}`, { ...state, env }),
-          );
-      }
+    // WHAT THE COMMAND BINDS FOR THE REST OF THE SHELL IS READ ONCE, BY THE RECORDER (bindings.ts), whichever builtin binds it.
+    // A line of assignments, `export` and its kin, `printf -v`, `read`, `mapfile`, `getopts`, a `for` loop's variable, `let` and the
+    // `${NAME:=default}` expansion are the same act, and only the first two were recognised: `printf -v PATH %s "$PWD/bin"; ls` ran a
+    // planted `ls` and `read EDITOR <<< /tmp/x; git commit` opened a program of the caller's choosing at ALLOW (exit review 11, #108;
+    // self-attack on exit review 10, #86). EVERY WORD of a list is a binding, quoted or not: `export A=1 PGHOST=prod-db`,
+    // `export "PGHOST=prod-db"` and `declare -x A=1 B=2` each carry more than the one unquoted word the test accepted.
+    for (const b of bindingsOf(tokenize(bare), seg).persistent) {
+      const vn = b.name;
+      const vv = b.value;
+      // a literal value becomes known to the stages that follow - where the binding is certain to have run. (A default expansion binds
+      // only a name nothing has set, so it never changes what the line already knows.)
+      if (b.how === 'default-expansion') {
+        if (!shellVars.has(vn) && /^(HOME|PWD|OLDPWD)$/.test(vn)) shellVars.set(vn, `\${${vn}:-assigned-at-run-time}`);
+      } else if (bindingIsProven && vv !== null && !/[$`*?[{~\\]/.test(vv)) shellVars.set(vn, vv);
+      // THREE NAMES THE PATH READER EXPANDS ON ITS OWN (`$HOME`, `$PWD`, `$OLDPWD`): once the line has given one a value this
+      // kernel cannot read, the reader's answer is no longer the shell's. The name is bound to a word that cannot be
+      // resolved, so every later use asks instead of being read as the home or working directory it used to be
+      else if (/^(HOME|PWD|OLDPWD)$/.test(vn)) shellVars.set(vn, `\${${vn}:-assigned-at-run-time}`);
+      else shellVars.delete(vn);
+      // (a value bound at run time is written as one that cannot be resolved, which is what it is)
+      const written1 = `${vn}=${vv ?? '$RUNTIME'}`;
+      Object.assign(carriedEnv, segmentEnvInputs(written1 + ' x', true));
+      // A STANDALONE BINDING OF AN INJECTING NAME IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
+      // emitted the marker and `export LD_AUDIT=./evil.so; cmd` did not, although it re-points every program
+      // for the rest of the shell rather than for one command (exit review 10).
+      if (ENV_INJECT_RE.test(vn) && envInjects(vn, written1))
+        hits.push(...classifyNormalized(table, ctx, compiled, `${MARK}env-inject ${vn}`, { ...state, env }));
     }
     const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([^\s()<>|&;'"$`]+)\s*\(\s*\)\s*\{)/.exec(seg.trim());
     if (decl && bindingIsProven) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);
@@ -14590,17 +14714,25 @@ export function classifyUrl(
   } catch {
     /* keep raw */
   }
+  // the core's first matching rule, and every rule of the overlay, the strictest deciding (the overlay only narrows: behind the core's
+  // `localhost` ALLOW and its catch-all ask, a project's rule for a port it forwards to production never ran - exit review 11, #120)
+  let coreHit: CapabilityHit | null = null;
+  const overlayHits: CapabilityHit[] = [];
   for (const m of table.matchers) {
     if (!m.url || (m.tool !== 'WebFetch' && m.tool !== 'any')) continue;
+    if (m.layer !== 'overlay' && coreHit !== null) continue;
     if (new RegExp(m.url, 'i').test(host)) {
-      return {
+      const hit: CapabilityHit = {
         capability: m.capability,
         verdict: verdictFor(table, ctx, m.capability),
         via: `matcher url /${m.url}/`,
         absolute: isAbsoluteCap(table, m.capability),
       };
+      if (m.layer === 'overlay') overlayHits.push(hit);
+      else coreHit = hit;
     }
   }
+  if (coreHit !== null || overlayHits.length > 0) return worstHit([...(coreHit ? [coreHit] : []), ...overlayHits]);
   return {
     capability: 'network.unknown',
     verdict: verdictFor(table, ctx, 'network.unknown'),

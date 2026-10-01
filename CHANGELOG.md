@@ -163,3 +163,41 @@ discipline of decision Q84 (authority changes are never patch releases).
   DENY (a redirection dropped every path under `/dev`; now only the discard devices are dropped, `/dev/shm` is scratch).
   A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask, and a leading `~` is the HOME the line assigned (`export HOME=/etc; echo x > ~/passwd`). A
   decision shares one view of the filesystem (the ordinary-development corpus runs in about two thirds of its former time).
+- **A decision ends inside the hook's budget on any input** (closure audit 2026-10-01, wave 3, "time"). A sed script of seven hundred
+  spaces followed by `git push origin main` is an absolute deny, and the scan that read the script backtracked for 66 to 105
+  seconds before saying so; the host gives a hook thirty, and a hook that has not answered has not refused. The sed scanners
+  (`w FILE`, `e CMD`, the `s///w` flag), eight matcher patterns (the awk/sed `e` command, the copy verbs of the runtime, hook and
+  trust-store rules, the no-op builtins, the registry push, the credential mount) and four scans in the splitter and the path walk
+  were quadratic or worse and are linear. A work budget (`authority/work-bound.ts`) ends what is left: text read, processes spawned
+  and paths judged are paid for in units, the same units on every machine, and past the limit (10 million; the largest decision in the
+  corpus spends about a nineteenth of it) the decision ends with an ASK whose reason is "too large to classify within the bound" - what
+  was found before it is kept, so a DENY stays a DENY. One command larger than 32 KiB is not scanned but asks on its own, so the
+  commands around it are still read, and a command nested deeper than the stack is an ASK instead of an exception. Visible change:
+  a command (not a heredoc body) of more than 32 KiB, or one call that runs several dozen git commands or more, asks.
+- **One reader of a git command line** (closure audit 2026-10-01, wave 3, "git"). `authority/git-invocation.ts` reads a git line by the
+  canonical names of its options (taken from `git <verb> -h`: `switch --force-create` is `-C`, a long option is any unambiguous prefix, a
+  cluster is each letter, a global option that takes a value no longer displaces the verb), judges configuration keys by one table of the
+  keys git documents (`man.<tool>.path`, `browser.<tool>.path`, `sendemail.*`, `gpg.*.program` name programs; `author.*`, `committer.*`
+  and `--config-env` are identity), reads the pathspecs of a checkout or restore from the parsed line (`git checkout HEAD -- .` is
+  `git checkout .`), and treats a transport verb's repository operand as a read of the local path it denotes (`file://` URLs included).
+  Visible changes: `git clone --config user.name=…` and `git -c author.name=… commit` ask (git.identity.override); `git stash push
+  --include-untr` asks as `-u` does; a hyphenated git command no rule names (`git checkout-index`, `git commit-graph write`, `git
+  fetch-pack`, `git status-x`) asks instead of being read as the verb it begins with, and `git remote-ext` is the `ext::` act; the
+  repository's own configuration is what git reports as local (`--show-scope`), through as many includes as git follows.
+- **One recorder of what a shell line binds** (closure audit 2026-10-01, wave 3, "environment"). `authority/bindings.ts` answers which
+  names a command binds - an assignment, `export` and its kin, `printf -v`, `read`, `mapfile`, `getopts`, a loop's variable, `let`, the
+  `${NAME:=default}` expansion - and a quoted assignment word handed to `env` or `export` binds as the bare one does. `printf -v PATH …; ls`
+  and `read EDITOR …; git commit` are gated as `PATH=… ls` is. The word `version` is a subcommand only after the tools that have one
+  (`go`, `cargo`, `docker`, `kubectl`, `helm`, `terraform`, `gcloud`, `az`, `git lfs`, `poetry`, `uv`): `node version`, `make version` and
+  `yarn version` are no longer read-only. A flag that selects the program npm runs scripts in asks whether or not the script is in the
+  manifest, npm's scoped registry flag (`--@scope:registry`) is an endpoint like `--registry`, and awk's file options are read as getopt
+  reads them (`gawk -Eevil.awk`, `-nievil.awk`).
+- **A project's overlay narrows, and is read as its author meant it** (closure audit 2026-10-01, wave 3, "overlay"). An overlay `command`
+  rule is added beside the core's answer and the strictest wins (it was appended after every core rule under first-match-wins, so a rule
+  for `make deploy` or `*.pem` never ran); a `path` or `url` rule is combined with the core's the same way. A `path` is read as a
+  `.gitignore` line is: a name matches at any depth, `dir/**` and `dir/` are the directory and everything below it, `{a,b}` and `[Pp]`
+  work, `~/` is the home directory and a leading `/` the filesystem; the Write and Edit tools are one rule; a bare file name that exists
+  where a command runs is a path operand (`cat service-account.json`, `cd secrets && cat db.txt`); and a recursive read of a tree that
+  holds a protected path (`grep -r x .` over `secrets/**`) reads it. A rule whose tool never asks about its field (`tool: Bash` with a
+  `path`) is refused when the overlay is compiled. Removing an overlay rule from the working tree is a widening, held pending until a
+  human accepts it. Visible change: an overlay that loaded with a rule that never ran now fails to compile and says which.

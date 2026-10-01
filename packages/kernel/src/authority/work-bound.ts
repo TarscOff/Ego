@@ -33,23 +33,23 @@ export class WorkBoundExceeded extends Error {
 }
 
 /**
- * THE LIMIT, AND WHY IT IS THIS NUMBER. One unit is about one character read by a primitive (see `chargeWork` call sites in
- * evaluate.ts). Measured on this repository on 2026-10-01 (script in the closure-time test):
+ * THE LIMIT, AND WHY IT IS THIS NUMBER. One unit is about one character read by a primitive; the primitives that read no text pay a flat
+ * price (a stage 3,000, a path judged 2,500, a write 1,500, a process spawned 100,000 - the constants sit beside their call sites in
+ * evaluate.ts and paths.ts). Measured on this repository on 2026-10-01, the numbers the test of this module checks the margin of:
  *
- *   - the largest decision in the test corpus (every ordinary command, every attack spelling, every generated family
- *     member) spends about WORK_MEASURED_CORPUS_MAX units;
- *   - the largest line of any shell script, workflow `run:` block, Makefile recipe or package script under this repository
- *     (the producers read those and hand each line over) spends about WORK_MEASURED_SCRIPT_MAX;
- *   - a decision costs on the order of a microsecond per unit on the development host, so the limit below is a few
- *     seconds of work - far inside the thirty the host gives, and far above anything a person or an agent writes.
+ *   - the largest decision in the command family of the test corpus - 16,358 decisions: every ordinary command, every attack spelling
+ *     and every generated variant of it - spends 535,517 units; a git command costs about 180,000 of them, because it spawns processes;
+ *     a command that is not git costs a few tens of thousands;
+ *   - the longest command in that corpus is 190 characters, the longest line of any script, workflow step, Makefile recipe or package
+ *     script under this repository is 122, and the longest script in it (runtime/posix/git-hook.sh, 1,472 characters) spends 213,004;
+ *   - a decision spends between 0.04 and 0.2 microseconds a unit on the development host, so the limit is one to two seconds of work
+ *     on the shapes that are slowest per unit - a hundred kilobytes of `ln -s a b;`, answered at the limit in about a second - and a
+ *     small fraction of the thirty the host gives. A machine several times slower, and a host that is busy, still answer in time.
  *
- * The limit is a margin of two orders of magnitude over the largest ordinary decision measured. Raising it is a decision
- * about how long a hook may be asked to think; lowering it makes ordinary work ask.
+ * The limit is nineteen times the largest decision measured, and about fifty git commands in one call. Raising it is a decision about
+ * how long a hook may be asked to think; lowering it makes ordinary work ask.
  */
 export const WORK_LIMIT = 10_000_000;
-/** the measurements the limit was derived from, kept beside it so the margin is checkable (see test/closure-time.test.ts) */
-export const WORK_MEASURED_CORPUS_MAX = 0;
-export const WORK_MEASURED_SCRIPT_MAX = 0;
 
 let spent = 0;
 let limit = WORK_LIMIT;
