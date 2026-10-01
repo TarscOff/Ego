@@ -713,6 +713,23 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     ],
   },
   {
+    family: 'db',
+    // a plain SELECT is a read (product decision, 2026-09-30) - by a strict grammar, so whatever a SELECT can do besides
+    // read is still the act it is: a function that acts, a clause that writes or locks, a second statement, a comment
+    id: 'an effect smuggled inside a plain SELECT',
+    floor: 'DENY',
+    cases: [
+      'psql -h prod-db.acme.com -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"',
+      `psql -h prod-db.acme.com -c "SELECT nextval('orders_id_seq')"`,
+      `psql -h prod-db.acme.com -c "SELECT lo_import('/etc/passwd')"`,
+      `mysql -h prod-db.acme.com -e "SELECT * FROM users INTO OUTFILE '/tmp/users'"`,
+      'psql -h prod-db.acme.com -c "SELECT * FROM users FOR UPDATE"',
+      'mysql -h prod-db.acme.com -e "SELECT SLEEP(3600)"',
+      'psql -h prod-db.acme.com -c "SELECT 1; DROP TABLE users"',
+      'mysql -h prod-db.acme.com -e "SELECT /*! DROP TABLE users */ 1"',
+    ],
+  },
+  {
     family: 'ego',
     // ln's SECOND documented form: with an existing directory last, the link is created INSIDE it
     id: 'a symlink into a protected tree made by ln\'s other two forms',

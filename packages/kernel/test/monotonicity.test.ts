@@ -206,7 +206,7 @@ test('PROPERTY: looking at something is not doing it', () => {
     ['make --dry-run deploy', 'make deploy', { Makefile: mk }],
     ['make -f Makefile -n deploy', 'make -f Makefile deploy', { Makefile: mk }],
     // a host that is a PATH is the local unix socket directory, not a network name
-    ["psql -h /tmp -c 'select 1'", "psql -h prod-db.acme.com -c 'select 1'"],
+    ["psql -h /tmp -c 'select 1'", "psql -h prod-db.acme.com -c 'delete from t'"],
     // a single dash in front of a whole word is a long option: `-host localhost` is not `-h ost`
     ["influx -host localhost -execute 'show databases'", "influx -host prod-metrics.acme.com -execute 'show databases'"],
     // a download changes nothing in the cloud; the upload does

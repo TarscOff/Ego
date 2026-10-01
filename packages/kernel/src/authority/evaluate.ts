@@ -7473,7 +7473,7 @@ const DB_EXECUTES_UNREAD =
   // `\ifile`), and a script path may be followed by a quote or a parenthesis rather than whitespace
   // (`mongosh --eval 'load("/tmp/evil.js")'`) — each of which put an unread program back out of reach
   // (exit review 10).
-  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$|["'),;])|\s(-f|--file|-init|--init)(=|\s|\S)|\s<\s*\S|\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(|--queries?[-_]file\b|--(multi)?query[-_]file\b/i;
+  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$|["'),;])|\s(-f|--file|-init|--init)(=|\s|\S)|\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(|--queries?[-_]file\b|--(multi)?query[-_]file\b/i;
 
 const TARGET_ENV_RE =
   // THE CONTAINER ENGINE IS SELECTED BY ENVIRONMENT TOO. `DOCKER_HOST` and `DOCKER_CONTEXT` were enrolled in the
@@ -8088,6 +8088,121 @@ function dbStatements(tokens: string[]): { statements: string[]; fromFile: boole
   return { statements: [...new Set(statements)], fromFile };
 }
 
+/** The functions a SELECT may call and still be a read: pure in PostgreSQL and in MySQL alike, named in ONE place.
+ *  A function that is not here is refused - `pg_terminate_backend`, `nextval`, `setval`, `lo_import`, `load_file`,
+ *  `sleep`, `dblink`, `query_to_xml` and `openrowset` are SELECTs that act, and a list of the ones that do is wrong by
+ *  omission. The type names are here because `varchar(10)` and `numeric(10,2)` have the shape of a call. */
+const SELECT_PURE_FUNCTIONS = new Set(
+  (
+    'count sum avg min max coalesce nullif greatest least lower upper length char_length character_length octet_length ' +
+    'trim ltrim rtrim btrim substr substring left right replace concat concat_ws lpad rpad reverse position strpos initcap ' +
+    'abs round floor ceil ceiling sqrt power mod sign cast extract date_part date_trunc to_char to_date to_number to_timestamp ' +
+    'date year month day hour minute second now current_date current_time current_timestamp row_number rank dense_rank ' +
+    'array_length array_agg string_agg md5 version database current_database current_schema current_user ' +
+    'varchar char numeric decimal timestamp time float'
+  ).split(' '),
+);
+
+/** Words that are followed by a parenthesis because of the GRAMMAR - a subquery, a list, a join condition - and not
+ *  because they are being called. */
+const SELECT_PAREN_WORDS = new Set(
+  'in and or not exists any all some on using from where having by select union intersect except as join when then else case between limit offset distinct over'.split(' '),
+);
+
+/** The words that give a SELECT an effect or a lock: `INTO` writes a file or a table, `FOR UPDATE` and `LOCK IN SHARE
+ *  MODE` take locks, `PROCEDURE ANALYSE` runs one, `WITH` can carry a data-modifying statement. Everything else a
+ *  SELECT can do is done by a function, and those are the allowlist above. */
+const SELECT_EFFECT_WORDS = new Set(
+  'into for lock update share procedure outfile dumpfile nowait skip locked with call do copy exec execute'.split(' '),
+);
+
+/** A plain SELECT is a read - by a strict grammar, not by the absence of words (product decision, 2026-09-30: "it is
+ *  only a select"). What is accepted is a short lexical set (identifiers, numbers, single-quoted strings, a handful of
+ *  operators, parentheses), one statement, no comment of any kind (a MySQL versioned comment, slash-star-bang, EXECUTES), and no call to
+ *  a function that is not on the pure list. Anything else - an unknown function, an `INTO`, a `FOR UPDATE`, a
+ *  variable assignment, a dollar-quoted body - is not a read, and the statement is judged as the act it may be. */
+function isPlainSelect(q: string): boolean {
+  if (q.length > 4000 || !/^select\b/i.test(q)) return false;
+  type Tok = { k: 'word' | 'quoted' | 'str' | 'num' | 'sysvar' | 'op'; v: string };
+  const toks: Tok[] = [];
+  const OPS = ['->>', '->', '<=', '>=', '<>', '!=', '||', '::'];
+  let i = 0;
+  while (i < q.length) {
+    const c = q[i]!;
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\n') {
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      // a doubled quote is the quote itself; a backslash never reaches here (the caller refuses any)
+      let j = i + 1;
+      for (;;) {
+        if (j >= q.length) return false;
+        if (q[j] === c) {
+          if (q[j + 1] === c) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      toks.push({ k: c === "'" ? 'str' : 'quoted', v: q.slice(i, j + 1) });
+      i = j + 1;
+      continue;
+    }
+    const rest = q.slice(i);
+    const num = /^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(rest);
+    if (num) {
+      if (/^[A-Za-z_]/.test(q[i + num[0].length] ?? '')) return false;
+      toks.push({ k: 'num', v: num[0] });
+      i += num[0].length;
+      continue;
+    }
+    const word = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(rest);
+    if (word) {
+      toks.push({ k: 'word', v: word[0] });
+      i += word[0].length;
+      continue;
+    }
+    const sysvar = /^@@[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?/.exec(rest);
+    if (sysvar) {
+      toks.push({ k: 'sysvar', v: sysvar[0] });
+      i += sysvar[0].length;
+      continue;
+    }
+    // `--` and `/*` open comments; MySQL's `/*!` and `/*+` are executed or interpreted, so no comment is accepted
+    if ((c === '-' && q[i + 1] === '-') || (c === '/' && q[i + 1] === '*')) return false;
+    const op = OPS.find((o) => rest.startsWith(o)) ?? (/^[=<>+\-*/%,.()]/.test(c) ? c : undefined);
+    if (op === undefined) return false;
+    toks.push({ k: 'op', v: op });
+    i += op.length;
+  }
+  let depth = 0;
+  for (let n = 0; n < toks.length; n++) {
+    const t = toks[n]!;
+    const prev = toks[n - 1];
+    const next = toks[n + 1];
+    const callNext = next?.k === 'op' && next.v === '(';
+    if (t.k === 'op') {
+      if (t.v === '(') depth++;
+      else if (t.v === ')' && --depth < 0) return false;
+      continue;
+    }
+    // a quoted name followed by `(` is a call whose name the allowlist cannot see
+    if (t.k === 'quoted' && callNext) return false;
+    if (t.k !== 'word') continue;
+    const w = t.v.toLowerCase();
+    if (SELECT_EFFECT_WORDS.has(w)) return false;
+    if (callNext) {
+      // a qualified call is somebody's function, whatever its last word is called
+      if (prev?.k === 'op' && prev.v === '.') return false;
+      if (!SELECT_PURE_FUNCTIONS.has(w) && !SELECT_PAREN_WORDS.has(w)) return false;
+    }
+  }
+  return depth === 0;
+}
+
 /** A statement that is a READ of schema, plan or server state - by a strict grammar, not by the absence of words.
  *  A blocklist of write verbs is wrong by omission (`created_at` contains `create`; `\g` ends a statement in mysql
  *  without a semicolon), so what is accepted is described positively and everything else is not a read. */
@@ -8104,7 +8219,7 @@ function isReadStatement(q: string): boolean {
   if (d) return !/^(analy[sz]e|format|extended|partitions)$/i.test(d[2] ?? '') || d[2] === undefined;
   // EXPLAIN prints a plan and runs nothing - unless ANALYZE, in any spelling and any option list, says otherwise
   if (/^explain\b/i.test(s0)) return !/analy[sz]e/i.test(s0) && !/^explain\s*\(/i.test(s0);
-  return false;
+  return isPlainSelect(s0);
 }
 
 /** redis' INFO, PING, DBSIZE and TTL read server state rather than data - and only when every option on the line is
@@ -8884,7 +8999,37 @@ function classifyShellPaths(
   // and only there: mongosh's `--eval` takes CODE and psql's `-x` is "expanded output", so this is tested per
   // client rather than folded into the shared pattern (exit review 10).
   const redisReadsScript = /^(redis-cli|valkey-cli)$/.test(head) && tokens.some((t) => t === '--eval' || t === '-x');
-  if (DB_CLIENT_HEADS.has(head) && (DB_EXECUTES_UNREAD.test(seg) || redisReadsScript))
+  // `mysql < file` feeds the client a script; `where a < 1` inside the statement is a comparison. Only a `<` that the
+  // shell sees is the former, so the VALUE of the client's own statement flag is set aside before the test - and
+  // nothing else: the segment may have been re-quoted from tokens (a wrapper stripped), so a quote around a word says
+  // nothing about whether it was a statement. The flag is the client's own (`mysql -c` is `--comments`, and
+  // `redis-cli -e` is a boolean), and a client not named here keeps the text as it is.
+  const STATEMENT_FLAG: Record<string, RegExp> = {
+    psql: /^(-c|--command)$/,
+    mysql: /^(-e|--execute)$/,
+    mariadb: /^(-e|--execute)$/,
+    mysqlsh: /^(-e|--execute)$/,
+    cqlsh: /^(-e|--execute)$/,
+    'clickhouse-client': /^(-q|--query)$/,
+    influx: /^(-execute|--execute)$/,
+    mongosh: /^--eval$/,
+    mongo: /^--eval$/,
+  };
+  const rawWords = tokenizeMarked(rawSeg);
+  const clientAt = rawWords.findIndex((t) => !t.quoted && STATEMENT_FLAG[t.text.replace(/^.*\//, '')] !== undefined);
+  let unquotedSeg = seg;
+  if (clientAt >= 0) {
+    const flag = STATEMENT_FLAG[rawWords[clientAt]!.text.replace(/^.*\//, '')]!;
+    const kept: string[] = [];
+    for (let n = 0; n < rawWords.length; n++) {
+      const w = rawWords[n]!.text;
+      if (n > clientAt && /^--?[a-z-]+=/.test(w) && flag.test(w.slice(0, w.indexOf('=')))) continue;
+      kept.push(w);
+      if (n > clientAt && flag.test(w) && rawWords[n + 1] !== undefined) n++;
+    }
+    unquotedSeg = kept.join(' ');
+  }
+  if (DB_CLIENT_HEADS.has(head) && (DB_EXECUTES_UNREAD.test(seg) || /\s<\s*\S/.test(' ' + unquotedSeg) || redisReadsScript))
     hits.push({
       capability: 'command.script-opaque',
       verdict: verdictFor(table, ctx, 'command.script-opaque'),
@@ -9974,8 +10119,13 @@ function carrierCommandValues(seg: string): string[] {
     const body = operandWrapperBody(words, wi);
     if (body !== null) out.push(body);
   }
+  // `psql -c "select a > 1"` hands the SERVER a statement; read as a shell body its `>` is a redirection and its
+  // first word is a command. What such a statement can do to the host is judged where it belongs - the client's own
+  // shell escapes (`\!`, `COPY … PROGRAM`) are the db opacity check, not a second shell parse.
+  const sqlClientAt = m.findIndex((t) => !t.quoted && /^(?:.*\/)?(psql|pgcli|usql)$/.test(t.text));
   for (let i = 0; i < m.length; i++) {
     const t = m[i]!.text;
+    if (t === '-c' && sqlClientAt >= 0 && i > sqlClientAt) continue;
     if ((t === '-c' || t === '-S' || t === '--split-string') && m[i + 1]) out.push(m[i + 1]!.text);
     else if (t.startsWith('--split-string=')) out.push(t.slice('--split-string='.length));
     else if (t.startsWith('-S') && t.length > 2 && !t.startsWith('--')) out.push(t.slice(2));

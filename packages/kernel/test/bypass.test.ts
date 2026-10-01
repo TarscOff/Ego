@@ -1107,7 +1107,7 @@ test('round-14 residuals: Q98 target resolution takes the MOST RESTRICTIVE signa
   );
   assert.equal(bash('psql "host=db.acme.internal dbname=app"', c).decisive?.capability, 'db.nonlocal.mutate');
   // a connection service name resolves through a file the kernel cannot read: never local
-  assert.equal(bash('psql service=prod -c "select 1"', c).decisive?.capability, 'db.target.unclassified');
+  assert.equal(bash('psql service=prod -c "delete from t"', c).decisive?.capability, 'db.target.unclassified');
   // [6] the statement no longer has to arrive by flag: a client aimed at a remote database is an external effect
   // whatever it then types (bare operands, a script file, stdin, or an interactive session)
   assert.equal(bash('redis-cli -h cache.acme.com flushall', c).decisive?.capability, 'db.nonlocal.mutate');
