@@ -40,6 +40,10 @@ export function effectScope(id: string): EffectScope {
   return LOCAL_NAMESPACES.has(ns) ? 'local' : 'external';
 }
 
+/** THE PROFILES FROM THE WEAKEST ASSURANCE TO THE STRONGEST. The compiler refuses a control plane in which a profile
+ *  is looser, for any capability in any mode, than the one before it. */
+export const PROFILE_ORDER = ['STANDARD', 'STRICT', 'HIGH_ASSURANCE'] as const;
+
 export interface CompiledCapability {
   family: string;
   description: string;
@@ -261,6 +265,31 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       budgets: { ...p.budgets },
       modes,
     };
+  }
+
+  // A STRICTER PROFILE IS NEVER LOOSER THAN A WEAKER ONE, for any capability in any mode. A profile's `narrow` list is
+  // its own - it is not inherited - so the order is a property of three hand-written lists, and a list that falls
+  // behind turns the strongest profile into a hole in the middle one: exit review 10 added `git.local.merge` and
+  // `git.local.cherry-pick` to STRICT, HIGH_ASSURANCE was not touched, and `git merge --no-ff topic` was ASK under
+  // STRICT and ALLOW under HIGH_ASSURANCE. The compiled cells are compared, so a mode override or a layer cannot hide it.
+  const present = PROFILE_ORDER.filter((id) => id in profiles);
+  for (let i = 1; i < present.length; i++) {
+    const weaker = present[i - 1]!;
+    const stricter = present[i]!;
+    const looser = new Map<string, { mode: string; was: Verdict; is: Verdict; modes: number }>();
+    for (const [mode, caps] of Object.entries(profiles[stricter]!.modes))
+      for (const [cap, is] of Object.entries(caps)) {
+        const was = profiles[weaker]!.modes[mode]?.[cap];
+        if (was === undefined || VERDICT_RANK[is] >= VERDICT_RANK[was]) continue;
+        const seen = looser.get(cap);
+        if (seen) seen.modes++;
+        else looser.set(cap, { mode, was, is, modes: 1 });
+      }
+    const file = (id: string): string => `profiles/${basename(cp.profiles.find((p) => p.id === id)?.file ?? id)}`;
+    for (const [cap, l] of looser)
+      problems.push(
+        `${file(stricter)}: profile ${stricter} is looser than ${weaker} for "${cap}" (${l.is} against ${l.was}, first in mode ${l.mode}${l.modes > 1 ? ` and ${l.modes - 1} more` : ''}); a stricter profile lists at least what a weaker one narrows, because narrow is not inherited`,
+      );
   }
 
   const matchers: CompiledMatcher[] = cp.matchers.map((m) => {

@@ -14,10 +14,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evaluate, listIndexedPaths } from '../src/authority/evaluate.ts';
-import { ctx, table, workspace, verdict } from './support/corpus.ts';
+import { compileAuthority, PROFILE_ORDER } from '../src/authority/compile.ts';
+import { loadControlPlane } from '../src/control-plane/load.ts';
+import { ControlPlaneValidationError, VERDICT_RANK } from '../src/control-plane/types.ts';
+import { RANK, ctx, table, workspace, verdict } from './support/corpus.ts';
 
 /** what the recipes below would do if they were READ: an absolute-class act, so "read" (DENY) and "hidden" (ALLOW)
  *  and "gated unread" (ASK) are three different answers */
@@ -484,4 +488,99 @@ test('the index reader lists what git ls-files lists, in every layout', () => {
   assert.deepEqual(none, { paths: [] });
   const dir = workspace({ 'index': 'DIRC\0\0\0\u0002\0\0\0\u0009' });
   assert.ok('problem' in listIndexedPaths(join(dir, 'index')));
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 4. A STRICTER PROFILE IS NEVER LOOSER THAN A WEAKER ONE
+ *
+ * A profile's `narrow` list moves capabilities toward DENY and is NOT inherited: HIGH_ASSURANCE lists what it narrows
+ * itself. STRICT had `git.local.merge` and `git.local.cherry-pick` added to its list in exit review 10; the
+ * HIGH_ASSURANCE list was not touched, so `git merge --no-ff topic` was ASK under STRICT and ALLOW under
+ * HIGH_ASSURANCE - the strongest profile permitting what the middle one asks about. Each list is written by hand, so
+ * "the stricter one lists at least what the weaker one does" cannot be left to whoever edits the next page: the
+ * compiler refuses a control plane in which STANDARD <= STRICT <= HIGH_ASSURANCE fails for any capability in any mode.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const CONTROL_PLANE = new URL('../../../control-plane/', import.meta.url).pathname;
+const withProfile = (file: string, edit: (text: string) => string): ReturnType<typeof loadControlPlane> => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-profile-order-'));
+  cpSync(CONTROL_PLANE, dir, { recursive: true });
+  const f = join(dir, 'profiles', file);
+  writeFileSync(f, edit(readFileSync(f, 'utf8')));
+  return loadControlPlane(dir);
+};
+
+test('the shipped table is ordered: for every capability in every mode, STANDARD <= STRICT <= HIGH_ASSURANCE', () => {
+  assert.deepEqual([...PROFILE_ORDER], ['STANDARD', 'STRICT', 'HIGH_ASSURANCE']);
+  const wrong: string[] = [];
+  for (const mode of Object.keys(table.profiles['STANDARD']!.modes))
+    for (const cap of Object.keys(table.capabilities))
+      for (let i = 1; i < PROFILE_ORDER.length; i++) {
+        const weaker = table.profiles[PROFILE_ORDER[i - 1]!]!.modes[mode]![cap]!;
+        const stricter = table.profiles[PROFILE_ORDER[i]!]!.modes[mode]![cap]!;
+        if (VERDICT_RANK[stricter] < VERDICT_RANK[weaker])
+          wrong.push(`${cap} in ${mode}: ${PROFILE_ORDER[i]} is ${stricter}, ${PROFILE_ORDER[i - 1]} is ${weaker}`);
+      }
+  assert.deepEqual(wrong, []);
+});
+
+test('git merge and git cherry-pick ask under every profile that asks for a commit', () => {
+  const dir = workspace();
+  const at = (profile: string, command: string): string =>
+    evaluate(table, { ...ctx(dir), profile }, { tool: 'Bash', input: { command } }).verdict;
+  for (const command of ['git merge --no-ff topic', 'git merge topic', 'git cherry-pick abc1234', 'git commit -m x']) {
+    assert.equal(at('STRICT', command), 'ASK', `${command} under STRICT`);
+    assert.equal(at('HIGH_ASSURANCE', command), 'ASK', `${command} under HIGH_ASSURANCE`);
+  }
+  // and the verdict of a whole command never falls from a weaker profile to a stricter one, whatever it is
+  const wrong: string[] = [];
+  for (const command of [
+    'git merge --no-ff topic', 'git cherry-pick abc1234', 'git commit -m x', 'git revert HEAD', 'git rebase main', 'git stash',
+    'git tag v1', 'git branch feat', 'git pull', 'npm install', 'curl https://example.com', 'make build', 'rm -rf build',
+    'sed -i s/a/b/ src/x.ts', 'touch x', 'docker run img',
+  ]) {
+    const got = PROFILE_ORDER.map((p) => RANK[at(p, command)]!);
+    if (!(got[0]! <= got[1]! && got[1]! <= got[2]!)) wrong.push(`${command}: ${PROFILE_ORDER.map((p, i) => `${p}=${got[i]}`).join(' ')}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('the compiler refuses a control plane in which a stricter profile is looser than a weaker one', () => {
+  // HIGH_ASSURANCE forgets what STRICT narrows
+  const forgetting = withProfile('high-assurance.md', (t) => t.replace(/  - capability: git\.local\.merge\n    verdict: ASK\n/, ''));
+  assert.throws(
+    () => compileAuthority(forgetting),
+    (e: unknown) =>
+      e instanceof ControlPlaneValidationError &&
+      e.problems.some((p) => /git\.local\.merge/.test(p) && /HIGH_ASSURANCE/.test(p) && /STRICT/.test(p) && /looser/.test(p)),
+  );
+  // STANDARD narrows something further than STRICT does
+  const inverted = withProfile('standard.md', (t) => t.replace('narrow: []', 'narrow:\n  - capability: git.local.commit\n    verdict: DENY'));
+  assert.throws(
+    () => compileAuthority(inverted),
+    (e: unknown) => e instanceof ControlPlaneValidationError && e.problems.some((p) => /git\.local\.commit/.test(p) && /STRICT/.test(p) && /STANDARD/.test(p)),
+  );
+  // every violation is listed, not the first
+  const both = withProfile('high-assurance.md', (t) =>
+    t.replace(/  - capability: git\.local\.merge\n    verdict: ASK\n/, '').replace(/  - capability: git\.local\.cherry-pick\n    verdict: ASK\n/, ''),
+  );
+  assert.throws(
+    () => compileAuthority(both),
+    (e: unknown) =>
+      e instanceof ControlPlaneValidationError &&
+      e.problems.some((p) => /git\.local\.merge/.test(p)) &&
+      e.problems.some((p) => /git\.local\.cherry-pick/.test(p)),
+  );
+  // a control plane that obeys the order still compiles
+  assert.doesNotThrow(() => compileAuthority(withProfile('high-assurance.md', (t) => t)));
+});
+
+test('the profile documents say what the narrowing lists do', () => {
+  const page = (f: string): string => readFileSync(join(CONTROL_PLANE, 'profiles', f), 'utf8');
+  const high = page('high-assurance.md');
+  assert.match(high, /merges?,? and cherry-picks?|merges?, cherry-picks?/i, 'the HIGH_ASSURANCE page names the merge and cherry-pick narrowing');
+  assert.match(high, /looser\s+than\s+STRICT/i, 'the HIGH_ASSURANCE page says the profiles are ordered and the compiler checks it');
+  assert.match(high, /`network\.external-write`/, 'the HIGH_ASSURANCE page lists what its narrow list denies');
+  assert.match(page('strict.md'), /merges?, cherry-picks?/i);
+  assert.match(page('standard.md'), /weaker|ordered|never looser/i, 'the STANDARD page says narrowing is ordered across profiles');
 });

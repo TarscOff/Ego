@@ -33,7 +33,9 @@ relaxes is ceremony, not authority. Where a guarantee cannot be met, STANDARD co
 a stale forge snapshot.
 
 `narrow` lists capability identifiers this profile moves toward DENY relative to the core table; STANDARD narrows
-nothing.
+nothing. The profiles are ordered STANDARD, STRICT, HIGH_ASSURANCE and a stricter one is never looser than a weaker
+one, for any capability in any mode: `narrow` is not inherited, so each page lists everything it narrows, and the
+compiler refuses a control plane that breaks the order.
 
 Execution budgets (`budgets`) bound one task: wall-clock duration, agent iterations, tool calls, retries of one step,
 delegation depth, concurrent subagents and network operations. Token and cost limits apply only where the host reports
