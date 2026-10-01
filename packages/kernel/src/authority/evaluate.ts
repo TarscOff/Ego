@@ -3757,6 +3757,10 @@ export function isScratchPath(abs: string): boolean {
     '/private/tmp',
     '/var/tmp',
     '/private/var/tmp',
+    // Linux's shared-memory tmpfs is scratch space too. Redirections used to drop EVERY path under /dev as a device, which
+    // made a write there look harmless by accident; now that only the discard devices are dropped (isDiscardDevice), this
+    // is the one place under /dev where a file is ordinary
+    '/dev/shm',
   ]);
   for (const r of roots) if (posix === r || posix.startsWith(r + '/')) return true;
   return false;
@@ -13435,6 +13439,8 @@ function analyzeSegments(
         ))
           hits.push(h);
     }
+    // every directory the shell may be in here: the relative words of the checks below are read in each of them
+    const dirsHere = [effectiveCwd, ...altDirs];
     // shell writes whose target token resolves under the EGO home trust stores are trust tampering wherever EGO_HOME is
     if (ctx.egoHome) {
       const head = tokenize(seg)[0] ?? '';
@@ -13450,9 +13456,8 @@ function analyzeSegments(
         for (const [ti, tok] of opTokens.entries()) {
           if (!tok.includes('/') || /^-/.test(tok)) continue;
           if (copyLike && bareIdx.length >= 2 && ti !== lastBare && !opTokens.some((t) => /^(-t|--target-directory)/.test(t))) continue;
-          const abs = canonicalPath(tok.replace(/^~(?=\/|$)/, homedir()));
           const home = canonicalPath(ctx.egoHome).split(sep).join('/');
-          if (underTrustDir(abs.split(sep).join('/'), home)) {
+          if (pathCandidates(dirsHere, tok, point.old).paths.some((q) => underTrustDir(canonicalPath(q).split(sep).join('/'), home))) {
             hits.push({
               capability: 'ego.trust.tamper',
               verdict: verdictFor(table, ctx, 'ego.trust.tamper'),
@@ -13477,7 +13482,6 @@ function analyzeSegments(
     const dequoted = tokenize(seg).join(' ');
     for (const n of normalizeSegment(seg))
       if (n !== dequoted) for (const t of redirectionTargets(n)) redirTargets.add(t);
-    const dirsHere = [effectiveCwd, ...altDirs];
     for (const target of redirTargets) {
       // a discard device swallows what it is given, whichever way the word spells it (the one reader, see isDiscardDevice)
       if (discardWord(dirsHere, target, point.old)) continue;
@@ -13589,6 +13593,10 @@ function analyzeSegments(
         const vn = w.slice(0, w.indexOf('='));
         const vv = w.slice(w.indexOf('=') + 1);
         if (bindingIsProven && !/[$`*?[{~\\]/.test(vv)) shellVars.set(vn, vv);
+        // THREE NAMES THE PATH READER EXPANDS ON ITS OWN (`$HOME`, `$PWD`, `$OLDPWD`): once the line has given one a value this
+        // kernel cannot read, the reader's answer is no longer the shell's. The name is bound to a word that cannot be
+        // resolved, so every later use asks instead of being read as the home or working directory it used to be
+        else if (/^(HOME|PWD|OLDPWD)$/.test(vn)) shellVars.set(vn, `\${${vn}:-assigned-at-run-time}`);
         else shellVars.delete(vn);
         Object.assign(carriedEnv, segmentEnvInputs(w + ' x', true));
         // A STANDALONE `export NAME=value` IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`

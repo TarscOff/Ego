@@ -14,11 +14,11 @@
 //   G  the resolver is bounded                                   H  no site resolves a shell word on its own
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { evaluate, type Evaluation } from '../src/authority/evaluate.ts';
-import { pathCandidates, isDiscardDevice } from '../src/authority/paths.ts';
+import { chdirPath, directoryCandidates, isDiscardDevice, openedPath, pathCandidates } from '../src/authority/paths.ts';
 import { RANK, ctx, link, table, workspace } from './support/corpus.ts';
 
 const HOME = homedir();
@@ -213,6 +213,39 @@ test('C. the directory is a SET: a conditional or lexical-versus-physical `cd` k
   assert.notEqual(verdictOf('cd e/.. && echo x > out.txt'), 'DENY');
 });
 
+test('C. the shell may itself be standing in a link: `..` is the parent of the directory it is really in', () => {
+  const inside = (cwd: string, command: string): string => evaluate(table, { ...ctx(dirOf), cwd }, { tool: 'Bash', input: { command } }).verdict;
+  for (const command of ['echo x > ../settings.json', 'cp package.json ../settings.json', 'touch ../settings.json', 'tee ../settings.json < package.json'])
+    assert.equal(inside(join(dirOf, 'd'), command), 'DENY', `in a link to .claude/sub: ${command}`);
+  for (const command of ['echo x > ../out.txt', 'cp package.json ../copy.json', 'touch ../x.ts'])
+    assert.equal(inside(join(dirOf, 'e'), command), 'ALLOW', `in a link to src/deep: ${command}`);
+  assert.equal(inside(join(dirOf, 'src'), 'echo x > ../out.txt'), 'ALLOW');
+});
+
+test('the lexical reading stays beside the physical one: a protected NAME that is itself a link is still protected', () => {
+  // `.claude` here is a link, so its realpath (`store/…`) no longer says `.claude`: only the typed name protects the file.
+  // A resolver that kept only the physical reading would have judged `store/settings.json` and let all of these through.
+  const root = mkdtempSync(join(tmpdir(), 'ego-namelink-'));
+  mkdirSync(join(root, '.git', 'hooks'), { recursive: true });
+  mkdirSync(join(root, 'store'));
+  mkdirSync(join(root, 'src'));
+  symlinkSync('store', join(root, '.claude'));
+  writeFileSync(join(root, 'package.json'), '{}');
+  for (const command of [
+    'echo x > .claude/settings.json',
+    'cp package.json .claude/settings.json',
+    'touch .claude/settings.json',
+    'tee .claude/settings.json < package.json',
+    'mv package.json .claude/settings.json',
+    'sed -i s/a/b/ .claude/settings.json',
+    'cp package.json src/../.claude/settings.json',
+    'cd src && cp ../package.json ../.claude/settings.json',
+    'find . -name x -exec cp package.json .claude/settings.json \\;',
+  ])
+    assert.equal(verdictOf(command, root), 'DENY', command);
+  assert.equal(verdictOf('echo x > src/ok.txt', root), 'ALLOW');
+});
+
 test('D. one path spelled many ways is one path', () => {
   const root = 'echo x >';
   for (const spelling of [
@@ -238,10 +271,21 @@ test('D. one path spelled many ways is one path', () => {
     '~/./.ssh/authorized_keys',
     '~/.ssh/../.ssh/authorized_keys',
     `${HOME}//.ssh/./authorized_keys`,
+    '${HOME}x/.ssh/authorized_keys', // a brace ends the name: the home directory followed by an `x`
   ])
     assert.equal(verdictOf(`${root} ${spelling}`), 'DENY', spelling);
   // `$HOMEDIR` is a different variable, not `$HOME` followed by letters: nothing can be said, so it asks
   assert.equal(verdictOf('echo x > $HOMEDIR/.ssh/authorized_keys'), 'ASK');
+  // a name the line itself gave a value this kernel cannot read is no longer the directory the reader would expand it to
+  for (const command of [
+    'PWD=$(echo /etc); echo x > $PWD/cron.d/x',
+    'HOME=$(echo /etc); echo x > $HOME/cron.d/x',
+    'export HOME=$(echo /etc) && echo x > ${HOME}/cron.d/x',
+    'OLDPWD=$(echo /etc); cd src; echo x > $OLDPWD/cron.d/x',
+  ])
+    assert.notEqual(verdictOf(command), 'ALLOW', command);
+  assert.equal(verdictOf('PWD=/etc; echo x > $PWD/cron.d/x'), 'DENY', 'a literal assignment is read, as every other variable is');
+  assert.equal(verdictOf('echo x > $PWD/out.txt'), 'ALLOW');
   // the previous directory, where the command line has one
   assert.equal(verdictOf('cd src; echo x > ~-/.claude/settings.json'), 'DENY');
   assert.equal(verdictOf('cd src; cp package.json ~-/.claude/settings.json'), 'DENY');
@@ -358,6 +402,9 @@ test('F. one reader decides whether a destination is a discard device, and the r
   for (const command of ['echo x > /dev/null', 'cat /dev/null', 'ls | tee /dev/null', 'cp package.json /dev/null', 'sort -o /dev/null package.json', 'echo x > /dev/tty'])
     assert.equal(verdictOf(command), 'ALLOW', command);
   assert.equal(verdictOf('echo x > /dev/tcp/localhost/80'), 'ASK', 'a socket is judged by the network, not as a file');
+  // ...and the one place under /dev where a file is ordinary stays ordinary now that the rest of /dev is not dropped
+  for (const command of ['echo x > /dev/shm/x', 'cp package.json /dev/shm/x', 'mkdir -p /dev/shm/build'])
+    assert.equal(verdictOf(command), 'ALLOW', command);
 });
 
 test('G. the resolver returns the lexical reading AND the physical one, bounded and without throwing', () => {
@@ -401,6 +448,36 @@ test('G. the resolver returns the lexical reading AND the physical one, bounded 
   assert.ok(home.includes(join(HOME, 'a')), home.join(' '));
   assert.deepEqual(pathCandidates(dir, '${HOME}/a').paths, home);
   assert.equal(pathCandidates(dir, '$HOMEDIR/a').dynamic, true);
+  // ...whereas a BRACE ends the name, so `${HOME}x` is the home directory followed by an `x`
+  assert.deepEqual(pathCandidates(dir, '${HOME}x/a').paths, [`${HOME}x/a`]);
+  // an alias is recognised before a `..` is applied to it: `/proc/self/cwd/../x` is beside the working directory
+  const beside = pathCandidates(dir, '/proc/self/cwd/../x');
+  assert.notEqual(beside.uncertain, null);
+  assert.ok(beside.paths.includes(join(dirname(dir), 'x')), beside.paths.join(' '));
+  assert.ok(pathCandidates(dir, '/proc/self/root/../x').paths.includes('/x'));
+});
+
+test('G. the readers that are not judges: the file a command opens, the directory a -C leaves it in, the directories a cd may reach', () => {
+  const dir = workspace(FILES);
+  const real = realpathSync(dir);
+  // the file whose bytes run: the PHYSICAL one, canonical
+  assert.equal(openedPath(dir, 'd/../Makefile'), join(real, '.claude', 'Makefile'));
+  assert.equal(openedPath(dir, 'src/../Makefile'), join(real, 'Makefile'));
+  assert.equal(openedPath(dir, './src//a.ts'), join(real, 'src', 'a.ts'));
+  assert.equal(openedPath(dir, '$X/Makefile'), null);
+  assert.equal(openedPath(dir, '*.mk'), null);
+  // a chdir(2): physical where a `..` follows a link, the text the caller compares otherwise
+  assert.equal(chdirPath(dir, 'd/..'), join(real, '.claude'));
+  assert.equal(chdirPath(dir, 'src'), join(dir, 'src'));
+  assert.equal(chdirPath(dir, '..'), dirname(dir));
+  assert.equal(chdirPath(dir, '$X'), null);
+  // `cd d/..` goes two places unless it says -P: the logical one (the text) and the physical one (the link followed)
+  assert.deepEqual(directoryCandidates(dir, 'd/..'), [real, join(real, '.claude')]);
+  assert.deepEqual(directoryCandidates(dir, 'd/..', true), [join(real, '.claude')]);
+  assert.deepEqual(directoryCandidates(dir, 'src'), [join(real, 'src')]);
+  assert.equal(directoryCandidates(dir, 'nope*'), null);
+  assert.equal(directoryCandidates(dir, '$X'), null);
+  assert.equal(directoryCandidates(dir, '~-3'), null);
 });
 
 test('G. a physical walk costs filesystem calls, and ordinary work pays for none it does not need', () => {

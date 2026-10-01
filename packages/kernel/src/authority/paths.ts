@@ -117,6 +117,21 @@ function walkComponents(from: string, path: string, budget: { left: number }): s
 
 const hasDotDot = (p: string): boolean => /(^|\/)\.\.(\/|$)/.test(p);
 
+/** The longest path the kernel will open (Linux 4096; macOS is 1024). */
+const PATH_MAX = 4096;
+
+/** The physical reading of `literal` from `base` (the root for an absolute word). A decision reads the same word at several
+ *  sites - the redirection, the ledger, the trust-store check - and a walk costs a filesystem call per component, so it is
+ *  made once per evaluation. A walk starts with a fresh link budget, so its answer does not depend on who asked first. */
+function physicalReading(base: string | null, literal: string): string {
+  const key = `\0physical\0${base ?? ''}\0${literal}`;
+  const known = cache?.get(key);
+  if (known !== undefined) return known;
+  const out = walkComponents(base === null ? sep : canonicalPath(base), literal, { left: MAX_LINK_HOPS });
+  cache?.set(key, out);
+  return out;
+}
+
 /** Where a path that may contain `..` lands once every link it passes through is followed (see walkComponents). */
 export function physicalPath(p: string, cwd: string): string {
   const budget = { left: MAX_LINK_HOPS };
@@ -287,11 +302,13 @@ function expandStart(
 ): string[] | null {
   const t = word.replace(/\[([^\]!^\\/-])\]/g, '$1');
   let m: RegExpExecArray | null;
-  if ((m = /^(?:~\+|\$PWD|\$\{PWD\})(?=\/|$)([\s\S]*)$/.exec(t))) return dirs.map((d) => d + m![1]);
-  if ((m = /^(?:~-|\$OLDPWD|\$\{OLDPWD\})(?=\/|$)([\s\S]*)$/.exec(t)))
+  // (`$NAME` ends where the identifier does, so `$HOMEDIR` is another variable; `${NAME}` ends at its brace, so `${HOME}x`
+  // IS the home directory followed by an `x`; a tilde-prefix ends at the first slash)
+  if ((m = /^(?:(?:~\+|\$PWD)(?=\/|$)|\$\{PWD\})([\s\S]*)$/.exec(t))) return dirs.map((d) => d + m![1]);
+  if ((m = /^(?:(?:~-|\$OLDPWD)(?=\/|$)|\$\{OLDPWD\})([\s\S]*)$/.exec(t)))
     return old !== undefined && old.length > 0 ? old.map((d) => d + m![1]) : null;
   if (/^~[+-]?\d/.test(t)) return null; // the directory stack: not tracked
-  if ((m = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)([\s\S]*)$/.exec(t))) return [homedir() + m[1]];
+  if ((m = /^(?:(?:~|\$HOME)(?=\/|$)|\$\{HOME\})([\s\S]*)$/.exec(t))) return [homedir() + m[1]];
   if ((m = /^~([A-Za-z0-9_.-]+)(?=\/|$)([\s\S]*)$/.exec(t))) {
     if (m[1] === currentUser()) return [homedir() + m[2]];
     note.uncertain ??= `~${m[1]} is another user's home directory, which this kernel does not look up`;
@@ -345,11 +362,12 @@ function readVariant(
       out.lexical.push(lexical);
       // the physical reading differs only where a `..` can follow a link; a word without one is judged by the
       // lexical reading's canonical form, which is what the classifier makes of it
-      if (hasDotDot(literal)) {
-        const physical = walkComponents(base === null ? sep : canonicalPath(base), literal, { left: MAX_LINK_HOPS });
+      // (a path longer than PATH_MAX cannot be opened at all - ENAMETOOLONG - so it has no physical reading to walk)
+      if (hasDotDot(literal) && literal.length <= PATH_MAX) {
+        const physical = physicalReading(base, literal);
         if (physical !== canonicalPath(lexical)) out.physical.push(physical);
       }
-      out.lexical.push(...aliasReadings(lexical, dirs, note));
+      out.lexical.push(...aliasReadings(literal, lexical, dirs, note));
     }
   }
   return out;
@@ -389,17 +407,34 @@ function directoriesOf(cwds: string | readonly string[]): string[] {
   return dirs;
 }
 
-/** The places an alias path leads, as far as they can be told: `/proc/self/cwd/x` is `x` in the working directory. */
-function aliasReadings(lexical: string, dirs: readonly string[], note: { uncertain: string | null }): string[] {
-  const why = descriptorAlias(lexical);
-  if (why === null) return [];
-  note.uncertain ??= why;
-  const m = PROC_ALIAS_RE.exec(lexical);
-  if (!m || (m[1] !== 'self' && m[1] !== 'thread-self')) return [];
-  const rest = (m[3] ?? '').replace(/^\//, '');
-  if (m[2] === 'cwd') return dirs.map((d) => resolve(d, rest));
-  if (m[2] === 'root') return [resolve(sep, rest)];
-  return [];
+/**
+ * The places an alias path leads, as far as they can be told: `/proc/self/cwd/x` is `x` in the working directory. An alias is
+ * recognised in the text BEFORE any `..` is applied as well: `/proc/self/cwd/../x` is beside the working directory, and
+ * collapsing the `..` first turned it into `/proc/self/x`, which names nothing.
+ */
+function aliasReadings(
+  literal: string,
+  lexical: string,
+  dirs: readonly string[],
+  note: { uncertain: string | null },
+): string[] {
+  const probes: Array<{ at: string; tail: string }> = [{ at: lexical, tail: '' }];
+  if (isAbsolute(literal) && hasDotDot(literal)) {
+    const head = literal.split(/\/\.\.(?:\/|$)/)[0] || '/';
+    probes.push({ at: resolve(head), tail: literal.slice(head.length) });
+  }
+  const out: string[] = [];
+  for (const { at, tail } of probes) {
+    const why = descriptorAlias(at);
+    if (why === null) continue;
+    note.uncertain ??= why;
+    const m = PROC_ALIAS_RE.exec(at);
+    if (!m || (m[1] !== 'self' && m[1] !== 'thread-self')) continue;
+    const rest = '.' + (m[3] ?? '') + tail;
+    if (m[2] === 'cwd') out.push(...dirs.map((d) => resolve(d, rest)));
+    else if (m[2] === 'root') out.push(resolve(sep, rest));
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
