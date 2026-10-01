@@ -13,7 +13,11 @@
 //   6. a file a command WRITES is not a program it runs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { workspace, verdict } from './support/corpus.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { evaluate, listIndexedPaths } from '../src/authority/evaluate.ts';
+import { ctx, table, workspace, verdict } from './support/corpus.ts';
 
 /** what the recipes below would do if they were READ: an absolute-class act, so "read" (DENY) and "hidden" (ALLOW)
  *  and "gated unread" (ASK) are three different answers */
@@ -237,4 +241,236 @@ test('npm: a key that runs code is one key whether it arrives as a flag, as an .
   // the same file with harmless keys stays ordinary
   assert.equal(v('npm run build', { ...BUILD, '.npmrc': 'loglevel=silent\nfund=false\naudit=false\n' }), 'ALLOW');
   assert.equal(v('npm run build --loglevel=silent --if-present', BUILD), 'ALLOW');
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 3. lint-staged CONFIGURATIONS BELOW THE WORKING DIRECTORY
+ *
+ * Since lint-staged 13 the tool takes the configuration nearest to EACH staged file, and it finds them with
+ * `git ls-files` - the tracked files and the untracked ones git does not ignore. A `.lintstagedrc` under `packages/a`
+ * therefore runs on the files staged there even when lint-staged is started at the repository root. The producer
+ * walked UP from the working directory only, so a nested configuration was never read: its commands ran under the
+ * root configuration's ALLOW.
+ *
+ * The universe lint-staged sees is read the way git does, WITHOUT running git: the classifier never starts a program the
+ * repository's own configuration can name (core.fsmonitor), so the tracked paths come from the index file and the
+ * untracked ones from a walk that skips what the ignore files provably exclude. Both are bounded; a reached bound is
+ * an ask that says so, never "nothing there".
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+function git(dir: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd: dir, env: GIT_ENV, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }).toString();
+}
+/** a workspace that is a real repository: `tracked` paths are in its index, added with -f so an ignored one can be tracked */
+function repo(files: Record<string, string>, tracked: string[] = [], indexVersion?: number): string {
+  const dir = workspace(files);
+  git(dir, 'init', '-q');
+  if (tracked.length) git(dir, 'add', '-f', '--', ...tracked);
+  if (indexVersion) git(dir, 'update-index', '--index-version', String(indexVersion));
+  return dir;
+}
+const BAD_RC = JSON.stringify({ '*.js': ACT });
+const OK_RC = JSON.stringify({ '*.js': 'eslint --fix' });
+const BAD_PKG = JSON.stringify({ name: 'a', 'lint-staged': { '*.ts': ACT } });
+const OK_PKG = JSON.stringify({ name: 'a', 'lint-staged': { '*.ts': 'eslint --fix' } });
+
+test('lint-staged: a configuration below the working directory is read, whether git tracks it or not', () => {
+  const rows: Array<[label: string, command: string, files: Record<string, string>, tracked: string[]]> = [
+    ['an untracked rc one level down', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.json': BAD_RC }, []],
+    ['the bare rc name', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc': BAD_RC }, []],
+    ['four levels down', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'a/b/c/d/.lintstagedrc.json': BAD_RC }, []],
+    ['with no configuration at the root at all', 'npx lint-staged', { 'sub/.lintstagedrc.json': BAD_RC }, []],
+    ['a nested manifest that names lint-staged', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/package.json': BAD_PKG }, []],
+    ['the same, run as the binary', 'lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.json': BAD_RC }, []],
+    ['started in a directory above the nested one', 'cd packages && npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/b/.lintstagedrc.json': BAD_RC }, []],
+    ['a tracked rc', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.json': BAD_RC }, ['packages/a/.lintstagedrc.json']],
+    ['a tracked manifest', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/package.json': BAD_PKG }, ['packages/a/package.json']],
+    ['one of several nested, the others harmless', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/package.json': OK_PKG, 'packages/b/package.json': '{"name":"b"}', 'packages/c/.lintstagedrc.json': BAD_RC }, []],
+    // a configuration that is tracked inside a directory the ignore file excludes: only the index knows it
+    ['tracked under an ignored directory', 'npx lint-staged', { '.gitignore': 'vendor/\n', '.lintstagedrc.json': OK_RC, 'vendor/x/.lintstagedrc.json': BAD_RC }, ['.gitignore', 'vendor/x/.lintstagedrc.json']],
+    // a dot-directory, a directory named like an ignored one in another place, a pattern the walk does not understand
+    ['inside a dot-directory', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, '.tools/x/.lintstagedrc.json': BAD_RC }, []],
+    ['under a name the ignore file lists only at the root', 'npx lint-staged', { '.gitignore': '/dist\n', '.lintstagedrc.json': OK_RC, 'pkg/dist/.lintstagedrc.json': BAD_RC }, []],
+    ['under a directory a wildcard pattern ignores', 'npx lint-staged', { '.gitignore': 'build*\n', '.lintstagedrc.json': OK_RC, 'build-x/.lintstagedrc.json': BAD_RC }, []],
+    ['under a directory a negation could re-include', 'npx lint-staged', { '.gitignore': 'out/\n!out/keep/\n', '.lintstagedrc.json': OK_RC, 'out/keep/.lintstagedrc.json': BAD_RC }, []],
+    // a node_modules the ignore file does not mention is not special
+    ['inside node_modules that nothing ignores', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'node_modules/p/.lintstagedrc.json': BAD_RC }, []],
+  ];
+  const wrong: string[] = [];
+  for (const [label, command, files, tracked] of rows) {
+    const got = verdict(command, repo(files, tracked));
+    if (got !== 'DENY') wrong.push(`${label}: ${command} must read the nested configuration, got ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('lint-staged: a nested configuration that is code or is not readable is the human gate, as the root one is', () => {
+  const rows: Array<[string, Record<string, string>]> = [
+    ['a JavaScript module', { '.lintstagedrc.json': OK_RC, 'packages/a/lint-staged.config.js': 'module.exports = {}' }],
+    ['an rc module', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.cjs': 'module.exports = {}' }],
+    ['a YAML rc', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.yaml': "'*.js': eslint\n" }],
+    ['a manifest that is not JSON', { '.lintstagedrc.json': OK_RC, 'packages/a/package.json': '{ "lint-staged": ' }],
+    ['a package.yaml that names lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/package.yaml': "lint-staged:\n  '*.js': eslint\n" }],
+    ['a rc that is not an object', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.json': '[1]' }],
+  ];
+  const wrong: string[] = [];
+  for (const [label, files] of rows) {
+    const got = verdict('npx lint-staged', repo(files));
+    if (got !== 'ASK') wrong.push(`${label}: got ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('lint-staged: what stays as it was - a root configuration alone, harmless nested ones, everything git does not see', () => {
+  const same: Array<[label: string, command: string, files: Record<string, string>, tracked?: string[]]> = [
+    ['a root configuration only', 'npx lint-staged', { '.lintstagedrc.json': OK_RC }],
+    ['a root manifest only', 'npx lint-staged', { 'package.json': OK_PKG }],
+    ['nested manifests that name no lint-staged', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/package.json': '{"name":"a"}', 'packages/b/package.json': '{"name":"b","scripts":{}}' }],
+    ['a harmless nested configuration', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/.lintstagedrc.json': OK_RC }],
+    ['a sibling directory of the working directory', 'cd packages/b && npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/b/src/x.ts': '1', 'packages/a/.lintstagedrc.json': BAD_RC }],
+    // git does not list an untracked file in an ignored directory, so lint-staged never meets it
+    ['an untracked file in an ignored directory', 'npx lint-staged', { '.gitignore': 'node_modules/\n', '.lintstagedrc.json': OK_RC, 'node_modules/p/.lintstagedrc.json': BAD_RC }],
+    ['the same, spelled /name', 'npx lint-staged', { '.gitignore': '/node_modules\n', '.lintstagedrc.json': OK_RC, 'node_modules/p/.lintstagedrc.json': BAD_RC }],
+    ['the same, spelled **/name', 'npx lint-staged', { '.gitignore': '**/node_modules\n', '.lintstagedrc.json': OK_RC, 'a/node_modules/p/.lintstagedrc.json': BAD_RC }],
+    ['the same, spelled name/*', 'npx lint-staged', { '.gitignore': 'node_modules/*\n', '.lintstagedrc.json': OK_RC, 'node_modules/p/.lintstagedrc.json': BAD_RC }],
+    ['an ignore file in the directory itself', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/.gitignore': 'gen\n', 'packages/gen/x/.lintstagedrc.json': BAD_RC }],
+    // a nested repository is another repository: git lists it as one entry and lint-staged never goes in
+    ['a nested repository', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'vendor/lib/.git/HEAD': 'ref: refs/heads/main\n', 'vendor/lib/.git/objects/.keep': '', 'vendor/lib/.git/refs/.keep': '', 'vendor/lib/.lintstagedrc.json': BAD_RC }],
+    ['a name that is not a configuration', 'npx lint-staged', { '.lintstagedrc.json': OK_RC, 'packages/a/lintstagedrc.json': BAD_RC, 'packages/a/.lintstaged.json': BAD_RC }],
+  ];
+  const wrong: string[] = [];
+  for (const [label, command, files, tracked] of same) {
+    const got = verdict(command, repo(files, tracked ?? []));
+    if (got !== 'ALLOW') wrong.push(`${label}: ${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+  // a directory that merely LOOKS like a nested repository is walked: git only skips a real one
+  const fake = repo({ '.lintstagedrc.json': OK_RC, 'vendor/lib/.git/placeholder': '', 'vendor/lib/.lintstagedrc.json': BAD_RC });
+  assert.equal(verdict('npx lint-staged', fake), 'DENY');
+  // a link is a file to git and is not followed
+  const target = workspace({ '.lintstagedrc.json': BAD_RC });
+  const linked = repo({ '.lintstagedrc.json': OK_RC });
+  execFileSync('ln', ['-s', target, join(linked, 'elsewhere')]);
+  assert.equal(verdict('npx lint-staged', linked), 'ALLOW');
+});
+
+test('lint-staged: the commit hook that runs it reads the nested configuration too', () => {
+  const files = {
+    '.lintstagedrc.json': OK_RC,
+    'packages/a/.lintstagedrc.json': BAD_RC,
+    '.git/hooks/pre-commit': '#!/bin/sh\nnpx lint-staged\n',
+  };
+  assert.notEqual(verdict('git commit -m x', repo(files)), 'ALLOW');
+  assert.equal(verdict('git commit -m x', repo({ ...files, 'packages/a/.lintstagedrc.json': OK_RC })), 'ALLOW');
+});
+
+test('lint-staged: a configuration this command writes below the working directory is not the one that was there', () => {
+  const base = { '.lintstagedrc.json': OK_RC, 'evil/.lintstagedrc.json': BAD_RC, 'evil/x': '1' };
+  const stale: string[] = [
+    `mkdir -p sub && printf '%s' '${BAD_RC}' > sub/.lintstagedrc.json && npx lint-staged`,
+    `printf '%s' '${BAD_RC}' > packages/a/.lintstagedrc && npx lint-staged`,
+    `cp -r evil sub && npx lint-staged`,
+    `cp evil/.lintstagedrc.json sub-rc && npx lint-staged`,
+    `mv evil sub && npx lint-staged`,
+    `cp -R evil newdir && npx lint-staged`,
+    `printf '%s' '${BAD_PKG}' > packages/package.json && npx lint-staged`,
+  ];
+  const wrong: string[] = [];
+  for (const command of stale) {
+    const got = verdict(command, repo(base));
+    if (got === 'ALLOW') wrong.push(command);
+  }
+  assert.deepEqual(wrong, []);
+  // a write that cannot be a configuration is not a reason to ask
+  assert.equal(verdict("mkdir -p src && printf 'x' > src/a.ts && npx lint-staged", repo({ '.lintstagedrc.json': OK_RC })), 'ALLOW');
+  assert.equal(verdict("printf 'x' > notes.txt && npx lint-staged", repo({ '.lintstagedrc.json': OK_RC })), 'ALLOW');
+});
+
+test('lint-staged: a bound that is reached is an ask that says so - never "nothing there"', () => {
+  // 20001 untracked files git does not ignore: the walk gives up before it can show there is no configuration among them
+  const big: Record<string, string> = { '.lintstagedrc.json': OK_RC };
+  for (let i = 0; i < 20_001; i++) big[`big/d${i % 50}/f${i}.txt`] = '';
+  const dir = repo(big);
+  const r = evaluate(table, ctx(dir), { tool: 'Bash', input: { command: 'npx lint-staged' } });
+  assert.equal(r.verdict, 'ASK');
+  assert.match(JSON.stringify(r.hits), /bound/, 'the reason names the bound');
+  // the same tree with the directory ignored is not walked, and the answer is the ordinary one
+  const ignored = repo({ ...big, '.gitignore': 'big/\n' });
+  assert.equal(verdict('npx lint-staged', ignored), 'ALLOW');
+});
+
+test('lint-staged: more tracked configurations than the bound is an ask that says so', () => {
+  const many: Record<string, string> = { '.lintstagedrc.json': OK_RC };
+  const entries: string[] = [];
+  for (let i = 0; i < 20_001; i++) {
+    many[`p${i}/package.json`] = '{}';
+    entries.push(`100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\tp${i}/package.json`);
+  }
+  const dir = repo(many);
+  // the entries go straight into the index, as `git add` of twenty thousand files would put them, without the cost
+  execFileSync('git', ['update-index', '--add', '--index-info'], { cwd: dir, env: GIT_ENV, input: entries.join('\n') + '\n' });
+  const r = evaluate(table, ctx(dir), { tool: 'Bash', input: { command: 'npx lint-staged' } });
+  assert.equal(r.verdict, 'ASK');
+  assert.match(JSON.stringify(r.hits), /bound/);
+});
+
+test('lint-staged: a repository whose index this resolver cannot read is an ask, and a fresh one is not', () => {
+  // a fresh repository has no index file yet: nothing is tracked
+  assert.equal(verdict('npx lint-staged', repo({ '.lintstagedrc.json': OK_RC })), 'ALLOW');
+  // a file that is not an index is "I could not tell", which is not "no configuration"
+  const broken = repo({ '.lintstagedrc.json': OK_RC });
+  writeFileSync(join(broken, '.git', 'index'), 'not an index');
+  assert.equal(verdict('npx lint-staged', broken), 'ASK');
+  const truncated = repo({ '.lintstagedrc.json': OK_RC, a: '1' }, ['a']);
+  const bytes = execFileSync('head', ['-c', '40', join(truncated, '.git', 'index')]);
+  writeFileSync(join(truncated, '.git', 'index'), bytes);
+  assert.equal(verdict('npx lint-staged', truncated), 'ASK');
+});
+
+test('lint-staged: a worktree whose .git is a file reads the index of its own git directory', () => {
+  const main = repo({ '.lintstagedrc.json': OK_RC, a: '1' }, ['.lintstagedrc.json', 'a']);
+  git(main, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'x');
+  const wt = join(main, '..', `wt-${Date.now()}`);
+  git(main, 'worktree', 'add', '-q', '-b', 'wt-branch', wt);
+  mkdirSync(join(wt, 'vendor', 'x'), { recursive: true });
+  writeFileSync(join(wt, '.gitignore'), 'vendor/\n');
+  writeFileSync(join(wt, 'vendor', 'x', '.lintstagedrc.json'), BAD_RC);
+  git(wt, 'add', '-f', '--', 'vendor/x/.lintstagedrc.json');
+  assert.equal(evaluate(table, ctx(wt), { tool: 'Bash', input: { command: 'npx lint-staged' } }).verdict, 'DENY');
+});
+
+test('the index reader lists what git ls-files lists, in every layout', () => {
+  const files: Record<string, string> = {
+    'a.txt': '1',
+    'dir/b.txt': '2',
+    'dir/sub/c.txt': '3',
+    'dir/sub/deeper/d.txt': '4',
+    'dir/sub/deeper/evenmore/e.txt': '5',
+    'dir/sub2/f.txt': '6',
+    'unicodé/ñ/ü.txt': '7',
+    'with space/g h.txt': '8',
+    [`long/${'x'.repeat(120)}/${'y'.repeat(120)}.txt`]: '9',
+    '.lintstagedrc.json': OK_RC,
+  };
+  for (const version of [2, 3, 4]) {
+    const dir = repo(files, Object.keys(files), version === 3 ? 2 : version);
+    if (version === 3) {
+      // an intent-to-add entry carries the extended flags only layout 3 has room for
+      writeFileSync(join(dir, 'intent.txt'), 'x');
+      git(dir, 'add', '-N', '--', 'intent.txt');
+    }
+    const want = git(dir, 'ls-files', '-z').split('\0').filter(Boolean).sort();
+    const got = listIndexedPaths(join(dir, '.git', 'index'));
+    assert.ok('paths' in got, `layout ${version}: ${'problem' in got ? got.problem : ''}`);
+    assert.deepEqual([...got.paths].sort(), want, `layout ${version}`);
+    // the layout the file actually has is the one asked for
+    const header = execFileSync('head', ['-c', '8', join(dir, '.git', 'index')]);
+    assert.equal(header.readUInt32BE(4), version, `layout ${version} is the one under test`);
+  }
+  // a file that is not there is an empty index; one that is damaged is a problem
+  const none = listIndexedPaths(join(workspace(), 'no-index'));
+  assert.deepEqual(none, { paths: [] });
+  const dir = workspace({ 'index': 'DIRC\0\0\0\u0002\0\0\0\u0009' });
+  assert.ok('problem' in listIndexedPaths(join(dir, 'index')));
 });

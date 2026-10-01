@@ -1,6 +1,6 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, type Dirent } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
@@ -4316,6 +4316,35 @@ const LINT_STAGED_CONFIGS: readonly string[] = [
   ...['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'].flatMap((e) => [`.lintstagedrc${e}`, `lint-staged.config${e}`]),
 ];
 
+const LINT_STAGED_NAME_SET: ReadonlySet<string> = new Set(LINT_STAGED_CONFIGS);
+
+/** Whether the files an earlier unit of this command writes could add a lint-staged configuration below `cwd`, or change
+ *  which directories git ignores: a config-named file, an ignore file, a directory that is written or exists (moved or
+ *  copied into place, its contents come with it) or a name without an extension that is probably one about to be created.
+ *  An ordinary source file written beside the staged ones is none of these. */
+function writesMayChangeNestedConfigs(written: ReadonlySet<string>, cwd: string): boolean {
+  if (written.size === 0) return false;
+  const below = foldName(canonicalPath(cwd));
+  const names = new Set([...LINT_STAGED_CONFIGS, '.gitignore'].map(foldName));
+  for (const w of written) {
+    if (w.startsWith('\0')) continue;
+    const f = foldName(w);
+    const base = f.slice(f.lastIndexOf('/') + 1);
+    // an ignore file anywhere changes which directories git ignores below it - and so which files lint-staged sees
+    if (base === '.gitignore' || (base === 'exclude' && f.endsWith('/.git/info/exclude'))) return true;
+    if (f !== below && !f.startsWith(below + '/')) continue;
+    if (f === below || names.has(base)) return true;
+    let directory = false;
+    try {
+      directory = statSync(w).isDirectory();
+    } catch {
+      /* not there yet */
+    }
+    if (directory || !base.includes('.')) return true;
+  }
+  return false;
+}
+
 /** the configuration files a package manager reads beside the manifest, from the package directory upwards */
 const RC_FILES: readonly string[] = ['.npmrc', '.yarnrc.yml', '.yarnrc'];
 
@@ -4486,6 +4515,285 @@ function locateEvery(
     return false;
   });
   return { found, tried, capped };
+}
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * THE FILES git LISTS BELOW A DIRECTORY - the universe lint-staged searches for nested configurations.
+ *
+ * lint-staged 13+ finds its configurations with `git ls-files` (the tracked files, and the untracked ones git does not
+ * ignore) and uses the nearest to EACH staged file, so a configuration below the directory it is started in is one a run
+ * may use. The walk UP from the working directory never meets it.
+ *
+ * THE CLASSIFIER DOES NOT RUN GIT FOR THIS. A repository can name a program in its own configuration (`core.fsmonitor`),
+ * and a classifier that starts one while it decides whether a command may run has handed the repository the decision.
+ * The tracked paths are read from the index file, which is a documented sequential format, and the untracked ones from a
+ * walk of the work tree that skips only what the ignore files PROVABLY exclude. Anything the reader does not understand
+ * (a sparse or split index, an unknown layout, a directory it cannot list) and any bound it reaches is reported as such:
+ * the caller turns it into an ask that says so, never into "nothing there".
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** The bound on what the search below a directory looks at: config-named entries found, and untracked entries walked.
+ *  Tracked entries are read from the index in one pass and cost nothing to skip. */
+const NESTED_SEARCH_BOUND = 20_000;
+/** A sanity ceiling for the pieces that are not bounded by the above: the size of the index file and the number of
+ *  directory entries a walk may list in total. A work tree larger than this is not searched by guesswork. */
+const NESTED_INDEX_BYTES = 128 * 1024 * 1024;
+const NESTED_WALK_CEILING = 2_000_000;
+
+export type IndexedPaths = { paths: string[] } | { problem: string };
+
+/**
+ * The paths a git index lists - what `git ls-files --cached` prints - read from the file itself. Layouts 2, 3 and 4 (the
+ * last prefix-compresses every path against the one before), with a 20-byte or a 32-byte object name. A missing file is
+ * a repository nothing has been added to yet. A sparse index (a directory entry stands for files it does not list) and a
+ * split index (the entries live in a second file) list less than is tracked, so they are a problem, not a short list.
+ */
+export function listIndexedPaths(indexFile: string): IndexedPaths {
+  let buf: Buffer;
+  try {
+    const st = statSync(indexFile);
+    if (!st.isFile()) return { problem: 'the git index is not a file' };
+    if (st.size > NESTED_INDEX_BYTES) return { problem: 'the git index is larger than this resolver reads' };
+    buf = readFileSync(indexFile);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? { paths: [] } : { problem: `the git index could not be read (${code ?? 'error'})` };
+  }
+  if (buf.length < 12 || buf.toString('latin1', 0, 4) !== 'DIRC') return { problem: 'the git index does not start with the DIRC signature' };
+  const version = buf.readUInt32BE(4);
+  const count = buf.readUInt32BE(8);
+  if (version < 2 || version > 4) return { problem: `the git index has a layout this resolver does not read (version ${version})` };
+  for (const hash of [20, 32]) {
+    const r = parseIndexEntries(buf, version, count, hash);
+    if (r !== null) return r;
+  }
+  return { problem: 'the git index is not in a layout this resolver can read' };
+}
+
+/** null: the bytes are not laid out this way (the other object-name size may fit); otherwise the answer */
+function parseIndexEntries(buf: Buffer, version: number, count: number, hash: number): IndexedPaths | null {
+  const paths: string[] = [];
+  let sparse = false;
+  let prev: Buffer = Buffer.alloc(0);
+  let p = 12;
+  for (let i = 0; i < count; i++) {
+    const nameAt = 40 + hash + 2;
+    if (p + nameAt > buf.length) return null;
+    const mode = buf.readUInt32BE(p + 24);
+    const flags = buf.readUInt16BE(p + 40 + hash);
+    let q = p + nameAt;
+    if (version >= 3 && (flags & 0x4000) !== 0) q += 2;
+    let name: Buffer;
+    if (version === 4) {
+      // the number of bytes to cut from the end of the previous path, in git's offset encoding, then the new tail
+      if (q >= buf.length) return null;
+      let c = buf[q++]!;
+      let cut = c & 0x7f;
+      while ((c & 0x80) !== 0) {
+        if (q >= buf.length) return null;
+        c = buf[q++]!;
+        cut = (cut + 1) * 128 + (c & 0x7f);
+      }
+      const end = buf.indexOf(0, q);
+      if (end < 0 || cut > prev.length) return null;
+      name = Buffer.concat([prev.subarray(0, prev.length - cut), buf.subarray(q, end)]);
+      p = end + 1;
+    } else {
+      const end = buf.indexOf(0, q);
+      if (end < 0) return null;
+      name = buf.subarray(q, end);
+      // the entry is padded with NULs to a multiple of eight bytes, the terminator included
+      p += (q - p + (end - q) + 8) & ~7;
+    }
+    if (name.length === 0 || p > buf.length) return null;
+    if (mode >>> 12 === 0o4) sparse = true;
+    prev = name;
+    paths.push(name.toString('utf8'));
+  }
+  // the extensions, then the checksum: the walk must land exactly on it, which is what tells the object-name sizes apart
+  const stop = buf.length - hash;
+  let split = false;
+  while (p < stop) {
+    if (p + 8 > stop) return null;
+    const size = buf.readUInt32BE(p + 4);
+    if (p + 8 + size > stop) return null;
+    if (buf.toString('latin1', p, p + 4) === 'link') split = true;
+    p += 8 + size;
+  }
+  if (p !== stop) return null;
+  if (split) return { problem: 'the git index is a split index, whose entries are in another file' };
+  if (sparse) return { problem: 'the git index is sparse, so it does not list every tracked file' };
+  return { paths };
+}
+
+/** The git directory of a work tree whose `.git` is a directory, or a file that points to one (a worktree, a submodule). */
+function gitDirOf(root: string): string | null {
+  const dotGit = join(root, '.git');
+  try {
+    const st = statSync(dotGit);
+    if (st.isDirectory()) return dotGit;
+    if (!st.isFile() || st.size > 4096) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
+    return m ? resolve(root, m[1]!) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** git's own test for "this directory is another repository, and is listed as one entry": a git directory of its own. */
+function isNestedRepository(dir: string): boolean {
+  const gd = gitDirOf(dir);
+  if (gd === null) return false;
+  return fileExists(join(gd, 'HEAD')) && fileExists(join(gd, 'objects')) && fileExists(join(gd, 'refs'));
+}
+
+/** What one ignore file provably excludes: directories it names outright. Anything it cannot prove (a wildcard, a
+ *  pattern in the middle of a path, an escape) is not claimed, and the directory is walked. */
+interface IgnoreLayer {
+  /** the directory the ignore file sits in, relative to the work tree root ('' for the root) */
+  base: string;
+  /** names excluded at any depth below `base` */
+  anywhere: Set<string>;
+  /** paths excluded relative to `base` */
+  anchored: Set<string>;
+  /** the file contains a negation: a later line may bring a directory back, so no exclusion below is certain */
+  negated: boolean;
+}
+function readIgnoreLayer(file: string, base: string): IgnoreLayer | null {
+  let text: string;
+  try {
+    const st = statSync(file);
+    if (!st.isFile()) return null;
+    if (st.size > 512 * 1024) return { base, anywhere: new Set(), anchored: new Set(), negated: true };
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  const layer: IgnoreLayer = { base, anywhere: new Set(), anchored: new Set(), negated: false };
+  for (const raw of text.split('\n')) {
+    let line = raw.replace(/\r$/, '').replace(/ +$/, '');
+    if (line === '' || line.startsWith('#')) continue;
+    if (line.startsWith('!')) {
+      layer.negated = true;
+      continue;
+    }
+    // a directory and everything under it
+    line = line.replace(/\/\*{1,2}$/, '').replace(/\/$/, '');
+    const everywhere = line.startsWith('**/');
+    if (everywhere) line = line.slice(3);
+    if (line === '' || /[*?[\\]/.test(line)) continue;
+    if (everywhere) {
+      if (!line.includes('/')) layer.anywhere.add(line);
+    } else if (line.startsWith('/')) layer.anchored.add(line.slice(1));
+    else if (line.includes('/')) layer.anchored.add(line);
+    else layer.anywhere.add(line);
+  }
+  return layer;
+}
+function ignoredByLayers(layers: readonly IgnoreLayer[], rel: string): boolean {
+  const name = rel.slice(rel.lastIndexOf('/') + 1);
+  for (const l of layers) {
+    if (l.base !== '' && !rel.startsWith(l.base + '/')) continue;
+    const within = l.base === '' ? rel : rel.slice(l.base.length + 1);
+    if (l.anchored.has(within)) return true;
+    if (l.anywhere.has(name)) return true;
+  }
+  return false;
+}
+
+export interface NestedSearch {
+  /** absolute paths of files below the directory whose name is one lint-staged reads a configuration from */
+  found: string[];
+  /** set when the search could not be completed: why. `found` is then only what was seen before it stopped */
+  problem: string | null;
+  /** the search ran at all: false when the directory is not inside a git work tree */
+  inRepository: boolean;
+}
+
+/** Every file below `dir` that git would list (tracked, or untracked and not ignored) and that has a name in `names`. */
+function findConfigsBelow(ctx: EvaluationContext, dir: string, names: ReadonlySet<string>): NestedSearch {
+  const start = canonicalPath(dir);
+  let root: string | null = null;
+  walkUp(ctx, start, true, (d) => {
+    if (fileExists(join(d, '.git'))) {
+      root = d;
+      return true;
+    }
+    return false;
+  });
+  if (root === null) return { found: [], problem: null, inRepository: false };
+  const top: string = root;
+  const gitDir = gitDirOf(top);
+  if (gitDir === null) return { found: [], problem: 'the git directory of this work tree could not be found', inRepository: true };
+  const prefix = start === top ? '' : start.slice(top.length + 1) + '/';
+  const found = new Set<string>();
+  const done = (problem: string | null): NestedSearch => ({ found: [...found], problem, inRepository: true });
+
+  // 1. the tracked files, from the index
+  const indexed = listIndexedPaths(join(gitDir, 'index'));
+  if ('problem' in indexed) return done(indexed.problem);
+  const tracked = new Set<string>();
+  for (const p of indexed.paths) {
+    tracked.add(p);
+    if (!p.startsWith(prefix)) continue;
+    // an entry whose file is gone is listed by git and fails to load: nothing runs from it
+    if (names.has(p.slice(p.lastIndexOf('/') + 1)) && fileExists(join(top, p))) {
+      found.add(join(top, p));
+      if (found.size > NESTED_SEARCH_BOUND)
+        return done(`the search reached its bound of ${NESTED_SEARCH_BOUND} tracked files named like a configuration`);
+    }
+  }
+
+  // 2. the untracked files git does not ignore, from the work tree
+  const layers: IgnoreLayer[] = [];
+  const exclude = readIgnoreLayer(join(gitDir, 'info', 'exclude'), '');
+  if (exclude) layers.push(exclude);
+  // the ignore files of the directories ABOVE the starting one, from the work tree root down, apply to everything beneath
+  const above = prefix === '' ? [] : prefix.slice(0, -1).split('/').slice(0, -1);
+  let relAbove = '';
+  for (const seg of ['', ...above]) {
+    relAbove = relAbove === '' ? seg : `${relAbove}/${seg}`;
+    const l = readIgnoreLayer(join(top, relAbove, '.gitignore'), relAbove);
+    if (l) layers.push(l);
+  }
+  let untracked = 0;
+  let visited = 0;
+  const stack: Array<{ abs: string; rel: string; layers: IgnoreLayer[] }> = [{ abs: start, rel: prefix.slice(0, -1), layers }];
+  while (stack.length) {
+    const here = stack.pop()!;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(here.abs, { withFileTypes: true });
+    } catch {
+      return done(`the directory ${here.abs} could not be listed`);
+    }
+    visited += entries.length;
+    if (visited > NESTED_WALK_CEILING) return done('the work tree is larger than this resolver walks');
+    // this directory's own ignore file joins the ones above it for everything beneath
+    const own = entries.some((e) => e.name === '.gitignore') ? readIgnoreLayer(join(here.abs, '.gitignore'), here.rel) : null;
+    const active = own ? [...here.layers, own] : here.layers;
+    const negated = active.some((l) => l.negated);
+    for (const e of entries) {
+      if (e.name === '.git') continue;
+      const rel = here.rel === '' ? e.name : `${here.rel}/${e.name}`;
+      const abs = join(here.abs, e.name);
+      if (e.isDirectory()) {
+        if (isNestedRepository(abs)) continue;
+        if (!negated && ignoredByLayers(active, rel)) continue;
+        stack.push({ abs, rel, layers: active });
+        continue;
+      }
+      if (tracked.has(rel)) continue;
+      if (++untracked > NESTED_SEARCH_BOUND)
+        return done(`the search reached its bound of ${NESTED_SEARCH_BOUND} untracked files that nothing ignores`);
+      if (names.has(e.name)) {
+        found.add(abs);
+        if (found.size > NESTED_SEARCH_BOUND)
+          return done(`the search reached its bound of ${NESTED_SEARCH_BOUND} files named like a configuration`);
+      }
+    }
+  }
+  return done(null);
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -8051,6 +8359,12 @@ function resolveScriptCommand(
         resolution: 'PARTIAL',
       };
     const candidates = [...search.found];
+    // ...AND SINCE 13 IT USES THE ONE NEAREST TO EACH STAGED FILE, which may be BELOW the directory it starts in: a
+    // `.lintstagedrc` under `packages/a` runs on the files staged there when lint-staged is started at the root. The walk
+    // up never met it. Every file git would list below the working directory (tracked, or untracked and not ignored)
+    // that is named like a configuration joins the candidates and is judged exactly as the ones above are.
+    const below = findConfigsBelow(ctx, cwd, LINT_STAGED_NAME_SET);
+    for (const f of below.found) if (!candidates.includes(f)) candidates.push(f);
     // with nothing at all inside the roots, the nearest manifest beyond them still decides (exit review 10)
     if (!outward && !candidates.some((f) => f.endsWith('/package.json'))) {
       const beyond = locateUp(ctx, cwd, ['package.json'], true);
@@ -8076,8 +8390,23 @@ function resolveScriptCommand(
         resolution: 'STALE',
         unresolved: [{ what: 'freshness', where: cwd, why: 'the configuration is rewritten earlier in the same command' }],
       };
+    // ...and a configuration this command writes BELOW the working directory (or a directory it moves into place, or an
+    // ignore file it rewrites) is not one the search saw either. Writes that cannot be any of those leave it alone.
+    if (below.inRepository && writesMayChangeNestedConfigs(written, cwd))
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:stale-below:${cwd}`,
+        body: null,
+        reason: 'a lint-staged configuration or an ignore file is written below the working directory earlier in the same command, so what was read is not what runs',
+        resolution: 'STALE',
+        unresolved: [{ what: 'freshness', where: cwd, why: 'a nested configuration may be created earlier in the same command' }],
+      };
     const confs: Array<{ path: string; text: string; conf: unknown }> = [];
     const problems: Array<{ path: string; why: string; outcome: 'UNSUPPORTED' | 'UNREADABLE' }> = [];
+    // A SEARCH THAT COULD NOT BE COMPLETED IS NOT A SEARCH THAT FOUND NOTHING: the bound, an index in a layout this
+    // resolver does not read, a directory it could not list. What was found is still judged; the gap is added to it.
+    if (below.problem !== null)
+      problems.push({ path: cwd, why: `the search below the working directory for nested lint-staged configurations could not be completed: ${below.problem}`, outcome: 'UNREADABLE' });
     for (const f of candidates) {
       const base = f.slice(f.lastIndexOf('/') + 1);
       // a JS/CJS/MJS config is code, and code is not resolvable by reading - whether or not the file can be opened
