@@ -8,7 +8,7 @@ title: Forge read, narrow write, issues and work items
 
 The forge abstraction covers GitHub, GitLab, Azure DevOps, Bitbucket and future providers through one contract.
 Reading is broadly allowed; writing is narrow and separate from repository mutation. Pull-request creation,
-modification, closing, merging, self-approval and release publication are organization-locked denies (Q98): DENY
+modification, closing, merging, self-approval and release publication are ADMIN_GOVERNED capabilities (Q98): DENY
 unless the organization policy layer says otherwise. So is every act that changes the rules or the permissions of a
 repository, and every deletion of what cannot be recreated (a repository, a release, an issue). Defeating a
 protection instead of changing it (`gh pr merge --admin`, enforcement switched off for administrators, a bypass
@@ -39,5 +39,5 @@ changes nothing, and each occurrence asks (issue #16 sections 4 and 8).
 
 ## Denied
 
-Issue creation, editing, transition and closing are organization-locked denies (see `organization-locked.md`): DENY
+Issue creation, editing, transition and closing are ADMIN_GOVERNED capabilities (see `admin-governed.md`): DENY
 here, widenable only by organization policy.

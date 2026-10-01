@@ -136,7 +136,7 @@ matchers:
     # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST, as for the runtime tree: `cp ~/.ego/trust/keys.json
     # /tmp/keys-backup.json` reads a key out of the trust store, which is not tampering with it (exit review 10).
     command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod|cp\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*)\b.*\.ego/(trust|index|releases|runtimes)/'
-  # --- git remote (organization-locked) ---
+  # --- git remote (ADMIN_GOVERNED) ---
   # `--no-verify` ON A PUSH SKIPS THE PRE-PUSH HOOK, which is EGO's own repository-side gate for this very verb. It
   # sits ABOVE the push rules because matching is first-match-wins: below them the flag was read as the push it
   # decorated, so an organization that had enabled pushing turned the same flag that is an absolute deny on
@@ -256,7 +256,7 @@ matchers:
   - capability: forge.pr.merge
     tool: Bash
     command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*((repos/[^/\s]+/[^/\s]+/pulls|projects/[^/\s]+/merge_requests)/[^/\s]+/merge)(\s|\?|$))(?=[^\x00]*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
-  # --- forge CLIs (organization-locked PR and issue mutation, narrow writes) ---
+  # --- forge CLIs (ADMIN_GOVERNED PR and issue mutation, narrow writes) ---
   - capability: forge.pr.merge
     tool: Bash
     command: '^(gh\s+pr\s+merge|glab\s+mr\s+merge|az\s+repos\s+pr\s+update\b.*--status\s+completed)\b'
@@ -1346,7 +1346,7 @@ matchers:
 
 The machine part of this file is the frontmatter. Matchers translate what a host reports (a shell command, a file
 path, a URL, an MCP tool name) into a capability identifier that the compiled authority table can decide. The order is
-the priority: locked-deny matchers (absolute and organization-locked) come first so a compound command cannot hide a push behind a harmless prefix.
+the priority: locked-deny matchers (HARD_LOCK and ADMIN_GOVERNED) come first so a compound command cannot hide a push behind a harmless prefix.
 
 Consumers may add matchers in `.harness/overlay/matchers.md`; they may only map to existing capabilities that are
 ASK or DENY in the effective table (narrowing), never introduce an ALLOW mapping for a command the core classifies

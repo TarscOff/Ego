@@ -6,8 +6,8 @@ title: Git local and remote
 ---
 # Git local and remote
 
-Local history is the agent's working material. Remote mutation is never the agent's decision; the organization-locked
-denies in `organization-locked.md` cover push, force push, remote tags and remote branch deletion (DENY unless the
+Local history is the agent's working material. Remote mutation is never the agent's decision; the ADMIN_GOVERNED
+capabilities in `admin-governed.md` cover push, force push, remote tags and remote branch deletion (DENY unless the
 organization policy layer says otherwise, Q98).
 
 ## Allowed

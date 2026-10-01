@@ -9,8 +9,8 @@ compilation closed: nothing is silently weakened.
 
 | Directory | What it holds | Schema |
 |---|---|---|
-| `permissions/absolute-denies.md` | Denies no lower layer may reference or widen | `ego.capabilities/1` with `lock: absolute` |
-| `permissions/capabilities/organization-locked.md` | Denies widenable only by the organization policy layer (Q98) | `ego.capabilities/1` with `lock: organization` |
+| `permissions/absolute-denies.md` | The HARD_LOCK tier: denies no lower layer may reference or widen | `ego.capabilities/1` with `lock: absolute` |
+| `permissions/capabilities/admin-governed.md` | ADMIN_GOVERNED capabilities: DENY at the core, widenable only by the organization policy layer and never past ASK (Q98; formerly named `organization-locked`, still read as an alias) | `ego.capabilities/1` with `lock: admin-governed` |
 | `containment/controls.md` | Controls EGO declares per profile and host (a sandbox, isolation of Git state, host features), distinct from policy and authority. Read by `ego doctor` only; it enforces nothing, and no OS-level containment exists yet | `ego.containment/1` |
 | `permissions/capabilities/*.md` | Narrow capability families with ALLOW / ASK / DENY sections | `ego.capabilities/1` |
 | `permissions/matchers.md` | Deterministic operation → capability matchers (tool, command, path, URL) | `ego.matchers/1` |
@@ -33,8 +33,8 @@ identifier in two sections of one file is a compile error. Omission means inheri
 Precedence: ABSOLUTE CORE DENY > ORGANIZATION POLICY > HARNESS PROFILE > PRODUCT OVERLAY > TASK GRANT (ASK → ALLOW
 only, current task) > MODEL DECISION. A lower layer may narrow (move toward DENY) and never widen. An overlay that
 references an absolute deny, or tries to widen anything, fails compilation. The single exception is the
-organization-locked tier: identifiers in `capabilities/organization-locked.md` are DENY at the core and the
-organization policy layer alone may widen them; overlays, grants, modes, skills and models never can.
+ADMIN_GOVERNED tier: identifiers in `capabilities/admin-governed.md` are DENY at the core and the organization
+policy layer alone may widen them, and then no further than ASK; overlays, grants, modes, skills and models never can.
 
 Commands are classified by their effect, not their spelling: `npm run <script>` is classified by the script body in
 `package.json`, `./x.sh` and `bash x.sh` by the lines of the script when it is inside the workspace and static,

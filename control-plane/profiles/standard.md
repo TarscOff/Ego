@@ -27,7 +27,7 @@ narrow: []
 ---
 # STANDARD
 
-A reasonable engineering baseline. Deterministic enforcement of absolute and organization-locked denies is still required; what STANDARD
+A reasonable engineering baseline. Deterministic enforcement of HARD_LOCK and ADMIN_GOVERNED capabilities is still required; what STANDARD
 relaxes is ceremony, not authority. Where a guarantee cannot be met, STANDARD continues with explicit disclosure in
 `doctor`, `status` and the receipt: unsigned runtime trust, relayed presentation, an unavailable model-assisted review,
 a stale forge snapshot.
