@@ -144,6 +144,22 @@ export const SHELL_GRAMMAR: Grammar = gnu(
   { stopAtOperand: true, plus: true },
 );
 
+// ---- awk -------------------------------------------------------------------------------------------------------------------------
+// gawk's long options are matched by any unique prefix: `--incl=inplace` rewrites its input file, `--fi prog.awk` takes its program from
+// a file, `--prof=FILE` writes a profile. The options with an OPTIONAL value (`-p[FILE]`, `-d[FILE]`, `-o[FILE]`, `-D[FILE]`) take it glued only.
+const AWK_GRAMMAR = gnu([
+  '-F|--field-separator:v', '-f|--file:v', '-v|--assign:v', '-b|--characters-as-bytes', '-c|--traditional', '-C|--copyright', '-d|--dump-variables:o',
+  '-D|--debug:o', '-e|--source:v', '-E|--exec:v', '-g|--gen-pot', '-h|--help', '-i|--include:v', '-l|--load:v', '-L|--lint:o', '-M|--bignum',
+  '-n|--non-decimal-data', '-N|--use-lc-numeric', '-o|--pretty-print:o', '-O|--optimize', '-p|--profile:o', '-P|--posix', '-r|--re-interval',
+  '-s|--no-optimize', '-S|--sandbox', '-t|--lint-old', '-V|--version', '--csv', '--ignore-case', '--persist:o', '--trace', '--disable-extensions',
+]);
+const AWK_ROLES: Record<string, Role> = {
+  'dump-variables': 'write',
+  debug: 'write',
+  'pretty-print': 'write',
+  profile: 'write',
+};
+
 // ---- sort ----------------------------------------------------------------------------------------------------------------------
 const SORT_GRAMMAR = gnu([
   '-b|--ignore-leading-blanks', '-d|--dictionary-order', '-f|--ignore-case', '-g|--general-numeric-sort', '-i|--ignore-nonprinting', '-M|--month-sort',
@@ -342,6 +358,18 @@ const CARGO_ROLES: Record<string, Role> = {
 };
 
 // ---- git subcommands that write, and the options that name where --------------------------------------------------------------
+// `git grep -O<cmd>` / `--open-files-in-pager[=<cmd>]` runs a COMMAND LINE with the matching files appended; git reads any unique prefix of the
+// long name (`--open-f=`), which is why the table lists every option of the verb
+const GIT_GREP = gnu(
+  ['--cached', '--no-index', '--untracked', '--no-exclude-standard', '--exclude-standard', '--recurse-submodules', '--no-recurse-submodules',
+    '--parent-basename:v', '-v|--invert-match', '-i|--ignore-case', '-w|--word-regexp', '-a|--text', '-I', '--textconv', '--no-textconv', '-r|--recursive',
+    '--no-recursive', '-H', '-h', '--full-name', '-E|--extended-regexp', '-G|--basic-regexp', '-P|--perl-regexp', '-F|--fixed-strings', '-n|--line-number',
+    '--column', '-l|--files-with-matches|--name-only', '-L|--files-without-match', '-O|--open-files-in-pager:o', '-z|--null', '-o|--only-matching',
+    '-c|--count', '--all-match', '-q|--quiet', '--max-depth:v', '-m|--max-count:v', '-C|--context:v', '-A|--after-context:v', '-B|--before-context:v',
+    '-W|--function-context', '-p|--show-function', '--threads:v', '-f:v', '-e:v', '--and', '--or', '--not', '--heading', '--break', '--color:o', '--no-color',
+    '--no-line-number', '--no-column', '--help'],
+  { numeric: true },
+);
 const GIT_CHECKOUT_INDEX = gnu(['-a|--all', '-f|--force', '-n|--no-create', '-q|--quiet', '-u|--index', '--prefix:v', '--stage:v', '--temp', '-z', '--stdin', '--ignore-skip-worktree-bits']);
 const GIT_ARCHIVE = gnu(['-l|--list', '-v|--verbose', '--format:v', '-0', '-1', '-2', '-3', '-4', '-5', '-6', '-7', '-8', '-9', '--worktree-attributes', '--mtime:v', '-o|--output:v', '--remote:v', '--exec:v', '--prefix:v', '--add-file:v', '--add-virtual-file:v']);
 const GIT_BUNDLE = gnu(['--progress', '--quiet', '-q', '--all', '--version:v']);
@@ -361,6 +389,7 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
   tar: { grammar: TAR_GRAMMAR, roles: TAR_ROLES, complete: true },
   sort: { grammar: SORT_GRAMMAR, roles: SORT_ROLES, complete: true },
   sed: { grammar: SED_GRAMMAR, roles: {}, complete: true },
+  awk: { grammar: AWK_GRAMMAR, roles: AWK_ROLES, complete: true },
   go: { grammar: GO_GRAMMAR, roles: GO_ROLES },
   cc: { grammar: CC_GRAMMAR, roles: CC_ROLES },
   wget: { grammar: WGET_GRAMMAR, roles: WGET_ROLES },
@@ -370,6 +399,7 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
   prettier: { grammar: PRETTIER_GRAMMAR, roles: PRETTIER_ROLES },
   pylint: { grammar: PYLINT_GRAMMAR, roles: PYLINT_ROLES },
   python: { grammar: PYTHON_GRAMMAR, roles: PYTHON_ROLES },
+  'git grep': { grammar: GIT_GREP, roles: { 'open-files-in-pager': 'code' }, complete: true },
   'git checkout-index': { grammar: GIT_CHECKOUT_INDEX, roles: { prefix: 'writeDir' } },
   'git archive': { grammar: GIT_ARCHIVE, roles: { output: 'write', exec: 'program', 'add-file': 'read' } },
   'git bundle': { grammar: GIT_BUNDLE, roles: {} },
@@ -390,6 +420,8 @@ export function toolTableFor(head: string, argv: readonly string[]): { key: stri
   if (base === 'tar' || base === 'gtar' || base === 'bsdtar') return { key: 'tar', table: TOOL_TABLES['tar']!, from: 1 };
   if (base === 'sort' || base === 'gsort') return { key: 'sort', table: TOOL_TABLES['sort']!, from: 1 };
   if (base === 'sed' || base === 'gsed') return { key: 'sed', table: TOOL_TABLES['sed']!, from: 1 };
+  // (gawk and the awk that is gawk; BSD and mawk spell their options another way, and a GNU table must not rewrite theirs)
+  if (base === 'awk' || base === 'gawk') return { key: 'awk', table: TOOL_TABLES['awk']!, from: 1 };
   if (base === 'eslint' || base === 'prettier' || base === 'pylint' || base === 'rsync') return { key: base, table: TOOL_TABLES[base]!, from: 1 };
   if (base === 'wget' || base === 'wget2') return { key: 'wget', table: TOOL_TABLES['wget']!, from: 1 };
   if (base === 'cargo') {

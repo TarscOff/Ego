@@ -1899,6 +1899,7 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'prettier --config ./evil.json a.js',
       "pylint --init-hook \"import os\" x.py",
       'pylint --load-plugins=evil x.py',
+      "git grep --open-f='git push origin main #' hello",
     ],
     files: {
       'README.md': 'x\n',

@@ -636,8 +636,14 @@ test('a bounded runner or compiler is bounded only while its options name nothin
     'pylint --load-plugins a,evil x.py',
     'pylint --rcfile evil.rc x.py',
     'pylint --rcfile=evil.rc x.py',
+    // a pager COMMAND LINE git runs, by any unique prefix of the long option
+    "git grep --open-f='git push origin main #' hello",
+    "git grep --open-files-in-pager='git push origin main #' hello",
+    "git grep -O'git push origin main #' hello",
   ])
     assert.notEqual(verdict(c, dir), 'ALLOW', c);
+  for (const c of ["git grep --open-f='git push origin main #' hello", "git grep -O'git push origin main #' hello"]) assert.equal(verdict(c, dir), 'DENY', c);
+  for (const c of ['git grep -n TODO', "git grep -i foo -- '*.ts'", 'git grep -e a -e b', 'git grep -C 3 foo', 'git grep -3 foo', 'git grep -l foo']) assert.equal(verdict(c, dir), 'ALLOW', c);
   // `python -m MOD` imports MOD from the working directory FIRST
   for (const c of ['python3 -m venv .venv', 'python3 -m black .', 'python3.11 -m venv .venv', 'python -m venv .venv', 'python3 -Bm venv .venv', 'python3 -u -m venv .venv'])
     assert.notEqual(verdict(c, dir), 'ALLOW', c);
@@ -710,4 +716,35 @@ test('RC-WRT: wget, rsync and cargo name more than one file to write, and name i
     assert.notEqual(verdict(c, dir), 'DENY', c);
   assert.equal(verdict('cargo build --target-dir target', dir), 'ALLOW');
   assert.equal(verdict('wget -qO- https://example.test/x', dir), 'ASK');
+});
+
+test('RC-OPT: gawk reads a long option by any unique prefix - an in-place edit, a profile, a dump - and an ambiguous prefix is not guessed', () => {
+  const dir = workspace({ '.claude/settings.json': '{}', 'README.md': 'x\n' });
+  for (const c of [
+    "gawk --incl=inplace '{print}' .claude/settings.json",
+    "gawk --inc inplace '{print}' .claude/settings.json",
+    "gawk --include=inplace '{print}' .claude/settings.json",
+    "gawk -i inplace -v x=1 '{print}' .claude/settings.json",
+    "gawk -iinplace '{print}' .claude/settings.json",
+    "gawk --profile=.claude/settings.json '{print}' README.md",
+    "gawk --prof=.claude/settings.json '{print}' README.md",
+    "gawk -p.claude/settings.json '{print}' README.md",
+    "gawk --dump-variables=.claude/settings.json '{print}' README.md",
+    "gawk --dump-v=.claude/settings.json '{print}' README.md",
+    "gawk --pretty-print=.claude/settings.json '{print}' README.md",
+    "gawk -o.claude/settings.json '{print}' README.md",
+    "gawk --debug=.claude/settings.json '{print}' README.md",
+    "awk -i inplace '{print}' .claude/settings.json",
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  // a program taken from a file is read, whatever the spelling of the option that names it
+  const prog = workspace({ 'prog.awk': 'BEGIN{system("git push origin main")}', 'README.md': 'x\n' });
+  for (const c of ['gawk -f prog.awk README.md', 'gawk -fprog.awk README.md', 'gawk --file=prog.awk README.md', 'gawk --file prog.awk README.md', 'gawk --fil=prog.awk README.md'])
+    assert.notEqual(verdict(c, prog), 'ALLOW', c);
+  for (const c of ['gawk --fil=prog.awk README.md', 'gawk --file=prog.awk README.md', 'gawk -fprog.awk README.md']) assert.equal(verdict(c, prog), 'DENY', c);
+  // the ordinary awk is ordinary
+  for (const c of ["awk '{print $1}' README.md", "awk -F: '{print $1}' README.md", "awk -v OFS=, '{print $1}' README.md", "gawk -F, '{print $2}' README.md"])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+  assert.deepEqual(expandLongOptions(words('gawk --incl=inplace --prof=x p f')), ['gawk', '--include=inplace', '--profile=x', 'p', 'f']);
+  assert.deepEqual(expandLongOptions(words('gawk --fi=x p')), ['gawk', '--fi=x', 'p']);
 });

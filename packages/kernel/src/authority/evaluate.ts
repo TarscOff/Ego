@@ -8,7 +8,7 @@ import { git, gitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
 import { peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
-import { has, isOn, lastOf, parseOptions, valueReadings } from './options.ts';
+import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
 import { SHELL_GRAMMAR, expandLongOptions, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
@@ -1730,6 +1730,10 @@ function normalizeSegmentInner(segment: string): string[] {
   if (split) return [...extra, ...splitShellSegments('env ' + split.body + (split.appended.length ? ' ' + requote(split.appended) : '')).flatMap(normalizeSegment)];
   // flock [opts] <file> -c 'cmd', su [-] user -c cmd, su --command='cmd' user, runuser -u user -- cmd: the string is a command
   // line of its own, and the wrapper itself is still classified
+  // `su` and `runuser` change the user the command runs as: whatever they carry, the wrapper itself is still a privilege change,
+  // and command.privileged must see it
+  const switcher = steps.find((st) => st.carrier === 'su' || st.carrier === 'runuser');
+  if (switcher && peeled.strings.length === 0) extra.push(tokens.slice(switcher.at).join(' '));
   const owned = peeled.strings[0];
   if (owned) {
     const bodies = splitShellSegments(owned.body).flatMap(normalizeSegment);
@@ -5308,7 +5312,7 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   const abs = (t: string): string[] => pathCandidates(cwd, t).paths;
   // THE MODELLED TOOLS' OWN TABLE (tools.ts) names what they write: the same reading the verdict uses, so a file the verdict
   // judged as written is a file the ledger will not call fresh
-  const tableWrites = toolEffects(head, tokens);
+  const tableWrites = toolEffects(head, tokens.slice(hi));
   if (tableWrites !== null) for (const w of [...tableWrites.writes, ...tableWrites.writeDirs]) if (!/[$`]/.test(w) && !discardWord(cwd, w)) out.push(...abs(w));
   // A WRITE THIS LEDGER CANNOT ENUMERATE is a wildcard, and pretending otherwise is how a makefile replaced by `cp
   // evil/* .` looked untouched: a glob or bracket in an operand of a writer, `find … -exec`, `xargs` running a writer,
@@ -13309,8 +13313,9 @@ function commitBypassFlag(cmdStr: string): boolean {
  *  carried `git commit` can be scanned the same way as a top-level one. */
 /** WHERE A COMMAND RUNS BECAUSE OF ITS OWN OPTIONS: `env -C DIR`, `env --chdir=DIR`, `git -C DIR`, through whatever
  *  wrappers stand in front of it. One reader, with the option parsers the tools really have:
- *    - env: `-u NAME` takes a value, clusters (`-iC dir`, `-iCdir`), unique abbreviations of the long options
- *      (`--chd=`, `--ch=`), and `-S STRING`, which is a command line of its own that env splits and runs;
+ *    - every `env` in the chain is read by the carrier table (carriers.ts): `-u NAME` takes a value, clusters (`-iC dir`,
+ *      `-iCdir`), unique abbreviations of the long options (`--chd=`, `--ch=`), and `-S STRING`, which is a command line of
+ *      its own that env splits and runs - and the chain may be any other carrier in front of it (`timeout -s KILL 5 env -C d`);
  *    - git: a global option either takes a value (`-C`, `-c`, `--git-dir`, …) or does not (`--no-pager`, `--bare`, …),
  *      and one this table does not know leaves the verb's position - and so the directory - unknown.
  *  Three regexes had been doing this job, each assuming every option is one token and every word is spelled plainly
@@ -13603,7 +13608,16 @@ function gitPagerCommands(seg: string): string[] {
     const m = /^(?:-O|--open-files-in-pager=)(.+)$/.exec(w);
     if (m?.[1]) out.push(m[1]);
   }
-  return out;
+  // ...and by git's own option parser for `grep` (tools.ts), which reads any unique prefix of the long name: `--open-f='…'` is the pager
+  // too, and a scan for the full spelling saw only `--open-files-in-pager=`
+  const hi = commandHeadIndex(t);
+  const after = t.slice(hi + 1);
+  const vi = verbIndex('git', after.map((text) => ({ text, quoted: false })));
+  if (vi >= 0 && after[vi] === 'grep') {
+    const eff = toolEffects('git', ['git', ...after.slice(vi)]);
+    if (eff) for (const v of valuesOf(eff.parsed, 'open-files-in-pager')) if (v) out.push(v);
+  }
+  return [...new Set(out)];
 }
 
 function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
@@ -13621,13 +13635,20 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
   const fromFiles: string[] = [];
   const unread: string[] = [];
   let sawF = false;
+  // THE PROGRAM FILES are read from awk's own option parser where this is gawk (tools.ts): `--file`, `--fil=` and every unique prefix of
+  // it name a program, as `-f` does, and a scan for the spellings its author had met read none of the prefixes
+  const named = new Set<string>();
   for (let j = i + 1; j < t.length; j++) {
     const w = t[j]!;
     const f =
       w === '-f' || w === '--file' || w === '--source-file'
         ? (t[++j] ?? null)
         : (/^(?:--file=|--source-file=|-f)(.+)$/.exec(w)?.[1] ?? null);
-    if (f === null) continue;
+    if (f !== null) named.add(f);
+  }
+  const awkParsed = /^(awk|gawk)$/.test(head) ? toolEffects(head, t.slice(i))?.parsed : undefined;
+  if (awkParsed) for (const f of valuesOf(awkParsed, 'file')) named.add(f);
+  for (const f of named) {
     sawF = true;
     if (ctx && cwd !== undefined && !/[$`*?]/.test(f)) {
       const text = readWordFile(ctx, cwd, f);
