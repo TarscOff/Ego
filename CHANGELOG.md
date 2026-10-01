@@ -163,3 +163,33 @@ discipline of decision Q84 (authority changes are never patch releases).
   DENY (a redirection dropped every path under `/dev`; now only the discard devices are dropped, `/dev/shm` is scratch).
   A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask, and a leading `~` is the HOME the line assigned (`export HOME=/etc; echo x > ~/passwd`). A
   decision shares one view of the filesystem (the ordinary-development corpus runs in about two thirds of its former time).
+- **A look is not an act - one reader of the role of a word** (closure audit 2026-10-01, register cause F: 50 over-gated
+  findings, 13 of them HIGH, and the critical review-11 #142). `grep -rn "hook claude-code PreToolUse" docs/` - reading the
+  documentation that describes the gate - was an absolute deny, as were `git commit -m "docs: explain --no-verify"`,
+  `git grep core.hooksPath docs`, `grep -rn claude src/`, `git log --grep=...`, `echo "ego hook"` and `jq . <
+  .harness/runtime/state.json`: the text matchers, the path readers and the scan for governed programs in argument position
+  read a segment as a bag of words and could not tell the word searched for from the word run. `authority/operands.ts` now
+  answers it once, from a grammar of the tools that take data (grep and its twins, ripgrep, `git grep`, the pickaxe and
+  message options of git, `echo`/`printf`), and the normalizer takes those words out before any matcher reads the text. An
+  option nobody listed leaves the line unread, a redirection is never data (the tokenizer reports whether an operator was
+  written bare, quoted or escaped), and a head that is a path is not trusted. The write matchers name what is WRITTEN: an input
+  redirection and the first operand of a copy are reads, so `tee /tmp/o < .harness/runtime/state.json` and `cp
+  .claude/settings.json /tmp/s.json` are ALLOW and the doing forms stay absolute denies. Reading the EGO trust store
+  (`cat ~/.ego/trust/keys.json`, `du -sh ~/.ego`, `cp -r ~/.ego/trust /tmp/copy`) is a read, as the Read tool already judged
+  it; writing, moving, linking or copying INTO it is still `ego.trust.tamper`. A probe performs nothing, decided once: a
+  help flag after the verb (`git push --help origin main`, `gh pr merge -h`), `help` as a verb, a redirection glued to a flag
+  (`--dry-run>/dev/null`), a dry-run cluster (`-vn`), the dry run of `git add|rm|mv|clean` and `commit --dry-run` (read as
+  `git status`, which still runs the filters the repository configures), the print options of git (`git --exec-path`), the
+  manual of curl and wget and `ssh -V`/`-Q`, and a syntax check behind `flock`. A read keeps the verdict of a read:
+  `kubectl get` and `helm status` in PRODUCTION_ADVISORY, `gh api -X GET ... -f q=x`, `aws configure get region`,
+  `psql -c 'EXPLAIN (FORMAT JSON) ...'` and `clickhouse-client -q 'SHOW TABLES'` against a production host, `psql -l>/dev/null`,
+  `java -version`, `git config --file X --get`, `git stash list --all`, `git diff --textconv`, `GIT_PAGER=cat git log`,
+  `git -c alias.st=status st`, `ls ~/*` (which now asks as a read outside the workspace and no longer refuses), and
+  `find . -name '*.tmp' -exec rm {} \;` (an ASK where it was an absolute deny; a search that names or selects a governed
+  tree is still refused). The remaining fixes of the group are `sort --o FILE` (an unauthorized ALLOW: any unambiguous
+  prefix of `--output`), a here-document delimiter that is a regular-expression metacharacter (the evaluator threw), and
+  `trap '...'`/`<<<` unquoting their body a second time. One narrowing came with the reads: `kubectl config view --raw`
+  and `--flatten` print the kubeconfig unredacted and are now a credential read wherever the verb sits (`kubectl --context
+  production config view --raw` slipped under an anchor on `config`, and would have become ALLOW in the production advisory once
+  a cluster read stopped taking the advisory's verdict). Not changed, on purpose: `helm get values|manifest|all` of a production
+  release and `docker logs|inspect` on a non-local engine stay refused (they print secrets).

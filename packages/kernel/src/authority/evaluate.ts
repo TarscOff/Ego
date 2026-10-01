@@ -1653,14 +1653,6 @@ function helpProbeHead(segment: string): string | null {
         if (/^(--help|-help)$/.test(next.text) && head !== 'docker' && head !== 'podman' && head !== 'nerdctl') return head;
         if (next.text === '-h' && SHORT_H_IS_HELP.test(head) && rest.length === at + 2) return head;
       }
-      // a DRY RUN of a verb that performs nothing: the last dry-run flag decides, and a word the shell fills in after it
-      // could be the flag that says "really do it" (`git add -n $FLAGS`)
-      const dry = head === 'git' ? gitDryRunGrammar(verbWord.text) : undefined;
-      if (dry !== undefined) {
-        const after = rest.slice(at + 1);
-        const { state, at: flagAt } = dryRunDecision(after.map((x) => x.text), dry);
-        if (state === 'dry' && !after.slice(flagAt + 1).some((x) => (x as { expands?: boolean }).expands === true)) return head;
-      }
     }
   }
   if (rest.some((x) => !x.quoted && x.text === '--')) return null;
@@ -1742,7 +1734,9 @@ export function normalizeSegment(segment: string): string[] {
   if (probe === null) return out;
   return [
     ...out.filter((n) => n.startsWith(MARK) || /^git (config|alias-override) /.test(n)),
-    `${MARK}help-probe ${probe}`,
+    // git's manual is shown by a viewer the repository's own configuration may name (`man.<tool>.cmd`, `core.pager`), so the probe stays a
+    // git command and the resolver reads that configuration for it; every other tool's probe runs nothing of the kind
+    probe === 'git' ? 'git help' : `${MARK}help-probe ${probe}`,
   ];
 }
 
@@ -2032,6 +2026,20 @@ function normalizeSegmentInner(segment: string): string[] {
   const stripped = stripToolGlobalOptions(head, rest);
   rest = canonicalDryRun(stripped.rest);
   extra.push(...stripped.extra);
+  // THE DRY RUN OF A VERB THAT ONLY LISTS IS THE LISTING. `git add -n .`, `rm -n`, `mv -n`, `clean -n` and `commit --dry-run` print what
+  // they would do, and the staging, removal or commit they name is denied in the mode that denies local changes (PRODUCTION_ADVISORY),
+  // which refused the question (review 11, #247). They are read as the verb that lists the same tree - `git status` - and NOT as
+  // a probe that replaces the segment: `git add -n` still runs a clean filter the repository configures (measured), and the
+  // analysis of what `status` runs (filters, fsmonitor) is exactly what is left to do. A word the shell fills in after the flag could
+  // be the flag that says "really do it" (`git add -n $FLAGS`), so it is the act.
+  if (rest[0] === 'git' && rest.length > 1 && !stripped.extra.some((e) => e.startsWith(MARK))) {
+    const grammar = gitDryRunGrammar(rest[1]!);
+    if (grammar !== undefined) {
+      const body = rest.slice(2);
+      const { state, at } = dryRunDecision(body, grammar);
+      if (state === 'dry' && !body.slice(at + 1).some((w) => /[$`]/.test(w))) rest = ['git', 'status', ...body];
+    }
+  }
   // A CARRIER'S INNER SHELL RUNS ITS OWN EXPANSION PASS. `sh -c "echo x > .harnes{s..s}/runtime/pin.json"`
   // keeps the braces QUOTED at the outer level — where a real shell does not expand them either — and the inner
   // shell then expands them for real. The segment-level expansion therefore cannot see them, and the write to

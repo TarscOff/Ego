@@ -53,6 +53,11 @@ matchers:
   - capability: command.read-only
     tool: Bash
     command: '^\x00ego\x00help-probe\b'
+  # a git manual: the normalizer hands the probe over as `git help`, which stays a git command so that the program the repository
+  # configures to SHOW a manual is read like the program it configures for any other verb
+  - capability: command.read-only
+    tool: Bash
+    command: '^git\s+help\s*$'
   - capability: ego.gate.bypass
     tool: Bash
     command: '(^|\s)hook\s+(claude-code|codex-cli)\s+(SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|SubagentStart|SubagentStop|Stop|SessionEnd)\b'
@@ -612,7 +617,7 @@ matchers:
     command: '(^|\s)(\b(cp|mv|ln|install)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(chmod|chown|rm|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
   - capability: fs.git-internals.write
     tool: Bash
-    command: '(^|\s)(\b(cp|ln|install)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(chmod|chown|rm|mv|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(^|\s|/)\.git/'
+    command: '(^|\s)(\b(cp|ln|install)\b\s+(?:-\S+\s+)*\S+(?=\s)(?:[^|;&<]|<<<?|<\()*|\b(chmod|chown|rm|mv|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(^|\s|/)\.git/'
   - capability: fs.generated.write
     tool: Write
     path: 'policies/generated/**'
@@ -929,10 +934,14 @@ matchers:
     command: '^(docker|podman|nerdctl)\s+(container\s+)?(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s*)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
   # `kubectl config view --raw` PRINTS THE KUBECONFIG UNREDACTED — client certificates, bearer tokens and the
   # credentials of every cluster the developer can reach, production included. Without `--raw` the values are
-  # redacted, so the flag is the whole difference (exit review 7).
+  # redacted, so the flag is the whole difference (exit review 7). `--flatten` is the same disclosure by another
+  # name - it inlines the files the kubeconfig points at and does not shorten them - and a global option before
+  # the verb (`--context production config view --raw`) moved the command out from under an anchor on `config`:
+  # that spelling was ALLOW outside the production advisory, and became ALLOW inside it once a cluster READ stopped
+  # taking the advisory's verdict, so the credential is now named wherever the verb sits.
   - capability: fs.credential-store.read
     tool: Bash
-    command: '^(kubectl|oc)\s+config\s+view\b[^|;&]*--raw\b'
+    command: '^(kubectl|oc)\b[^|;&]*\sconfig\s+view\b[^|;&]*--(raw|flatten)\b'
   # awk RUNS A SHELL. `print … | "cmd"`, `"cmd" | getline` and `system("cmd")` all fork /bin/sh, and the command
   # is an arbitrary string EXPRESSION, so holding it in a variable is the same act (exit review 7).
   - capability: command.script-opaque

@@ -434,6 +434,30 @@ test('#196, #163, #145: governed state is READ by the readers of it - patterns, 
   );
 });
 
+test('#163, #145, #146 neighbours: the verb of a write, searched for in the file it would write, is a search - for every governed tree', () => {
+  const trees = [
+    '.harness/runtime/state.json',
+    '.harness/runtime/',
+    '.harness/generated/index.md',
+    '.harness/hooks/h.sh',
+    '.harness/harness.md',
+    '.husky/pre-commit',
+    '.claude/settings.json',
+    '.githooks/pre-push',
+    '.codex/config.toml',
+    '.git/hooks/pre-commit',
+  ];
+  const files: Record<string, string> = {};
+  for (const t of trees) if (!t.endsWith('/')) files[t] = 'x\n';
+  const dir = workspace(files);
+  const writes = ['rm', 'rm -rf', 'touch', 'chmod', 'tee', 'dd', 'mv', 'cp', 'sed -i', 'truncate', 'python3', 'node', 'ln', 'PYTHONPATH=', 'GIT_DIR=', 'NODE_OPTIONS=', 'core.hooksPath'];
+  const looks: string[] = [];
+  for (const t of trees)
+    for (const w of writes)
+      looks.push(`grep -n "${w}" ${t}`, `grep -rn '${w}' ${t}`, `rg "${w}" ${t}`, `git grep -n "${w}" -- ${t}`, `grep -c -e "${w}" ${t}`, `git log -S "${w}" -- ${t}`);
+  allAllowed(looks, dir);
+});
+
 test('#122: reading the trust store is a read; writing, moving, linking and copying INTO it are not', () => {
   const dir = workspace();
   const t = `${EGO_HOME}/trust/keys.json`;
@@ -689,6 +713,30 @@ test('#83, #174, #182, #246: a cluster read is a read in the mode made for looki
     dir,
     { mode: 'PRODUCTION_ADVISORY' },
   );
+});
+
+test('a cluster READ keeps the read verdict, but the kubeconfig printed unredacted is a credential read wherever the verb sits', () => {
+  const dir = workspace();
+  // a global option before the verb moved the command out from under the anchor on `config`: that spelling was ALLOW in
+  // the ordinary mode, and would have become ALLOW in the production advisory the moment a cluster read stopped taking
+  // the advisory's verdict - the proportionate fix must not widen what it does not mean to
+  for (const over of [{}, { mode: 'PRODUCTION_ADVISORY' }]) {
+    allGated(
+      [
+        'kubectl config view --raw',
+        'kubectl config view --flatten',
+        'kubectl --context production config view --raw',
+        'kubectl --context kind-dev config view --raw',
+        'kubectl -n production config view --flatten --minify',
+        'oc --context production config view --raw',
+        'kubectl --kubeconfig ~/.kube/config config view --raw',
+      ],
+      dir,
+      over,
+      true,
+    );
+  }
+  allAllowed(['kubectl config view', 'kubectl --context production config view --minify', 'kubectl config get-contexts'], dir, { mode: 'PRODUCTION_ADVISORY' });
 });
 
 test('#12, #184, #87: a listing or a plan against a production database is a read; a statement is judged as before', () => {

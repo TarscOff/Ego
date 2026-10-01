@@ -21,14 +21,14 @@
 // WHAT IS NOT HERE: which of the remaining words is a path that is read and which is written (the path readers in
 // evaluate.ts decide that), and whether a command is a probe or a dry run (helpProbeHead).
 
-/** What a word is to the command it belongs to. Only `data` is ever masked; `operand` and `value` are named so that the
- *  scan for governed programs in argument position can tell a file name from an option value that may be a program. */
 /** What a word holds of the shell's redirection characters, by how it was WRITTEN: `none`; `real`, a `<` or `>` outside every quote -
  *  the shell's operator; `literal`, only characters a quote, a backslash or an ANSI-C string turned into text (`"=>"`, `\\>x`,
- *  `$'>'`); `mixed`, both (`''>x`: an empty word and a redirection). The tokenizer is the one reader that knows, and a caller that
- *  does not have it passes nothing (see `redirectionWords`). */
+ *  `$'>'`); `mixed`, both, or a quoted part beside a real operator (`''>x`: an empty word and a redirection). The tokenizer is the
+ *  one reader that knows, and a caller that does not have it passes nothing (see `redirectionWords`). */
 export type OperatorShape = 'none' | 'real' | 'literal' | 'mixed';
 
+/** What a word is to the command it belongs to. Only `data` is ever masked; `operand` and `value` are named so that the
+ *  scan for governed programs in argument position can tell a file name from an option value that may be a program. */
 export type WordRole = 'head' | 'option' | 'value' | 'data' | 'operand' | 'unread';
 
 interface OptionGrammar {
@@ -190,11 +190,11 @@ const isRedirection = (w: string): boolean => /[<>]/.test(w) && !/\s/.test(w);
  *  when the command prints: `echo x>.harness/runtime/ledger.json` is one word with the operator inside it, and masking it as
  *  the string it looks like hid a write to the runtime state (the bypass corpus).
  *
- *  WHETHER A WORD IS ONE DEPENDS ON ITS QUOTING, and only the caller that still has it can say: `grep => src` redirects, and
- *  `grep "=>" src` searches for an arrow. Both reach here as the word `=>`. When the quoting is given, an unquoted word with
- *  an operator in it is the redirection and a quoted one is a plain word. When it is not, the question has no answer, and a
- *  wrong one MOVES THE PATTERN: reading the arrow as a redirection made the next word - the file, `~/.ssh/id_rsa` - the
- *  pattern, and masked the path. So a line with such a word is not read at all (null). */
+ *  WHETHER A WORD IS ONE DEPENDS ON HOW IT WAS WRITTEN, and only the caller that still has that can say: `grep => src` redirects,
+ *  and `grep "=>" src` searches for an arrow. Both reach here as the word `=>`. With the shape of each word (the tokenizer's), a
+ *  `real` operator is the redirection and a `literal` one is a plain word. Without it the question has no answer, and a wrong
+ *  one MOVES THE PATTERN: reading the arrow as a redirection made the next word - the file, `~/.ssh/id_rsa` - the pattern, and
+ *  masked the path. So a line with a word that cannot be placed (no shape, or a `mixed` one) is not read at all (null). */
 function redirectionWords(line: readonly string[], from: number, shape?: readonly OperatorShape[]): Set<number> | null {
   const out = new Set<number>();
   for (let i = from; i < line.length; i++) {
@@ -208,8 +208,12 @@ function redirectionWords(line: readonly string[], from: number, shape?: readonl
       return null;
     }
     out.add(i);
-    // a bare operator (`>`, `>>`, `2>`, `&>`, `<`, `>&`, `<<<`) takes the NEXT word as its target
-    if (/^(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)$/.test(w) && i + 1 < line.length) out.add(++i);
+    // a bare operator (`>`, `>>`, `2>`, `&>`, `<`, `>&`, `<<<`) takes the NEXT word as its target - and a target that is itself an
+    // operator (`echo => > f`) is no line a shell runs: it is not read
+    if (/^(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)$/.test(w) && i + 1 < line.length) {
+      if (shape !== undefined ? shape[i + 1] !== 'none' : isRedirection(line[i + 1]!)) return null;
+      out.add(++i);
+    }
   }
   return out;
 }

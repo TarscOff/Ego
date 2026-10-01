@@ -43,6 +43,16 @@ cannot read is ASK: `command.script-opaque` for an unreadable manifest, commands
 that is not a shell script, `command.interpreter-script` for an interpreter program (`python x.py`), and
 `command.unknown` for a script file that does not exist or that no matcher names.
 
+A word is judged by the role it plays in its command. A search pattern (`grep -rn "ego hook" docs/`), a commit message
+(`git commit -m "docs: explain --no-verify"`), a printed string and the value of `git log -S` are DATA: they are neither
+the act nor the place it is done, so the matchers never read them and the scan for governed programs in argument position
+never takes `grep claude` for starting `claude` (`packages/kernel/src/authority/operands.ts` is the one place that says which
+words these are, from a grammar of the tools that take data; a line with an option the grammar does not list is read as it
+was written). A write matcher names what is written - the destination operand and the redirect target - not what is read:
+an input redirection and the sources of a copy are reads. A probe performs nothing: a help flag or `help` after a verb, a dry
+run and a version query are decided once and are never an absolute deny. An absolute deny on something that only looks removes
+the human gate, which is the one thing it is for.
+
 Since decision "option B" (2026-09-22, `docs/architecture/security-model.md`) a declared outer class no longer
 absorbs that opacity in general. It keeps its verdict only when the target **does not exist** — `npm test` with no
 test script fails harmlessly. When something **will run that could not be read**, the human gate applies whatever the
