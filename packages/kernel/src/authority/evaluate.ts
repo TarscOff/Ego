@@ -23,6 +23,18 @@ import {
   type PathCandidates,
 } from './paths.ts';
 import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
+import {
+  HELM_VERBS,
+  KUBECTL_VERBS,
+  k8sEffect,
+  k8sGlobalOptions,
+  k8sOptionMayTakeValue,
+  k8sOptionTakesValue,
+  type K8sEffect,
+  type K8sFile,
+  type K8sHost,
+  type K8sWord,
+} from './k8s.ts';
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
@@ -199,7 +211,7 @@ const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'
  *  documents and this list lacks is the same defect again.
  */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|[Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_\w+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|REDISCLI_RCFILE|PSQLRC|PSQL_PAGER|PSQL_EDITOR|PSQL_EDITOR_LINENUMBER_ARG|PSQL_HISTORY|PGSYSCONFDIR|PGLOCALEDIR|PGSSLKEY|PGSSLCERT|PGSSLCRL|PGSSLCRLDIR|LIBMYSQL_PLUGIN_DIR|LIBMYSQL_PLUGINS|MYSQL_HISTFILE|MYSQL_TEST_LOGIN_FILE|MYSQL_DEBUG|SQLITE_HISTORY|SQLITE_TMPDIR|REDISCLI_HISTFILE|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES|CLICKHOUSE_CONFIG|CQLSH_[A-Z_]*|MONGOSH_[A-Z_]*|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|[Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_\w+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|KUBE_EDITOR|KUBECTL_EXTERNAL_DIFF|KUBECTL_PLUGINS_[A-Z_]*|KUBERC|KUBECTL_KUBERC|HELM_PLUGINS|HELM_DATA_HOME|HELM_CONFIG_HOME|HELM_BIN|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|REDISCLI_RCFILE|PSQLRC|PSQL_PAGER|PSQL_EDITOR|PSQL_EDITOR_LINENUMBER_ARG|PSQL_HISTORY|PGSYSCONFDIR|PGLOCALEDIR|PGSSLKEY|PGSSLCERT|PGSSLCRL|PGSSLCRLDIR|LIBMYSQL_PLUGIN_DIR|LIBMYSQL_PLUGINS|MYSQL_HISTFILE|MYSQL_TEST_LOGIN_FILE|MYSQL_DEBUG|SQLITE_HISTORY|SQLITE_TMPDIR|REDISCLI_HISTFILE|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES|CLICKHOUSE_CONFIG|CQLSH_[A-Z_]*|MONGOSH_[A-Z_]*|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
 
 /** Options of a governed variable that actually LOAD CODE. `NODE_OPTIONS=--max-old-space-size=4096 npm test` is
  *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
@@ -1458,14 +1470,10 @@ const ARGV_CARRYING_VERBS = /^(run|exec|create|start|attach|cp|debug|port-forwar
  *  table does not know has an arity nobody can tell, so the position of the verb is unknown and nothing that rests on it
  *  may be granted (exit review 10, self-attack: `docker --context production run alpine ./deploy.sh --help`). */
 const GLOBAL_OPTIONS: Record<string, { value: RegExp; bool: RegExp }> = {
-  kubectl: {
-    value: /^(--context|--cluster|--user|--namespace|-n|--kubeconfig|--server|-s|--token|--as|--as-group|--as-uid|--request-timeout|--certificate-authority|--client-certificate|--client-key|--cache-dir|--username|--password|--tls-server-name|-v|--v|--vmodule|--profile|--profile-output|--log-flush-frequency)$/,
-    bool: /^(--insecure-skip-tls-verify|--warnings-as-errors|--disable-compression|--match-server-version)$/,
-  },
-  helm: {
-    value: /^(--kube-context|--kubeconfig|-n|--namespace|--kube-apiserver|--kube-token|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--registry-config|--repository-cache|--repository-config|--burst-limit)$/,
-    bool: /^(--debug|--kube-insecure-skip-tls-verify)$/,
-  },
+  // kubectl, oc and helm are DERIVED from the cluster reader's one option table (k8s.ts), so that the reader of the verb, the
+  // dry-run reader and this one cannot disagree about which words are options and which are their values
+  kubectl: k8sGlobalOptions('kubectl'),
+  helm: k8sGlobalOptions('helm'),
   docker: {
     value: /^(--context|-c|--config|-H|--host|-l|--log-level|--tlscacert|--tlscert|--tlskey|--connection|--url|--identity)$/,
     bool: /^(--debug|-D|--tls|--tlsverify)$/,
@@ -2973,6 +2981,15 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expan
   }
   flush();
   return out;
+}
+
+/** A marked word written back so that tokenizing it gives the same word: a word that held a blank, a quote or an operator
+ *  stays ONE word, and what the shell fills in stays filled in. For the readers that need the word boundaries of a line
+ *  that was rebuilt from words (the argument-position sweep). */
+function quoteMarkedWord(w: { text: string; quoted: boolean; expands: boolean }): string {
+  if (w.text === '') return "''";
+  if (!w.quoted && !/[\s;&|<>'"\\]/.test(w.text)) return w.text;
+  return w.expands ? `"${w.text.replace(/["\\]/g, '\\$&')}"` : `'${w.text.replace(/'/g, `'\\''`)}'`;
 }
 
 // Decode a bash ANSI-C `$'...'` body: the shell expands its escapes and yields an ordinary (unquoted) word, so a
@@ -4495,17 +4512,7 @@ function defaultReadFile(abs: string): string | null {
 }
 
 function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null {
-  if (
-    !insideRoots(abs, ctx) &&
-    !(
-      ctx.cwd &&
-      canonicalPath(abs)
-        .split(sep)
-        .join('/')
-        .startsWith(canonicalPath(ctx.cwd).split(sep).join('/') + '/')
-    )
-  )
-    return null;
+  if (!inWorkspace(ctx, abs)) return null;
   return (ctx.readFile ?? defaultReadFile)(abs);
 }
 
@@ -8901,7 +8908,7 @@ const TARGET_ENV_RE =
   // RESOLVER but not here, so the assignment was stripped as noise and never re-attached: the engine survived
   // only while the assignment happened to stay leading in the raw segment. Inside an `if`, a loop body, a `trap`
   // or a herestring it did not, and a shell on a production daemon asked (exit review 6, generated cross-product).
-  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER|LIQUIBASE_COMMAND_URL|LIQUIBASE_URL|DBMATE_DATABASE_URL|PRISMA_DATABASE_URL|TYPEORM_URL|SEQUELIZE_URL|POSTGRES_URL|POSTGRES_HOST|MONGODB_HOST)$/;
+  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBERNETES_SERVICE_HOST|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|HELM_NAMESPACE|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER|LIQUIBASE_COMMAND_URL|LIQUIBASE_URL|DBMATE_DATABASE_URL|PRISMA_DATABASE_URL|TYPEORM_URL|SEQUELIZE_URL|POSTGRES_URL|POSTGRES_HOST|MONGODB_HOST)$/;
 const TARGET_ENV_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
   'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
@@ -8911,29 +8918,8 @@ const TARGET_ENV_HEADS = new Set([
   'npx', 'pnpm', 'yarn', 'bunx', 'pnpx', 'bun', 'npm',
 ]);
 
-const K8S_MUTATING_VERBS = new Set([
-  'apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon',
-  'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward',
-  'debug', 'certificate', 'proxy', 'auth', 'apply-set',
-  // `wait` is NOT here: it blocks until a condition holds and changes nothing (exit review 10)
-]);
-/** A VERB IS NOT A MUTATION IN EVERY SUBCOMMAND IT SPELLS. `rollout` restarts and undoes — and it also REPORTS,
- *  with `status` and `history`; `auth` changes nothing at all in the `can-i` and `whoami` forms, which are the
- *  two commands an operator runs to find out what they may do. Judged by the verb alone, both were absolute
- *  denies against a production cluster: refusing to LOOK, which is the one verdict nobody can approve
- *  (exit review 9). The mutating spellings keep the verb. */
-const K8S_READ_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
-  rollout: new Set(['status', 'history']),
-  auth: new Set(['can-i', 'whoami']),
-  certificate: new Set([]),
-};
-// `dependency update|build` FETCHES remote charts and writes them into the chart directory, and `helm repo add`
-// records where later fetches come from — neither touches the cluster, which is why the verb test missed them,
-// and both bring unreviewed content into the workspace (exit review 10).
-const HELM_MUTATING_VERBS = new Set([
-  ...['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test'],
-  ...['dependency', 'repo', 'plugin', 'registry'],
-]);
+// (the verbs of kubectl, oc and helm - which of them act, and which of their subcommands only look - are in k8s.ts, with
+// the one reader that uses them)
 /** A COMMAND THAT ASKS FOR HELP, OR REPORTS A VERSION, CONNECTS TO NOTHING. It is the first thing anyone runs
  *  against an unfamiliar tool and the last thing that should be refused outright (exit review 9). Read from the
  *  RAW tokens, so a `--help` inside a quoted SQL statement or a search pattern is not one. */
@@ -8968,6 +8954,9 @@ interface DryRunGrammar {
   boolean?: RegExp;
   /** options KNOWN to take a value, for tools whose option set is fully known: every other option takes none */
   valued?: RegExp;
+  /** the tool's own reader of "may the word after this option be its value" - for a tool whose options are read by ONE
+   *  table elsewhere (kubectl, oc, helm: k8s.ts), so that this scan and every other agree on what an option is */
+  mayTakeValue?: (opt: string) => boolean;
 }
 /** the values of `--dry-run=VALUE` that mean "do not act": kubectl's and helm's `client` and `server`, and the
  *  spellings of true that a boolean flag accepts. Anything else - `none`, `false`, an empty value, a word nobody
@@ -9007,6 +8996,7 @@ function dryRunDecision(words: readonly string[], g: DryRunGrammar): { state: 'd
       const valuedAt = [...opt.slice(1)].findIndex((c) => g.shortValued.includes(c));
       if (valuedAt >= 0) return valuedAt === opt.length - 2; // the value is glued unless the valued letter ends the cluster
     }
+    if (g.mayTakeValue) return g.mayTakeValue(opt);
     return g.valued ? g.valued.test(opt) : !(g.boolean?.test(opt) ?? false);
   };
   let last: 'dry' | 'act' | null = null;
@@ -9091,17 +9081,14 @@ function operandsOf(words: readonly string[], valued?: RegExp): string[] {
   return out;
 }
 
-/** flags that take no value, so the word after them is a new word: what may stand in front of a dry-run flag */
-const BOOLEAN_BEFORE_DRY_RUN =
-  /^(--force|-f|--wait|--atomic|--install|-i|--overwrite|--server-side|--prune|--recursive|-R|--all|-A|--all-namespaces|--record|--save-config|--show-managed-fields|--skip-crds|--no-hooks|--debug|--create-namespace|--dependency-update|--reuse-values|--reset-values|--cascade|--ignore-not-found|--wait-for-jobs|--enable-helm|--delete|--quiet|-q|--verbose|--validate|--force-conflicts|--local|--now|--devel|--replace|--cleanup-on-fail|--keep-history|--disable-openapi-validation|--insecure-skip-tls-verify)$/;
-
-/** kubectl, oc and helm: long options only, and most of their options are of unknown arity */
-const K8S_DRY_RUN: DryRunGrammar = {
+/** kubectl, oc and helm: long options only. Which words are options, and which are their values, is the cluster reader's
+ *  one table (k8s.ts) - an option it does not know MAY take the next word, which is then its value and never a flag */
+const k8sDryRunGrammar = (head: string): DryRunGrammar => ({
   longs: ['dry-run', 'dryrun', 'server-dry-run', 'what-if', 'no-act'],
   short: '',
   shortValued: '',
-  boolean: BOOLEAN_BEFORE_DRY_RUN,
-};
+  mayTakeValue: (opt) => k8sOptionMayTakeValue(head, opt),
+});
 /** the tools whose whole option set is known: every option not listed as taking a value takes none, so what stands
  *  after it is an operand. `-n` is the dry run of `git rm`, `git mv` and `rsync`; for `patch` it is `--normal`. */
 const GIT_PATH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: /^--pathspec-from-file$/ };
@@ -9122,21 +9109,20 @@ const PATCH_DRY_RUN: DryRunGrammar = {
   valued: /^(-p|-d|-i|-o|-r|-F|-B|-Y|-z|-V|-g|-D|--strip|--directory|--input|--output|--reject-file|--fuzz|--prefix|--suffix|--basename-prefix|--version-control|--get|--ifdef)$/,
 };
 
-function isDryRun(seg: string): boolean {
-  // `--dry-run=none` IS NOT A DRY RUN. It is the EXPLICIT spelling of "really do it": kubectl documents none as
-  // the default, and helm's own help says `--dry-run=none` executes the operation normally and persists
-  // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
-  // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
-  // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
-  const words = commandWords(tokenizeMarked(seg));
-  const { state, at } = dryRunDecision(words.map((x) => x.text), K8S_DRY_RUN);
+/** THE LINE'S WORDS - the head included, assignments and wrappers in front of it allowed - are a dry run that was PROVED.
+ *  `--dry-run=none` IS NOT A DRY RUN. It is the EXPLICIT spelling of "really do it": kubectl documents none as the default,
+ *  and helm's own help says `--dry-run=none` executes the operation normally and persists changes. Accepting any value
+ *  swallowed it, so `kubectl --context production apply --dry-run=none` and `helm --kube-context production uninstall app
+ *  --dry-run=none` reached ALLOW — the exception meant to let an operator LOOK became the spelling that hid the act
+ *  (self-attack on exit review 9). The words are the ones the tool receives: a quoted `"--dry-run=none"` is the flag, and
+ *  `'x --dry-run=client'` is one word that is not. */
+function isDryRunWords(words: ReadonlyArray<{ text: string; quoted: boolean; expands?: boolean }>): boolean {
+  const headAt = words.findIndex((t) => /(^|\/)(kubectl|oc|helm)$/.test(t.text));
+  const head = headAt < 0 ? 'kubectl' : words[headAt]!.text.replace(/^.*\//, '');
+  const { state, at } = dryRunDecision(words.map((x) => x.text), k8sDryRunGrammar(head));
   return state === 'dry' && !flagFilledInAfter(words, at);
 }
 
-/** options of kubectl and helm KNOWN to take a value, beyond the global ones in K8S_VALUE_OPTS: the word after one is
- *  that value, whatever the shell fills in, and never a flag */
-const K8S_DRY_RUN_VALUED =
-  /^(--grace-period|--timeout|--field-manager|--image|--replicas|--type|--patch|--patch-file|-p|--subresource|--container|-c|--description|--history-max|--wait-timeout|--max|--min|--cpu-percent|--labels|-L|--sort-by|--chunk-size|--template|--revision|--overrides|--port|--target-port|--name|--env|--limits|--requests|--annotations|--set-json|--set-literal|--cert-file|--key-file|--ca-file)$/;
 /** the bare words (neither options nor their values) a kubectl or helm verb takes after itself, or null for any number.
  *  A verb that names its object by a file takes none, and `helm upgrade RELEASE CHART` has taken all it takes by its
  *  second: what stands after those can only be a flag. Every other verb names its objects (`delete TYPE NAME...`,
@@ -9174,7 +9160,7 @@ function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolea
   const head = text[headAt]!.replace(/^.*\//, '');
   const end = text.indexOf('--') >= 0 ? text.indexOf('--') : text.length;
   const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
-  const valued = (t: string): boolean => !t.includes('=') && (K8S_VALUE_OPTS.test(t) || K8S_DRY_RUN_VALUED.test(t));
+  const valued = (t: string): boolean => k8sOptionTakesValue(head, t);
   let verbAt = -1;
   for (let i = headAt + 1; i < end; i++) {
     const t = text[i]!;
@@ -9389,20 +9375,6 @@ const TARGET_SEVERITY: Record<TargetClass, number> = {
   PRODUCTION: 3,
 };
 
-/** Every kubectl verb, so the verb can be found BY NAME rather than by skipping option values. */
-const KUBECTL_VERBS = new Set([
-  ...['get', 'describe', 'logs', 'top', 'explain', 'api-resources', 'api-versions', 'version', 'config', 'cluster-info', 'wait', 'diff', 'events', 'kustomize', 'completion', 'options'],
-  ...['apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon', 'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward', 'debug', 'certificate', 'proxy', 'auth', 'apply-set'],
-]);
-/** kubectl/helm options that consume the NEXT token; their value must never be mistaken for the verb. */
-const K8S_VALUE_OPTS =
-  /^(-n|--namespace|--as-user-extra|--context|--kube-context|--kubeconfig|--server|-s|--kube-apiserver|--token|--kube-token|--kube-apiserver|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--user|--username|--password|--cluster|--as|--as-uid|--as-group|--cache-dir|--certificate-authority|--client-certificate|--client-key|--request-timeout|--tls-server-name|-o|--output|-f|--filename|-l|--selector|--field-selector|--chart|--repo|--version|--values|--set|--set-string|--set-file|-v|--v|--profile|--profile-output|--registry-config|--repository-config|--repository-cache|--burst-limit|--qps|--post-renderer|--post-renderer-args|--key-file|--cert-file|--ca-file|--keyring|--log-flush-frequency|--tls-server-name|--password-stdin|--kuberc|--default-not-ready-toleration-seconds|--default-unreachable-toleration-seconds|--storage-driver-[a-z-]+|--application-metrics-count-limit|--container-hints|--docker[a-z-]*|--global-housekeeping-interval|--housekeeping-interval|--max-housekeeping-interval|--event-storage-[a-z-]+|--boot-id-file|--machine-id-file|--add-dir-header|--alsologtostderr|--log-backtrace-at|--log-dir|--log-file|--log-file-max-size|--logtostderr|--one-output|--skip-headers|--skip-log-headers|--stderrthreshold|--vmodule)$/;
-
-const HELM_VERBS = new Set([
-  ...['list', 'ls', 'status', 'get', 'history', 'show', 'search', 'template', 'lint', 'version', 'env', 'dependency', 'diff'],
-  ...['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push', 'test', 'repo', 'plugin', 'create', 'package'],
-]);
-
 /** Every value of an option, in every spelling — a client applies the LAST one, so all of them are classified and
  *  the most restrictive decides rather than trusting whichever appears first (round 14). */
 function optionValues(tokens: string[], short: string, longs: string[]): string[] {
@@ -9605,138 +9577,145 @@ function resolveContainerTarget(
   return { ...worst, mutating };
 }
 
-function resolveK8sTarget(
-  tokens: string[],
-  targets: LocalTargets,
-  /** THE SEGMENT AS WRITTEN. A probe flag inside a quoted VALUE is not a probe, and normalization has already
-   *  dropped the quoting that says so: `helm uninstall app --description 'run --help first'` reaches the token
-   *  scan as three bare words, one of which is `--help` (exit review 10). */
-  rawSeg?: string,
-): { cls: TargetClass; target: string; mutating: boolean } {
-  const head = tokens[0] ?? '';
-  if (/^(kind|k3d|minikube)$/.test(head)) return { cls: 'LOCAL', target: head, mutating: true };
-  // `kustomize build|cfg|fn` RENDERS: it reads kustomization.yaml and writes YAML to stdout, opening no
-  // kubeconfig and contacting no cluster, so there is no target to be unclassified about (exit review 7)
-  if (head === 'kustomize' && /^(build|cfg|fn|version|edit)$/.test(tokens[1] ?? ''))
-    return { cls: 'LOCAL', target: 'a local render', mutating: false };
-  // The verb is found BY NAME, not by skipping option values: any global option missing from a skip-list would
-  // otherwise displace it and silently turn a mutation into a read (round 14).
-  const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
-  // READING A PRODUCTION CLUSTER'S SECRETS IS NOT A READ THIS MODEL MAY WAVE THROUGH. The target model escalates
-  // only MUTATING verbs, so `kubectl --context production get secrets -o yaml` — a full credential dump — reached
-  // ALLOW under a capability named k8s.local.apply (exit review 6). A secret is the one resource whose READ is an
-  // effect on its own.
-  // `secrets/db` is `TYPE/NAME` exactly as `secret/db` is, and only the singular slash form was listed, so
-  // `kubectl --context production get secrets/db -o yaml` dumped a production Secret's data block at ALLOW
-  // (exit review 7).
-  const touchesSecrets =
-    // kubectl accepts a COMMA-SEPARATED resource list: `get secrets,configmaps` reads both (exit review 8)
-    (head === 'kubectl' && tokens.some((t) => t.split(',').some((r) => /^secrets?(\/.+)?$/i.test(r)))) ||
-    // `helm get values|all|manifest|notes|hooks` PRINTS THE RENDERED RELEASE, which carries whatever the chart
-    // templated — database URLs, tokens, the contents of every Secret it defines. Against a production cluster
-    // that is a credential dump, exactly as `kubectl get secrets` is, and it was ALLOW because `get` is a read
-    // verb and the target model escalates only mutations (exit review 7).
-    (head === 'helm' && tokens.includes('get') && tokens.some((t) => /^(values|all|manifest|notes|hooks)$/.test(t)));
-  const mutate = head === 'helm' ? HELM_MUTATING_VERBS : K8S_MUTATING_VERBS;
-  let verb: string | undefined;
-  let verbAt = -1;
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    if (t.startsWith('-')) {
-      if (K8S_VALUE_OPTS.test(t)) i++; // its value is a namespace/context/file, never the verb
-      continue;
-    }
-    if (known.has(t)) {
-      verb = t;
-      verbAt = i;
-      break;
-    }
-  }
-  // an unrecognised verb fails closed: the kernel cannot show it is a read. And `config use-context` is not a
-  // read of anything — it re-points every LATER command at that cluster, which is the effect that matters.
-  const switchesContext = tokens.some((t, i) => t === 'use-context' && tokens[i - 1] === 'config');
-  // READING A CLUSTER'S SECRETS IS AN EFFECT ON ITS OWN. The target model escalates only MUTATING verbs, so
-  // `kubectl --context production get secrets -o yaml` — a full credential dump from a production cluster —
-  // reached ALLOW under a capability literally named k8s.local.apply (exit review 6). A secret is the one
-  // resource whose READ has to be treated as an act against the cluster it is read from.
-  // A VERB IS NOT A MUTATION IN EVERY SUBCOMMAND IT SPELLS: `rollout status` reports and `auth can-i` answers a
-  // question. And a PROBE connects to nothing while a DRY RUN performs the act's checks and not the act — both
-  // were absolute denies against a production cluster, which is a refusal to LOOK (exit review 9).
-  const line = rawSeg ?? requote(tokens);
-  // THE VERB'S POSITION IS THE ONE THE SCAN FOUND, not the first token that spells it. `kubectl --context
-  // production -n auth auth can-i create pods` has `auth` as the NAMESPACE first, so `indexOf` pointed at the
-  // option's value and the subcommand read as `auth` instead of `can-i` (self-attack on exit review 9).
-  const sub = tokens[verbAt + 1];
-  const readsOnly =
-    (verb !== undefined && sub !== undefined && (K8S_READ_SUBCOMMANDS[verb]?.has(sub) ?? false)) ||
-    // `kubectl set env … --list` PRINTS the environment and sets nothing
-    (verb === 'set' &&
-      tokens[tokens.length - 1] === '--list' &&
-      !(tokens[tokens.length - 2] ?? '-').startsWith('-') &&
-      !tokens.includes('--'));
-  const mutating =
-    switchesContext || touchesSecrets
-      ? true
-      : verb === undefined
-        ? !isProbeInvocation(line)
-        : mutate.has(verb) && !readsOnly && !isProbeInvocation(line) && !isDryRun(line);
-  // EVERY signal that can select the cluster is classified, and the MOST RESTRICTIVE one decides. kubectl resolves
-  // them together — `--server` overrides the context's endpoint and `--kubeconfig` chooses the file the context is
-  // looked up in — so a local-looking `--context` must never end the search (round 14).
-  const signals: Array<{ cls: TargetClass; target: string }> = [];
-  const add = (values: string[], patterns: string[], kind: string) => {
-    for (const v of values) signals.push({ cls: classifyTargetName(v, patterns, targets), target: `${kind} ${v}` });
+/** THE WORDS OF A CLUSTER COMMAND AS THE TOOL RECEIVES THEM. The normalized text has lost its quoting - `set env deploy/x
+ *  'A=b --list'` reads `set env deploy/x A=b --list` - and re-splitting it on blanks is how a value that ends in `--list`
+ *  became the read-only flag (sa10-33). The words are therefore taken from the segment AS WRITTEN, or from the body of a
+ *  shell it is carried by (`sh -c '…'`), wherever they spell exactly what the normalizer kept after the head. When no
+ *  such spelling is found the words are the blank-split ones and `written` is false: nothing is then excused.
+ *  `rawSeg` is where the line came from; its redirections are not words of the command. */
+function k8sInvocation(norm: string, rawSeg: string | undefined): { headWord: K8sWord; words: K8sWord[]; written: boolean } {
+  const tokens = tokenize(norm);
+  const headBase = (tokens[0] ?? '').replace(/^.*\//, '');
+  /** the words of the command, without the redirections a word may carry */
+  const argv = (ws: ReadonlyArray<{ text: string; quoted: boolean; expands?: boolean }>): K8sWord[] =>
+    commandWords(ws).map((w) => ({ text: w.text, quoted: w.quoted, expands: w.expands ?? /[$`]/.test(w.text) }));
+  const split = (): { headWord: K8sWord; words: K8sWord[]; written: boolean } => ({
+    headWord: { text: tokens[0] ?? '', quoted: false, expands: false },
+    words: argv(tokens.slice(1).map((t) => ({ text: t, quoted: false, expands: /[$`]/.test(t) }))),
+    written: false,
+  });
+  if (rawSeg === undefined) return split();
+  const texts: string[] = [];
+  const collect = (t: string, depth: number): void => {
+    texts.push(t);
+    if (depth < 4) for (const body of carriedShellBodies(t)) collect(expandBraces(body), depth + 1);
   };
-  // `kubectl config use-context X` re-points every later command at that cluster, exactly as `docker context
-  // use` does — and that one was already classified (exit review 3).
-  const useIdx = tokens.findIndex((t, i) => t === 'use-context' && tokens[i - 1] === 'config');
-  if (useIdx > 0 && tokens[useIdx + 1]) add([tokens[useIdx + 1]!], k8sContexts(targets), 'context use');
-  add(optionValues(tokens, '', ['--context', '--kube-context']), k8sContexts(targets), 'context');
-  // A NAMED LOCAL CONTEXT IS DECISIVE. `kind get kubeconfig > ./kube.conf` then `kubectl --kubeconfig ./kube.conf
-  // --context kind-dev apply` is the documented kind workflow; the FILE is UNCLASSIFIED (the kernel cannot read
-  // it) and outranked the context, so the whole local loop was DENIED (exit review 7). A kubeconfig says where
-  // contexts are listed; the `--context` says which one is used, and when that one is local there is nothing
-  // left for the file to change.
-  const namedContext = optionValues(tokens, '', ['--context', '--kube-context']);
-  const contextIsLocal =
-    namedContext.length > 0 &&
-    namedContext.every((c) => classifyTargetName(c, k8sContexts(targets), targets) === 'LOCAL') &&
-    // ...and only for a kubeconfig the WORKSPACE owns. `kind get kubeconfig > ./kube.conf` writes it into the
-    // checkout; a file somewhere else is one the kernel cannot read and did not see created, and a pinned
-    // bypass rests on exactly that (`--kubeconfig /tmp/remote.yaml --context kind-dev`, round 14).
-    optionValues(tokens, '', ['--kubeconfig']).every((f) => !isAbsolute(f) && !f.startsWith('~'));
-  // a kubeconfig FILE is unreadable to the kernel, so it is UNCLASSIFIED — unless the `--context` already names a
-  // local cluster, in which case the file only says where that name is listed
-  if (!contextIsLocal) add(optionValues(tokens, '', ['--kubeconfig']), [], 'kubeconfig');
-  for (const t of tokens) {
-    const env = /^(KUBECONFIG|KUBERNETES_MASTER)=(.+)$/.exec(t);
-    if (env) signals.push({ cls: classifyTargetName(env[2]!, [], targets), target: env[1]! + '=' + env[2]! });
-    // helm reads its context from the environment too, and `HELM_KUBECONTEXT=production helm upgrade` was a
-    // production release nobody saw (exit review 7)
-    const ctxEnv = /^(HELM_KUBECONTEXT|KUBE_CONTEXT|HELM_KUBEAPISERVER)=(.+)$/.exec(t);
-    if (ctxEnv)
-      signals.push({
-        cls: classifyTargetName(ctxEnv[2]!, k8sContexts(targets), targets),
-        target: `${ctxEnv[1]!}=${ctxEnv[2]!}`,
-      });
+  collect(rawSeg, 0);
+  for (const text of texts) {
+    const m = tokenizeMarked(text);
+    for (let h = 0; h < m.length; h++) {
+      if (m[h]!.text.replace(/^.*\//, '') !== headBase) continue;
+      // the words after the head are the ones the normalizer kept, in order; what it appended after them is the
+      // target-selecting assignments it re-attached to the head
+      for (let k = m.length; k > h; k--) {
+        const prefix = [tokens[0]!, ...m.slice(h + 1, k).map((w) => (w.text === '' ? "''" : w.text))].join(' ');
+        if (!norm.startsWith(prefix)) continue;
+        const tail = norm.slice(prefix.length);
+        if (tail === '' || (tail.startsWith(' ') && tokenize(tail).every((t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t))))
+          return { headWord: m[h]!, words: argv(m.slice(h + 1, k)), written: true };
+      }
+    }
   }
-  // THE API SERVER IS AN ENDPOINT, so its HOST is what decides — `--server https://127.0.0.1:6443` names the
-  // loopback cluster explicitly and was read as an opaque name, denying the very thing the local list exists to
-  // allow (exit review 7).
-  for (const v of optionValues(tokens, 's', ['--server', '--kube-apiserver'])) {
-    const host = endpointHost(v);
-    signals.push({
-      cls: classifyTargetName(host, targets.dbLocalHosts, targets),
-      target: `server ${v}`,
-    });
+  return split();
+}
+
+/** The variables that select a cluster, with every value they have in scope: the ones the command line sets for this
+ *  command, and the ones an earlier command of the same line exported. */
+const K8S_SELECTING_ENV =
+  /^(KUBECONFIG|KUBERNETES_MASTER|KUBERNETES_SERVICE_HOST|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|HELM_NAMESPACE)$/;
+function k8sEnvironment(norm: string, envInputs: Record<string, string>): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  const put = (name: string, value: string): void => {
+    const list = (out[name] ??= []);
+    if (!list.includes(value)) list.push(value);
+  };
+  for (const [name, value] of Object.entries(envInputs)) if (K8S_SELECTING_ENV.test(name)) put(name, value);
+  for (const t of tokenize(norm)) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(t);
+    if (m && K8S_SELECTING_ENV.test(m[1]!)) put(m[1]!, m[2]!);
   }
-  for (const ns of optionValues(tokens, 'n', ['--namespace']))
-    if (!isOpaqueTarget(ns) && hasProductionMarker(ns, targets.productionMarkers))
-      signals.push({ cls: 'PRODUCTION', target: `namespace ${ns}` });
-  if (signals.length === 0)
-    return { cls: 'UNCLASSIFIED', target: 'the ambient kubeconfig context', mutating };
-  const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
-  return { cls: worst.cls, target: worst.target, mutating };
+  return out;
+}
+
+/** Whether a path is inside the workspace the kernel may read: a registered root, or the directory the command runs in. */
+function inWorkspace(ctx: EvaluationContext, abs: string): boolean {
+  return (
+    insideRoots(abs, ctx) ||
+    !!(ctx.cwd && canonicalPath(abs).split(sep).join('/').startsWith(canonicalPath(ctx.cwd).split(sep).join('/') + '/'))
+  );
+}
+
+/** What a cluster command may say about a file it names, from where the kernel stands: read inside the workspace, not
+ *  there, not readable, outside the workspace, or - because this very command line, or an earlier one whose effect is
+ *  unknown, writes it - not what the disk holds now. */
+function k8sFile(ctx: EvaluationContext, env: ExecutionEnvironment | undefined, word: string): K8sFile {
+  if (/[$`*?[{]/.test(word)) return { state: 'dynamic' };
+  const cwd = env?.cwd ?? ctx.cwd ?? process.cwd();
+  // a relative name means nothing when the directory it is relative to was not proved
+  if (env && env.cwdVerified === false && !isAbsolute(word) && !word.startsWith('~')) return { state: 'unread' };
+  const abs = openedPath(cwd, word);
+  if (abs === null) return { state: 'dynamic' };
+  if (!inWorkspace(ctx, abs)) return { state: 'outside' };
+  if (env && (env.written.has('\0any') || env.written.has(canonicalPath(abs)))) return { state: 'fresh' };
+  const text = readInsideWorkspace(ctx, abs);
+  if (text !== null) return { state: 'text', text };
+  return fileExists(abs) ? { state: 'unread' } : { state: 'absent' };
+}
+
+/** The manifests a directory holds, as the paths the same reader can open: `kubectl -f DIR` reads every `.yaml`, `.yml` and
+ *  `.json` file in it (below it too, with `-R`). More than a cap, or a directory the kernel may not list, is null. */
+function k8sManifestsIn(ctx: EvaluationContext, env: ExecutionEnvironment | undefined, word: string, recursive: boolean): string[] | null {
+  const abs = openedPath(env?.cwd ?? ctx.cwd ?? process.cwd(), word);
+  if (abs === null || !inWorkspace(ctx, abs)) return null;
+  const out: string[] = [];
+  const walk = (dir: string, label: string, depth: number): boolean => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const e of entries) {
+      const child = `${label.replace(/\/+$/, '')}/${e.name}`;
+      if (e.isDirectory()) {
+        if (recursive && depth < 4 && !walk(join(dir, e.name), child, depth + 1)) return false;
+      } else if (/\.(ya?ml|json)$/i.test(e.name) && (e.isFile() || e.isSymbolicLink())) out.push(child);
+      if (out.length > 200) return false;
+    }
+    return true;
+  };
+  return walk(abs, word, 0) ? out : null;
+}
+
+/** WHAT A CLUSTER COMMAND DOES, from the one reader of it (k8s.ts). The evaluator supplies what the reader must not
+ *  import: the declared local targets, the production markers, the files the kernel may read, the dry-run reader. */
+function resolveK8sTarget(
+  norm: string,
+  targets: LocalTargets,
+  /** THE SEGMENT AS WRITTEN: where the words, with their boundaries and their quoting, come from */
+  rawSeg: string | undefined,
+  envInputs: Record<string, string>,
+  ctx: EvaluationContext,
+  env: ExecutionEnvironment | undefined,
+): K8sEffect {
+  const head = (tokenize(norm)[0] ?? '').replace(/^.*\//, '');
+  const inv = k8sInvocation(norm, rawSeg);
+  const local = k8sContexts(targets);
+  const host: K8sHost = {
+    classifyName: (name) => classifyTargetName(name, local, targets),
+    // the API server is an ENDPOINT, so its HOST is what decides, against the hosts of this machine
+    classifyServer: (url) =>
+      isOpaqueTarget(url) ? 'UNCLASSIFIED' : classifyTargetName(endpointHost(url), targets.dbLocalHosts, targets),
+    productionMarked: (name) => hasProductionMarker(name, targets.productionMarkers),
+    file: (word) => k8sFile(ctx, env, word),
+    directory: (word, recursive) => k8sManifestsIn(ctx, env, word, recursive),
+    stdin: () => env?.stdinText ?? null,
+    dryRun: (headWord, words) => isDryRunWords([headWord, ...words]),
+  };
+  return k8sEffect(
+    { head, headWord: inv.headWord, words: inv.words, written: inv.written, env: k8sEnvironment(norm, envInputs) },
+    host,
+  );
 }
 
 /** Resolves the database target of a normalized segment and whether a statement is executed against it. */
@@ -11441,6 +11420,8 @@ function retargetLocalCapability(
    *  that says so, so `--eval "show dbs; db.dropDatabase()"` arrives as the bare word `show` and a read-only
    *  test on it is a test of the first word only (self-attack on exit review 9). */
   rawSeg: string = norm,
+  /** the environment the segment runs in: the directory its files are read from, what this command line has written */
+  env?: ExecutionEnvironment,
 ): CapabilityHit {
   const kind =
     TARGET_SENSITIVE[hit.capability] ??
@@ -11465,17 +11446,20 @@ function retargetLocalCapability(
       absolute: isAbsoluteCap(table, CLOUD_LOCAL_CAPABILITY),
     };
   }
+  // A CLUSTER COMMAND IS READ ONCE (k8s.ts): which cluster, what it reads, what it changes, what it runs. The target class
+  // below is the first of those answers; the others are hits of their own, and the strongest of them all decides
+  const effect = kind === 'k8s' ? resolveK8sTarget(norm, targets, rawSeg, envInputs, ctx, env) : undefined;
+  const settle = (h: CapabilityHit): CapabilityHit => (effect === undefined ? h : withClusterEffects(table, ctx, h, norm, effect));
   const resolved =
-    kind === 'k8s'
-      ? resolveK8sTarget(tokens, targets, rawSeg)
-      : kind === 'db'
-        ? resolveDbTarget(tokens, targets, envInputs, rawSeg)
-        : resolveContainerTarget(tokens, targets, envInputs);
+    effect ??
+    (kind === 'db'
+      ? resolveDbTarget(tokens, targets, envInputs, rawSeg)
+      : resolveContainerTarget(tokens, targets, envInputs));
   const acts =
     kind === 'db'
       ? (resolved as { executes: boolean }).executes
       : (resolved as { mutating: boolean }).mutating;
-  if (!acts || resolved.cls === 'LOCAL') return hit; // reads and genuinely local work keep their verdict
+  if (!acts || resolved.cls === 'LOCAL') return settle(hit); // reads and genuinely local work keep their verdict
   const outcomes = TARGET_KINDS[kind];
   const capability =
     resolved.cls === 'PRODUCTION'
@@ -11483,8 +11467,8 @@ function retargetLocalCapability(
       : resolved.cls === 'EXTERNAL'
         ? outcomes.external
         : outcomes.unclassified;
-  if (!(capability in table.capabilities)) return hit;
-  return {
+  if (!(capability in table.capabilities)) return settle(hit);
+  return settle({
     capability,
     verdict: verdictFor(table, ctx, capability),
     via:
@@ -11494,7 +11478,31 @@ function retargetLocalCapability(
     segment: norm,
     absolute: isAbsoluteCap(table, capability),
     target: { cls: resolved.cls, name: resolved.target },
-  };
+  });
+}
+
+/** What a cluster command does BESIDES reaching a cluster, as hits of their own: it prints the local kubeconfig with its
+ *  credentials, it writes it, it runs a program nobody read. The hit the target decided stands unless one of these is
+ *  stronger. The reasons are the reader's own sentences, so the person asked sees why. */
+function withClusterEffects(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  decided: CapabilityHit,
+  norm: string,
+  fx: K8sEffect,
+): CapabilityHit {
+  const of = (capability: string, via: string): CapabilityHit[] =>
+    capability in table.capabilities
+      ? [{ capability, verdict: verdictFor(table, ctx, capability), via, segment: norm, absolute: isAbsoluteCap(table, capability) }]
+      : [];
+  const extra = [
+    ...(fx.kubeconfigDump ? of('fs.credential-store.read', fx.kubeconfigDump) : []),
+    ...(fx.kubeconfigWrite ? of('fs.credential-store.write', fx.kubeconfigWrite) : []),
+    ...(fx.program ? [opaqueHit(table, ctx, norm, fx.program, true, 'command.unmodelled-closure')] : []),
+  ];
+  const weight = (h: CapabilityHit): number =>
+    VERDICT_RANK[h.verdict] * 10 + (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'admin-governed' ? 1 : 0);
+  return extra.reduce((a, b) => (weight(b) > weight(a) ? b : a), decided);
 }
 
 /** A request's DOCUMENT body is appended to the text its patterns are matched against, after this sentinel. The
@@ -11958,6 +11966,7 @@ function classifyNormalized(
         norm,
         state.env.envInputs,
         state.env.rawSegment ?? norm,
+        state.env,
       );
       break;
     }
@@ -14231,6 +14240,8 @@ function analyzeSegments(
           const name = marked[k]!.text.slice(marked[k]!.text.lastIndexOf('/') + 1);
           if (!LOCKED_HEADS.has(name)) continue;
           const suffix = [name, ...marked.slice(k + 1).map((t) => t.text)].join(' ');
+          // the same words with their quoting kept, for the reader that needs to know where a word ends (k8s.ts)
+          const asWritten = [name, ...marked.slice(k + 1).map(quoteMarkedWord)].join(' ');
           for (const sub of normalizeSegment(suffix)) {
             const subject = forgeApiSubject(ctx, sub, env);
             for (const { m, re } of compiled) {
@@ -14258,7 +14269,8 @@ function analyzeSegments(
                     },
                     sub,
                     env.envInputs,
-                    sub,
+                    asWritten,
+                    env,
                   ),
                 );
               break;
