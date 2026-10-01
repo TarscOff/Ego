@@ -5082,6 +5082,9 @@ export function segmentEnvInputs(segment: string, allAssignments = false): Recor
       // producers down reads its recipe's variables from its environment (`CMD=… npm run build` reaching `make other`)
       if (allAssignments) out[`\0env:${name}`] = value;
     }
+    // `watch FOO=1 make` runs `sh -c 'FOO=1 make'`: the string a carrier hands to a shell is a command line, and its assignments are the
+    // command's environment like any other
+    if (peeled.shellString) scan(peeled.shellString);
   };
   scan(segment);
   // `env -S 'VAR=x cmd'` carries a whole command line in one quoted value

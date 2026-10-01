@@ -345,7 +345,7 @@ const CARGO_GRAMMAR = gnu([
   '-Z:v', '--message-format:v', '-j|--jobs:v', '-p|--package:v', '--workspace', '--all', '--exclude:v', '--lib', '--bin:v', '--bins', '--example:v',
   '--examples', '--test:v', '--tests', '--bench:v', '--benches', '--all-targets', '-F|--features:v', '--all-features', '--no-default-features', '--target:v',
   '-r|--release', '--profile:v', '--ignore-rust-version', '--locked', '--offline', '--frozen', '-v|--verbose', '-q|--quiet', '--color:v', '--keep-going',
-  '--registry:v', '--index:v', '--git:v', '--branch:v', '--tag:v', '--rev:v', '--force', '-f', '--no-track', '--list', '--version:v', '--help', '--version',
+  '--registry:v', '--index:v', '--git:v', '--branch:v', '--tag:v', '--rev:v', '--force', '-f', '--no-track', '--list', '--version:v', '--help',
 ]);
 const CARGO_ROLES: Record<string, Role> = {
   'target-dir': 'writeDir',
@@ -375,7 +375,7 @@ const GIT_ARCHIVE = gnu(['-l|--list', '-v|--verbose', '--format:v', '-0', '-1', 
 const GIT_BUNDLE = gnu(['--progress', '--quiet', '-q', '--all', '--version:v']);
 const GIT_FORMAT_PATCH = gnu([
   '-o|--output-directory:v', '--output:v', '--stdout', '--cover-letter', '--attach:o', '--inline:o', '--thread:o', '-n|--numbered', '-N|--no-numbered', '-k|--keep-subject',
-  '-s|--signoff', '--start-number:v', '--zero-commit', '--no-stat', '-p|--no-stat', '--subject-prefix:v', '--cc:v', '--to:v', '--from:o', '--in-reply-to:v', '--base:v',
+  '-s|--signoff', '--start-number:v', '--zero-commit', '-p|--no-stat', '--subject-prefix:v', '--cc:v', '--to:v', '--from:o', '--in-reply-to:v', '--base:v',
   '--range-diff:v', '--creation-factor:v', '--interdiff:v', '-v|--reroll-count:v', '--rfc', '--filename-max-length:v', '--notes:o', '--no-notes', '--signature:v', '--signature-file:v',
   '--suffix:v', '-U|--unified:v', '-q|--quiet',
 ], { numeric: true });
@@ -383,7 +383,7 @@ const GIT_DIFFLIKE = gnu(['--output:v']);
 const GIT_CLONE = gnu(['--separate-git-dir:v', '--template:v', '-u|--upload-pack:v', '--reference:v', '--reference-if-able:v', '-o|--origin:v', '-b|--branch:v', '--depth:v', '-c|--config:v', '-j|--jobs:v', '--bare', '--mirror', '-l|--local', '-s|--shared', '-n|--no-checkout', '-q|--quiet', '-v|--verbose', '--progress', '--recurse-submodules:o', '--shallow-submodules', '--single-branch', '--no-tags', '--filter:v', '--sparse', '--dissociate', '--hardlinks|--no-hardlinks', '--ref-format:v', '--server-option:v', '--bundle-uri:v']);
 const GIT_INIT = gnu(['--separate-git-dir:v', '--template:v', '-b|--initial-branch:v', '--shared:o', '--bare', '-q|--quiet', '--object-format:v', '--ref-format:v']);
 const GIT_CONFIG = gnu(['-f|--file:v', '--global', '--system', '--local', '--worktree', '--blob:v', '-l|--list', '--get', '--get-all', '--get-regexp', '--get-urlmatch', '--unset', '--unset-all', '--add', '--replace-all', '--rename-section', '--remove-section', '-e|--edit', '--type:v', '--bool', '--int', '--path', '-z|--null', '--name-only', '--show-origin', '--show-scope', '--includes', '--no-includes', '--default:v', '--fixed-value']);
-const GIT_ROLES: Record<string, Role> = { output: 'write', 'output-directory': 'writeDir', 'separate-git-dir': 'writeDir', template: 'read', 'upload-pack': 'program', exec: 'program', file: 'write', 'add-file': 'read', 'signature-file': 'read' };
+
 
 export const TOOL_TABLES: Record<string, ToolTable> = {
   tar: { grammar: TAR_GRAMMAR, roles: TAR_ROLES, complete: true },
@@ -403,11 +403,11 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
   'git checkout-index': { grammar: GIT_CHECKOUT_INDEX, roles: { prefix: 'writeDir' } },
   'git archive': { grammar: GIT_ARCHIVE, roles: { output: 'write', exec: 'program', 'add-file': 'read' } },
   'git bundle': { grammar: GIT_BUNDLE, roles: {} },
-  'git format-patch': { grammar: GIT_FORMAT_PATCH, roles: GIT_ROLES },
-  'git diff': { grammar: GIT_DIFFLIKE, roles: GIT_ROLES },
-  'git clone': { grammar: GIT_CLONE, roles: GIT_ROLES },
-  'git init': { grammar: GIT_INIT, roles: GIT_ROLES },
-  'git config': { grammar: GIT_CONFIG, roles: GIT_ROLES },
+  'git format-patch': { grammar: GIT_FORMAT_PATCH, roles: { output: 'write', 'output-directory': 'writeDir', 'signature-file': 'read' } },
+  'git diff': { grammar: GIT_DIFFLIKE, roles: { output: 'write' } },
+  'git clone': { grammar: GIT_CLONE, roles: { 'separate-git-dir': 'writeDir', template: 'read', 'upload-pack': 'program' } },
+  'git init': { grammar: GIT_INIT, roles: { 'separate-git-dir': 'writeDir', template: 'read' } },
+  'git config': { grammar: GIT_CONFIG, roles: { file: 'write' } },
 };
 
 /** compilers and linkers read by the `cc` table */
@@ -468,6 +468,11 @@ export function toolEffects(head: string, argv: readonly string[]): ToolEffects 
       for (const v of values) bucket(out, role, v);
       break;
     }
+  }
+  // `git config --file F --get KEY` (and --list, --get-all...) READS F; only a setting, an unsetting or an edit writes it
+  if (found.key === 'git config' && ['get', 'get-all', 'get-regexp', 'get-urlmatch', 'list', 'name-only', 'show-origin', 'show-scope'].some((a) => has(parsed, a))) {
+    out.reads.push(...out.writes);
+    out.writes = [];
   }
   return out;
 }
