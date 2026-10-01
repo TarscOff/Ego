@@ -141,18 +141,20 @@ detectors:
     severity: block
     locked: true
     replacement: '[REDACTED:telegram]'
-  - id: ai.openai
-    name: OpenAI API key
-    pattern: '\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b'
-    severity: block
-    locked: true
-    replacement: '[REDACTED:openai-key]'
+  # THE NARROW DETECTOR RUNS BEFORE THE BROAD ONE. `sk-ant-…` also matches the OpenAI pattern (its class admits `-`), so
+  # listed behind it `ai.anthropic` could never report any value, and an Anthropic key was labelled as an OpenAI one.
   - id: ai.anthropic
     name: Anthropic API key
     pattern: '\bsk-ant-[A-Za-z0-9_-]{20,}\b'
     severity: block
     locked: true
     replacement: '[REDACTED:anthropic-key]'
+  - id: ai.openai
+    name: OpenAI API key
+    pattern: '\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:openai-key]'
   - id: ai.huggingface
     name: Hugging Face token
     pattern: '\bhf_[A-Za-z0-9]{20,}\b'

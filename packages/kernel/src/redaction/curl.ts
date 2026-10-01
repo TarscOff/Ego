@@ -138,8 +138,10 @@ export function redactCurl(text: string): CurlRedaction {
   const counts = new Map<string, number>();
   const bump = (k: string) => counts.set(k, (counts.get(k) ?? 0) + 1);
   // a backslash-newline continuation joins the logical command: splitting on '\n' first hid every flag that sat on
-  // a continuation line, so `-u user:pass` on line 2 was never seen (round 14)
-  const lines = text.replace(/\\\r?\n[ \t]*/g, ' ').split('\n');
+  // a continuation line, so `-u user:pass` on line 2 was never seen (round 14). The pair is DELETED, as the shell
+  // deletes it, and what follows it is left alone: replacing it with a space cut `-u alice:pass\<nl>word` into the
+  // credential `pass` and a stray `word`, so half of a secret reached the redacted text (closure evidence, finding 17).
+  const lines = text.replace(/\\\r?\n/g, '').split('\n');
   const outLines = lines.map((line) => {
     // a curl inside a command substitution or assignment (`RESP=`curl -u u:p …``, `x=$(curl …)`) is still a curl
     if (!/(^|[\s;&|(`=$])curl(\s|$)/.test(line)) return line;

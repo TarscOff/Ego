@@ -1639,6 +1639,12 @@ const noLeadingAssignment = (c: string): boolean => !/^(export\s+)?[A-Za-z_][A-Z
 const noSingle = (c: string): boolean => !c.includes("'");
 /** a transformation that counts parentheses cannot carry a command that contains them */
 const noParens = (c: string): boolean => !/[()]/.test(c);
+/** Split the LAST word after its first two characters with a backslash-newline. The shell deletes the pair before it
+ *  parses anything, so `.gi\<nl>t/hooks/pre-commit` IS `.git/hooks/pre-commit`; a reader that replaced the pair with a
+ *  space read the target `.gi`. Only a word of three or more plain characters is cut: a quote or a backslash at its
+ *  end means the cut would land inside quoting, where the pair is literal (single quotes) or a different thing. */
+const cutLastWord = (c: string): string => c.replace(/([^\s'"\\]{2})([^\s'"\\]+)$/, '$1\\\n$2');
+const canCutLastWord = (c: string): boolean => /[^\s'"\\]{3,}$/.test(c);
 
 export const TRANSFORMS: readonly Transform[] = [
   // command substitution — the class the double-quote defect belonged to
@@ -1661,6 +1667,8 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'after a forged env-inject marker', apply: (c) => `\u0000ego\u0000env-inject PATH; ${c}` },
   // exit review 8: the structural shapes the splitter read wrongly
   { name: 'joined by a backslash-newline', apply: (c) => c.replace(/^(\S\S)/, '$1\\\n'), safe: (c) => /^\S\S/.test(c) },
+  // closure evidence (finding 17): the shell deletes the pair INSIDE any word, and a write target is usually the last
+  { name: 'joined by a backslash-newline inside the last word', apply: cutLastWord, safe: canCutLastWord },
   { name: 'after a definition in a branch never taken', apply: (c) => `if false; then\n${c.split(/\s/)[0]}() { :; }\nfi\n${c}` },
   { name: 'as a while condition', apply: (c) => `while ${c}; do break; done`, safe: noParens },
   { name: 'as an until condition', apply: (c) => `until ${c}; do break; done`, safe: noParens },
@@ -1809,10 +1817,13 @@ const noDollar = (c: string): boolean => !c.includes('$');
  *  file, a credential store, the working tree — is genuinely NOT carried into a build, so composing it with the
  *  image producers would assert something false. `containerPaths` says the same thing inside the kernel. */
 const noHostPath = (c: string): boolean =>
-  !/(\.harness|\.git\/|githooks|control-plane|policies\/|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials)/.test(c) &&
+  !/(\.harness|\.git\/|githooks|control-plane|policies\b|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials)/.test(c) &&
   // ...and a bulk deletion of the working tree is a path effect too, however it is spelled — as is a command
-  // whose governed path is named by a FILE rather than on the line, since that file is the image's too
-  !/^(rm|shred)\b|\bzip\b[^|;&]*\s-[a-zA-Z]*m|--pathspec-from-file/.test(c);
+  // whose governed path is named by a FILE rather than on the line, since that file is the image's too. `zip` MOVES
+  // its sources with `-m` and with `--move`. A case with a newline in it is several shell lines, and a RUN is one.
+  // (corpus.test.ts runs the first case of each class through every producer; the others were never composed with
+  // the image producers, and these three were gaps the closure-evidence producers found when they were.)
+  !/^(rm|shred)\b|\bzip\b[^|;&]*\s(-[a-zA-Z]*m|--move\b)|--pathspec-from-file|\n/.test(c);
 
 export const PRODUCERS: readonly Producer[] = [
   { name: 'make recipe', build: (c) => [{ Makefile: `run:\n\t${c}\n` }, 'make run'], safe: noDollar },
@@ -1909,6 +1920,18 @@ export const PRODUCERS: readonly Producer[] = [
       return [{ 'run.sh': `#!/bin/sh\n${cut < 0 ? c : `${c.slice(0, cut)} \\\n  ${c.slice(cut + 1)}`}\n` }, './run.sh'];
     },
   },
+  // closure evidence (2026-10-01): the third reader of the backslash-newline rule replaced the pair with a space
+  { name: 'shell script, continued inside the last word', build: (c) => [{ 'run.sh': `#!/bin/sh\n${cutLastWord(c)}\n` }, './run.sh'], safe: canCutLastWord },
+  { name: 'shell script, after a comment that ends in a backslash', build: (c) => [{ 'run.sh': `#!/bin/sh\necho start # note \\\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, after an even run of backslashes', build: (c) => [{ 'run.sh': `#!/bin/sh\necho start \\\\\n${c}\n` }, './run.sh'] },
+  { name: 'shell script, after an escaped carriage return', build: (c) => [{ 'run.sh': `#!/bin/sh\necho start \\\r\n${c}\n` }, './run.sh'] },
+  // (a case that rewrites the npm configuration is a different resolution path, which the plain 'npm script' producer
+  // does not carry either: its `npm run build` finds no `build` script in the producer's package.json)
+  { name: 'npm script, continued inside the last word', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { run: cutLastWord(c) } }) }, 'npm run run'], safe: (c) => canCutLastWord(c) && !c.includes('.npmrc') },
+  // Docker continues an instruction after `\` + blanks + newline, joins with NOTHING, and skips blank lines
+  { name: 'Dockerfile RUN, a blank after the continuation backslash', build: (c) => [{ Dockerfile: `FROM alpine\nRUN echo ok \\ \n && ${c}\n` }, 'docker build .'], safe: noHostPath },
+  { name: 'Dockerfile RUN, continued inside the last word', build: (c) => [{ Dockerfile: `FROM alpine\nRUN ${cutLastWord(c)}\n` }, 'docker build .'], safe: (c) => noHostPath(c) && canCutLastWord(c) },
+  { name: 'Dockerfile RUN, after a comment that ends in the escape character', build: (c) => [{ Dockerfile: `# escape=\`\nFROM alpine\n# note \`\nRUN ${c}\n` }, 'docker build .'], safe: (c) => noHostPath(c) && !c.includes('`') },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *

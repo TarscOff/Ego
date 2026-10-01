@@ -4895,6 +4895,43 @@ function heredocDelimiter(line: string): string | null {
   return null;
 }
 
+/** The LOGICAL lines of a shell script: the physical lines, joined exactly where the shell joins them and nowhere else.
+ *
+ *  A BACKSLASH-NEWLINE IS DELETED, NOT REPLACED BY A SPACE, and what follows it is left alone. Replacing it turned
+ *  `echo x > .gi\<newline>t/hooks/pre-commit` into the target `.gi`, so a script file could write `.git/hooks/`,
+ *  `.harness/runtime/` and `control-plane/` at ALLOW while the identical line typed directly was refused. That is
+ *  the defect the direct splitter and the redirection scanner had already been repaired for (exit review 8); this
+ *  was the third reader of the same rule, and the one that was missed (closure evidence, finding 17).
+ *
+ *  The shell joins only where the newline is really escaped. Verified against sh, bash, dash and zsh: an EVEN run
+ *  of backslashes is escaped backslashes followed by a plain newline; a backslash in a COMMENT is part of the
+ *  comment, which the newline ends; and `\` before a carriage return escapes the CR, so a CRLF file does not
+ *  continue. A reader that joins in any of those cases hides the next line from the classifier. */
+function logicalScriptLines(text: string): string[] {
+  const out: string[] = [];
+  let pending = '';
+  for (const physical of text.split('\n')) {
+    const line = pending + physical;
+    const run = /\\+$/.exec(line)?.[0].length ?? 0;
+    if (run % 2 === 1 && stripComment(line).length === line.length) {
+      pending = line.slice(0, -1);
+      continue;
+    }
+    let logical = line;
+    if (logical.endsWith('\r')) {
+      logical = logical.slice(0, -1);
+      // `\` + CR escapes the CR, and what is left once the CR goes is a lone trailing backslash, which the canonical
+      // splitter downstream would read as a continuation of the NEXT line. The backslash goes with the CR it escaped:
+      // a slightly stricter reading of the last word, never a looser one.
+      if ((/\\+$/.exec(logical)?.[0].length ?? 0) % 2 === 1) logical = logical.slice(0, -1);
+    }
+    out.push(logical);
+    pending = '';
+  }
+  if (pending) out.push(pending);
+  return out;
+}
+
 /** Splits shell script text into classifiable segments, returning null when the script is opaque (dynamic commands). */
 function scriptSegments(text: string): string[] | null {
   // PRODUCER CONTRACT: resolve WHICH lines execute, and hand every one of them over verbatim. Nothing is dropped
@@ -4909,7 +4946,7 @@ function scriptSegments(text: string): string[] | null {
   // A BACKSLASH-NEWLINE IS ERASED BEFORE THE SHELL SEES THE COMMAND. Splitting on the raw newline first cut
   // `git \` + newline + `push origin main` into two unclassifiable fragments, so an absolute core deny reached
   // ASK from inside a script while the same continuation typed directly was denied (exit review 4).
-  for (const raw of text.replace(/\\\r?\n[ \t]*/g, ' ').split(/\r?\n/)) {
+  for (const raw of logicalScriptLines(text)) {
     if (heredoc !== null) {
       if (raw.trim() !== heredoc) {
         heredocBody += raw + '\n';
@@ -5387,8 +5424,7 @@ function dockerfileShellLines(text: string): string[] {
   // `# escape=<char>` CHANGES THE LINE-CONTINUATION CHARACTER for the whole file — a documented directive whose
   // usual use is a backtick on Windows. It is read BEFORE comment lines are dropped, because it is one of them,
   // and joining only backslash-newline left the continued half of a RUN as its own line (exit review 8).
-  const esc = /^\s*#\s*escape\s*=\s*(\S)/im.exec(text)?.[1];
-  if (esc && esc !== '\\') text = text.split(esc + '\n').join(' ');
+  const esc = /^\s*#\s*escape\s*=\s*(\S)/im.exec(text)?.[1] ?? '\\';
   // A COMMENT LINE IS REMOVED BEFORE CONTINUATIONS ARE JOINED. Docker strips comment lines first, so a trailing
   // backslash in a comment joins NOTHING — but this reader joined continuations first, so `# helper \` swallowed
   // the `RUN` beneath it and that line became invisible (exit review 8). The `# syntax=` directive is kept,
@@ -5409,7 +5445,14 @@ function dockerfileShellLines(text: string): string[] {
   // `# escape=<char>` CHANGES THE LINE-CONTINUATION CHARACTER for the whole file — a documented directive whose
   // usual use is a backtick on Windows. Joining only backslash-newline left the continued half of a RUN as its
   // own line, which then matched nothing (exit review 8).
-  const joined = text.replace(/\\\r?\n\s*/g, ' ');
+  // DOCKER REMOVES THE ESCAPE CHARACTER, ANY BLANKS AFTER IT AND THE NEWLINE, AND INSERTS NOTHING; blank lines inside
+  // the continuation are skipped, and the next line keeps its own indentation. Replacing the run with a space turned
+  // `git pu\<newline>sh` into two words, and requiring the newline to follow the escape directly meant that a single
+  // trailing blank (`RUN echo ok \ `) made Docker continue the instruction while this reader did not: the line after
+  // it was never read, and a `git push` there was ALLOW. A custom escape character is joined the same way, and only
+  // HERE, after the comment lines are gone, so a comment that ends in it (`# helper `) joins nothing.
+  const escRe = esc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const joined = text.replace(new RegExp(`${escRe}[ \\t]*\\r?\\n(?:[ \\t]*\\r?\\n)*`, 'g'), '');
   const out: string[] = [];
   for (const raw of joined.split('\n')) {
     const line = raw.replace(/^\s+/, '');
