@@ -27,10 +27,10 @@ Each does one job. None replaces another.
 | Mechanism | What it actually does | What it does NOT do |
 |---|---|---|
 | **Git** | Records code changes and makes them reviewable | Does not constrain what a process may reach |
-| **Worktrees** | Isolate Git working state between tasks | **Not containment.** A worktree shares the filesystem, the network, the credentials and the process table |
+| **Worktrees** | Isolate Git working state between tasks (EGO neither creates nor requires one today) | **Not containment.** A worktree shares the filesystem, the network, the credentials and the process table |
 | **Authority** | Decides whether a recognised effect is permitted, and by whom | Cannot decide about an effect it was never shown |
 | **Classifier** | Recognises known semantic effects in commands, paths, redirections, archives, interpreters and targets | Cannot enumerate every spelling of every effect; is not a boundary |
-| **Containment** | Restricts what a process can physically reach: filesystem, network, credentials, tool surface | Does not understand intent, and **does not exist in every profile** |
+| **Containment** | Restricts what a process can physically reach: filesystem, network, credentials, tool surface | Does not understand intent, and **does not exist today in any profile** (issue #26) |
 | **Independent review** | Finds weaknesses in all of the above, continuously | Never proves their absence |
 
 ## The rule that holds the model together
@@ -46,7 +46,9 @@ KNOWN CLASS + AN OPERAND NAMING A PROGRAM, SCRIPT OR DESTINATION
 THAT THE CLASS DOES NOT BOUND          -> treat as UNKNOWN / OPAQUE
 ```
 
-The fourth line was added after the first challenge of this contract. Without it the rule *endorsed*
+The second line describes the design: no profile provides a containment boundary today, so unknown execution is never
+"contained" and takes the third line in every profile (see "What each profile may honestly claim"). The fourth line
+was added after the first challenge of this contract. Without it the rule *endorsed*
 `tar -I /tmp/pwn`: the class is known (`command.local-mutation`), the class is authorized (`ALLOW`), and an arbitrary
 program runs. A class only counts as known when it bounds what its operands can do.
 
@@ -169,7 +171,8 @@ multi-dimensional, and the invariant is:
 > canonical analyzer**.
 
 "Relevant" is doing deliberate work: a claim must prove the dimensions it actually depends on, not all of them —
-proving all of them would gate ordinary development, and proving only the directory was the hole.
+proving all of them would gate ordinary development, and proving only the directory was the hole. The recorded
+exceptions to the invariant are stated under "The global invariant" below.
 
 | Dimension | What it decides | How it fails safe |
 |---|---|---|
@@ -259,6 +262,14 @@ A positive ALLOW requires the relevant execution closure to be **dispatch-known*
 dimension unresolved means UNKNOWN/OPAQUE — named by scope, so the gap is legible and a local unknown does not
 poison unrelated safe work.
 
+That is the rule the analyzer follows. It is not a statement that every `ALLOW` EGO returns satisfies it. Some
+`ALLOW`s have an execution closure nobody read, by a recorded product decision (`docker run` and `docker compose up`
+on the local daemon, whose images, compose files and Dockerfiles are not read) or because the tool runs code the
+analyzer is not shown (`cargo build`, whose dependencies' build scripts run at compile time). They are recorded, with
+their residual risk, in [`phase-1-residuals.md`](phase-1-residuals.md) as permitted and uncontained. Read the
+invariant as holding **except for those recorded residuals**, and as a property of the analyzer, not of the system:
+no profile contains anything today.
+
 ## Execution closure
 
 Security analysis cannot consider only the executable text present in the command. The **execution closure** of an
@@ -335,22 +346,26 @@ Containment is a property of the host and the profile, never of the classifier. 
 
 **Today, no profile provides OS-level containment.** The table below therefore has two separate columns: what the
 profile is *designed* to provide once issue #26 lands, and what is *actually in force right now*. They must never be
-conflated, and the second column is the one any claim about EGO's security has to rest on.
+conflated, and the "Actually in force today" column is the one any claim about EGO's security has to rest on.
 
 | Profile | Designed isolation (#26, not built) | Actually in force today | What EGO may claim today |
 |---|---|---|---|
-| **STANDARD** | Current checkout; policies, hooks, claims, validation | **Policies and hooks only.** Held scopes/claims are phase 2 and the validation matrix is phase 3-4, so neither is in force. No process, filesystem or network restriction. | Normal local work stays fluid, and known-safe `LOCAL_WORKSPACE` operations are `ALLOW`. EGO must **not** pretend arbitrary opaque execution is physically contained. Ambiguous actions able to escape the governed workspace `ASK` or `DENY`. |
-| **STRICT** | A dedicated branch and worktree per task | **Nothing beyond STANDARD.** The branch/worktree execution strategy is not implemented. | Exactly what STANDARD claims, and nothing more. Even once built, **worktree isolation is not filesystem, network or process containment.** |
-| **HIGH_ASSURANCE** | Worktree plus a sandbox or managed boundary: restricted filesystem, credentials, network, external targets and tool surface | **The narrowed capability set only.** Managed-settings tamper protection is a HOST feature EGO records in its capability matrix; EGO neither installs nor verifies it, so it is not something EGO provides. **No sandbox, no filesystem, credential, network or tool-surface restriction.** | Exactly what STANDARD claims. It may **not** yet rely on containment for anything. |
+| **STANDARD** | Current checkout; policies, hooks, claims, validation | **Policies and hooks only.** Held scopes/claims are phase 2 and the validation matrix is phase 3-4, so neither is in force. No process, filesystem or network restriction. | Normal local work stays fluid, and known-safe `LOCAL_WORKSPACE` operations are `ALLOW`. EGO must **not** pretend arbitrary opaque execution is physically contained. Ambiguous actions able to escape the governed workspace `ASK` or `DENY`, except the `ALLOW`s whose execution closure nobody read that [`phase-1-residuals.md`](phase-1-residuals.md) records (`docker run` and `docker compose up`, `cargo build`): those are permitted and uncontained. |
+| **STRICT** | A dedicated branch and worktree per task | **No isolation beyond STANDARD's.** The branch/worktree execution strategy is not implemented. (STRICT does narrow local commits, merges, cherry-picks and local mutation to `ASK`, requires signed-release trust and applies `BLOCK` budgets; none of that isolates anything.) | Exactly what STANDARD claims, and nothing more. Even once built, **worktree isolation is not filesystem, network or process containment.** |
+| **HIGH_ASSURANCE** | Worktree plus a sandbox or managed boundary: restricted filesystem, credentials, network, external targets and tool surface | **The narrowed capability set, signed-release trust before any governed mutation, and `BLOCK` budgets.** Managed-settings tamper protection is a HOST feature that EGO records as UNVERIFIED in its control plane and capability matrix; EGO neither installs nor verifies it, so it is not something EGO provides. **No sandbox, no filesystem, credential, network or tool-surface restriction.** | Exactly what STANDARD claims. It may **not** yet rely on containment for anything. |
 
-The third column is why the fail-safe rule currently resolves to `ASK` in *every* profile: there is no boundary to
-defer to anywhere. When issue #26 lands, only the profile whose containment is both required and verified may move
-unknown execution from `ASK` to a contained `ALLOW`.
+The "Actually in force today" column is why the fail-safe rule currently resolves to `ASK` in *every* profile: there
+is no boundary to defer to anywhere. When issue #26 lands, only the profile whose containment is both required and
+verified may move unknown execution from `ASK` to a contained `ALLOW`.
 
 When the host provides hooks only, EGO claims hooks only. `control-plane/containment/controls.md` declares each
-control together with its per-host support, and `ego doctor` reports what a given host satisfies. Note a real gap:
-`packages/kernel/src/hosts/matrix.ts` carries its own capability keys and **is not** the source doctor consults for
-containment, so the two tables can drift apart with nothing to catch it. Reconciling them is part of issue #26.
+control, the profiles that require or recommend it and its status on each host, and `ego doctor` reports those
+statuses; a status there is a declaration EGO authored, never a measurement, and the file enforces nothing.
+`packages/kernel/src/hosts/matrix.ts` records host capabilities by key with the conformance check that will verify
+each. `ego doctor` reads one key from it (`blocking-pre-tool-hook`) and reports containment from `controls.md`. The two
+tables are kept equal on every id they share: `packages/kernel/test/closure-docs.test.ts` fails when the statuses
+differ (they had silently diverged on three claude-code entries before anything compared them). A control with no key
+in the matrix is recorded in `controls.md` only. Verification against a running host is phase-6 work.
 
 ## What the regression corpus is for
 

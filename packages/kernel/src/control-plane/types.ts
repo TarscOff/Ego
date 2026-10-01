@@ -212,9 +212,27 @@ export type TargetClass = 'LOCAL' | 'PRODUCTION' | 'EXTERNAL' | 'UNCLASSIFIED';
 
 export type SupportStatus = 'SUPPORTED' | 'PARTIAL' | 'UNAVAILABLE' | 'UNVERIFIED';
 
-/** A containment control (alignment item 3): technical isolation, distinct from policy and authority. */
+/**
+ * What a control IS. The catalogue lists, side by side, things that are not the same kind of thing, and a worktree
+ * reported under the word "containment" was how a reader came to believe a boundary existed (exit criterion 6).
+ * `doctor` takes the section a control is reported under from this field, so the word is derived from the data.
+ *
+ *  - `containment`  restricts what a process can physically reach (a sandbox, an egress restriction). None is built.
+ *  - `isolation`    separates Git working state or session state and shares everything else (a worktree, a held scope).
+ *  - `enforcement`  a decision the kernel takes in-band, before or while it handles a call (hooks, redaction). It binds
+ *                   what the kernel sees; it is not a boundary around what it does not.
+ *  - `host-feature` something the host provides that EGO only records.
+ */
+export const CONTROL_KINDS = ['containment', 'isolation', 'enforcement', 'host-feature'] as const;
+export type ControlKind = (typeof CONTROL_KINDS)[number];
+
+/**
+ * A control EGO declares per profile and host (alignment item 3). The name is historical: only the entries of kind
+ * `containment` restrict what a process can reach. Read by `ego doctor` and by nothing else; it enforces nothing.
+ */
 export interface ContainmentControl {
   id: string;
+  kind: ControlKind;
   description: string;
   requiredIn: string[];
   recommendedIn: string[];

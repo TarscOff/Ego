@@ -1,6 +1,15 @@
 // Host capability matrix (alignment item 2, Q32, Q90). Keyed by host identifier, never by model name. A status of
-// UNAVAILABLE or UNVERIFIED is honest; fake parity is not. `doctor` renders this table for the active host and marks
-// every profile requirement that depends on an UNVERIFIED capability as NOT SATISFIED until conformance verifies it.
+// UNAVAILABLE or UNVERIFIED is honest; fake parity is not.
+//
+// WHAT A STATUS IS. Every status here is a DECLARATION EGO authored, read as "what EGO can claim on this host today",
+// not "what the host might offer": a host with a sandbox EGO never detects is UNAVAILABLE for the sandbox control.
+// Nothing is measured against a running host before the phase-6 conformance suite; `verifiedBy` names the check that
+// will do it.
+//
+// WHO READS IT. `ego doctor` reads exactly one key from this table, `blocking-pre-tool-hook` (the hooks section).
+// `hostCapability` and `hostSupports` have no production caller. The containment controls that doctor reports come
+// from control-plane/containment/controls.md, which carries its own per-host statuses; for every id both files carry
+// the statuses must be equal, and packages/kernel/test/closure-docs.test.ts fails when they differ.
 import type { SupportStatus } from '../control-plane/types.ts';
 
 export const HOST_IDS = ['claude-code', 'codex-cli'] as const;
@@ -57,17 +66,17 @@ export const HOST_MATRIX: Record<HostId, HostProfile> = {
       },
       'post-tool-hook': {
         status: 'SUPPORTED',
-        note: 'PostToolUse observes Bash writes after execution (detect, not prevent)',
+        note: 'PostToolUse arrives after the call; EGO counts failed steps against the retry budget and writes a ledger line (tool, one-line summary, failed). It inspects no path and detects no write: a shell write is judged before it runs, never observed after',
         verifiedBy: 'conformance.hook.posttooluse',
       },
       'session-start-hook': {
         status: 'SUPPORTED',
-        note: 'SessionStart injects the resume context',
+        note: 'SessionStart injects the governance summary, active grants and corrections, and a resume reminder',
         verifiedBy: 'conformance.hook.sessionstart',
       },
       'stop-hook': {
         status: 'SUPPORTED',
-        note: 'Stop runs the completion gate',
+        note: 'Stop runs and records the stop and any budget breach in the ledger; it never blocks (the completion gate is phase 2)',
         verifiedBy: 'conformance.hook.stop',
       },
       'user-prompt-hook': {
@@ -92,7 +101,7 @@ export const HOST_MATRIX: Record<HostId, HostProfile> = {
       },
       'host-process-identity': {
         status: 'SUPPORTED',
-        note: 'CLAUDE_PID for liveness of held scopes',
+        note: 'CLAUDE_PID is used to recognise the host; liveness of held scopes (phase 2) would use it',
         verifiedBy: 'conformance.host.pid',
       },
       'blocking-in-every-permission-mode': {
@@ -101,18 +110,18 @@ export const HOST_MATRIX: Record<HostId, HostProfile> = {
         verifiedBy: 'conformance.hook.allmodes',
       },
       'managed-settings-lock': {
-        status: 'SUPPORTED',
-        note: 'managed tier: allowManagedHooksOnly, allowManagedPermissionRulesOnly (HIGH_ASSURANCE)',
+        status: 'UNVERIFIED',
+        note: 'a host feature (the design names allowManagedHooksOnly and allowManagedPermissionRulesOnly); EGO does not install, read or verify a managed tier, so it cannot claim it',
         verifiedBy: 'conformance.host.managed',
       },
       'sandboxed-command-execution': {
-        status: 'PARTIAL',
-        note: 'host sandbox exists; EGO records its presence and never assumes it',
+        status: 'UNAVAILABLE',
+        note: 'not in force: EGO neither establishes, requires nor detects a sandbox, whatever the host offers (issue #26)',
         verifiedBy: 'conformance.host.sandbox',
       },
       'network-egress-control': {
         status: 'PARTIAL',
-        note: 'egress limits depend on the host sandbox; kernel classifies URLs and commands regardless',
+        note: 'no OS-level egress restriction; the classifier asks or denies the network clients and URLs it recognises (DENY in HIGH_ASSURANCE) and leaves git remotes, forge reads, registry reads and container runs open',
         verifiedBy: 'conformance.host.egress',
       },
       'model-identity-reporting': {
@@ -136,8 +145,8 @@ export const HOST_MATRIX: Record<HostId, HostProfile> = {
         verifiedBy: 'conformance.host.mcp',
       },
       'worktree-isolation': {
-        status: 'PARTIAL',
-        note: 'host can open worktrees; the kernel enforces isolation through held scopes',
+        status: 'UNAVAILABLE',
+        note: 'isolation of Git state, not containment, and not implemented: the host can open worktrees, but EGO neither creates nor requires one and nothing refuses a second live session in a checkout (held scopes are phase 2)',
         verifiedBy: 'conformance.host.worktree',
       },
     },

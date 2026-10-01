@@ -54,7 +54,7 @@ test('host matrix is complete, honest and keyed by host id', () => {
   assert.ok(!hostSupports('claude-code', 'token-usage-reporting'));
 });
 
-test('containment controls reference known hosts and profiles and are consistent with the matrix', () => {
+test('containment controls reference known hosts and profiles (agreement with the matrix is asserted in closure-docs.test.ts)', () => {
   const cp = loadControlPlane(ROOT);
   const ids = new Set(cp.containment.map((c) => c.id));
   for (const required of [
