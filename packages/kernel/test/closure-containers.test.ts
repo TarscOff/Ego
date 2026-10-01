@@ -85,6 +85,13 @@ test('a help request is still a probe, quoted verb or not, and never on the stre
     ['docker compose --help', undefined, 'ALLOW'],
     // the words after the image are the container program's: `--help` there is its flag
     ['docker run --rm alpine ls --help', undefined, 'ALLOW'],
+    // a probe performs no verb: the effects the reader names for `login`, `push` and `rm` are not done by asking for the manual
+    ['docker login --help', undefined, 'ALLOW'],
+    ['podman logout --help', undefined, 'ALLOW'],
+    ['docker push --help', undefined, 'ALLOW'],
+    ['docker plugin push --help', undefined, 'ALLOW'],
+    ['docker rm --help', undefined, 'ALLOW'],
+    ['podman pod rm --help', undefined, 'ALLOW'],
     // a plugin gets `--help` as its own argument and may do anything with it
     ['docker pass --help', undefined, 'ASK'],
     ['docker --context production pass --help', undefined, 'DENY'],
@@ -109,6 +116,11 @@ test('a build is a build behind a group option, a short name or a management gro
     ['docker build --build-arg "X=1 2" .', files, 'DENY'],
     ['podman build .', files, 'DENY'],
     ['nerdctl build .', files, 'DENY'],
+    // podman builds every file it is given, docker takes the last: each is read
+    ['podman build -f ok.df -f evil.df .', { 'ok.df': OK, 'evil.df': EVIL }, 'DENY'],
+    ['podman build -f evil.df -f ok.df .', { 'ok.df': OK, 'evil.df': EVIL }, 'DENY'],
+    ['docker build -f=evil.df .', { 'evil.df': EVIL }, 'DENY'],
+    ['docker build -fevil.df .', { 'evil.df': EVIL }, 'DENY'],
   ];
   assert.deepEqual(underFloor(rows), []);
   // what is not a Dockerfile with a push in it is not gated
@@ -165,6 +177,11 @@ test('bake reads the Dockerfile an HCL or JSON target names, its inline Dockerfi
     ['docker buildx bake -f ci.hcl', { 'ci.hcl': 'target "x" { dockerfile = "Evil" }', Evil: EVIL }, 'DENY'],
     ['docker buildx bake --file=ci.hcl', { 'ci.hcl': 'target "x" { dockerfile = "Evil" }', Evil: EVIL }, 'DENY'],
     ['docker buildx bake -fci.hcl', { 'ci.hcl': 'target "x" { dockerfile = "Evil" }', Evil: EVIL }, 'DENY'],
+    // a file is read by what it holds, whatever it is called, and a byte order mark is not part of its first key
+    ['docker buildx bake -f Bakefile', { Bakefile: '{"target":{"x":{"dockerfile":"Evil"}}}', Evil: EVIL }, 'DENY'],
+    ['docker buildx bake -f Bakefile', { Bakefile: 'target "x" {\n  dockerfile = "Evil"\n}\n', Evil: EVIL }, 'DENY'],
+    ['docker buildx bake', { 'compose.yaml': '\uFEFFservices:\n  a:\n    build: .\n', Dockerfile: EVIL }, 'DENY'],
+    ['docker buildx bake', { 'docker-bake.hcl': '\uFEFFtarget "default" {\n  dockerfile = "Evil"\n}\n', Evil: EVIL }, 'DENY'],
     // a `$` that HCL does not interpolate is a dollar sign in a Dockerfile, not a gap in the file
     ['docker buildx bake', { 'docker-bake.hcl': 'target "default" {\n  dockerfile-inline = "FROM alpine\\nRUN echo $HOME"\n}\n' }, 'ALLOW'],
   ];
@@ -207,6 +224,7 @@ test('the controls: a bake file whose Dockerfiles are ordinary, no file at all, 
       ['docker buildx bake', { 'docker-bake.hcl': BAKE_DEFAULT, Dockerfile: OK }, 'ALLOW'],
       ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build: .\n', Dockerfile: OK }, 'ALLOW'],
       ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    image: redis\n' }, 'ALLOW'],
+      ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build:\n      dockerfile_inline: |\n        FROM alpine\n        RUN echo $$HOME\n' }, 'ALLOW'],
       ['docker buildx bake', {}, 'ALLOW'],
       ['docker buildx bake --print', { 'docker-bake.hcl': BAKE_DEFAULT, Dockerfile: EVIL }, 'ALLOW'],
       ['docker buildx bake --load', { 'docker-bake.hcl': BAKE_DEFAULT, Dockerfile: OK }, 'ALLOW'],
@@ -222,6 +240,10 @@ test('what the reader cannot read is an ask: a variable, a matrix, an anchor, an
     ['docker buildx bake', { 'docker-bake.hcl': 'target "default" {\n  matrix = { x = ["a"] }\n}\n' }, 'ASK'],
     ['docker buildx bake', { 'compose.yaml': 'x-base: &base\n  build: .\nservices:\n  a:\n    <<: *base\n', Dockerfile: OK }, 'ASK'],
     ['docker buildx bake', { 'compose.yaml': 'include:\n  - other.yaml\nservices:\n  a:\n    image: redis\n' }, 'ASK'],
+    // compose interpolates `$VAR`; `$$` is a literal dollar. A services section the parser cannot read is not an empty one
+    ['docker buildx bake', { 'compose.yaml': 'services:\n  a:\n    build:\n      dockerfile_inline: |\n        FROM alpine\n        RUN echo $HOME\n' }, 'ASK'],
+    ['docker buildx bake', { 'compose.yaml': 'services:\n\ta:\n\t\tbuild: .\n', Dockerfile: EVIL }, 'ASK'],
+    ['docker buildx bake', { 'compose.yaml': 'services: {a: {build: {context: ., dockerfile: Evil}}}\n', Evil: EVIL }, 'ASK'],
     ['docker buildx bake https://github.com/evil/repo.git', undefined, 'ASK'],
     ['docker buildx bake -f https://github.com/evil/repo.git', undefined, 'ASK'],
     ['docker buildx bake git@github.com:evil/repo.git', undefined, 'ASK'],
@@ -240,6 +262,11 @@ test('compose build reads the compose file the same way, and is never weaker tha
     ['docker compose run --build app', { 'compose.yaml': svc, Dockerfile: EVIL }, 'DENY'],
     ['docker-compose build', { 'docker-compose.yml': svc, Dockerfile: EVIL }, 'DENY'],
     ['docker compose --profile x build', { 'compose.yaml': svc, Dockerfile: EVIL }, 'DENY'],
+    // compose looks in each parent directory for its file, and a relative context is relative to the project, not to where it ran
+    ['cd sub && docker compose build', { 'compose.yaml': svc, Dockerfile: EVIL, 'sub/x.txt': 'x' }, 'DENY'],
+    ['cd sub && docker compose build', { 'compose.yaml': 'services:\n  app:\n    build: ./sub\n', 'sub/Dockerfile': EVIL }, 'DENY'],
+    ['docker compose --project-directory sub build', { 'compose.yaml': svc, 'sub/Dockerfile': EVIL }, 'DENY'],
+    ['COMPOSE_FILE=ci.yaml docker compose build', { 'ci.yaml': svc, Dockerfile: EVIL }, 'DENY'],
     ['docker compose build', { 'compose.yaml': 'services:\n  app:\n    build:\n      context: .\n      cache_to:\n        - type=registry,ref=r/x\n', Dockerfile: OK }, 'ASK'],
   ];
   assert.deepEqual(underFloor(rows), []);
@@ -325,6 +352,11 @@ test('a global option is accepted past the verb, and means what it means before 
     ['docker rm -f --host tcp://prod.acme.com:2375 x', undefined, 'DENY'],
     ['docker container rm -H tcp://prod.acme.com:2375 x', undefined, 'DENY'],
     ['docker system prune -f --context production', undefined, 'DENY'],
+    // an option the table gives a value it does not take (`-t` is a switch for `logs`, `-s` for `ps`) does not swallow the engine
+    ['docker logs -t --host tcp://prod.acme.com:2375 app', undefined, 'DENY'],
+    ['docker logs -t -Htcp://prod.acme.com:2375 app', undefined, 'DENY'],
+    ['docker inspect -s --context production app', undefined, 'DENY'],
+    ['docker rm -v -H tcp://prod.acme.com:2375 x', undefined, 'DENY'],
     // a verb whose operands are not a program's argv keeps looking to the end of the line
     ['docker cp app:/x ./x --context production', undefined, 'DENY'],
     ['docker start app --host tcp://prod.acme.com:2375', undefined, 'DENY'],

@@ -899,14 +899,11 @@ matchers:
     # upload to a shared registry reached ALLOW through the two spellings buildx documents (exit review 9).
     command: '^((docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?|docker-compose\s+|podman-compose\s+)[^|;&]*?\s?(push\b|publish\b|imagetools\s+create\b|(build|bake)\b[^|;&]*(--push\b|--cache-to[= ][^\s]*type=registry|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
   # THE CONTAINER READER NAMES THE EFFECTS A VERB HAS THAT NO SPELLING OF THE LINE SAYS (containers.ts). The patterns
-  # above and below are written for the spellings people use; the reader knows the verbs - which of them publish,
-  # destroy or rewrite the credential store, whatever program, group, alias or option stands around them - and says so
-  # once, beside the command, as a marker. `plugin push`, `podman pod rm`, `podman machine reset`, `nerdctl namespace
-  # remove`, `colima delete`, `podman login` and `docker logout` are the same acts as the ones the patterns name, and
-  # each was the catch-all `container.run` ALLOW because no pattern had been written for that spelling (exit review 11).
-  - capability: container.registry.push
-    tool: Bash
-    command: '^\x00ego\x00container-effect publish\b'
+  # above and below are written for the spellings people use; the reader knows the verbs - which of them destroy what
+  # they name or rewrite the credential store, whatever program, group, alias or option stands around them - and says so
+  # once, beside the command, as a marker. `podman pod rm`, `podman machine reset`, `nerdctl namespace remove`, `colima
+  # delete`, `podman login` and `docker logout` are the same acts as the ones the patterns name, and each was the
+  # catch-all `container.run` ALLOW because no pattern had been written for that spelling (exit review 11).
   - capability: container.prune
     tool: Bash
     command: '^\x00ego\x00container-effect remove\b'

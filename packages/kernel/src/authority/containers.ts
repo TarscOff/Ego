@@ -255,7 +255,7 @@ const DOCKER_TOP = leaves(
 const PODMAN_TOP = leaves(
   'attach:hx build:b commit cp:h create:c diff:r events:r exec:cx export history:r images:r import info:r inspect kill load ' +
     'login:k logout:k logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save:r search:r start:h stats:r stop tag ' +
-    'top:r unpause update version:r wait help:r',
+    'top:r unpause update version:r wait help:r untag completion checkpoint restore init',
 );
 const GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   container: leaves(
@@ -291,6 +291,12 @@ const BUILDX_IMAGETOOLS = leaves('create:p inspect:r');
 // podman and nerdctl add groups of their own
 const PODMAN_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   ...GROUPS,
+  container: leaves(
+    'attach:hx commit cp:h create:c diff:r exec:cx export inspect kill logs ls:r list=ls ps=ls pause port:r prune:d rename ' +
+      'restart rm:d remove=rm run:c start:h stats:r stop top:r unpause update wait exists init checkpoint restore cleanup clone',
+  ),
+  image: leaves('build:b diff:r exists history:r import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save:r tag untag'),
+  healthcheck: leaves('run'),
   pod: leaves('clone create exists inspect kill logs pause prune:d ps:r ls=ps list=ps restart rm:d start stats stop top unpause'),
   machine: leaves('cp info:r init inspect list:r ls=list os reset:d rm:d set ssh:c start stop'),
   system: leaves('check df:r events:r info:r migrate prune:d renumber reset:d connection'),
@@ -302,6 +308,7 @@ const PODMAN_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
 const PODMAN_SYSTEM_CONNECTION = leaves('add:n default:n list:r ls=list remove:d rm=remove rename');
 const NERDCTL_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   ...GROUPS,
+  image: leaves('build:b convert decrypt encrypt history:r import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save:r tag'),
   namespace: leaves('create inspect ls:r list=ls remove:d rm=remove update'),
 };
 const BUILDAH_TOP = leaves('build:b bud=build build-using-dockerfile=build');
@@ -364,6 +371,8 @@ const TRAILING_ENV = /^[A-Z][A-Z0-9_]*=/;
 /** the engine options, as values, wherever the verb's own grammar does not know them */
 const ENGINE_VALUES = grammar('-H --host --url --address --context --connection --builder --config', '');
 const ENGINE_VALUES_C = grammar('-c', '');
+/** a word that is itself an engine-selecting option, whatever stands before it */
+const ENGINE_OPTION_WORD = /^(-H|--(host|context|url|connection|builder|config|address)(=|$))/;
 
 function blank(program: ContainerProgram, ws: string[]): ContainerCommand {
   return {
@@ -556,7 +565,12 @@ function finish(cmd: ContainerCommand, def: ProgramDef): ContainerCommand {
       break;
     }
     if (w.startsWith('-') && w !== '-') {
-      const o = readOption(ws, i, g);
+      let o = readOption(ws, i, g);
+      // AN ENGINE OPTION IS NEVER SOMEBODY'S VALUE. This table gives a letter one meaning for every verb that shares it, and
+      // `-t` is a timeout for `stop` and a switch for `logs`, `-s` a signal for `kill` and a switch for `ps`: where the
+      // guess is wrong the next word is swallowed, and when that word is `-H` the engine is never seen
+      if (o.length === 2 && o.value !== null && ENGINE_OPTION_WORD.test(o.value))
+        o = { ...o, value: null, length: 1 };
       cmd.options.push(o);
       cmd.optionAt.push(i);
       if (!o.known && !o.glued && cmd.unknownOption === null) cmd.unknownOption = o.name;
@@ -775,7 +789,7 @@ export function outputEffects(spec: string): BuildEffect[] {
   const type = kv.get('type');
   const dest = kv.get('dest');
   const effects: BuildEffect[] = [];
-  const name = kv.get('name') ?? kv.get('ref') ?? 'the build output';
+  const name = kv.get('name') ?? kv.get('ref') ?? 'build-output';
   const pushes = kv.get('push') === 'true' || kv.get('push') === '1' || kv.has('push-by-digest') && kv.get('push-by-digest') !== 'false';
   if (type === undefined) return [{ kind: 'gap', why: `the output ${trimmed} names no type` }];
   if (isDynamic(trimmed)) return [{ kind: 'gap', why: `the output ${trimmed} is built at run time` }];
@@ -817,7 +831,7 @@ export function cacheToEffects(spec: string): BuildEffect[] {
     return dest !== undefined && dest !== '' ? [{ kind: 'write', dest }] : [{ kind: 'gap', why: 'a local cache names no destination' }];
   }
   // registry, gha, s3, azblob: layers are uploaded to a service other people can read
-  return [{ kind: 'push', ref: kv.get('ref') ?? `the ${type} cache` }];
+  return [{ kind: 'push', ref: kv.get('ref') ?? `build-cache-${type}` }];
 }
 
 /** A build secret reads a host file into the build. */
@@ -842,7 +856,7 @@ export function commandBuildEffects(cmd: ContainerCommand): BuildEffect[] {
     else if (key === 'network' && value === 'host') out.push({ kind: 'isolation', what: 'build network host' });
   };
   for (const o of cmd.options) {
-    if (o.name === '--push') out.push({ kind: 'push', ref: 'the build output' });
+    if (o.name === '--push') out.push({ kind: 'push', ref: 'build-output' });
     else if (o.name === '-o' || o.name === '--output') take('output', o.value);
     else if (o.name === '--cache-to') take('cache-to', o.value);
     else if (o.name === '--secret') take('secret', o.value);
@@ -859,7 +873,7 @@ export function commandBuildEffects(cmd: ContainerCommand): BuildEffect[] {
 export function effectStatement(e: BuildEffect): string | null {
   switch (e.kind) {
     case 'push':
-      return `docker push ${e.ref.includes(' ') || e.ref === '' ? 'build-output' : e.ref}`;
+      return `docker push ${e.ref === '' ? 'build-output' : quoteWord(e.ref)}`;
     case 'write':
       return `docker image save -o ${quoteWord(e.dest)} build-output`;
     case 'read':
@@ -922,8 +936,10 @@ export function canonicalCommand(cmd: ContainerCommand, original: readonly strin
   return out.join(' ') === original.join(' ') ? null : out;
 }
 
-/** The markers the evaluator's matchers name for the effects a verb has that no spelling of the command line says:
- *  a destroyed pod, a rewritten credential store, a push by a verb nobody wrote a pattern for. */
+/** The markers the evaluator's matchers name for the effects a verb has that no spelling of the command line says: a
+ *  destroyed pod, a rewritten credential store. (A PUSH is not here: every spelling of one - `push`, `image push`, `plugin
+ *  push`, `manifest push`, `compose publish`, `imagetools create`, `build --push` - already ends in a word the registry
+ *  pattern reads, and the approval card names the registry from the decisive hit's own words, which a marker has not got.) */
 export function effectMarkers(cmd: ContainerCommand, mark: string): string[] {
   if (!cmd.determinate || !cmd.modelled || cmd.path.length === 0) return [];
   const tag = `${cmd.program} ${cmd.path.join(' ')}`;
@@ -934,7 +950,6 @@ export function effectMarkers(cmd: ContainerCommand, mark: string): string[] {
     const rmi = cmd.options.some((o) => o.name === '--rmi' && /^(all|local)$/.test(o.value ?? ''));
     if (volumes || rmi) out.push(`${mark}container-effect remove ${tag}`);
   }
-  if (cmd.flags.includes('p')) out.push(`${mark}container-effect publish ${tag}`);
   if (cmd.flags.includes('k')) out.push(`${mark}container-effect credential ${tag}`);
   return out;
 }
@@ -1017,7 +1032,29 @@ const lastOf = <T>(xs: readonly T[]): T | undefined => xs[xs.length - 1];
 
 /** `docker build`: one Dockerfile, named by `-f` (relative to the working directory) or sitting in the context */
 function collectDockerfileBuild(cmd: ContainerCommand, io: BuildIO): BuildResult {
-  const named = lastOf(cmd.options.filter((o) => o.name === '-f' || o.name === '--file').map((o) => o.value))?.replace(/^=/, '') ?? null;
+  const fileOptions = cmd.options.filter((o) => o.name === '-f' || o.name === '--file');
+  // docker takes the LAST `-f`; podman and buildah build EVERY file they are given. Which tool this is cannot be asked of a
+  // word, so each is read, and a build that names two Dockerfiles runs all of them as far as this reader can tell.
+  if (fileOptions.length > 1) {
+    const parts = fileOptions.map((keep) =>
+      collectDockerfileBuild({ ...cmd, options: cmd.options.filter((o) => o === keep || !(o.name === '-f' || o.name === '--file')) }, io),
+    );
+    const body = parts.flatMap((p) => p.body ?? []);
+    const unresolved: BuildGap[] = parts
+      .filter((p) => p.resolution !== 'RESOLVED_COMPLETE' && p.resolution !== 'ABSENT_VERIFIED')
+      .map((p) => ({ what: 'body', where: p.key, why: p.reason }));
+    const sources = parts.flatMap((p) => (p.provenance ? [p.provenance] : []));
+    return {
+      key: parts.map((p) => p.key).join('+'),
+      reason: unresolved.length ? `Dockerfiles; NOT fully resolved: ${unresolved[0]!.why}` : 'Dockerfiles',
+      resolution: unresolved.length ? 'PARTIAL' : parts.every((p) => p.resolution === 'ABSENT_VERIFIED') ? 'ABSENT_VERIFIED' : 'RESOLVED_COMPLETE',
+      body: parts.every((p) => p.body === null) && !unresolved.length ? null : body,
+      hostBody: [],
+      unresolved,
+      ...(sources.length ? { provenance: { source: sources.map((s) => s.source).join(','), fingerprint: sources.map((s) => s.fingerprint).join(',') } } : {}),
+    };
+  }
+  const named = lastOf(fileOptions.map((o) => o.value))?.replace(/^=/, '') ?? null;
   const result = (r: Omit<BuildResult, 'hostBody' | 'unresolved'> & { unresolved?: BuildGap[] }): BuildResult => ({ hostBody: [], unresolved: [], ...r });
   // `-f -` reads the Dockerfile from STANDARD INPUT. That is a stream - UNLESS the command line holds it, which a
   // heredoc does: `docker build -f - . <<EOF\nFROM alpine\nRUN git push origin main\nEOF` writes the whole Dockerfile in
@@ -1217,8 +1254,8 @@ const BAKE_DEFAULT_FILES = [
 function collectBake(cmd: ContainerCommand, io: BuildIO): BuildResult {
   const into = new Collected();
   const files = cmd.options.filter((o) => o.name === '-f' || o.name === '--file').map((o) => o.value ?? '');
-  const key = `bake:${io.cwd}:${files.join(',')}:${cmd.operands.join(',')}`;
   const sets = cmd.options.filter((o) => o.name === '--set').map((o) => o.value ?? '');
+  const key = `bake:${io.cwd}:${files.join(',')}:${cmd.operands.join(',')}:${sets.join(',')}`;
   // `--print` PRINTS the resolved configuration as JSON and builds nothing (exit review 10)
   if (cmd.options.some((o) => (o.name === '--print' || o.name === '--list') && !(o.glued && FALSE.test(o.value ?? ''))))
     return { key: 'bake:print', reason: 'bake --print renders the configuration and builds nothing', resolution: 'ABSENT_VERIFIED', body: null, hostBody: [], unresolved: [] };
@@ -1384,10 +1421,14 @@ function resolveInheritance(t: Target, all: ReadonlyMap<string, Target>, depth =
 }
 
 /** one definition file, by what it is: HCL, JSON or a compose file */
-function parseDefinition(name: string, text: string): { targets: Target[]; gaps: BuildGap[] } {
+function parseDefinition(name: string, source: string): { targets: Target[]; gaps: BuildGap[] } {
+  // a byte order mark is not part of the first key: left in, it made `services` another word and the file empty
+  const text = source.charCodeAt(0) === 0xfeff ? source.slice(1) : source;
   const base = name.slice(name.lastIndexOf('/') + 1);
-  if (/\.ya?ml$/i.test(base) || (name === '-' && /^\s*(services|name|version|x-[\w-]+)\s*:/m.test(text))) return parseComposeAsTargets(name, text);
-  if (/\.json$/i.test(base) || (name === '-' && /^\s*\{/.test(text))) return parseBakeJson(name, text);
+  const yaml = /\.ya?ml$/i.test(base) || (!/\.(json|hcl)$/i.test(base) && /^\s*(services|name|version|x-[\w-]+)\s*:/m.test(text));
+  if (yaml) return parseComposeAsTargets(name, text);
+  // a file with no extension is read by what it holds: bake takes JSON or HCL from `-f` whatever it is called
+  if (/\.json$/i.test(base) || (!/\.hcl$/i.test(base) && /^\s*\{/.test(text))) return parseBakeJson(name, text);
   return parseBakeHcl(name, text);
 }
 
@@ -1719,13 +1760,18 @@ function parseComposeAsTargets(name: string, text: string): { targets: Target[];
     return { targets: [], gaps: [{ what: 'body', where: name, why: 'the compose file uses anchors, merge keys, include or extends, which this reader does not follow' }] };
   let doc: YamlValue;
   try {
-    doc = parseYaml(stripped.replace(/^---\s*$/m, ''));
+    doc = parseYaml(text.replace(/^---\s*$/m, ''));
   } catch (e) {
     return { targets: [], gaps: [{ what: 'body', where: name, why: `the compose file could not be parsed (${(e as Error).message})` }] };
   }
   const targets: Target[] = [];
   const services = isMap(doc) ? doc['services'] : undefined;
-  if (services === undefined || services === null) return { targets, gaps };
+  if (services === undefined || services === null) {
+    // a `services:` key the parser did not find is a file it did not understand, not a file with nothing to build
+    if (/^\s*["']?services["']?\s*:/m.test(stripped))
+      return { targets, gaps: [{ what: 'body', where: name, why: 'the compose file has a services section this reader could not parse' }] };
+    return { targets, gaps };
+  }
   if (!isMap(services)) return { targets, gaps: [{ what: 'body', where: name, why: 'the compose services are not a map' }] };
   for (const [svc, body] of Object.entries(services)) {
     if (!isMap(body)) continue;
@@ -1734,7 +1780,9 @@ function parseComposeAsTargets(name: string, text: string): { targets: Target[];
     const xb = isMap(body['x-bake']) ? (body['x-bake'] as { [key: string]: YamlValue }) : null;
     if (b === undefined || b === null) continue;
     const t = emptyTarget(svc);
-    const dynamicOf = (v: YamlValue | undefined): string | null => (typeof v === 'string' && !isDynamic(v) ? v : null);
+    // compose interpolates `$VAR` and `${VAR}` in every value and writes a literal dollar as `$$`
+    const dynamicOf = (v: YamlValue | undefined): string | null =>
+      typeof v === 'string' && !/\$[{A-Za-z_]/.test(v.replace(/\$\$/g, '')) ? v.replace(/\$\$/g, '$') : null;
     if (typeof b === 'string') {
       if (isDynamic(b)) t.dynamic.push('build');
       else {
@@ -1834,6 +1882,9 @@ function collectCompose(cmd: ContainerCommand, io: BuildIO): BuildResult {
       defined.push({ name: f, text });
     } else if (required || io.exists(abs)) into.gaps.push({ what: 'body', where: f, why: 'the compose file could not be read' });
   };
+  // where the project is: the directory of the first file named, or of the first default file found (a relative context is
+  // relative to it, not to the directory the command runs in)
+  let projectBase = (files[0] ?? '').replace(/\/?[^/]*$/, '');
   if (files.length) for (const f of files) load(f, true);
   else {
     // compose looks in the working directory and then in each PARENT, and takes the first directory that has a file
@@ -1851,6 +1902,7 @@ function collectCompose(cmd: ContainerCommand, io: BuildIO): BuildResult {
         }
         if (!io.exists(abs)) continue;
         found = true;
+        projectBase = rel.replace(/\/$/, '');
         load(word, false);
       }
       const up = dir.slice(0, dir.lastIndexOf('/')) || '/';
@@ -1867,7 +1919,7 @@ function collectCompose(cmd: ContainerCommand, io: BuildIO): BuildResult {
     targets.push(...parsed.targets);
   }
   // compose resolves a relative context against the PROJECT directory: the directory of the first file, or the one named
-  const base = projectDir ?? (files[0] ?? '').replace(/\/?[^/]*$/, '');
+  const base = projectDir ?? projectBase;
   const seen = new Set<string>();
   for (const t0 of targets) {
     const t = { ...t0 };

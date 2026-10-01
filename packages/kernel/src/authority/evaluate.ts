@@ -325,6 +325,8 @@ const NODE_OPTIONS_INERT =
  *  no command can spell one on purpose either. A forged marker becomes ordinary text and is classified as what it
  *  is, rather than silencing the classification of what follows. */
 const MARK = '\u0000ego\u0000';
+/** what the container reader says a verb DOES (publish, remove, credential) - see containers.ts `effectMarkers` */
+const CONTAINER_EFFECT_MARK = `${MARK}container-effect `;
 /** Mangle EGO's own marker sentinel out of text that came from OUTSIDE the analyzer. Every hand-over of external
  *  bytes goes through here; the replacement keeps the length and the word shape, so what the reader sees is a
  *  plain unknown command rather than a marker. */
@@ -1674,7 +1676,8 @@ export function normalizeSegment(segment: string): string[] {
   const probe = helpProbeHead(segment);
   if (probe === null) return out;
   return [
-    ...out.filter((n) => n.startsWith(MARK) || /^git (config|alias-override) /.test(n)),
+    // (a container EFFECT is what a verb does, and a probe performs no verb: `docker login --help` rewrites no credentials)
+    ...out.filter((n) => (n.startsWith(MARK) && !n.startsWith(CONTAINER_EFFECT_MARK)) || /^git (config|alias-override) /.test(n)),
     `${MARK}help-probe ${probe}`,
   ];
 }
@@ -1954,13 +1957,16 @@ function normalizeSegmentInner(segment: string): string[] {
   const stripped = stripToolGlobalOptions(head, rest);
   rest = canonicalDryRun(stripped.rest);
   extra.push(...stripped.extra);
+  const late = stripped.late ?? [];
   // A CARRIER'S INNER SHELL RUNS ITS OWN EXPANSION PASS. `sh -c "echo x > .harnes{s..s}/runtime/pin.json"`
   // keeps the braces QUOTED at the outer level — where a real shell does not expand them either — and the inner
   // shell then expands them for real. The segment-level expansion therefore cannot see them, and the write to
   // EGO's own runtime reached ASK through every carrier there is (found by the cross-product, exit review 9).
   // The normalizer's output IS the command as the inner shell sees it, so it is expanded here, once, for all of
   // them; a segment with no brace returns unchanged.
-  return [...extra, ...normalizeTail(rest)].map((n) => expandBraces(n));
+  // (what a container verb DOES comes after the command itself, so the words the human reads in the approval are the
+  // command's own: the first of equal hits is the decisive one)
+  return [...extra, ...normalizeTail(rest), ...late].map((n) => expandBraces(n));
 }
 
 /** git accepts any UNAMBIGUOUS abbreviation of a long option, so `--no-verif`, `--forc`, `--amen` and `--de` all work.
@@ -2353,8 +2359,9 @@ const GIT_GLOBAL_FLAGS = new Set([
  * `git push` and `gh pr merge`. A `-c core.hooksPath=…` (or any hooks-related config override) additionally surfaces
  * as a `git config core.hooksPath …` segment so the hook-bypass matchers see it.
  */
-export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: string[]; extra: string[] } {
+export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: string[]; extra: string[]; late?: string[] } {
   const extra: string[] = [];
+  const late: string[] = [];
   const aliases = new Map<string, string>();
   if (head === 'git') {
     let i = 1;
@@ -2481,14 +2488,14 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
       // the effects a verb has that the line does not spell: a destroyed pod, a rewritten credential store, a push by a
       // verb no pattern was written for - and the outputs, caches and secrets of a build, which a flag can say in a
       // dozen forms. One statement each, in the plain words the matchers and the path rules already read.
-      extra.push(...effectMarkers(cc, MARK));
+      late.push(...effectMarkers(cc, MARK));
       for (const e of commandBuildEffects(cc)) {
         const s = effectStatement(e);
-        if (s !== null) extra.push(s);
+        if (s !== null) late.push(s);
       }
     }
   }
-  return { rest: tokens, extra };
+  return { rest: tokens, extra, late };
 }
 
 /** Output redirection targets of a segment (`> f`, `>> f`, `2> f`, `&> f`), quotes removed; heredocs and fd dups excluded. */
@@ -7360,6 +7367,10 @@ function resolveScriptCommand(
   const head = tokens[0] ?? '';
   const cwd = env.cwd;
   const written = env.written;
+  // A MARKER NAMES AN EFFECT AND RUNS NOTHING: the container reader's statement of what a verb does is not a program, and
+  // asking whether "container-effect" is a bounded command made every one of them an unmodelled closure of its own.
+  if (norm.startsWith(CONTAINER_EFFECT_MARK))
+    return { kind: 'none', key: 'container-effect', body: null, reason: 'a container effect marker runs nothing', resolution: 'NOT_A_PRODUCER' };
   /** A4 — FRESHNESS. A source rewritten by an earlier unit of the SAME command can no longer justify a later
    *  ALLOW: `printf 'build:\n\tgit push' > Makefile && make build` was classified from the old contents. */
   //  `\0any` is the wildcard: an EARLIER unit of this command could not be classified, so it may have written
@@ -7474,7 +7485,8 @@ function resolveScriptCommand(
         })(),
       shellLines: dockerfileShellLines,
       fingerprint,
-      env: (name) => env.envInputs?.[name],
+      // (every assignment the command line makes is kept under a private key: `COMPOSE_FILE` names the compose files)
+      env: (name) => env.envInputs?.[`\0env:${name}`] ?? env.envInputs?.[name],
     });
     if (built !== null)
       return {
