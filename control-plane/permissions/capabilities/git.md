@@ -48,5 +48,7 @@ organization policy layer says otherwise, Q98).
 
 ## Denied
 
-- [x] `git.hooks.bypass` — `--no-verify`, `-n` on commit, `core.hooksPath` changes, plumbing that skips hooks.
+`git.hooks.bypass` (`--no-verify`, `-n` on commit, `core.hooksPath` changes, plumbing that skips hooks) is an
+absolute deny and lives in `../absolute-denies.md`.
+
 - [x] `git.alias.inline` — an inline alias (`git -c alias.x=…`, `--config-env=alias.x=…`) redefines what a git verb runs; the aliased verb is judged as what it expands to, and a shell or opaque alias is refused. The transport options that name a program to run (`--upload-pack`, `--receive-pack`, `--exec`) are refused the same way: they hand git an arbitrary command line.

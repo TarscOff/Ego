@@ -124,9 +124,9 @@ test('PreToolUse: deny, ask, allow; effect-based denial; ledger and session coun
 test('grants: recognised once, negations respected, only ASK moves; corrections survive; mode marker only in EGO repo', () => {
   const { root, rt } = project('STANDARD');
   const table = compileAuthority(loadControlPlane(CP));
-  const g = recognizeGrants('please do not delete the branch, but assign it to me', table);
+  const g = recognizeGrants('please do not delete the branch, but rebase it', table);
   assert.ok(g.find((x) => x.capability === 'git.local.branch.delete')?.negated);
-  assert.ok(!g.find((x) => x.capability === 'forge.issue.assign')?.negated);
+  assert.ok(!g.find((x) => x.capability === 'git.local.rebase')?.negated);
   assert.equal(
     recognizeCorrection('ok. From now on always run lint first.'),
     'From now on always run lint first.',
@@ -135,23 +135,28 @@ test('grants: recognised once, negations respected, only ASK moves; corrections 
   assert.equal(recognizeModeMarker('ego mode: harness_maintenance'), null);
   const d = handleHook(
     ev(root, 'UserPromptSubmit', {
-      prompt: 'assign it to me. From now on always run lint first.\nEGO MODE: EGO_MAINTENANCE',
+      prompt: 'rebase it. From now on always run lint first.\nEGO MODE: EGO_MAINTENANCE',
     }),
     rt,
   );
-  assert.match(d.context ?? '', /grant recorded, forge.issue.assign/);
+  assert.match(d.context ?? '', /grant recorded, git.local.rebase/);
   assert.match(d.context ?? '', /EGO_MAINTENANCE is available only in the EGO source repository/);
   const rr = openRuntimeRoot(root, { runtimeSha256: rt.pin.integrity, version: rt.pin.version }, rt.now());
   const s = readSession(rr, 's1')!;
-  assert.deepEqual(s.grants, ['forge.issue.assign']);
+  assert.deepEqual(s.grants, ['git.local.rebase']);
   assert.deepEqual(s.activeCorrections, ['From now on always run lint first.']);
   assert.equal(s.mode, 'NORMAL_DELIVERY');
   // a DENY capability never becomes a grant even if the phrase matches
   const d2 = handleHook(ev(root, 'UserPromptSubmit', { prompt: 'you can push it' }), rt);
   assert.ok(!(d2.context ?? '').includes('grant recorded'));
+  // ...and neither does an EXTERNAL effect: assigning an issue changes shared state, so the phrase is heard, said so, and
+  // not recorded (this test used to pin the opposite, a session-wide ALLOW for forge.issue.assign - issue #16 section 4)
+  const d3 = handleHook(ev(root, 'UserPromptSubmit', { prompt: 'assign it to me' }), rt);
+  assert.match(d3.context ?? '', /forge.issue.assign is an external effect/);
+  assert.deepEqual(readSession(rr, 's1')!.grants, ['git.local.rebase']);
   // the SessionStart context carries grants and corrections across compaction
   const ss = handleHook(ev(root, 'SessionStart', { source: 'compact' }), rt);
-  assert.match(ss.context ?? '', /Active grants \(this session\): forge.issue.assign/);
+  assert.match(ss.context ?? '', /Active grants \(this session\): git.local.rebase/);
   assert.match(ss.context ?? '', /Active corrections: "From now on always run lint first."/);
   assert.match(ss.context ?? '', /Resumed/);
 });

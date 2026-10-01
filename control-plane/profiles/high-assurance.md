@@ -30,6 +30,10 @@ narrow:
     verdict: ASK
   - capability: command.network-tool
     verdict: DENY
+  # a request that SENDS is a network tool's work too: splitting the fetch from the send must not open a door that
+  # `command.network-tool` had closed
+  - capability: network.external-write
+    verdict: DENY
   - capability: network.public-read
     verdict: DENY
 ---

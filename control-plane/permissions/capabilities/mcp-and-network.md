@@ -31,6 +31,7 @@ MCP payloads pass redaction before transmission. Network endpoints are classifie
 - [x] `mcp.remote.discover` — list tools of a trusted remote MCP server. *Not yet reachable.*
 - [x] `mcp.remote.read` — read-only tools of a trusted remote MCP server. *Not yet reachable.*
 - [x] `mcp.remote.narrow-write` — narrow writes through a trusted remote MCP server. *Not yet reachable.*
+- [x] `network.external-write` — a request that SENDS to a host that is not a declared local target: a mutating HTTP request from `curl`, `wget` or an HTTP client (`-X POST|PUT|PATCH|DELETE`, `-d`, `--json`, `-F`, `-T`, `--post-data`), a file copy or remote shell (`scp`, `sftp`, `rsync` to a host, `ssh`), a raw socket (`nc`, `telnet`, `/dev/tcp`), or a tool pointed at an endpoint that is in no lockfile (`--registry`, `https_proxy=`). A fetch is `command.network-tool`; a request to a forge API host is the forge act it spells. The ceiling is ASK: no session grant lifts it, because an effect that leaves the machine is never an unattended ALLOW (issue #16 sections 4 and 8).
 - [x] `network.internal-dev` — internal development network endpoints.
 - [x] `network.public-read` — public read-only fetches (documentation, registries).
 

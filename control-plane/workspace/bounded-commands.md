@@ -296,6 +296,13 @@ bounded:
   - 'nerdctl'
   - 'curl'
   - 'wget'
+  # the other HTTP clients the network matcher reads by request: a client the evaluator reads cannot be "an unmodelled
+  # closure" (Q98 closure; the request is judged, see `networkWriteHits`)
+  - 'wget2'
+  - 'http'
+  - 'https'
+  - 'xh'
+  - 'xhs'
   - 'tar'
   - 'zip'
   - 'unzip'
