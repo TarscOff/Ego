@@ -326,6 +326,27 @@ test('a path with leading or trailing whitespace, or a NUL, is never judged as i
   assert.equal(evalIn(dir, 'Read', { file_path: 'src/a.ts' }).verdict, 'ALLOW');
 });
 
+test('trimming is linear: a very long run of padding cannot hold the hook until the host gives up on it', () => {
+  // a hook that times out is a non-blocking error on the host, so a call that stalls the classifier is a call that runs
+  const dir = workspace();
+  const wide = ' '.repeat(300_000);
+  const started = Date.now();
+  // the run of padding sits in the MIDDLE of the text: that is the shape a trailing-whitespace regex restarts on at every space
+  for (const [tool, input, refused] of [
+    ['apply_patch', { command: patch('*** Add File: ok.txt', `+x${wide}y`, `${wide}*** Add File: ${CRED}`, '+evil') }, true],
+    ['apply_patch', { command: patch('*** Update File: src/a.ts', `${wide}*** Move to: ${CRED}${wide}`, ...BODY) }, true],
+    ['apply_patch', { command: `*** Begin Patch\nz${'\t '.repeat(150_000)}z\n*** End Patch` }, true],
+    // padding in the middle of a name is part of the name: an odd file, not a refusal
+    ['Write', { file_path: `x${wide}y`, content: 'x' }, false],
+    ['Read', { file_path: `${wide}${HOME}/.ssh/id_rsa${wide}z` }, true],
+    ['Grep', { pattern: 'x', path: `src${wide}src` }, false],
+  ] as Array<[string, Record<string, unknown>, boolean]>) {
+    const e = evalIn(dir, tool, input);
+    if (refused) assert.notEqual(e.verdict, 'ALLOW', `${tool}: ${e.verdict}`);
+  }
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
+});
+
 test('a leading-space path is refused through the hook of both hosts', async () => {
   const p = project('STANDARD');
   for (const file_path of [` ${CRED}`, `${CRED} `, `\t${CRED}`]) {

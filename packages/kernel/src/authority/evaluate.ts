@@ -11359,8 +11359,20 @@ const INERT_HOST_TOOLS: ReadonlyMap<string, string> = new Map([
 
 /** What a host's own string handling treats as padding: `\s`, plus NEXT LINE and MONGOLIAN VOWEL SEPARATOR (the
  *  Unicode White_Space of Rust's `trim` and of older tables, which JavaScript's `\s` does not cover). */
-const HOST_PADDING = '\\s\\u0085\\u180e';
-const HOST_TRIM = new RegExp(`^[${HOST_PADDING}]+|[${HOST_PADDING}]+$`, 'g');
+const HOST_PADDING = /[\s\u0085\u180e]/;
+/**
+ * `trim` with the padding set above. A LOOP, NOT `replace(/^\s+|\s+$/g, '')`: the trailing alternative is quadratic on a
+ * long run of spaces that is NOT at the end (`/\s+$/` restarts at every space), and a patch line of 200 000 spaces and an
+ * `x` would hold the hook for minutes - a hook that times out is a non-blocking error on the host, so the call it was
+ * judging would simply run.
+ */
+function hostTrim(s: string): string {
+  let a = 0;
+  let b = s.length;
+  while (a < b && HOST_PADDING.test(s[a]!)) a++;
+  while (b > a && HOST_PADDING.test(s[b - 1]!)) b--;
+  return s.slice(a, b);
+}
 
 function unknownHit(table: CompiledAuthorityTable, ctx: EvaluationContext, via: string): CapabilityHit {
   return { capability: 'command.unknown', verdict: verdictFor(table, ctx, 'command.unknown'), via, absolute: false };
@@ -11382,7 +11394,7 @@ function toolPathHits(
   raw: string,
 ): CapabilityHit[] {
   const cwd = ctx.cwd ?? process.cwd();
-  const trimmed = raw.replace(HOST_TRIM, '');
+  const trimmed = hostTrim(raw);
   const nul = raw.indexOf('\0');
   const readings = new Set<string>([raw]);
   if (trimmed !== raw) readings.add(trimmed);
@@ -11436,7 +11448,7 @@ function applyPatchTargets(text: string): { targets: PatchTarget[]; refusal?: st
   const targets: PatchTarget[] = [];
   let inUpdate = false;
   for (const raw of text.split(PATCH_LINE_BREAK)) {
-    const line = raw.replace(HOST_TRIM, '');
+    const line = hostTrim(raw);
     if (!line.startsWith('*')) continue;
     const header = PATCH_HEADER.exec(line);
     if (header) {
@@ -11472,7 +11484,7 @@ function searchToolHits(
   glob: string,
 ): CapabilityHit[] {
   // the reach is computed from the path as a trimming host would read it; the path as written is classified too
-  const baseJudged = (base.split('\0')[0] ?? '').replace(HOST_TRIM, '') || (ctx.cwd ?? process.cwd());
+  const baseJudged = hostTrim(base.split('\0')[0] ?? '') || (ctx.cwd ?? process.cwd());
   const hits = toolPathHits(table, ctx, 'Read', base);
   const expanded = expandHome(baseJudged) ?? baseJudged;
   const home = canonicalPath(homedir()).split(sep).join('/');
