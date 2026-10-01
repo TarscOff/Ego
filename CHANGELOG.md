@@ -209,3 +209,36 @@ discipline of decision Q84 (authority changes are never patch releases).
   DENY (a redirection dropped every path under `/dev`; now only the discard devices are dropped, `/dev/shm` is scratch).
   A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask, and a leading `~` is the HOME the line assigned (`export HOME=/etc; echo x > ~/passwd`). A
   decision shares one view of the filesystem (the ordinary-development corpus runs in about two thirds of its former time).
+- **What makefile text `make` will run, and whether any of it was written or can be rewritten before or while it runs, is
+  one question with one reader** (closure audit 2026-10-01, wave 2, root cause "make"). The freshness ledger answered
+  "is this makefile stale" at the first read of an invocation and nowhere else; eight reviewed findings were the other
+  places. Visible changes, each from ALLOW to ASK or DENY and none for an ordinary command:
+  - `make 2>&1`, `make > log` and `make 2>&1 | tail` read the redirection's words as goals, found no rule for them and ran
+    the default goal under that proof (a default goal that pushes was ALLOW; it is now the DENY it always was for `make`).
+  - The shell expands an unquoted word with `*`, `?` or `[` before make starts, and make is handed the result: `make -f
+    ev*.mk` opens what matches, `make -C su* all` enters `sub`, `make dep*` builds the `deploy` a directory of that name
+    selects (a phony target runs). The command line was read with the pattern as if it were the name. One reader
+    (`shellGlobWords`) expands the whole word, as the shell does: `'ev*.mk'`, `--file=ev*.mk` and `-fev*.mk` stay literal
+    (checked against GNU make 3.81). A glob character produced by a brace expansion is no longer quoted back in
+    (`make -f ev*.m{k..k}`). A `-f` or `-I` word nobody can resolve asks instead of being dropped; `-I DIR` /
+    `--include-dir` are part of where an `include` is looked for.
+  - A makefile that a rule of the makefile can build is remade by make - the rule's recipe runs for every goal, `-n`
+    included - so what was read is a pre-image: a pattern rule (`%.mk: %.in`), a suffix rule, a wildcard or computed
+    target and `.DEFAULT` count, not only a rule with the file's own name. An implicit rule counts when its source is
+    there or can be made, so an old-style `%: %.sh` or `.c:` rule leaves a Makefile alone.
+  - A recipe's second pass asks: `cp evil.mk Makefile` then `make run`, a sub-makefile replaced and read again under a stamp
+    file, the same through an npm script or a shell script (the cycle guard compares the write ledger at entry and at
+    re-entry), and `CMD="..." make run` inside a recipe is a different invocation (the key carries the environment).
+  - A shell function is read again at its call when a file or the directory moved since its definition (`f() { make -C
+    sub all; }; cp evil.mk sub/Makefile; f`, `...; cd sub; f`).
+  - The ledger records a writer in the directory it runs in (`env -C`, `env --chdir`, `git -C`), a deletion or a move
+    away (`rm GNUmakefile && make` makes the next makefile in make's order the one that runs), and a sed script or a file
+    name with an `=` in it no longer hides the write (`sed -i 's/^CMD=true/CMD=sh/' Makefile`).
+  - The recipes of `make -j`, the stages of a pipeline, a background job and what follows it, and the later passes of a
+    loop are each read against the writes of the others.
+  - A command the makefile runs while it is read that is not a pure read (`X := $(shell cp gen.in gen.mk)` above `-include
+    gen.mk`, a script, `$(file >gen.mk,...)`) may write the makefile read after it: the invocation asks. A version
+    lookup, `date` and `uname` keep their ALLOW.
+
+  A growing recursion stops at the analysis depth and asks, as before. `$(MAKE)` in a recipe is still a variable this
+  resolver does not read, so a recipe line that spells it asks.
