@@ -50,4 +50,4 @@ the schema.
 - [x] `forge.issue.transition` — change issue state or workflow column (`gh issue reopen`, `gh project item-edit|item-add|item-archive|item-delete`).
 - [x] `forge.issue.close` — close issues.
 - [x] `forge.issue.delete` — delete an issue or work item (`gh issue delete`): unlike closing, it cannot be undone.
-- [x] `forge.api.mutate` — any mutating call through the forge API escape hatch (`gh api -X POST|PUT|PATCH|DELETE`, field flags, GraphQL mutations) that no more specific identifier names. A request whose path names an act this file lists (a merge, a repository delete, a protection or permission change) is judged as that act: the organization locks the act, not the spelling.
+- [x] `forge.api.mutate` — any mutating call through the forge API escape hatch (`gh api -X POST|PUT|PATCH|DELETE`, field flags, GraphQL mutations, or the same request sent with `curl`, `wget` or an HTTP client to a forge API host) that no more specific identifier names. A request whose path names an act this file lists (a merge, a repository delete, a protection or permission change) is judged as that act: the organization locks the act, not the spelling.

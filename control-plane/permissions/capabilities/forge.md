@@ -14,8 +14,13 @@ repository, and every deletion of what cannot be recreated (a repository, a rele
 protection instead of changing it (`gh pr merge --admin`, enforcement switched off for administrators, a bypass
 actor) is `forge.protection.bypass`, an absolute deny that no layer can widen.
 
-An act is judged by what it does, not by the tool that spells it: `gh pr merge` and `gh api -X PUT …/merge` are the
-same act under the same identifier. A write that no more specific identifier names is `forge.api.mutate`.
+An act is judged by what it does, not by the tool that spells it: `gh pr merge`, `gh api -X PUT …/merge` and a `curl`
+(or `wget`, `http`, `xh`) PUT of the same request to a forge API host are the same act under the same identifier. A
+write that no more specific identifier names is `forge.api.mutate`.
+
+Nothing below the Allowed section is ever an unattended ALLOW. A recognised human phrase
+(`control-plane/permissions/grants.md`) lifts only a capability whose effect stays on this machine; for a forge write it
+changes nothing, and each occurrence asks (issue #16 sections 4 and 8).
 
 ## Allowed
 

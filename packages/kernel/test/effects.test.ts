@@ -106,7 +106,9 @@ test('shell scripts are read and classified when static and inside the workspace
   assert.equal(bash('. scripts/push.sh', c).decisive?.capability, 'git.remote.push');
   // heredoc bodies are data, not commands
   assert.equal(bash('./scripts/heredoc.sh', c).verdict, 'ALLOW');
-  assert.equal(bash('./scripts/curl.sh', c).decisive?.capability, 'command.network-tool');
+  // (the script POSTs to a host that is not a declared local target: a send, so `network.external-write` since the
+  // Q98 closure - it was `command.network-tool` while that capability covered a download and an upload alike)
+  assert.equal(bash('./scripts/curl.sh', c).decisive?.capability, 'network.external-write');
   // a non-shell executable is opaque
   assert.equal(bash('./bin/tool', c).decisive?.capability, 'command.script-opaque');
   // outside the workspace: never read

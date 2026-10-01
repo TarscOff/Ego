@@ -170,7 +170,7 @@ function handleLocked(
       const launcher = resolveLauncher(rt.env ?? process.env);
       const lines = [
         `EGO ${self.version} (runtime ${self.runtimeSha256.slice(0, 12)}) governs this repository. Profile ${rt.pin.profile}, mode ${session.mode}, task source ${rt.pin.taskSource ?? 'ad-hoc'}.`,
-        `Authority: ${cache.table.absoluteDenies.length} absolute denies and ${cache.table.organizationLocked.length} organization-locked denies are enforced deterministically; ASK capabilities prompt the human once per grant.`,
+        `Authority: ${cache.table.absoluteDenies.length} absolute denies and ${cache.table.organizationLocked.length} organization-locked denies are enforced deterministically; an ASK capability that stays on this machine prompts the human once per grant, and one that leaves it (a forge write, a request sent to a remote host) prompts on every occurrence.`,
         session.grants.length
           ? `Active grants (this session): ${session.grants.join(', ')}.`
           : 'No grants active.',
@@ -243,6 +243,16 @@ function handleLocked(
           cache.table.effective[g.capability];
         if (verdict !== 'ASK') {
           notes.push(`EGO: ${g.capability} is ${verdict} here; a grant changes nothing.`);
+          continue;
+        }
+        // AN EXTERNAL EFFECT IS NEVER AN UNATTENDED ALLOW (issue #16 sections 4 and 8). The phrase is heard and said so,
+        // not silently dropped, but it is not recorded: a recorded grant would read "ALLOW for this session" for a
+        // write to shared state, on every issue and every repository, and the human approved one comment.
+        if (cache.table.capabilities[g.capability]?.effect !== 'local') {
+          ledger('grant.clamped', { capability: g.capability, phrase: g.phrase });
+          notes.push(
+            `EGO: ${g.capability} is an external effect; "${g.phrase}" does not lift it. Every occurrence asks a human (the ceiling is ASK).`,
+          );
           continue;
         }
         if (!session.grants.includes(g.capability)) {

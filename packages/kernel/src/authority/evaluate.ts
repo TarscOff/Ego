@@ -16,7 +16,8 @@ export interface EvaluationContext {
   repoRoots: string[];
   /** EGO_HOME, treated as inside-workspace for reads and kernel writes */
   egoHome?: string;
-  /** capability ids granted ASK→ALLOW for the current task */
+  /** capability ids a human granted ASK→ALLOW. Only a capability whose effect stays on this machine is lifted by it
+   *  (`applyGrants`): an external effect has a standing ceiling of ASK whatever this list says */
   grants?: string[];
   /** true when running inside the EGO source repository under EGO_MAINTENANCE */
   inEgoRepository?: boolean;
@@ -37,6 +38,8 @@ export interface CapabilityHit {
   segment?: string;
   absolute: boolean;
   grantApplied?: boolean;
+  /** a grant named this capability and was refused: its effect leaves the machine, so ASK is the ceiling */
+  grantClamped?: boolean;
   /** set when the hit was found inside the effect of a script, package script or make target */
   effectOf?: string;
   /** opacity that means "something WILL run that could not be read", as opposed to "the target does not exist" */
@@ -8643,6 +8646,11 @@ function retargetLocalCapability(
  *  request is; the patterns that look for a protection being switched off read past it, because that is where the
  *  switch is. `externalText` has already mangled any forged sentinel the document carried. */
 const BODY_MARK = `${MARK}body `;
+/** What the document section says when a body was named and could NOT be read (a pipe, a path outside the workspace, an
+ *  oversized or missing file, a variable). The bypass patterns treat it as the switch-off itself: that a protection is
+ *  not being defeated is a claim that has to be earned by reading the body, and a body the kernel cannot read earns
+ *  nothing - padding a file past the size limit must not be a way to hide `enforce_admins: false`. */
+const UNREAD_BODY = 'ego-body-unread';
 
 /** The text of a file or stream named in a body position, when the kernel can read it. Standard input counts only
  *  where a heredoc put it there; a pipe, a path outside the workspace, an unreadable or oversized file does not. */
@@ -8657,17 +8665,20 @@ function bodyDocument(ctx: EvaluationContext, env: ExecutionEnvironment, operand
  *  `-F config=@ruleset.json` hand the forge a DOCUMENT the command line only names, and the document is where
  *  enforcement is switched off for administrators or a bypass actor is added — the standard way to write a nested
  *  protection is exactly this, because `-f` cannot nest. Matching the command line alone made the bypass the one
- *  spelling that could not be seen. When the kernel can read the document it is put in front of the patterns;
- *  when it cannot, nothing is added and the call is judged as the administrable act it provably is, behind the
- *  human gate, never as a bypass it could not prove and never as less than the act. */
+ *  spelling that could not be seen. When the kernel can read the document it is put in front of the patterns. When
+ *  it cannot, `UNREAD_BODY` is: the document is where the switch-off would be, so a protection write whose body was
+ *  named and not read is judged as the bypass it could not rule out, and the way to an ordinary rule change is a
+ *  body inside the workspace, which is also what a reviewer can read. */
 function forgeApiSubject(ctx: EvaluationContext, norm: string, env: ExecutionEnvironment): string {
   if (!/^(gh|glab)\s+api\b/i.test(norm)) return norm;
   const words = tokenize(norm);
   const docs: string[] = [];
+  let unread = false;
   const take = (operand: string | undefined): void => {
     if (operand === undefined) return;
     const text = bodyDocument(ctx, env, operand);
     if (text !== null) docs.push(externalText(text).replace(/\s+/g, ' ').trim());
+    else unread = true;
   };
   for (let i = 1; i < words.length; i++) {
     const w = words[i]!;
@@ -8678,7 +8689,380 @@ function forgeApiSubject(ctx: EvaluationContext, norm: string, env: ExecutionEnv
     else if (w.startsWith('--field=')) take(/^--field=[^=]+=@(.+)$/.exec(w)?.[1]);
     else if (/^-F[^=]+=@/.test(w)) take(/^-F[^=]+=@(.+)$/.exec(w)?.[1]);
   }
-  return docs.length ? `${norm} ${BODY_MARK}${docs.join(' ')}` : norm;
+  return docs.length || unread ? `${norm} ${BODY_MARK}${docs.join(' ')}${unread ? ` ${UNREAD_BODY}` : ''}` : norm;
+}
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * A NETWORK TOOL IS JUDGED BY WHAT IT SENDS AND TO WHOM, NOT BY ITS NAME (Q98 sections 4 and 8)
+ *
+ * `command.network-tool` was the answer for curl whatever curl was doing, so a download and a PUT that merges a pull
+ * request through the forge API were one capability — and the grant phrase for the first ("you can curl it") lifted
+ * the second to ALLOW. The request is read instead: the method it really sends (`-d` makes a POST, `-T` a PUT, `-G`
+ * turns data back into a query), the host it really names, and whether that host is a declared local target.
+ *
+ *   - a fetch, or a write to a declared local target, stays `command.network-tool` (the tool's ordinary work);
+ *   - a write to a forge API host is the SAME ACT `gh api` would spell, under the same identifier (a merge is
+ *     `forge.pr.merge`, a repository delete `forge.repo.delete`, a protection switched off `forge.protection.bypass`,
+ *     anything else `forge.api.mutate`) — the request is turned into its `gh api` form and read by the same patterns,
+ *     so there is one reader for the act and not a second list that can drift from it;
+ *   - a write to any other host is `network.external-write`: ASK, with the standing ceiling no grant lifts.
+ *
+ * What cannot be read is not assumed harmless: a request whose host, method or configuration is hidden (`$URL`, `-X $M`,
+ * `-K file`, a proxy or a resolver override) is a write to an unknown destination.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const HTTP_CLIENT = /^(curl|wget|wget2|http|https|xh|xhs)$/;
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+interface HttpBody {
+  /** inline text, or the file/stream the body is read from (`-` is standard input) */
+  text?: string;
+  file?: string;
+}
+interface HttpRequest {
+  method: string;
+  url: string;
+  body: HttpBody[];
+  /** a proxy, a resolver override or a connect-to: the bytes may go somewhere the URL does not name */
+  repointed: boolean;
+}
+
+/** curl options that consume the next word (when it is not glued with `=`) */
+const CURL_VALUE_LONG = new Set(
+  (
+    'abstract-unix-socket alt-svc aws-sigv4 cacert capath cert cert-type ciphers config connect-timeout connect-to continue-at cookie ' +
+    'cookie-jar create-file-mode crlfile curves data data-ascii data-binary data-raw data-urlencode delegation dns-interface ' +
+    'dns-ipv4-addr dns-ipv6-addr dns-servers doh-url dump-header egd-file engine etag-compare etag-save expect100-timeout form ' +
+    'form-string ftp-account ftp-alternative-to-user ftp-method ftp-port ftp-ssl-ccc-mode happy-eyeballs-timeout-ms haproxy-clientip ' +
+    'header hostpubmd5 hostpubsha256 hsts interface ipfs-gateway json keepalive-time key key-type krb libcurl limit-rate local-port ' +
+    'login-options mail-auth mail-from mail-rcpt max-filesize max-redirs max-time netrc-file noproxy oauth2-bearer output output-dir ' +
+    'parallel-max pass pinnedpubkey preproxy proto proto-default proto-redir proxy proxy-cacert proxy-capath proxy-cert proxy-cert-type ' +
+    'proxy-ciphers proxy-crlfile proxy-header proxy-key proxy-key-type proxy-pass proxy-pinnedpubkey proxy-service-name ' +
+    'proxy-tls13-ciphers proxy-tlsauthtype proxy-tlspassword proxy-tlsuser proxy-user pubkey quote random-file range rate referer ' +
+    'request request-target resolve retry retry-delay retry-max-time sasl-authzid service-name socks4 socks4a socks5 ' +
+    'socks5-gssapi-service socks5-hostname speed-limit speed-time stderr telnet-option tftp-blksize time-cond tls-max tls13-ciphers ' +
+    'tlsauthtype tlspassword tlsuser trace trace-ascii trace-config unix-socket upload-file url url-query user user-agent variable write-out'
+  )
+    .split(' ')
+    .map((n) => `--${n}`),
+);
+/** curl short options that consume a value, glued (`-XPUT`) or as the next word */
+const CURL_SHORT_VALUE = new Set('AbcCdDeEFHKmoPQrtTuUwxXyYz'.split(''));
+
+function parseCurl(args: string[]): HttpRequest[] {
+  const out: HttpRequest[] = [];
+  type Group = {
+    method: string | null;
+    head: boolean;
+    get: boolean;
+    data: boolean;
+    form: boolean;
+    upload: boolean;
+    config: boolean;
+    body: HttpBody[];
+    urls: string[];
+    repointed: boolean;
+  };
+  const fresh = (): Group => ({
+    method: null, head: false, get: false, data: false, form: false, upload: false, config: false,
+    body: [], urls: [], repointed: false,
+  });
+  let g = fresh();
+  const flush = () => {
+    const method = (
+      g.method ?? (g.head ? 'HEAD' : g.upload ? 'PUT' : g.data || g.form ? (g.get && !g.form ? 'GET' : 'POST') : 'GET')
+    ).toUpperCase();
+    // an option file (-K) can set anything: the request is unknown, which for a write is the worst case
+    const urls = g.urls.length ? g.urls : [''];
+    for (const url of urls)
+      out.push({ method: g.config ? 'POST' : method, url, body: g.body, repointed: g.repointed });
+    g = fresh();
+  };
+  const apply = (name: string, val: string | undefined): void => {
+    const v = val ?? '';
+    switch (name) {
+      case '--request': g.method = v; break;
+      case '--url': g.urls.push(v); break;
+      case '--head': g.head = true; break;
+      case '--get': g.get = true; break;
+      case '--data': case '--data-ascii': case '--data-binary': case '--json':
+        g.data = true;
+        g.body.push(v.startsWith('@') ? { file: v.slice(1) } : { text: v });
+        break;
+      case '--data-raw': g.data = true; g.body.push({ text: v }); break;
+      case '--data-urlencode': {
+        g.data = true;
+        const f = /^[^=@]*@(.+)$/.exec(v);
+        g.body.push(f ? { file: f[1]! } : { text: v });
+        break;
+      }
+      case '--form': case '--form-string': {
+        g.form = true;
+        const f = name === '--form' ? /^[^=]*=[@<]([^;]*)/.exec(v) : null;
+        g.body.push(f ? { file: f[1]! } : { text: v });
+        break;
+      }
+      case '--upload-file': g.upload = true; g.body.push({ file: v }); break;
+      case '--config': g.config = true; break;
+      case '--proxy': case '--preproxy': case '--socks4': case '--socks4a': case '--socks5': case '--socks5-hostname':
+      case '--resolve': case '--connect-to':
+        g.repointed = true;
+        break;
+    }
+  };
+  const alias: Record<string, string> = {
+    X: '--request', I: '--head', G: '--get', d: '--data', F: '--form', T: '--upload-file', K: '--config', x: '--proxy',
+  };
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]!;
+    if (w === '--next' || w === '-:') { flush(); continue; }
+    if (w === '--') { g.urls.push(...args.slice(i + 1)); break; }
+    if (w.startsWith('--')) {
+      const eq = w.indexOf('=');
+      const name = eq < 0 ? w : w.slice(0, eq);
+      let val = eq < 0 ? undefined : w.slice(eq + 1);
+      if (val === undefined && CURL_VALUE_LONG.has(name)) val = args[++i];
+      apply(name, val);
+      continue;
+    }
+    if (w.length > 1 && w.startsWith('-')) {
+      for (let j = 1; j < w.length; j++) {
+        const c = w[j]!;
+        if (CURL_SHORT_VALUE.has(c)) {
+          let val = w.slice(j + 1);
+          if (val === '') val = args[++i] ?? '';
+          apply(alias[c] ?? `-${c}`, val);
+          break;
+        }
+        apply(alias[c] ?? `-${c}`, undefined);
+      }
+      continue;
+    }
+    g.urls.push(w);
+  }
+  flush();
+  return out;
+}
+
+/** wget options that consume a value, short and long */
+const WGET_SHORT_VALUE = new Set('oaetOTwQlPiBUARDIX'.split(''));
+const WGET_LONG_VALUE = new Set(
+  (
+    'output-file append-output execute tries output-document timeout dns-timeout connect-timeout read-timeout wait waitretry ' +
+    'limit-rate quota directory-prefix input-file base user-agent referer user password http-user http-password ftp-user ' +
+    'ftp-password header post-data post-file body-data body-file method load-cookies save-cookies certificate private-key ' +
+    'ca-certificate ca-directory crl-file bind-address proxy-user proxy-password accept reject domains exclude-domains follow-tags ' +
+    'ignore-tags include-directories exclude-directories level restrict-file-names prefer-family default-page secure-protocol ' +
+    'warc-file local-encoding remote-encoding progress cut-dirs backups compression regex-type accept-regex reject-regex ' +
+    'report-speed retry-on-http-error max-redirect use-askpass'
+  )
+    .split(' ')
+    .map((n) => `--${n}`),
+);
+
+function parseWget(args: string[]): HttpRequest[] {
+  let method: string | null = null;
+  let post = false;
+  let repointed = false;
+  const body: HttpBody[] = [];
+  const urls: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]!;
+    if (w === '--') { urls.push(...args.slice(i + 1)); break; }
+    if (w.startsWith('--')) {
+      const eq = w.indexOf('=');
+      const name = eq < 0 ? w : w.slice(0, eq);
+      let val = eq < 0 ? undefined : w.slice(eq + 1);
+      if (val === undefined && WGET_LONG_VALUE.has(name)) val = args[++i];
+      if (name === '--method') method = val ?? '';
+      else if (name === '--post-data' || name === '--body-data') { post = true; body.push({ text: val ?? '' }); }
+      else if (name === '--post-file' || name === '--body-file') { post = true; body.push({ file: val ?? '' }); }
+      else if (name === '--execute') repointed = repointed || /proxy/i.test(val ?? '');
+      continue;
+    }
+    if (w.length > 1 && w.startsWith('-')) {
+      for (let j = 1; j < w.length; j++) {
+        if (WGET_SHORT_VALUE.has(w[j]!)) {
+          const val = w.slice(j + 1) || (args[++i] ?? '');
+          if (w[j] === 'e') repointed = repointed || /proxy/i.test(val);
+          break;
+        }
+      }
+      continue;
+    }
+    urls.push(w);
+  }
+  const m = (method ?? (post ? 'POST' : 'GET')).toUpperCase();
+  return (urls.length ? urls : ['']).map((url) => ({ method: m, url, body, repointed }));
+}
+
+/** httpie (`http`, `https`) and xh (`xh`, `xhs`): `[options] [METHOD] URL [ITEM ...]` */
+const HTTPIE_VALUE = new Set(
+  (
+    'auth auth-type session session-read-only proxy verify cert cert-key timeout max-redirects output pretty style print boundary raw ' +
+    'default-scheme response-charset response-mime format-options ssl ciphers max-headers unsorted sorted download-resume'
+  )
+    .split(' ')
+    .map((n) => `--${n}`),
+);
+const HTTPIE_SHORT_VALUE = new Set(['-a', '-A', '-o', '-s', '-p']);
+function parseHttpie(args: string[]): HttpRequest[] {
+  let ignoreStdin = false;
+  let offline = false;
+  let repointed = false;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]!;
+    if (w === '--ignore-stdin' || w === '-I') ignoreStdin = true;
+    else if (w === '--offline') offline = true;
+    else if (w === '--') { positional.push(...args.slice(i + 1)); break; }
+    else if (w.startsWith('--') && w.includes('=')) { if (/^--proxy=/.test(w)) repointed = true; }
+    else if (HTTPIE_VALUE.has(w) || HTTPIE_SHORT_VALUE.has(w)) { if (w === '--proxy') repointed = true; i++; }
+    else if (w.startsWith('-') && w.length > 1) continue;
+    else positional.push(w);
+  }
+  let method: string | null = null;
+  if (positional[0] !== undefined && /^[A-Za-z]+$/.test(positional[0]) && (/^[A-Z]+$/.test(positional[0]) || /^(get|head|post|put|patch|delete|options)$/i.test(positional[0])))
+    method = positional.shift()!.toUpperCase();
+  const url = positional.shift() ?? '';
+  const body: HttpBody[] = [];
+  let data = false;
+  for (const item of positional) {
+    if (/^[^=:@]+==/.test(item)) continue; // a query parameter
+    if (/^[^=:@]+:(?!=)/.test(item) || /^[^=:@]+;$/.test(item)) continue; // a header
+    const file = /^[^=:@]*(?::=|=|)@(.+)$/.exec(item);
+    if (file) { data = true; body.push({ file: file[1]! }); continue; }
+    if (/^[^=:@]+(:=|=)/.test(item)) { data = true; body.push({ text: item }); }
+  }
+  // WITHOUT AN EXPLICIT READ METHOD, httpie and xh send standard input as the body when it is not a terminal — which in an
+  // agent shell it never is — so `http example.org` is a POST unless `--ignore-stdin` says otherwise
+  const effective = method ?? (data ? 'POST' : ignoreStdin ? 'GET' : 'POST');
+  return [{ method: offline ? 'GET' : effective, url, body, repointed }];
+}
+
+/** Every invocation of an HTTP client in this segment, read from the segment AS WRITTEN (quoting is what keeps a header
+ *  value from being mistaken for a destination) and from the shell bodies it carries. */
+function httpInvocations(raw: string, depth = 0): Array<{ head: string; args: string[] }> {
+  const out: Array<{ head: string; args: string[] }> = [];
+  for (const sub of splitShellSegments(raw)) {
+    const words = commandWords(tokenizeMarked(sub));
+    const k = words.findIndex((w) => !w.quoted && HTTP_CLIENT.test(w.text.replace(/^.*\//, '')));
+    if (k >= 0)
+      out.push({ head: words[k]!.text.replace(/^.*\//, ''), args: words.slice(k + 1).map((w) => w.text) });
+    if (depth < 4) for (const body of carriedShellBodies(sub)) out.push(...httpInvocations(body, depth + 1));
+  }
+  return out;
+}
+
+const URL_LIKE =
+  /^(?:[a-z][a-z0-9+.-]*:\/\/|\$|:\d*(?:[/?#]|$)|(?:\[[0-9a-f:.]+\]|[a-z0-9_-]+(?:\.[a-z0-9_-]+)+|localhost)(?::\d+)?(?:[/?#]|$)|[a-z0-9_-]+:\d+(?:[/?#]|$))/i;
+
+function httpRequests(head: string, args: string[]): HttpRequest[] {
+  if (head === 'curl') return parseCurl(args);
+  if (head === 'wget' || head === 'wget2') return parseWget(args);
+  return parseHttpie(args);
+}
+
+/** The host a destination names (`:3000/x` is httpie's shorthand for localhost) and the path after it. */
+function destination(url: string): { host: string; path: string } {
+  if (url.startsWith(':')) return { host: 'localhost', path: url.replace(/^:\d*/, '') || '/' };
+  const host = endpointHost(url).toLowerCase();
+  const afterScheme = url.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '');
+  const cut = afterScheme.search(/[/?#]/);
+  return { host, path: cut < 0 ? '/' : afterScheme.slice(cut) };
+}
+
+function isDeclaredLocalHost(table: CompiledAuthorityTable, host: string): boolean {
+  if (!host || isOpaqueTarget(host)) return false;
+  const t = table.localTargets;
+  if (t && hasProductionMarker(host, t.productionMarkers)) return false;
+  return /^127(\.\d{1,3}){3}$/.test(host) || (t ? matchesAnyGlob(host, t.dbLocalHosts) : false);
+}
+
+/** The forge a host or an API path belongs to: GitHub-shaped (`gh api`) or GitLab-shaped (`glab api`), else null. */
+const FORGE_API_HOST =
+  /^(?:api\.github\.com|uploads\.github\.com|github\.com|(?:[a-z0-9-]+\.)*gitlab\.com|api\.bitbucket\.org|bitbucket\.org|dev\.azure\.com|[a-z0-9-]+\.visualstudio\.com|api\.atlassian\.com|[a-z0-9-]+\.atlassian\.net|gitea\.com|codeberg\.org)$/;
+function forgeProvider(host: string, path: string): 'gh' | 'glab' | null {
+  if (/^\/api\/v4\//.test(path) || /(?:^|\.)gitlab\.com$/.test(host) || /^gitlab\./.test(host)) return 'glab';
+  if (FORGE_API_HOST.test(host) || /^\/api\/v3\//.test(path)) return 'gh';
+  return null;
+}
+
+/** The identifier the forge patterns give a request, by turning it into the `gh api`/`glab api` command that sends the same
+ *  request. null when the patterns see no write in it (a GraphQL query is a POST that reads). */
+function forgeActOf(
+  compiled: Array<{ m: CompiledMatcher; re: RegExp }>,
+  provider: 'gh' | 'glab',
+  r: HttpRequest,
+  path: string,
+  bodyText: string,
+  bodyUnread: boolean,
+): string | null {
+  const endpoint = path.replace(/^\/+(?:api\/v[34]\/)?/, '');
+  const subject = `${provider} api ${endpoint} -X ${r.method}${bodyUnread ? ' --input unread' : ''} ${BODY_MARK}${bodyText}${bodyUnread ? ` ${UNREAD_BODY}` : ''}`;
+  for (const { m, re } of compiled) {
+    if (m.additive || !re.test(subject)) continue;
+    return m.capability.startsWith('forge.') && !/\.read$/.test(m.capability) ? m.capability : null;
+  }
+  return null;
+}
+
+function networkWriteHits(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  compiled: Array<{ m: CompiledMatcher; re: RegExp }>,
+  norm: string,
+  env: ExecutionEnvironment,
+): CapabilityHit[] {
+  const head = commandHead(norm);
+  if (!HTTP_CLIENT.test(head)) return [];
+  let found = httpInvocations(env.rawSegment ?? norm);
+  // the normalized text is the fallback, for a client the raw segment hides (a quoted body, an unknown carrier)
+  if (found.length === 0) found = [{ head, args: tokenize(norm).slice(1) }];
+  const hits = new Map<string, CapabilityHit>();
+  const add = (capability: string, via: string): void => {
+    if (!(capability in table.capabilities) || hits.has(capability)) return;
+    hits.set(capability, {
+      capability,
+      verdict: verdictFor(table, ctx, capability),
+      via,
+      segment: norm,
+      absolute: isAbsoluteCap(table, capability),
+    });
+  };
+  for (const inv of found) {
+    for (const r of httpRequests(inv.head, inv.args)) {
+      const opaqueMethod = /[$`*?]/.test(r.method);
+      if (READ_METHODS.has(r.method) && !opaqueMethod) continue; // a fetch is the tool's ordinary work
+      const { host, path } = destination(r.url);
+      const hostKnown = r.url !== '' && !isOpaqueTarget(host) && (URL_LIKE.test(r.url) || r.url.startsWith(':'));
+      if (hostKnown && !r.repointed && isDeclaredLocalHost(table, host)) continue; // a write to the developer's own machine
+      const sends = `${inv.head} ${r.method} ${r.url || '(no destination named)'}`;
+      const provider = hostKnown ? forgeProvider(host, path) : null;
+      if (provider !== null) {
+        const texts: string[] = [];
+        let unread = false;
+        for (const b of r.body) {
+          if (b.text !== undefined) texts.push(b.text);
+          else {
+            const doc = b.file !== undefined ? bodyDocument(ctx, env, b.file) : null;
+            if (doc === null) unread = true;
+            else texts.push(doc);
+          }
+        }
+        const bodyText = externalText(texts.join(' ')).replace(/\s+/g, ' ').trim();
+        const act = forgeActOf(compiled, provider, r, path, bodyText, unread);
+        if (act !== null || !/(^|\/)graphql\b/.test(path))
+          add(act ?? 'forge.api.mutate', `${sends}: a write to the forge API, the same act \`${provider} api\` would send`);
+        continue;
+      }
+      add(
+        'network.external-write',
+        `${sends}: sends to ${hostKnown ? host : 'a destination that could not be resolved'}, which is not a declared local target`,
+      );
+    }
+  }
+  return [...hits.values()];
 }
 
 function classifyNormalized(
@@ -8722,6 +9106,20 @@ function classifyNormalized(
         state.env.rawSegment ?? norm,
       );
       break;
+    }
+  }
+  // A NETWORK TOOL IS JUDGED BY WHAT IT SENDS AND TO WHOM: the name alone made a download and a PUT that merges a pull
+  // request through the forge API one capability, so a grant for the first lifted the second. A request that only
+  // fetches, or writes to a declared local target, keeps `command.network-tool`; one that sends elsewhere is the act it
+  // is (`networkWriteHits`). The strongest of them replaces the hit, the others are kept beside it.
+  if (outer?.capability === 'command.network-tool') {
+    const writes = networkWriteHits(table, ctx, compiled, norm, state.env);
+    if (writes.length) {
+      const weight = (h: CapabilityHit) =>
+        VERDICT_RANK[h.verdict] * 10 + (h.absolute ? 2 : table.capabilities[h.capability]?.lock === 'organization' ? 1 : 0);
+      writes.sort((a, b) => weight(b) - weight(a));
+      outer = writes[0]!;
+      additive.push(...writes.slice(1));
     }
   }
   if (!outer && /^["']?\$/.test(norm))
@@ -10704,8 +11102,10 @@ function analyzeSegments(
     const endpointHit = endpointEnvHit(seg);
     if (endpointHit !== null)
       hits.push({
-        capability: 'command.network-tool',
-        verdict: verdictFor(table, ctx, 'command.network-tool'),
+        // the rest of the command line — argument values included — goes to a host that is in no lockfile and no
+        // configuration: that is a SEND, not a fetch, so no fetch grant ("you can curl it") reaches it
+        capability: 'network.external-write',
+        verdict: verdictFor(table, ctx, 'network.external-write'),
         via: `an endpoint is named by the environment: ${endpointHit}`,
         segment: seg,
         absolute: false,
@@ -11295,11 +11695,26 @@ export function classifyUrl(
   };
 }
 
-function applyGrants(hit: CapabilityHit, ctx: EvaluationContext): CapabilityHit {
-  if (hit.verdict === 'ASK' && !hit.absolute && ctx.grants?.includes(hit.capability)) {
-    return { ...hit, verdict: 'ALLOW', grantApplied: true };
-  }
-  return hit;
+/**
+ * A GRANT IS A HUMAN'S BOUNDED APPROVAL OF LOCAL WORK, NOT A STANDING LICENCE TO CHANGE SHARED STATE (issue #16
+ * sections 4 and 8: "never permit an unattended external-write ALLOW, in any host mode"). `you can comment on the
+ * issue` lifted `forge.issue.comment` to ALLOW for the rest of the session — on every issue of every repository —
+ * and `you can curl it` lifted the capability a raw PUT to the forge API shared with a plain download. A grant now
+ * lifts a capability only when the table says its effect stays on this machine; for one that leaves it the verdict
+ * stays ASK, the hit says a grant was refused, and the next occurrence asks again. This is the single decision point:
+ * the hook also declines to record such a grant, but a grant that arrives any other way (a session file, a host
+ * adapter, a test) is clamped here all the same. A capability the table does not know is not lifted either.
+ */
+function applyGrants(table: CompiledAuthorityTable, hit: CapabilityHit, ctx: EvaluationContext): CapabilityHit {
+  if (hit.verdict !== 'ASK' || hit.absolute || !ctx.grants?.includes(hit.capability)) return hit;
+  const cap = table.capabilities[hit.capability];
+  if (cap?.effect !== 'local' || cap.lock !== 'none')
+    return {
+      ...hit,
+      via: `${hit.via}; a session grant for ${hit.capability} cannot lift an external effect above ASK`,
+      grantClamped: true,
+    };
+  return { ...hit, verdict: 'ALLOW', grantApplied: true };
 }
 
 export function evaluate(
@@ -11487,7 +11902,7 @@ export function evaluate(
   // later moved into the absolute tier (Q98 follow-up 1) kept labelling its refusal "ordinary" and weighing it as such.
   // One reader, applied where the decision is taken.
   hits = hits.map((h) => (h.absolute || !isAbsoluteCap(table, h.capability) ? h : { ...h, absolute: true }));
-  hits = hits.map((h) => applyGrants(h, ctx));
+  hits = hits.map((h) => applyGrants(table, h, ctx));
   if (hits.length === 0) {
     // NOTHING fell through to ALLOW any more. A tool the evaluator does not model, or a modelled tool whose
     // operand is missing or of an unexpected shape, is unknown capability — and on claude-code an `allow` is

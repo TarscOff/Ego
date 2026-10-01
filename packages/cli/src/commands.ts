@@ -338,7 +338,7 @@ function explain(
   const profile = flagString(flags, 'profile') ?? project.pin.profile;
   const lines = [
     `${id}: ${c.description}`,
-    `family ${c.family}; lock ${c.lock}; core verdict ${c.core}; effective ${table.effective[id]}`,
+    `family ${c.family}; lock ${c.lock}; effect ${c.effect ?? 'external'}; core verdict ${c.core}; effective ${table.effective[id]}`,
     `provenance: ${(table.provenance[id] ?? []).map((p) => `${p.layer} (${p.file}) -> ${p.verdict}`).join('; ')}`,
     ...Object.keys(table.profiles)
       .sort()
@@ -360,7 +360,11 @@ function explain(
       `human grant phrases: ${grants
         .flatMap((g) => g.phrases)
         .slice(0, 6)
-        .join(' / ')}`,
+        .join(' / ')}${
+        c.effect === 'local'
+          ? ''
+          : ' (recognised, but they lift nothing: this effect leaves the machine, so every occurrence asks)'
+      }`,
     );
   if (c.lock === 'absolute')
     lines.push(

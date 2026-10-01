@@ -14,6 +14,32 @@ import {
   type Verdict,
 } from '../control-plane/types.ts';
 
+/** Where a capability's effect LANDS: on this machine and inside the governed workspace, or somewhere else. */
+export type EffectScope = 'local' | 'external';
+
+/** The second segment of an identifier says where its effect lands when it is one of these. */
+const OFF_MACHINE_SCOPES = new Set(['remote', 'nonlocal', 'registry', 'target', 'production', 'public', 'external']);
+/** Namespaces whose identifiers describe THIS machine unless their scope segment says otherwise (`git.local.*` and
+ *  `git.remote.*` share a namespace; `db.local.*` and `db.nonlocal.*` do too). */
+const LOCAL_NAMESPACES = new Set(['fs', 'command', 'ego', 'git', 'container']);
+
+/**
+ * WHETHER A CAPABILITY LEAVES THE MACHINE, derived from the identifier (issue #16 sections 4 and 8: an external
+ * effect has a standing ceiling of ASK, and a human phrase is a bounded approval, never a durable grant). It is a
+ * positive grammar, not a list of the external ones: an effect is `local` only when the identifier says so —
+ * `*.local.*`, or a namespace that describes this machine (`fs`, `command`, `ego`, `git`, `container`) whose scope
+ * segment is not one that points elsewhere. Everything else is external, including a namespace nobody has classified
+ * yet (`forge`, `network`, `mcp`, `cloud`, `production`, and the next one), so a new family is clamped until someone
+ * decides otherwise. `*.target.unclassified` is external because "could not be resolved to a local target" is the
+ * one claim a grant must never turn into a yes.
+ */
+export function effectScope(id: string): EffectScope {
+  const [ns = '', scope = ''] = id.split('.');
+  if (OFF_MACHINE_SCOPES.has(scope)) return 'external';
+  if (scope === 'local') return 'local';
+  return LOCAL_NAMESPACES.has(ns) ? 'local' : 'external';
+}
+
 export interface CompiledCapability {
   family: string;
   description: string;
@@ -22,6 +48,9 @@ export interface CompiledCapability {
   lock: CapabilityLock;
   /** verdict from the core layer before any narrowing */
   core: Verdict;
+  /** where the effect lands. A session grant lifts only `local` capabilities; an `external` one has a standing
+   *  ceiling of ASK that no phrase, mode or host setting removes */
+  effect: EffectScope;
 }
 
 export interface CompiledMatcher {
@@ -116,6 +145,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       absolute: true,
       lock: 'absolute',
       core: 'DENY',
+      effect: effectScope(c.id),
     };
     effective[c.id] = 'DENY';
     provenance[c.id] = [{ layer: 'absolute', file: rel(cp.root, c.file), verdict: 'DENY' }];
@@ -129,6 +159,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
         absolute: false,
         lock: c.lock,
         core: c.verdict,
+        effect: effectScope(c.id),
       };
       effective[c.id] = c.verdict;
       provenance[c.id] = [
@@ -180,6 +211,21 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
   };
   applyLayer(opts.organization, 'organization');
   applyLayer(opts.overlay, 'overlay');
+
+  // Q98 (issue #16 sections 4 and 8): a human phrase is a bounded task approval, never a durable authority grant, so a
+  // grant lifts ASK to ALLOW only for a capability whose effect stays on this machine. For one that leaves it, the grant
+  // is clamped at the ASK ceiling — recorded here, in the same trace the organization's ASK-ceiling clamp lives in,
+  // so `explain capability` can say why a recognised phrase changed nothing instead of leaving it silently ignored.
+  // The evaluator enforces it (`applyGrants`) and the hook says so when it hears the phrase.
+  for (const g of cp.grants.grants) {
+    const cap = capabilities[g.capability];
+    if (!cap || cap.effect !== 'external') continue;
+    provenance[g.capability]!.push({
+      layer: 'grant (external effect: a session grant cannot lift it above the ASK ceiling)',
+      file: rel(cp.root, cp.grants.file),
+      verdict: effective[g.capability] === 'DENY' ? 'DENY' : 'ASK',
+    });
+  }
 
   const profiles: CompiledAuthorityTable['profiles'] = {};
   const modeIds = cp.modes.map((m) => m.id);
@@ -417,6 +463,13 @@ export function diffAuthorityTables(
     const toLock = next.capabilities[id]?.lock;
     if (fromLock && toLock && fromLock !== toLock)
       push({ capability: id, kind: 'lock-changed', fromLock, toLock });
+    // a capability that stops leaving the machine stops being clamped: every grant phrase for it now lifts it
+    if (prev.capabilities[id]?.effect === 'external' && next.capabilities[id]?.effect === 'local')
+      push({
+        capability: id,
+        kind: 'grants-widened',
+        detail: 'effect external -> local: a session grant now lifts it from ASK to ALLOW',
+      });
   }
   const prevByKey = new Map(prev.matchers.map((x) => [matcherKey(x), x] as const));
   const nextByKey = new Map(next.matchers.map((x) => [matcherKey(x), x] as const));
