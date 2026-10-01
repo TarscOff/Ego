@@ -976,8 +976,11 @@ matchers:
   - capability: command.script-opaque
     tool: Bash
     command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\srun\b[^|;&]*--build\b'
-  # `docker compose build` builds whatever the compose FILE names, which EGO does not parse: the Dockerfile it
-  # chooses, its context and its build args are all decided by a file this kernel never read.
+  # `docker compose build` builds whatever the compose FILE names: the Dockerfile it chooses, its context and its
+  # outputs are decided by a file. The container reader (containers.ts) now READS that file and the Dockerfile each
+  # service points at, so a build whose inputs were read is judged by what its Dockerfiles run, and the capability
+  # below is what answers when they were not: an anchor, an include, a variable in a path, a remote context, a
+  # file this very command line has just written (exit review 11).
   - capability: command.script-opaque
     tool: Bash
     # the COMPOSE form only: `(compose\s+)?` was optional, so this swallowed every plain `docker build` and made

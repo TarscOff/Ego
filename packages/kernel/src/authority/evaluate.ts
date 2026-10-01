@@ -13957,8 +13957,12 @@ function analyzeSegments(
         env.cwdVerified = env.cwdVerified && directoryExists(env.cwd) && repoRootFor(ctx, env.cwd) !== null;
       } else env.cwdVerified = false;
     }
-    const carried = execCarriedCommand(seg);
-    if (carried !== null)
+    // THE COMMAND AFTER `--` IS FOUND IN THE SEGMENT AND IN EVERY NORMALIZATION OF IT: behind `sudo`, `env`, `timeout` or
+    // `sh -c` the head of the segment is the wrapper, and `docker pass run -- psql -h prod-db …` was analysed only when
+    // nothing stood in front of `docker`.
+    for (const carried of new Set(
+      [seg, ...normalizeSegment(seg)].map(execCarriedCommand).filter((c): c is string => c !== null),
+    ))
       for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
     // A PIPELINE INSIDE A CARRIER IS STILL A PIPELINE, and the normalizer cannot carry the edge across: it returns

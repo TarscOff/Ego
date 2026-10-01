@@ -325,6 +325,10 @@ test('a global option is accepted past the verb, and means what it means before 
     ['docker rm -f --host tcp://prod.acme.com:2375 x', undefined, 'DENY'],
     ['docker container rm -H tcp://prod.acme.com:2375 x', undefined, 'DENY'],
     ['docker system prune -f --context production', undefined, 'DENY'],
+    // a verb whose operands are not a program's argv keeps looking to the end of the line
+    ['docker cp app:/x ./x --context production', undefined, 'DENY'],
+    ['docker start app --host tcp://prod.acme.com:2375', undefined, 'DENY'],
+    ['docker attach app -H tcp://prod.acme.com:2375', undefined, 'DENY'],
     ['podman run --connection prod alpine ls', undefined, 'DENY'],
   ];
   assert.deepEqual(underFloor(rows), []);

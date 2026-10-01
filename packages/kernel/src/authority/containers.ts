@@ -212,8 +212,9 @@ const GROUP_OPTIONS: Readonly<Record<string, Grammar>> = {
  *
  * A word in a table is MODELLED; every other word is not. Flags: r = a READ that stays harmless against a non-local
  * engine (`ps` lists, it does not deploy; `logs` and `inspect` are not here: they print the environment and the
- * mounts, which against a production engine is an act on it), c = hands its remaining words to a program in a
- * container (a `--help` there is that program's), x = also takes a host command after `--`, b = builds, m = builds
+ * mounts, which against a production engine is an act on it), c = hands the words after its first operand to a program
+ * in a container (a `--help` there is that program's, and a global option there is not the CLI's), h = takes operands a
+ * `--help` after them is not read as a probe, x = also takes a host command after `--`, b = builds, m = builds
  * only with `--build`, B = bake, d = destroys what it names, D = destroys with -v/--volumes/--rmi, p = publishes to a
  * registry, k = rewrites the credential store, n = changes which engine later commands will use.
  * ------------------------------------------------------------------------------------------------------------- */
@@ -247,19 +248,19 @@ const BUILDX_LEAVES = 'bake:B f=bake build:b b=build create:n du:r imagetools in
 
 /** the verbs docker accepts without a group; most are the group's verb under its short name */
 const DOCKER_TOP = leaves(
-  'attach:cx build:b commit cp:c create:c diff:r events:r exec:cx export history:r images:r import info:r inspect kill load ' +
-    'login:k logout:k logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save:r search:r start:c stats:r stop tag ' +
+  'attach:hx build:b commit cp:h create:c diff:r events:r exec:cx export history:r images:r import info:r inspect kill load ' +
+    'login:k logout:k logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save:r search:r start:h stats:r stop tag ' +
     'top:r unpause update version:r wait help:r bake:B',
 );
 const PODMAN_TOP = leaves(
-  'attach:cx build:b commit cp:c create:c diff:r events:r exec:cx export history:r images:r import info:r inspect kill load ' +
-    'login:k logout:k logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save:r search:r start:c stats:r stop tag ' +
+  'attach:hx build:b commit cp:h create:c diff:r events:r exec:cx export history:r images:r import info:r inspect kill load ' +
+    'login:k logout:k logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save:r search:r start:h stats:r stop tag ' +
     'top:r unpause update version:r wait help:r',
 );
 const GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   container: leaves(
-    'attach:cx commit cp:c create:c diff:r exec:cx export inspect kill logs ls:r list=ls ps=ls pause port:r prune:d rename ' +
-      'restart rm:d remove=rm run:c start:c stats:r stop top:r unpause update wait',
+    'attach:hx commit cp:h create:c diff:r exec:cx export inspect kill logs ls:r list=ls ps=ls pause port:r prune:d rename ' +
+      'restart rm:d remove=rm run:c start:h stats:r stop top:r unpause update wait',
   ),
   image: leaves('build:b history:r import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save:r tag'),
   volume: leaves('create inspect ls:r list=ls prune:d rm:d remove=rm update'),
@@ -280,7 +281,7 @@ const GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   // docker's `builder` is buildx under another name; `docker builder bake|create|…` reach the plugin
   builder: leaves(BUILDX_LEAVES),
   compose: leaves(
-    'attach:c build:b commit config:r convert=config cp:c create:cm down:D events:r exec:cx export images:r kill logs ls:r list=ls ' +
+    'attach:h build:b commit config:r convert=config cp:h create:cm down:D events:r exec:cx export images:r kill logs ls:r list=ls ' +
       'pause port:r ps:r publish:p pull push:p restart rm:d run:cm scale start stats:r stop top:r unpause up:m version:r volumes:r ' +
       'wait watch:b',
   ),
@@ -607,7 +608,7 @@ export function isEngineRead(cmd: ContainerCommand): boolean {
 
 /** does the verb hand words to a program in a container, so that a `--help` there is that program's */
 export function carriesArgv(cmd: ContainerCommand): boolean {
-  return !cmd.determinate || !cmd.modelled || cmd.flags.includes('c');
+  return !cmd.determinate || !cmd.modelled || cmd.flags.includes('c') || cmd.flags.includes('h');
 }
 
 /** the command a verb takes after `--` and runs: `exec`, `attach`, `compose exec`, and any verb nobody modelled
