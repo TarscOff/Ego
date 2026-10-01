@@ -102,6 +102,15 @@ test('make: the escaped-name rule is read however the makefile is reached and th
     ["make all", { Makefile: `all: sub\\ dir/a\\ b\nsub\\ dir/a\\ b:\n\t${ACT}\n` }],
     ["make 'dir/a b'", { Makefile: `dir/a\\ b:\n\t${ACT}\n` }],
     ["make -f 'my file.mk' 'a b'", { 'my file.mk': own }],
+    // a command a shell carries keeps its quoting for the reader of make's command line: the goal is still ONE name
+    ['bash -c "make -f other.mk \'a b\'"', { 'other.mk': own }],
+    ["sh -c 'make -f other.mk a\\ b'", { 'other.mk': own }],
+    ["sh -c 'make -f other.mk \"a b\"'", { 'other.mk': own }],
+    ["sudo sh -c 'make -f other.mk \"a b\"'", { 'other.mk': own }],
+    ["trap 'make -f other.mk \"a b\"' EXIT", { 'other.mk': own }],
+    ['bash <<< "make -f other.mk \'a b\'"', { 'other.mk': own }],
+    ["env -S 'make -f other.mk \"a b\"'", { 'other.mk': own }],
+    ["cd sub && sh -c 'make \"a b\"'", { 'sub/Makefile': own }],
   ];
   const wrong: string[] = [];
   for (const [command, files] of rows) {

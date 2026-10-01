@@ -7888,7 +7888,20 @@ function resolveScriptCommand(
     // has `make` inside a single QUOTED word, so the scan finds no `make` at all and the raw tokens are `sh`,
     // `-c` and the body — under which the `-f` file and the goal were both misread (found by the cross-product).
     // The normalized text IS the command in that case, and it is what the producer was invoked on.
-    const rawMarked = makeAt >= 0 ? allRawMarked.slice(makeAt) : tokenizeMarked(norm);
+    // ...BUT THE NORMALISED TEXT HAS LOST THE QUOTING, and a goal is one name whatever it holds: `env -S 'make -f x.mk "a b"'`
+    // read the goal as `a` and `b`, found no rule for either, and ran the recipe of `a\ b` at ALLOW (found by the generated
+    // cross-product). The command a shell CARRIES still has its own quoting in the body it was carried in, so that body is
+    // read - when, and only when, it says what the normaliser says: the same words once the quoting is taken off.
+    const carriedRaw = (): ReturnType<typeof tokenizeMarked> | null => {
+      for (const body of carriedShellBodies(env.rawSegment ?? norm))
+        for (const piece of splitShellSegments(body)) {
+          const words = tokenizeMarked(piece);
+          const at = words.findIndex((t) => /^(?:.*\/)?(make|gmake)$/.test(t.text));
+          if (at >= 0 && words.slice(at).map((t) => t.text).join(' ') === norm) return words.slice(at);
+        }
+      return null;
+    };
+    const rawMarked = makeAt >= 0 ? allRawMarked.slice(makeAt) : (carriedRaw() ?? tokenizeMarked(norm));
     const rawTokens = rawMarked.map((t) => t.text);
     // ONE READER FOR THE COMMAND LINE: clusters, abbreviations, options that take a value, and `--` (see
     // parseMakeCommandLine). Nine self-attack findings came from three scans that each knew a different subset.
