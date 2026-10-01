@@ -241,6 +241,9 @@ export interface PeelOptions {
   stopAt?: (carrier: string, spec: Carrier) => boolean;
   /** peel at most this many carriers */
   maxSteps?: number;
+  /** read `NAME=value` words in front of the chain as assignments (default). The normalizer strips those itself, with its own rule
+   *  for a bare `FOO=1` (a statement, not an environment for a command), and leaves the word to be classified as the statement it is */
+  leadingAssignments?: boolean;
 }
 
 /** The values of an own option of one step (`env -C DIR`, `timeout -s SIG`), whatever the spelling. */
@@ -259,7 +262,7 @@ export function peelCarriers(words: readonly string[], from = 0, opts: PeelOptio
     // shell structure and bare assignments in front of a command: `if VAR=x timeout 5 cmd`
     while (i < words.length) {
       const w = words[i]!;
-      if (ASSIGNMENT.test(w) && out.steps.length === 0) {
+      if (ASSIGNMENT.test(w) && out.steps.length === 0 && opts.leadingAssignments !== false) {
         out.leading.push(w);
         i++;
         continue;

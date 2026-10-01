@@ -1702,7 +1702,7 @@ function normalizeSegmentInner(segment: string): string[] {
   const leading: string[] = [];
   let peeled: Peeled;
   for (let from = 0; ; ) {
-    peeled = peelCarriers(tokens, from, { stopAt: keepsHead });
+    peeled = peelCarriers(tokens, from, { stopAt: keepsHead, leadingAssignments: false });
     steps.push(...peeled.steps);
     leading.push(...peeled.leading);
     // `watch`'s argument - and `sem`'s - is a SHELL STRING, run by `sh -c`: what follows the first `;` or `&&` in `watch 'git
