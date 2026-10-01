@@ -914,10 +914,13 @@ matchers:
     command: '^(docker|podman|nerdctl)\s+(container\s+)?(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s*)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
   # `kubectl config view --raw` PRINTS THE KUBECONFIG UNREDACTED — client certificates, bearer tokens and the
   # credentials of every cluster the developer can reach, production included. Without `--raw` the values are
-  # redacted, so the flag is the whole difference (exit review 7).
+  # redacted, so the flag is the whole difference (exit review 7). `--flatten` inlines the certificate files and
+  # skips the redaction too (r11-70), and `--raw=false` is not `--raw`. This is the plain spelling; the cluster reader
+  # (`k8sEffect`) answers the same question for a command with an option in front of the verb, which anchors none of
+  # the regexes of this file.
   - capability: fs.credential-store.read
     tool: Bash
-    command: '^(kubectl|oc)\s+config\s+view\b[^|;&]*--raw\b'
+    command: '^(kubectl|oc)\s+config\s+view\b[^|;&]*--(raw|flatten)(?!=(false|f|0)(\s|$))(?![\w-])'
   # awk RUNS A SHELL. `print … | "cmd"`, `"cmd" | getline` and `system("cmd")` all fork /bin/sh, and the command
   # is an arbitrary string EXPRESSION, so holding it in a variable is the same act (exit review 7).
   - capability: command.script-opaque

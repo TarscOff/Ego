@@ -57,9 +57,21 @@ may remove one, and neither may classify a production-marked target as local.
 
 ## How a target is resolved
 
-For Kubernetes tools (`kubectl`, `oc`, `helm`, `kustomize`) the target is the context named by `--context` /
-`--kube-context`, the `--kubeconfig` file, the `--server` endpoint or the namespace. `kind`, `k3d` and `minikube`
-manage their own local clusters and are local by construction.
+For Kubernetes tools (`kubectl`, `oc`, `helm`, `kustomize`) ONE reader (`authority/k8s.ts`) collects every signal that
+selects the cluster and the most restrictive decides: the context (`--context` / `--kube-context`, `HELM_KUBECONTEXT`,
+`config use-context`), the cluster entry (`--cluster`), the credentials' name (`--user`, `--as`), the API server
+(`--server` / `-s` / `--kube-apiserver`, `KUBERNETES_MASTER`, `HELM_KUBEAPISERVER`, `KUBERNETES_SERVICE_HOST`), the
+namespace and the kubeconfig FILE (`--kubeconfig`, `oc --config`, `KUBECONFIG`). A kubeconfig the workspace holds is READ:
+a context is judged by its name and by the SERVER it points at — a context whose server is not a declared local host is
+not local, whatever it is called — and a credential plugin in it is a program the tool runs. A file outside the
+workspace, or one the kernel cannot read as a kubeconfig, says nothing about where a declared name points; one this very
+command line writes may be anything. `minikube kubectl -- ARGS` is `kubectl ARGS` with minikube's own cluster as the
+default. `kind` and `k3d` manage their own local clusters and are local by construction.
+
+The same reader answers the other questions a Kubernetes command raises: whether it READS a Secret or a credential (a
+resource type, a `-f` / `-k` source or stream, a word a shell fills in, `helm get` and `helm status -o json|yaml`, `config
+view --raw|--flatten`), whether it changes anything (a flag value is data, never the flag), and whether it RUNS a
+program (a verb the tool does not have is a plugin).
 
 For database clients (`psql`, `mysql`, `mongosh`, `redis-cli`, …) the target is the host in the connection URI or in
 `-h` / `--host`. With no host at all these clients connect to the local socket or to localhost, which is local.

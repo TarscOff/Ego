@@ -99,6 +99,11 @@ export interface SemanticClass {
   readonly files?: Readonly<Record<string, string>>;
 }
 
+/** A kubeconfig a workspace can hold: contexts called `kind-dev` and `docker-desktop` (names the local list declares) pointing at
+ *  `server`. The name says local; the SERVER is what the cluster really is (RC-K8S). */
+const kubeconfigAt = (server: string, credential = '{token: t}'): string =>
+  `apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {server: "${server}"}\ncontexts:\n- name: kind-dev\n  context: {cluster: c, user: u}\n- name: docker-desktop\n  context: {cluster: c, user: u}\ncurrent-context: kind-dev\nusers:\n- name: u\n  user: ${credential}\n`;
+
 export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   /* ----------------------------------------------------------------------------------------------------------
    * EXIT REVIEW 7 (2026-09-24). Each of these is an INSTANCE of a frozen class; they are listed here so the
@@ -580,6 +585,123 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     id: 'namespace deletion on a local cluster',
     floor: 'ASK',
     cases: ['kubectl --context kind-dev delete ns x'],
+  },
+  /* ----------------------------------------------------------------------------------------------------------
+   * RC-K8S (reviews 7-11): ONE reader of a cluster command (authority/k8s.ts). Which cluster it reaches, what it reads,
+   * what it changes and what it runs are answered over the words as the tool receives them - a flag VALUE is data, a
+   * kubeconfig the workspace holds is judged by its SERVER, an exported variable is a signal like a flag, and a verb the
+   * tool does not have is a plugin. Each class is a cause; the cases are the reviewers' spellings and their neighbours.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'k8s',
+    id: "a production act whose exception flag is a word inside a value, or whose cluster is chosen by a flag, a variable or minikube's own kubectl",
+    floor: 'DENY',
+    cases: [
+      // the value of an option is data: `--list` and `--dry-run` inside one quoted word are not the flags (sa10-33)
+      `kubectl --context production set env deploy/x 'A=b --list'`,
+      `kubectl --context production set env deploy/x "A=b --list"`,
+      `kubectl --context production set env deploy/x A=b --list=false`,
+      `kubectl --context production label pod x 'k=v --dry-run=client'`,
+      `helm --kube-context production upgrade app ./chart --set "a=1 --dry-run"`,
+      // the cluster is chosen by an option the resolver did not read (r11-68, r11-186)
+      'kubectl --context kind-foo --cluster production delete deploy x',
+      'kubectl --context docker-desktop --cluster=production delete deploy api',
+      'kubectl --context kind-foo --user prod-admin delete deploy x',
+      'kubectl delete deploy x --cluster production',
+      'kubectl -s https://prod.example.com delete pod x',
+      'helm --kube-context kind-foo --kube-apiserver https://k8s.prod.acme.com upgrade x ./c',
+      // minikube's kubectl takes every flag of kubectl after the separator (r11-187)
+      'minikube kubectl -- --server=https://10.0.0.5:6443 delete pod x',
+      'minikube kubectl -- --context production delete pod x',
+      'minikube kubectl -- delete pod x -n production',
+      // ...and so does a variable (r11-74)
+      'HELM_KUBEAPISERVER=https://prod.example.com helm --kube-context kind-foo upgrade x ./c',
+      'env HELM_KUBEAPISERVER=https://k8s.acme.com helm --kube-context kind-foo upgrade x ./c',
+      'KUBERNETES_MASTER=https://k8s.acme.com kubectl --context kind-foo apply -f a.yaml',
+      'HELM_KUBECONTEXT=production helm upgrade x ./c',
+      'HELM_NAMESPACE=production helm --kube-context kind-foo upgrade x ./c',
+    ],
+  },
+  {
+    family: 'k8s',
+    id: 'a context judged by its name when the kubeconfig the workspace holds says its server is a shared or production cluster',
+    floor: 'DENY',
+    cases: [
+      'kubectl --kubeconfig ./kube.conf --context kind-dev apply -f y.yaml',
+      'kubectl --kubeconfig=./kube.conf --context=kind-dev delete deploy x',
+      'kubectl --kubeconfig ./kube.conf apply -f y.yaml',
+      'KUBECONFIG=./kube.conf kubectl --context kind-dev apply -f y.yaml',
+      'KUBECONFIG=./none.conf:./kube.conf kubectl --context kind-dev apply -f y.yaml',
+      'helm --kubeconfig ./kube.conf --kube-context kind-dev upgrade x ./c',
+      'kubectl --kubeconfig ./other.yaml --context docker-desktop delete deploy api',
+    ],
+    files: {
+      'kube.conf': kubeconfigAt(
+        'https://api.prod.example.com:6443',
+        '{exec: {apiVersion: client.authentication.k8s.io/v1, command: aws, args: [eks, get-token]}}',
+      ),
+      'other.yaml': kubeconfigAt('https://k8s.acme.example:6443'),
+      'y.yaml': 'kind: ConfigMap\nmetadata: {name: y}\n',
+    },
+  },
+  {
+    family: 'k8s',
+    id: 'a Secret read from production through a manifest, a directory, a stream or a word the shell fills in',
+    floor: 'DENY',
+    cases: [
+      'kubectl --context production get -f s.yaml -o yaml',
+      'kubectl --context production get --filename=s.yaml -o yaml',
+      'kubectl --context production describe -f s.yaml',
+      'kubectl --context production get -f . -o yaml',
+      'kubectl --context production get -Rf k8s -o yaml',
+      'kubectl --context production get -f "$F" -o yaml',
+      'kubectl --context production get -k overlays/prod',
+      'kubectl --context production get $R db -o yaml',
+      'kubectl --context production get "$R" db -o yaml',
+      'kubectl --context production describe $R db',
+      'kubectl --context production get pod/a $X',
+      'helm --kube-context production get $X app',
+      'kubectl --context production get --raw "$P"',
+      'kubectl --context production get --raw /api/v1/namespaces/prod/secrets',
+      'helm --kube-context production status rel -o json',
+      'helm --kube-context production status rel --output=yaml',
+    ],
+    files: {
+      's.yaml': 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\n',
+      'k8s/s.yaml': 'kind: Secret\nmetadata: {name: db}\n',
+    },
+  },
+  {
+    family: 'k8s',
+    id: 'the kubeconfig printed with its credentials, or written, behind an option that anchors none of the matchers',
+    floor: 'DENY',
+    cases: [
+      'kubectl config view --flatten',
+      'kubectl --context kind-foo config view --flatten',
+      'kubectl -n x config view --raw',
+      'kubectl config view --minify --flatten -o json',
+      'oc config view --flatten',
+      'kubectl --context kind-foo config set-credentials u --exec-command=./tok.sh --exec-api-version=client.authentication.k8s.io/v1',
+      'kubectl -n x config set-cluster c --server=https://k8s.acme.com',
+      'kubectl --v=2 config set-credentials u --token=abc',
+      'kubectl --kubeconfig ./k config unset users.u',
+    ],
+  },
+  {
+    family: 'k8s',
+    id: 'a plugin or a program run by a cluster tool: a verb the tool does not have, a variable that names one',
+    floor: 'ASK',
+    cases: [
+      'helm --kube-context docker-desktop evil a b',
+      'HELM_PLUGINS=./hp helm --kube-context docker-desktop evil a b',
+      'helm --debug evil a',
+      'kubectl --context kind-foo foo bar get pods',
+      'kubectl --context kind-foo krew install x',
+      'kubectl --context kind-foo --no-such-flag get pods',
+      'KUBE_EDITOR=./e.sh kubectl --context kind-foo edit deploy x',
+      'KUBECTL_EXTERNAL_DIFF=/tmp/evil kubectl diff -f x.yaml',
+      'HELM_PLUGINS=./hp helm --kube-context kind-dev list',
+    ],
   },
   {
     family: 'network',
@@ -2275,6 +2397,31 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'mongosh --eval "db.users.find()"',
     `mongosh --eval 'db.users.insertOne({name: "a"})'`,
     'clickhouse-client -q "select 1"',
+  ],
+  // CLUSTER WORK AGAINST A LOCAL CLUSTER, AND LOOKING AT A PRODUCTION ONE, is what the one reader of a cluster command
+  // (authority/k8s.ts) must leave alone: it asks about a plugin, a credential plugin, a cluster it cannot place and a
+  // Secret read from somewhere that is not local - never about these (RC-K8S)
+  kubernetes: [
+    'kubectl --context kind-dev apply -f k8s/dev.yaml',
+    'kubectl --context kind-dev get pods -n default',
+    'kubectl --context docker-desktop rollout restart deploy/api',
+    'kubectl --context kind-dev logs deploy/api --tail=50',
+    'kubectl --context kind-dev delete pod x',
+    'kubectl --kubeconfig ./kube.conf --context kind-dev apply -f y.yaml',
+    'kubectl --context kind-dev config view --minify',
+    'kubectl config current-context',
+    'helm --kube-context kind-dev upgrade --install app ./chart',
+    'helm --kube-context kind-dev template app ./chart --set a=1',
+    'helm template app ./chart',
+    'kind create cluster --name dev',
+    'minikube kubectl -- get pods',
+    'kustomize build overlays/dev',
+    'kubectl --context production get pods',
+    'kubectl --context production describe deploy/api',
+    'kubectl --context production apply -f x.yaml --dry-run=server',
+    'kubectl --context production set env deploy/api --list',
+    'kubectl --context production rollout status deploy/api',
+    'helm --kube-context production list',
   ],
   // the shapes exit review 4 found gated for no reason; each is now proven to execute nothing it is not named for
   pipelines: ['ls -la | grep x', 'git diff | head -20', 'cat package.json | jq .name', 'echo hi | wc -l'],
