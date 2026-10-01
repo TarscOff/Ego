@@ -23,6 +23,7 @@
 //   G. `make -j` runs recipes at the same time, so a read may come after a write that is later in the text.
 //   H. `-I DIR` is part of where an `include` is looked for.
 //   I. a pipeline and a background job run while the stages after them do.
+//   J. the words of a redirection are not make goals - `make 2>&1` ran under a proof that its "goal" `2>&1` had no rule.
 //
 // The verdicts below are what a reader must give. `DENY` means the act is READ (the makefile is on the disk and nothing can have
 // changed it); `ASK` means something runs that could not be read; `ALLOW` is the control that must stay as it was.
@@ -481,5 +482,33 @@ test('I. a read in a background job or a pipeline sees the writes of the stages 
     ['a pipeline that writes a log', 'make -C sub all 2>&1 | tee build.log', sub, 'ALLOW'],
     ['a background job alone', 'make -C sub all &', sub, 'ALLOW'],
     ['sequential: the read is first and the shell waits for it', 'make -C sub all; cp evil.mk sub/Makefile', sub, 'ALLOW'],
+  ]);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * J. A REDIRECTION IS NOT A GOAL
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('J. the words of a redirection are not make goals: the default goal still runs (found by the merged-redirect transformation)', () => {
+  const dflt = { Makefile: EVIL };
+  check([
+    ['stderr merged', 'make 2>&1', dflt, 'DENY'],
+    ['stdout to a file', 'make > build.log', dflt, 'DENY'],
+    ['stdin from a file', 'make < /dev/null', dflt, 'DENY'],
+    ['both to a file', 'make &> build.log', dflt, 'DENY'],
+    ['appended', 'make >> build.log 2>&1', dflt, 'DENY'],
+    ['merged, piped', 'make 2>&1 | tail', dflt, 'DENY'],
+    ['merged, tee', 'make -j4 2>&1 | tee build.log', dflt, 'DENY'],
+    ['with -f', 'make -f evil.mk 2>&1', { 'evil.mk': EVIL }, 'DENY'],
+    ['with a glob -f', 'make -f ev*.mk 2>&1', { 'evil.mk': EVIL }, 'DENY'],
+    ['the redirection first', 'make 2>&1 all', dflt, 'DENY'],
+    ['a goal and a redirection', 'make all 2>&1', dflt, 'DENY'],
+    ['to the null device', 'make >/dev/null 2>&1', dflt, 'DENY'],
+    ['behind nice', 'nice make 2>&1', dflt, 'DENY'],
+    ['inside sh -c', "sh -c 'make 2>&1'", dflt, 'DENY'],
+    ['a dry run is a dry run', 'make -n 2>&1', dflt, 'ALLOW'],
+    ['a quoted > is a goal', "make '>'", { Makefile: OK }, 'ALLOW'],
+    ['no makefile: nothing runs', 'make 2>&1', {}, 'ALLOW'],
+    ['a harmless default goal', 'make 2>&1 | tail', { Makefile: OK }, 'ALLOW'],
   ]);
 });

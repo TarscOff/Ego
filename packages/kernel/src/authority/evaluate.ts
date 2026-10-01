@@ -8295,7 +8295,10 @@ function resolveScriptCommand(
         }
       return null;
     };
-    const rawMarked = makeAt >= 0 ? allRawMarked.slice(makeAt) : (carriedRaw() ?? tokenizeMarked(norm));
+    // THE REDIRECTIONS ARE NOT WORDS OF THE COMMAND. `make 2>&1`, `make > build.log` and `make 2>&1 | tail` read `2>&1`, `>` and
+    // `build.log` as GOALS: no makefile has a rule for them, so the requested target was "absent" and the default goal - which
+    // may be a `git push` - ran under that proof. The same reader every other head uses (commandWords) takes them out.
+    const rawMarked = commandWords(makeAt >= 0 ? allRawMarked.slice(makeAt) : (carriedRaw() ?? tokenizeMarked(norm)));
     const rawTokens = rawMarked.map((t) => t.text);
     // ONE READER FOR THE COMMAND LINE: clusters, abbreviations, options that take a value, and `--` (see
     // parseMakeCommandLine). Nine self-attack findings came from three scans that each knew a different subset.
@@ -14351,6 +14354,8 @@ function analyzeSegments(
           if (where.unknown) written.add('\0any');
           for (const q of pathCandidates(d, f).paths) recordWrite(q);
         }
+      // a checkout, a merge or a pull replaces files nobody enumerated (see TREE_CHANGING)
+      if (normalizeSegment(body).some((n) => TREE_CHANGING.test(n.trim()))) written.add(TREE_DIRTY);
     };
     // A LOOP RUNS ITS BODY AGAIN, so what a later iteration writes is what an earlier one read: `for i in 1 2; do make
     // all; cp evil.mk Makefile; done` runs the replaced makefile on its second pass. The writes of every loop body are

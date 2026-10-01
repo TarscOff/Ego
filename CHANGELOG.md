@@ -163,3 +163,22 @@ discipline of decision Q84 (authority changes are never patch releases).
   DENY (a redirection dropped every path under `/dev`; now only the discard devices are dropped, `/dev/shm` is scratch).
   A `HOME`, `PWD` or `OLDPWD` the command line assigns from something unreadable makes later uses of the name ask, and a leading `~` is the HOME the line assigned (`export HOME=/etc; echo x > ~/passwd`). A
   decision shares one view of the filesystem (the ordinary-development corpus runs in about two thirds of its former time).
+- **What makefile text `make` will run, and whether any of it was written or can be rewritten before or while it runs, is
+  one question with one reader** (closure audit 2026-10-01, wave 2, root cause "make"). The freshness ledger answered
+  "is this makefile stale" at the first read of an invocation and nowhere else; eight reviewed findings were the other
+  places. Visible changes, each from ALLOW to ASK or DENY and none for an ordinary command: `make 2>&1`, `make > log`
+  and `make 2>&1 | tail` read the redirection's words as goals, found no rule for them and ran the default goal under that
+  proof (a default goal that pushes was ALLOW; it is now the DENY it always was for `make`); `make -f 'ev*.mk'` opens
+  whatever the shell expands the word to (it read a file named `ev*.mk`, found none and called the makefile absent), and
+  a `-f` word nobody can resolve asks; an `include` that a pattern rule, a suffix rule, a wildcard or computed target or
+  `.DEFAULT` can build is remade by make - the rule's recipe runs for every goal, `-n` included - so what was read is a
+  pre-image (the exact-name check missed `%.mk: %.in`); a recipe's second pass (`cp evil.mk Makefile` then `make run`, a
+  sub-makefile replaced and read again under a stamp file, the same through an npm script or a shell script) asks, and
+  `CMD="..." make run` inside a recipe is a different invocation, not the one that is running; a shell function is read
+  again at its call when a file or the directory moved since its definition (`f() { make -C sub all; }; cp evil.mk
+  sub/Makefile; f`, `...; cd sub; f`); a writer behind `env -C`/`env --chdir` writes into the directory it names; a sed
+  script or a file name with an `=` in it no longer hides the write (`sed -i 's/^CMD=true/CMD=sh/' Makefile`); and the
+  recipes of `make -j`, the stages of a pipeline and a background job and what follows it are each read against the
+  writes of the others. `-I DIR` / `--include-dir` are part of where an `include` is looked for. A growing recursion
+  stops at the analysis depth and asks, as before. `$(MAKE)` in a recipe is still a variable this resolver does not
+  read, so a recipe line that spells it asks.

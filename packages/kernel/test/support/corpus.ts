@@ -1396,6 +1396,58 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   },
   {
     family: 'command',
+    // WHAT MAKEFILE TEXT MAKE RUNS is the files its command line NAMES, and `-f` takes whatever the shell expands the word to: the
+    // matches are read like the file they match (closure audit wave 2, RC-MK, r11-53). Named `evil.mk` / `sub/evil.mk`, never
+    // `Makefile`: every make PRODUCER writes a Makefile of its own.
+    id: 'a makefile named by a glob',
+    floor: 'DENY',
+    cases: [
+      'make -f ev*.mk',
+      "make -f 'ev*.mk'",
+      'make -f ev?l.mk',
+      'make -f ev[a-z]l.mk',
+      'make --file=ev*.mk',
+      'make -kf ev*.mk',
+      'make -f s*/evil.mk',
+    ],
+    files: {
+      'evil.mk': 'all:\n\tgit push --force origin main\n',
+      'sub/evil.mk': 'all:\n\tgit push --force origin main\n',
+    },
+  },
+  {
+    family: 'command',
+    // THE FIRST READ OF A MAKEFILE IS NOT ALWAYS THE LAST (closure audit wave 2, RC-MK): a recipe that rewrites it and runs make
+    // again, a sub-makefile replaced between two passes, an include that a pattern rule builds, recipes that run at the same time,
+    // a function whose call comes after the write, a writer behind `env -C`, a script with an `=` in it, a background job. Each is
+    // the same question - "was it written before it is read, or while?" - and the floor is the human gate.
+    id: 'a makefile read again after it was written, remade or raced',
+    floor: 'ASK',
+    cases: [
+      'make -f cyc.mk run',
+      'make -f stamp.mk run',
+      'make -f inc.mk all',
+      'make -j2 -f race.mk all',
+      'f() { make -C sub all; }; cp evil.mk sub/Makefile; f',
+      'env -C sub cp ../evil.mk Makefile && make -C sub all',
+      "sed -i 's/^CMD=true/CMD=sh/' eq.mk && make -f eq.mk build",
+      '(sleep 1; make -C sub all) & cp evil.mk sub/Makefile',
+      'make -f cyc.mk run & cp evil.mk cyc.mk',
+    ],
+    files: {
+      'cyc.mk': 'run:\n\tcp evil.mk cyc.mk\n\tmake -f cyc.mk run\n',
+      'stamp.mk': 'run:\n\tmake -C sub all\n\tcp evil.mk sub/Makefile\n\t[ -e stamp ] || { touch stamp; make -f stamp.mk run; }\n',
+      'inc.mk': '-include gen.mk\nall::\n\techo ok\n%.mk: %.in\n\tcp gen.in gen.mk\n',
+      'gen.in': 'all::\n\tgit push origin main\n',
+      'race.mk': 'all: build tamper\nbuild:\n\tsleep 1; make -C sub all\ntamper:\n\tcp evil.mk sub/Makefile\n',
+      'eq.mk': 'CMD=true a\nbuild:\n\t$(CMD)\n',
+      a: 'git push origin main\n',
+      'sub/Makefile': 'all:\n\techo ok\n',
+      'evil.mk': 'all:\n\tgit push origin main\n',
+    },
+  },
+  {
+    family: 'command',
     // the directory a shell is in after a change that may not have happened is a SET; each of these leaves both
     id: 'a governed file written after a change of directory that may or may not have happened',
     floor: 'ASK',
@@ -2300,6 +2352,12 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'build() { ls; }',
     'time ( ls -la )',
     'ls -la > out.log 2>&1',
+    // THE ORDER A SHELL RUNS THINGS IN is read, not assumed (closure audit wave 2, RC-MK): none of these is a rewritten file read again
+    'f() { ls; }; echo x > out.txt; f',
+    "sed -i 's/a=1/a=2/' config.ini",
+    'ls -la | tee list.txt',
+    'sleep 1 & echo started > out.log',
+    'git status | head -20',
   ],
   // LOOKING AT SOMETHING IS NOT DOING IT. Every one of these was an absolute DENY, which is the one verdict a
   // human cannot approve — so the inspection an operator performs BEFORE deciding was the thing being refused
