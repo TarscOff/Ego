@@ -1,6 +1,6 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
-import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
@@ -3727,6 +3727,23 @@ const PACKAGE_MANAGER_BUILTINS = new Set([
   'approve-scripts',
 ]);
 
+/** EVERY FILE lint-staged READS ITS CONFIGURATION FROM, in the order it tries them within one directory: the manifest
+ *  and its YAML twin, the rc file in each of its spellings, and a JavaScript module under both base names in every
+ *  extension a loader resolves. Derived from two small lists rather than typed out, because a name left off the list
+ *  is a configuration the producer claims does not exist (`.lintstagedrc.cjs` was, once). */
+const LINT_STAGED_CONFIGS: readonly string[] = [
+  'package.json',
+  'package.yaml',
+  '.lintstagedrc',
+  '.lintstagedrc.json',
+  '.lintstagedrc.yaml',
+  '.lintstagedrc.yml',
+  ...['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'].flatMap((e) => [`.lintstagedrc${e}`, `lint-staged.config${e}`]),
+];
+
+/** the configuration files a package manager reads beside the manifest, from the package directory upwards */
+const RC_FILES: readonly string[] = ['.npmrc', '.yarnrc.yml', '.yarnrc'];
+
 function defaultReadFile(abs: string): string | null {
   try {
     const st = statSync(abs);
@@ -3752,39 +3769,93 @@ function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null
   return (ctx.readFile ?? defaultReadFile)(abs);
 }
 
-/** Finds the nearest `name` walking upward. Returns the path when the file EXISTS, whether or not we could read it:
- *  conflating "not there" with "there but unreadable" is what let an oversized or unreadable manifest keep a
- *  declared class's ALLOW (challenge finding 1). The caller decides what an unreadable one means. */
-/** A REACHED CAP IS NOT AN ABSENCE. The upward walk stops after 64 levels, and returning the same `null` as a
+/** A REACHED CAP IS NOT AN ABSENCE. The upward walk stops after 128 levels, and returning the same `null` as a
  *  genuine miss let the caller report ABSENT_VERIFIED — the one outcome that carries a positive claim — for a
  *  manifest it simply never reached (exit review 8). The two are now different values. */
 const SEARCH_EXHAUSTED = '\0exhausted';
-function findUp(ctx: EvaluationContext, start: string, name: string, outward = false): string | null {
-  let dir = resolve(start);
-  for (let i = 0; i < 64; i++) {
-    const candidate = join(dir, name);
-    if (readInsideWorkspace(ctx, candidate) !== null || (insideRoots(candidate, ctx) && fileExists(candidate)))
-      return candidate;
+
+/** THE DIRECTORIES A TOOL'S SEARCH FOR A FILE VISITS, nearest first, the starting one included - the one walk every
+ *  "which file selects what runs" question shares. It follows the PHYSICAL parents, as npm and every tool here do: the
+ *  starting directory is canonicalised, so the parent of a directory reached through a link is the link target's
+ *  parent and not the link's. Without `outward` it stops where the registered roots end; with it, it goes on by
+ *  existence only (exit review 10: the tool's search does not stop at the workspace's edge). `visit` returns true to
+ *  stop. The result says whether the cap was hit, which is not an absence. */
+function walkUp(ctx: EvaluationContext, start: string, outward: boolean, visit: (dir: string) => boolean): boolean {
+  let dir = canonicalPath(start);
+  // 64 levels inside the roots and 64 beyond them, which is what the two walks this replaced allowed between them
+  for (let i = 0; i < 128; i++) {
+    if (visit(dir)) return false;
     const parent = dirname(dir);
-    if (parent === dir) return null;
-    // THE TOOL'S SEARCH DOES NOT STOP AT THE WORKSPACE'S EDGE. `npm run build` in a checkout with no package.json of
-    // its own runs the script of the nearest manifest ABOVE it, and stopping where the registered roots end reported
-    // "no package.json" as a verified absence over a file that decides what runs (exit review 10). With `outward` the
-    // walk goes on by existence only, and a manifest found there is returned - the caller cannot read it, which is
-    // the opacity that is true.
-    if (!insideRoots(parent, ctx)) {
-      if (!outward) return null;
-      for (let d = parent, j = 0; j < 64; j++) {
-        if (fileExists(join(d, name))) return join(d, name);
-        const up = dirname(d);
-        if (up === d) return null;
-        d = up;
-      }
-      return SEARCH_EXHAUSTED;
-    }
+    if (parent === dir || (!outward && !insideRoots(parent, ctx))) return false;
     dir = parent;
   }
-  return SEARCH_EXHAUSTED;
+  return true;
+}
+
+/** WHICH FILE SELECTS WHAT RUNS - the one reader every producer asks, so that "where is the manifest" has ONE answer.
+ *
+ *  At every directory of the walk it tries every name in `names`, in order: the nearest directory wins, and within it
+ *  the earlier name. The answer is the path of the first entry that EXISTS, whether or not we can read it: conflating
+ *  "not there" with "there but unreadable" is what let an oversized or unreadable manifest keep a declared class's
+ *  ALLOW (challenge finding 1). The caller decides what an unreadable one means.
+ *
+ *  EXISTENCE DECIDES, AT EVERY DIRECTORY, THE STARTING ONE INCLUDED. The walk used to count a candidate only when
+ *  EGO could read it or when it lay inside the registered roots, so a directory outside them was invisible to the one
+ *  question that matters about it - the directory a command RUNS in. `cd /tmp/p && npm test` with a manifest in
+ *  `/tmp/p`, and `cd link && npm test` with `link` pointing outside, never saw the file in the working directory
+ *  itself and reported "no package.json" over it; the same went for a manifest that is a LINK to a file outside the
+ *  roots, because its canonical path was outside (closure audit 2026-10-01, F1). The scratch exemption exists so that
+ *  ordinary scratch writes are not gated; it must not hide the directory a command runs in.
+ *
+ *  `tried` is every path that was looked at, found or not. A caller whose conclusion rests on "nothing nearer
+ *  exists" needs it: a candidate that is not there NOW may be written by an earlier part of the same command. */
+function locateUp(
+  ctx: EvaluationContext,
+  start: string,
+  names: readonly string[],
+  outward = false,
+): { found: string | null; tried: string[] } {
+  const tried: string[] = [];
+  let found: string | null = null;
+  const capped = walkUp(ctx, start, outward, (dir) => {
+    for (const name of names) {
+      const candidate = join(dir, name);
+      tried.push(candidate);
+      if (fileExists(candidate)) {
+        found = candidate;
+        return true;
+      }
+    }
+    return false;
+  });
+  return { found: found ?? (capped ? SEARCH_EXHAUSTED : null), tried };
+}
+
+/** The nearest `name` walking upward: see `locateUp`. */
+function findUp(ctx: EvaluationContext, start: string, name: string, outward = false): string | null {
+  return locateUp(ctx, start, [name], outward).found;
+}
+
+/** EVERY candidate on the way up, not the first. A tool that MERGES what it finds (yarn's `.yarnrc.yml`) or that uses
+ *  the nearest to each of its inputs (lint-staged, which picks a configuration per staged file) may use any of
+ *  them, so the nearest one is only part of what can run. */
+function locateEvery(
+  ctx: EvaluationContext,
+  start: string,
+  names: readonly string[],
+  outward = false,
+): { found: string[]; tried: string[]; capped: boolean } {
+  const tried: string[] = [];
+  const found: string[] = [];
+  const capped = walkUp(ctx, start, outward, (dir) => {
+    for (const name of names) {
+      const candidate = join(dir, name);
+      tried.push(candidate);
+      if (fileExists(candidate)) found.push(candidate);
+    }
+    return false;
+  });
+  return { found, tried, capped };
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -4453,13 +4524,21 @@ function writesUnenumerably(segment: string): boolean {
   return false;
 }
 
-/** True when the path exists on disk, whatever our ability to read it. */
+/** True unless the path is PROVEN not to be there - whatever our ability to read it.
+ *
+ *  ABSENCE IS A POSITIVE CLAIM, so only the two answers that say "no such entry" earn it: ENOENT and ENOTDIR. Every
+ *  other failure - a directory we may not traverse (EACCES), a link loop (ELOOP), a name too long, an I/O error - is
+ *  "I could not tell", and "I could not tell" must not read as "not there": the boolean used to be `statSync`
+ *  succeeding, so a manifest behind a directory we could not search was reported as ABSENT_VERIFIED and kept a
+ *  declared class's ALLOW. A link is looked at as a LINK (lstat): an entry that is there but leads nowhere is a
+ *  directory entry the tool's own search will see, and it is not proven absent either. */
 function fileExists(abs: string): boolean {
   try {
-    statSync(abs);
+    lstatSync(abs);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return !(code === 'ENOENT' || code === 'ENOTDIR');
   }
 }
 
@@ -5540,7 +5619,11 @@ function defaultMakefile(dir: string): string[] {
   try {
     entries = readdirSync(dir);
   } catch {
-    return [];
+    // A DIRECTORY THAT CANNOT BE LISTED CAN STILL BE ENTERED. Search permission without read permission (mode 0o111)
+    // is enough for make to open `./Makefile`, and `[]` here was "no Makefile" - a proven absence over a file that
+    // decides what runs. With no listing, the three names are tried directly, in make's precedence order; a name that
+    // is not provably absent is returned, and the caller finds out whether it can read it.
+    return ['GNUmakefile', 'makefile', 'Makefile'].map((n) => join(dir, n)).filter((f) => fileExists(f)).slice(0, 1);
   }
   const byLower = new Map<string, string>();
   for (const e of entries) if (!byLower.has(e.toLowerCase())) byLower.set(e.toLowerCase(), e);
@@ -6074,8 +6157,11 @@ function resolveScriptCommand(
   // A PATH IS STALE WHEN IT OR ANY ANCESTOR WAS WRITTEN: `mv evil sub` replaces everything under `sub`, `cp x n` where n
   // does not exist yet may be creating a directory, and a link to a directory makes its whole tree a second name. The
   // comparison is case-folded because the filesystem is (`cp evil.mk MAKEFILE` writes `Makefile` on APFS).
+  // (the common command has written nothing, so nothing is stale and no path needs resolving: a search that tries
+  //  every candidate name in every directory up the tree asks this of a hundred paths)
   const stale = (...paths: string[]): boolean =>
     written.has('\0any') ||
+    (written.size > 0 &&
     paths.some((p) => {
       const c = foldName(canonicalPath(p));
       for (const w of written) {
@@ -6084,7 +6170,7 @@ function resolveScriptCommand(
         if (c === f || c.startsWith(f + '/')) return true;
       }
       return false;
-    });
+    }));
 
   // A3 — a semantic conclusion drawn from a RELATIVE path is only trustworthy when the directory it is relative to
   // has been proven. Absence of proof is not proof.
@@ -6400,12 +6486,15 @@ function resolveScriptCommand(
     // ...and the same instruction lives in `.npmrc`, which npm reads from the package directory upwards. A flag
     // on the command line was modelled and the FILE that sets the identical key was not — the same gap this
     // producer already closed once for `script-shell`.
-    const wsRc = ['.npmrc', '.yarnrc.yml', '.yarnrc']
-      .map((n) => findUp(ctx, cwd, n))
-      .find((f) => f !== null && f !== SEARCH_EXHAUSTED);
-    const wsRcText = wsRc ? readInsideWorkspace(ctx, wsRc) : null;
+    // EVERY rc file on the way up is one the tool reads, not the first name found: yarn MERGES the `.yarnrc.yml` of
+    // each directory, and the package manager reads `.npmrc` and `.yarnrc.yml` side by side. Taking the first file
+    // of a three-name list let a benign `.npmrc` hide the `.yarnrc.yml` that re-points the tool beside it.
+    const rcFiles = locateEvery(ctx, cwd, RC_FILES).found;
     const rcSelectsWorkspaces =
-      wsRcText !== null && /^\s*workspaces\s*[:=]\s*(true|1|yes)\s*$/im.test(wsRcText) ? wsRc! : null;
+      rcFiles.find((f) => {
+        const t = readInsideWorkspace(ctx, f);
+        return t !== null && /^\s*workspaces\s*[:=]\s*(true|1|yes)\s*$/im.test(t);
+      }) ?? null;
     if (rcSelectsWorkspaces && !selector)
       return {
         kind: 'npm-script',
@@ -6529,7 +6618,8 @@ function resolveScriptCommand(
         };
       return { kind: 'none', key: `npm:${sub}`, body: null, reason: 'not a script invocation', resolution: 'ABSENT_VERIFIED' };
     }
-    const pkgPathRaw = findUp(ctx, cwd, 'package.json', true);
+    const located = locateUp(ctx, cwd, ['package.json'], true);
+    const pkgPathRaw = located.found;
     const pkgPath = pkgPathRaw === SEARCH_EXHAUSTED ? null : pkgPathRaw;
     if (pkgPathRaw === SEARCH_EXHAUSTED)
       return {
@@ -6539,10 +6629,15 @@ function resolveScriptCommand(
         reason: 'the search for a manifest was cut off before it could reach one',
         resolution: 'PARTIAL',
       };
-    if (pkgPath !== null && stale(pkgPath))
+    // EVERY CANDIDATE THE SEARCH LOOKED AT, NOT ONLY THE ONE IT FOUND. `mkdir sub && printf … > sub/package.json &&
+    // cd sub && npm run build` finds the OLDER manifest above `sub` - or none at all, in a scratch directory - and
+    // the manifest this very command writes nearer is the one npm reads. Testing only the found path left the file
+    // that was just created invisible, and "no such script" kept a declared class's ALLOW (closure audit
+    // 2026-10-01). The Makefile branch tests the candidate NAMES for the same reason; a manifest is the same question.
+    if (stale(...located.tried))
       return {
         kind: 'npm-script',
-        key: `npm:${pkgPath}:${script}`,
+        key: `npm:${pkgPath ?? cwd}:${script}`,
         body: null,
         reason: 'package.json is rewritten earlier in the same command, so its analysed contents are not what runs',
         resolution: 'STALE',
@@ -6607,10 +6702,6 @@ function resolveScriptCommand(
     );
     // the same settings live in `.npmrc` / `.yarnrc.yml`, which npm reads from the package directory upwards.
     // A flag on the command line was modelled and the FILE that sets the identical key was not (challenge 8).
-    const rcFile = ['.npmrc', '.yarnrc.yml', '.yarnrc']
-      .map((n) => findUp(ctx, cwd, n))
-      .find((f) => f !== null && f !== SEARCH_EXHAUSTED);
-    const rcText = rcFile ? readInsideWorkspace(ctx, rcFile) : null;
     // A CONFIGURATION FILE THIS COMMAND REWRITES IS NOT THE ONE npm WILL READ. `printf 'script-shell=/tmp/evil.sh'
     // > .npmrc && npm run build` hands every package script to a different interpreter, and the rc text this
     // resolver read is the PRE-IMAGE — it said nothing about script-shell, so nothing was recorded (exit
@@ -6623,9 +6714,7 @@ function resolveScriptCommand(
       rcDirs.push(d);
       if (d === dirname(d) || (ctx.repoRoots ?? []).some((r) => canonicalPath(r) === canonicalPath(d))) break;
     }
-    const rcStale =
-      (rcFile !== null && rcFile !== undefined && stale(rcFile)) ||
-      rcDirs.some((d) => ['.npmrc', '.yarnrc.yml', '.yarnrc'].some((n) => stale(join(d, n))));
+    const rcStale = rcFiles.some((f) => stale(f)) || rcDirs.some((d) => RC_FILES.some((n) => stale(join(d, n))));
     if (rcStale)
       return {
         kind: 'npm-script',
@@ -6634,10 +6723,10 @@ function resolveScriptCommand(
         reason: 'an npm configuration file is written earlier in the same command, so what was read is not what runs',
         resolution: 'STALE',
       };
-    const rcRebinds =
-      rcFile !== null && rcFile !== undefined && (rcText === null || /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText))
-        ? [rcFile]
-        : [];
+    const rcRebinds = rcFiles.filter((f) => {
+      const rcText = readInsideWorkspace(ctx, f);
+      return rcText === null || /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText);
+    });
     return {
       kind: 'npm-script',
       ...(npmFlags.length || rcRebinds.length
@@ -7165,99 +7254,123 @@ function resolveScriptCommand(
   // same configuration-closure rule applied to a tool instead of to git or make — and it is what keeps `git
   // commit` out of the way in the husky + lint-staged setup a large share of JavaScript repositories use.
   if (head === 'lint-staged' || (head === 'npx' && tokens[1] === 'lint-staged')) {
-    const pkgPathRaw = findUp(ctx, cwd, 'package.json', true);
-    const pkgPath = pkgPathRaw === SEARCH_EXHAUSTED ? null : pkgPathRaw;
-    if (pkgPathRaw === SEARCH_EXHAUSTED)
+    // WHICH CONFIGURATION IS NOT ONE FILE, AND NOT THE ONE THAT HAPPENS TO BE LISTED FIRST. lint-staged searches
+    // UPWARDS, as every cosmiconfig tool does, and since 13 it uses the configuration nearest to EACH staged file,
+    // so any of them on the way up is one a run may use. The producer used to read the first name in a list that
+    // was found ANYWHERE above (so a nearer `.lintstagedrc.json` lost to a farther `.lintstagedrc`), to look for a
+    // JavaScript configuration in the working directory only, and to stop at the nearest `package.json` even when it
+    // names no `lint-staged` key - three ways to read a file that is not the one that runs (closure audit
+    // 2026-10-01). Now every candidate on the walk is read, and the answer is the union.
+    // Beyond the registered roots the walk goes on by existence only when it STARTS outside them: there is no edge
+    // to stop at in a directory the roots never covered.
+    const outward = !insideRoots(cwd, ctx);
+    const search = locateEvery(ctx, cwd, LINT_STAGED_CONFIGS, outward);
+    if (search.capped)
       return {
         kind: 'npm-script',
-        key: `npm:${cwd}:exhausted`,
+        key: `lint-staged:${cwd}:exhausted`,
         body: null,
-        reason: 'the search for a manifest was cut off before it could reach one',
+        reason: 'the search for a lint-staged configuration was cut off before it could reach one',
         resolution: 'PARTIAL',
       };
-    // lint-staged SEARCHES UPWARDS, as every cosmiconfig tool does. The candidate list looked in the working
-    // directory ONLY, so running it from a workspace package with the configuration at the repository root
-    // found nothing and the producer claimed a proven absence over a file that decides what runs
-    // (exit review 10). `findUp` is the same search the manifest half of this producer already used.
-    const upward = (n: string): string | null => {
-      const f = findUp(ctx, cwd, n);
-      return f === null || f === SEARCH_EXHAUSTED ? null : f;
-    };
-    const candidates = ['.lintstagedrc', '.lintstagedrc.json', '.lintstagedrc.yaml', '.lintstagedrc.yml']
-      .map((n) => upward(n))
-      .filter((f): f is string => f !== null);
-    // a JS/CJS/MJS config is code, and code is not resolvable by reading
-    // every extension the tool resolves, derived rather than listed: `.lintstagedrc.cjs` was missing and reached
-    // ALLOW (decision challenge, finding 1)
-    const js = ['lint-staged.config', '.lintstagedrc']
-      .flatMap((b) => ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'].map((e) => `${b}${e}`))
-      .map((n) => join(cwd, n))
-      .find((f) => fileExists(f));
-    if (js)
-      return {
-        kind: 'shell-script',
-        key: `lint-staged:${js}`,
-        body: null,
-        reason: 'the lint-staged configuration is JavaScript, so the commands it runs cannot be read',
-        resolution: 'UNSUPPORTED',
-        unresolved: [{ what: 'config', where: js, why: 'executable configuration' }],
-      };
-    const src = candidates[0] ?? pkgPath;
-    const text = src ? readInsideWorkspace(ctx, src) : null;
-    if (!src || text === null)
-      return {
-        kind: 'shell-script',
-        key: `lint-staged:${src ?? cwd}`,
-        body: null,
-        reason: 'the lint-staged configuration could not be read',
-        resolution: src && fileExists(src) ? 'UNREADABLE' : 'ABSENT_VERIFIED',
-        unresolved: src ? [{ what: 'config', where: src, why: 'not readable' }] : [],
-      };
-    let conf: unknown;
-    try {
-      const parsed = JSON.parse(text) as Record<string, unknown>;
-      conf = src === pkgPath ? parsed['lint-staged'] : parsed;
-    } catch {
-      return {
-        kind: 'shell-script',
-        key: `lint-staged:${src}`,
-        body: null,
-        reason: 'the lint-staged configuration is not readable JSON',
-        resolution: 'UNREADABLE',
-        unresolved: [{ what: 'config', where: src, why: 'unparsable' }],
-      };
+    const candidates = [...search.found];
+    // with nothing at all inside the roots, the nearest manifest beyond them still decides (exit review 10)
+    if (!outward && !candidates.some((f) => f.endsWith('/package.json'))) {
+      const beyond = locateUp(ctx, cwd, ['package.json'], true);
+      if (beyond.found === SEARCH_EXHAUSTED)
+        return {
+          kind: 'npm-script',
+          key: `lint-staged:${cwd}:exhausted`,
+          body: null,
+          reason: 'the search for a manifest was cut off before it could reach one',
+          resolution: 'PARTIAL',
+        };
+      if (beyond.found !== null) candidates.push(beyond.found);
+      search.tried.push(...beyond.tried);
     }
-    if (conf === undefined || conf === null)
+    // A CONFIGURATION THIS COMMAND WRITES IS NOT THE ONE THAT WAS THERE. The candidate NAMES are tested, whether or
+    // not a file is sitting at them yet - the same rule the make and manifest producers follow.
+    if (stale(...search.tried))
       return {
         kind: 'shell-script',
-        key: `lint-staged:${src}`,
+        key: `lint-staged:stale:${cwd}`,
+        body: null,
+        reason: 'a lint-staged configuration is written earlier in the same command, so what was read is not what runs',
+        resolution: 'STALE',
+        unresolved: [{ what: 'freshness', where: cwd, why: 'the configuration is rewritten earlier in the same command' }],
+      };
+    const confs: Array<{ path: string; text: string; conf: unknown }> = [];
+    const problems: Array<{ path: string; why: string; outcome: 'UNSUPPORTED' | 'UNREADABLE' }> = [];
+    for (const f of candidates) {
+      const base = f.slice(f.lastIndexOf('/') + 1);
+      // a JS/CJS/MJS config is code, and code is not resolvable by reading - whether or not the file can be opened
+      if (/\.(js|mjs|cjs|ts|mts|cts)$/.test(base)) {
+        problems.push({ path: f, why: 'the lint-staged configuration is JavaScript, so the commands it runs cannot be read', outcome: 'UNSUPPORTED' });
+        continue;
+      }
+      const text = readInsideWorkspace(ctx, f);
+      if (text === null) {
+        problems.push({ path: f, why: 'the lint-staged configuration could not be read', outcome: 'UNREADABLE' });
+        continue;
+      }
+      // a package.yaml that names no `lint-staged` is not a configuration, and the search goes on
+      if (base === 'package.yaml') {
+        if (/lint-staged/.test(text))
+          problems.push({ path: f, why: 'the lint-staged configuration is YAML, which this resolver does not read', outcome: 'UNREADABLE' });
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        problems.push({ path: f, why: 'the lint-staged configuration is not readable JSON', outcome: 'UNREADABLE' });
+        continue;
+      }
+      // a manifest that names no `lint-staged` is not a configuration either
+      const conf = base === 'package.json' ? (parsed as Record<string, unknown> | null)?.['lint-staged'] : parsed;
+      if (conf === undefined || conf === null) continue;
+      if (typeof conf !== 'object' || Array.isArray(conf)) {
+        problems.push({ path: f, why: 'the lint-staged configuration is not an object of globs and commands', outcome: 'UNREADABLE' });
+        continue;
+      }
+      confs.push({ path: f, text, conf });
+    }
+    if (!confs.length && !problems.length)
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:${cwd}`,
         body: null,
         reason: 'no lint-staged configuration',
         resolution: 'ABSENT_VERIFIED',
       };
     const body: string[] = [];
-    for (const v of Object.values(conf as Record<string, unknown>)) {
-      if (typeof v === 'string') body.push(v);
-      else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) body.push(...(v as string[]));
-      else
-        return {
-          kind: 'shell-script',
-          key: `lint-staged:${src}`,
-          body: body.length ? body : null,
-          bodyEnv: childEnvironment(env, { cwd, cwdVerified: env.cwdVerified }),
-          reason: 'a lint-staged entry is a function rather than a command',
-          resolution: 'PARTIAL',
-          unresolved: [{ what: 'config', where: src, why: 'a non-literal entry' }],
-        };
-    }
+    const gaps: Unresolved[] = problems.map((p) => ({ what: 'config' as const, where: p.path, why: p.why }));
+    for (const { path, conf } of confs)
+      for (const v of Object.values(conf as Record<string, unknown>)) {
+        if (typeof v === 'string') body.push(v);
+        else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) body.push(...(v as string[]));
+        else gaps.push({ what: 'config', where: path, why: 'a non-literal entry' });
+      }
+    // nothing to hand over: the opacity is the whole answer, and it names the first thing that could not be read
+    if (!confs.length)
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:${problems[0]!.path}`,
+        body: null,
+        reason: problems[0]!.why,
+        resolution: problems[0]!.outcome,
+        unresolved: gaps,
+      };
+    const sources = confs.map((c) => c.path).join(', ');
     return {
       kind: 'shell-script',
-      key: `lint-staged:${src}`,
+      key: `lint-staged:${confs.map((c) => c.path).join(',')}`,
       body,
       bodyEnv: childEnvironment(env, { cwd, cwdVerified: env.cwdVerified }),
-      reason: `lint-staged commands from ${src}`,
-      resolution: 'RESOLVED_COMPLETE',
-      provenance: { source: src, fingerprint: fingerprint(text) },
+      reason: gaps.length ? `lint-staged commands from ${sources}; NOT fully resolved: ${gaps[0]!.why}` : `lint-staged commands from ${sources}`,
+      resolution: gaps.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
+      provenance: { source: confs.map((c) => c.path).join(','), fingerprint: fingerprint(confs.map((c) => c.text).join('\n')) },
+      ...(gaps.length ? { unresolved: gaps } : {}),
     };
   }
   if (head === 'git') return resolveGitAmbient(ctx, tokens, env);
