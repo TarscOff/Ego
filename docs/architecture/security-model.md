@@ -310,6 +310,50 @@ registered repository root. And because `cd` is *logical* by default but *physic
 a symlinked component resolves to two different directories: where the two disagree, the base is not proven and
 everything below it is downgraded.
 
+## A shell word is judged by what it resolves to
+
+The evaluator turns a shell word into a path in about forty places: a redirection target, a writer's operand, a `-C`
+directory, an archive's extraction root, the payload of `find -exec`, a git pathspec, the value of an output option, the
+file a script reader opens. Each of them used to join the working directory and the word with `resolve()`, which applies
+`..` to the **text**. The kernel does not: it follows `d` first, so with `d -> .claude/sub` the file named by
+`d/../settings.json` is `.claude/settings.json`. `echo x > d/../settings.json` was ALLOW while
+`cd d && echo x > ../settings.json` — the same file — was DENY, and the structured tools judged it correctly.
+
+The question is now asked in one place, [`authority/paths.ts`](../../packages/kernel/src/authority/paths.ts).
+`pathCandidates(cwds, word)` returns every path the word may denote, and a caller judges all of them and keeps the
+worst:
+
+- the **lexical** reading (`..` applied to the text), kept because a protected *name* is a property of the typed path —
+  a `.claude` that is itself a link has a realpath that no longer says `.claude` — and because one more candidate can only
+  make a verdict stricter;
+- the **physical** reading, every component followed as the kernel follows it with `..` the parent of the directory
+  reached; a link whose target is missing is still followed, and a loop or a long chain is cut by one budget the whole
+  resolution shares. It is computed only for a word that has a `..` in it, once per evaluation;
+- each of them for the word **as written and trimmed** (a quoted word keeps its padding), in **every directory the shell may
+  be in** (the working directory is a set), after the shell's own expansion: `~`, `~+`, `~-`, `~user`, `$HOME`, `${HOME}`,
+  `$PWD`, `$OLDPWD`, a one-character bracket class.
+
+A word that is only an alias — `/proc/self/cwd/…`, `/proc/self/root/…`, an open descriptor above 2 (`/dev/fd/3`) — is
+followed as far as it can be and **asks**, because where it leads is decided by the process that opens it. Whether a
+destination is a **discard device** is also asked once (`isDiscardDevice`): `/dev/null`, `/dev/zero`, `/dev/full`,
+`/dev/random`, `/dev/urandom`, `/dev/tty` and the command's own standard streams. A redirection and an option's value
+(`curl -o /dev/null`, which was an absolute DENY) get the same answer, and the rest of `/dev` is a destination:
+`echo x > /dev/disk0` used to be dropped with the null device.
+
+`evaluate.ts` does not import `resolve`, and [`closure-paths.test.ts`](../../packages/kernel/test/closure-paths.test.ts)
+fails if a bare join of a directory and a word comes back. What it does **not** establish:
+
+- `~-` and `$OLDPWD` are known only after a `cd` in the same command line (the previous directory of the shell the command
+  started in is the environment's); before one they are a dynamic word and ask. A `HOME`, `PWD` or `OLDPWD` the line itself
+  assigns from something unreadable makes every later use of the name ask.
+- `~user` is not looked up (that would be a process): the conventional places a home directory lives are all judged, and
+  the word asks. The `/proc` aliases are matched by name and tested here by string, not on a Linux host.
+- The normalizer drops the quoting of an ordinary segment, so an operand with padding or an interior space reaches the
+  operand readers as two words (the redirection reader, which reads the segment as written, keeps it whole). That
+  over-reads; it cannot hide a write.
+- A file that a reader opens itself (a script, a makefile, a response file) is read at its physical path. A check that the
+  file is the one that will run at execution time is still a race the kernel cannot close (#26).
+
 ## The producer contract: true by construction, not by vigilance
 
 Four independent challenges exposed the same meta-defect in the repairs themselves, not in the rules: a rule would be
