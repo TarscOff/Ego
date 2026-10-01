@@ -341,3 +341,43 @@ export function peelCarriers(words: readonly string[], from = 0, opts: PeelOptio
   out.at = Math.min(i, words.length);
   return out;
 }
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * PAYLOAD CLAUSES
+ *
+ * `find -exec CMD ARGS ;` and `fd -x CMD ARGS` carry a command of their own inside the line. WHERE THAT COMMAND'S WORDS BEGIN AND END
+ * is one fact, and it was read by four loops of three readers (the carried-command text of the raw-text scanners, the payload
+ * reader of the normalizer for `find` and for `fd`, and the reader of which words are data), each with its own idea of the
+ * terminator: `;`, `\;`, and a `+` that find only honours right after `{}`. They are one function now.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const FIND_HEAD = /^(find|gfind)$/;
+const FD_HEAD = /^(fd|fdfind)$/;
+/** the options that open a clause, for the carrier whose own word is `head`, or null when it carries none */
+export function payloadOpener(head: string): RegExp | null {
+  const name = head.replace(/^.*\//, '');
+  return FIND_HEAD.test(name) ? /^-(exec|execdir|ok|okdir)$/ : FD_HEAD.test(name) ? /^(-x|--exec|-X|--exec-batch)$/ : null;
+}
+/** Whether the clause that began before `words[j]` ends AT it. `;` ends both; find's `+` ends a clause only right after `{}`
+ *  (anywhere else it is an argument), and fd has no `+` terminator at all. */
+export function payloadClauseEndsAt(words: readonly string[], j: number, head: string): boolean {
+  const w = words[j];
+  if (w === ';' || w === '\\;') return true;
+  return w === '+' && FIND_HEAD.test(head.replace(/^.*\//, '')) && words[j - 1] === '{}';
+}
+/** The command clauses of a `find` or an `fd` whose own word stands at `at`: `[from, to)` is the range of words handed to the carried
+ *  command, and `from - 1` is the option that opened it. A clause that is never terminated runs to the end of the line. */
+export function payloadSpans(words: readonly string[], at: number): Array<[number, number]> {
+  const head = words[at] ?? '';
+  const opener = payloadOpener(head);
+  const out: Array<[number, number]> = [];
+  if (opener === null) return out;
+  for (let i = at + 1; i < words.length; i++) {
+    if (!opener.test(words[i]!)) continue;
+    let j = i + 1;
+    while (j < words.length && !payloadClauseEndsAt(words, j, head)) j++;
+    out.push([i + 1, j]);
+    i = j;
+  }
+  return out;
+}

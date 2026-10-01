@@ -129,7 +129,10 @@ test('PROPERTY: every tool the target model knows reaches the target model', () 
     ...['kubectl', 'oc'].map((h) => [h, `${h} --context production delete deployment api`] as const),
     ['helm', 'helm --kube-context production upgrade app ./chart'],
     // container runtimes
-    ...['docker', 'podman', 'nerdctl'].map((h) => [h, `${h} --context production rm -f app`] as const),
+    ...['docker', 'podman'].map((h) => [h, `${h} --context production rm -f app`] as const),
+    // (nerdctl has no contexts - its engine is chosen by `--host` / `--address`, and an option the container reader does not know in
+    // front of the verb is an ASK; the probe is the spelling nerdctl really has)
+    ['nerdctl', 'nerdctl --host tcp://prod-engine.acme.com:2375 rm -f app'],
   ];
   const unreachable: string[] = [];
   for (const [head, probe] of PRODUCTION_PROBES)

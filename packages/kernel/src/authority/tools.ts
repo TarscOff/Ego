@@ -470,11 +470,24 @@ export function toolEffects(head: string, argv: readonly string[]): ToolEffects 
     }
   }
   // `git config --file F --get KEY` (and --list, --get-all...) READS F; only a setting, an unsetting or an edit writes it
-  if (found.key === 'git config' && ['get', 'get-all', 'get-regexp', 'get-urlmatch', 'list', 'name-only', 'show-origin', 'show-scope'].some((a) => has(parsed, a))) {
+  if (found.key === 'git config' && gitConfigAsks(parsed)) {
     out.reads.push(...out.writes);
     out.writes = [];
   }
   return out;
+}
+
+/** WHETHER A `git config` INVOCATION ASKS FOR A VALUE OR A LISTING AND SETS NOTHING: a get or a list option, or one bare key with
+ *  nothing after it. The scope options (`--global`, `--file F`, `--blob B`) only say WHERE, and a write option anywhere (`--add`,
+ *  `--unset`, `--replace-all`, `--edit`, a second operand) makes the whole line a write. An option the grammar does not know
+ *  cannot be placed, and the line is not a read. ONE reader of this, asked by the table's file role (above) and by the scan that
+ *  takes `--file` as an output flag for the tools that have one (`git config --file .git/config --get remote.origin.url` names the
+ *  file it looks in; judged as an output it was an absolute refusal of a look - review 11, #62). */
+export function gitConfigAsks(parsed: Parsed): boolean {
+  if (parsed.unknown.length > 0) return false;
+  if (['add', 'unset', 'unset-all', 'replace-all', 'rename-section', 'remove-section', 'edit'].some((a) => has(parsed, a))) return false;
+  if (['get', 'get-all', 'get-regexp', 'get-urlmatch', 'list', 'name-only', 'show-origin', 'show-scope'].some((a) => has(parsed, a))) return true;
+  return parsed.operands.length === 1;
 }
 
 function bucket(out: ToolEffects, role: Role, v: string): void {

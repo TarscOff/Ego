@@ -421,6 +421,13 @@ Two modules now answer, and every reader uses them:
   read the line (`tar --use=./x` is `--use-compress-program=./x`; an ambiguous prefix is left alone, as the tool would refuse
   it). [`authority/sed.ts`](../../packages/kernel/src/authority/sed.ts) reads a sed script as a script — the file of `w`, `W`
   and the `w` flag of `s` may be glued to the letter, and ends at the end of the line.
+- [`authority/operands.ts`](../../packages/kernel/src/authority/operands.ts) is the **role of a word**: which words of a
+  command are *data* — a search pattern, a commit message, a printed string — and so neither the act nor the place it is
+  done. The normalizer replaces them before any text matcher reads the line, which is what keeps `grep -rn "ego hook" docs/`
+  (reading the documentation of the gate) from being the absolute deny that `ego hook …` (running it) is. It locates the
+  command with the same `peelCarriers`, and the clause of a `find -exec` / `fd -x` with the same `payloadSpans`; an option
+  its grammar of the data-taking tools does not list, or a carrier whose carried command cannot be placed, leaves the line
+  unread — it can only ever *reduce* what the matchers see, never classify.
 
 What this does **not** establish: a tool whose options no table lists is still read by the regexes it always was; a table is
 the tool's *documented* option set and an option added to the tool tomorrow is `unknown` to the parser until its row is

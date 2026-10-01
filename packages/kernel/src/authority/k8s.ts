@@ -96,6 +96,11 @@ export interface K8sEffect {
   /** files the command reads through an option whose value is `KEY=PATH` (`helm --set-file`, `kubectl create --from-file`).
    *  The path scan of the evaluator reads a word that IS a path; `a=.env` is not one, and the read was invisible */
   reads: Array<{ option: string; path: string }>;
+  /** why the API server or the credentials this command uses are NOT the ambient ones the user configured, or null: an API server
+   *  named on the line or in the environment that is not a declared local one, or a kubeconfig file the kernel cannot read (it may
+   *  name a credential plugin). A read sends the credentials to whatever answers, so a read that is unvouched does not take the
+   *  verdict of a read in the mode made for looking at the clusters the developer configured */
+  unvouched: string | null;
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -268,6 +273,12 @@ const OC_ACT = [
 ];
 const OC_VERBS: ReadonlySet<string> = new Set([...KUBECTL_VERBS, ...OC_READ, ...OC_ACT]);
 
+/** Whether `verb` is a verb the tool itself has. Any other first word is a PLUGIN, which the tool RUNS with the words after it - `--help`
+ *  among them: `kubectl foo --help` starts `kubectl-foo --help`. ONE answer, asked by this reader and by the help-probe reader. */
+export function k8sHasVerb(head: string, verb: string): boolean {
+  return (head === 'helm' ? HELM_VERBS : head === 'oc' ? OC_VERBS : KUBECTL_VERBS).has(verb);
+}
+
 export const HELM_VERBS: ReadonlySet<string> = new Set([
   ...['list', 'ls', 'status', 'get', 'history', 'hist', 'show', 'inspect', 'search', 'template', 'lint', 'version', 'env', 'dependency', 'dep', 'dependencies', 'diff', 'completion', 'help', 'verify'],
   ...['install', 'upgrade', 'uninstall', 'un', 'del', 'delete', 'rollback', 'push', 'test', 'repo', 'plugin', 'create', 'package', 'pull', 'fetch', 'registry'],
@@ -340,7 +351,6 @@ function isGlobalName(head: string, name: string): boolean {
 }
 
 function parse(head: string, words: readonly K8sWord[]): Parsed {
-  const known = head === 'helm' ? HELM_VERBS : head === 'oc' ? OC_VERBS : KUBECTL_VERBS;
   const p: Parsed = {
     head,
     words,
@@ -388,7 +398,7 @@ function parse(head: string, words: readonly K8sWord[]): Parsed {
         // a word the shell fills in where the verb stands names nothing: it may be an option, a verb or a plugin
         p.plugin = true;
         p.unplaced ??= 'a word a shell fills in where the verb stands';
-      } else if (!known.has(w.text)) p.plugin = true;
+      } else if (!k8sHasVerb(head, w.text)) p.plugin = true;
       continue;
     }
     p.operands.push(i);
@@ -493,6 +503,7 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
     kubeconfigWrite: null,
     program: null,
     reads: [],
+    unvouched: null,
   });
   // `kind` and `k3d` manage their OWN local clusters and are local by construction. minikube also carries kubectl:
   // `minikube kubectl -- ARGS` is kubectl with minikube's cluster as the default and every flag of kubectl after the
@@ -535,6 +546,8 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
 
   /* ---- WHICH CLUSTER ------------------------------------------------------------------------------------------ */
   const signals: Signal[] = [];
+  /** see K8sEffect.unvouched: the first reason found */
+  let unvouched: string | null = null;
   const dyn = (w: K8sWord | string): boolean => (typeof w === 'string' ? /[$`]/.test(w) : dynamic(w));
   const textOf = (w: K8sWord | string): string => (typeof w === 'string' ? w : w.text);
   /** a name that a shell fills in is not a name: PRODUCTION if the part that is written says so, else unresolved */
@@ -558,29 +571,40 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
   const absent: string[] = [];
   for (const { word: fw, label } of kubeFiles) {
     const name = textOf(fw);
+    // (every file the kernel does not read is a kubeconfig nobody vouched for: it may name a credential plugin, or another server)
     if (dyn(fw)) {
       signals.push(hidden(label, name));
+      unvouched ??= `${label}${name} is a kubeconfig a shell fills in`;
       continue;
     }
     // a path that says production is production, whatever the file holds
     if (host.productionMarked(name)) {
       signals.push({ cls: 'PRODUCTION', target: label + name });
+      unvouched ??= `${label}${name} is a kubeconfig the kernel did not read`;
       continue;
     }
     const f = host.file(name);
     if (f.state === 'text') {
       const model = readKubeconfig(f.text);
-      if (model === null) signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (not a kubeconfig this reader understands)` });
-      else models.push(model);
+      if (model === null) {
+        signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (not a kubeconfig this reader understands)` });
+        unvouched ??= `${label}${name} is not a kubeconfig this reader understands`;
+      } else models.push(model);
       // what is on the disk is the worst case it can be taken for, not the whole truth: it may be rewritten before the tool opens it
-      if (f.stale === true) signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (this command line may rewrite it)` });
+      if (f.stale === true) {
+        signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (this command line may rewrite it)` });
+        unvouched ??= `${label}${name} may be rewritten by this command line before it is opened`;
+      }
     } else if (f.state === 'outside') {
       // the workspace does not own it, so it says nothing about where a declared name points
       signals.push({ cls: 'EXTERNAL', target: label + name });
+      unvouched ??= `${label}${name} is a kubeconfig outside the workspace, which the kernel cannot read`;
     } else if (f.state === 'absent') {
       absent.push(label + name);
+      unvouched ??= `${label}${name} is not there`;
     } else {
       signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (${f.state === 'fresh' ? 'this command line writes it' : 'it cannot be read'})` });
+      unvouched ??= `${label}${name} cannot be read`;
     }
   }
   const selectedUsers = new Set<string>();
@@ -637,10 +661,16 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
     else if (dyn(w)) signals.push({ cls: 'UNCLASSIFIED', target: `user ${w.text}` });
   }
   // (`-s` is the server of kubectl and the `--show-only` of helm template)
-  for (const w of opt('--server', ...(head === 'helm' ? [] : ['-s']), '--kube-apiserver')) server('server ', w);
-  for (const name of ['KUBERNETES_MASTER', 'HELM_KUBEAPISERVER']) for (const v of env[name] ?? []) server(`${name}=`, v);
+  // (an API server named HERE - on the line or in the environment - is not one the user's kubeconfig defines: unless it is a declared
+  // local one, the credentials of the kubeconfig go to a host nobody vouched for)
+  const endpoint = (label: string, w: K8sWord | string): void => {
+    server(label, w);
+    if (dyn(w) || host.classifyServer(textOf(w)) !== 'LOCAL') unvouched ??= `${label}${textOf(w)} is an API server named on the command line, not one a kubeconfig defines`;
+  };
+  for (const w of opt('--server', ...(head === 'helm' ? [] : ['-s']), '--kube-apiserver')) endpoint('server ', w);
+  for (const name of ['KUBERNETES_MASTER', 'HELM_KUBEAPISERVER']) for (const v of env[name] ?? []) endpoint(`${name}=`, v);
   // in-cluster: the service host in the environment is where the API server is
-  for (const v of env['KUBERNETES_SERVICE_HOST'] ?? []) server('KUBERNETES_SERVICE_HOST=', v);
+  for (const v of env['KUBERNETES_SERVICE_HOST'] ?? []) endpoint('KUBERNETES_SERVICE_HOST=', v);
   for (const w of opt('--namespace', '-n')) if (host.productionMarked(w.text)) signals.push({ cls: 'PRODUCTION', target: `namespace ${w.text}` });
   for (const v of env['HELM_NAMESPACE'] ?? []) if (host.productionMarked(v)) signals.push({ cls: 'PRODUCTION', target: `HELM_NAMESPACE=${v}` });
 
@@ -728,6 +758,7 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
     kubeconfigWrite,
     program: programs[0] ?? null,
     reads,
+    unvouched,
   };
 }
 
