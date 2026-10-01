@@ -1835,6 +1835,116 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'cp package.json /proc/self/root/tmp/x',
     ],
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE OF THE OVER-GATING FINDINGS (register cause F; review 11 #142, the critical one). The looks are in
+   * ORDINARY (`proportionality`) and in closure-proportionality.test.ts; these are the ACTS beside them. Separating a
+   * word that is DATA from a word that is the act, an input from an output, a probe from the call, must never
+   * release the act: every class here is held under every transformation below.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'ego',
+    // a printed or searched word is data and a redirection after it is not: masking the word must leave the target in view
+    id: 'a write to governed state beside a reader of it - an output redirection, a destination operand, a redirection glued to a printed word',
+    floor: 'DENY',
+    files: { 'in.json': '{}' },
+    cases: [
+      'grep -rn x docs > .harness/runtime/state.json',
+      'echo x>.harness/runtime/ledger.json',
+      'jq . in.json > .harness/runtime/state.json',
+      'tee .harness/runtime/state.json < in.json',
+      'cat in.json | tee .harness/runtime/y.json',
+      'cp in.json .harness/runtime/state.json',
+      'git log -S x > .harness/generated/index.md',
+      'rg x docs 2> .harness/runtime/err.log',
+      'python3 -m json.tool in.json .harness/runtime/state.json',
+    ],
+  },
+  {
+    family: 'ego',
+    // the words of the gate are data in a search and in a message; the invocation is the act
+    id: 'the invocation of the gate, which a search for its name or a message that spells it is not',
+    floor: 'DENY',
+    cases: [
+      'ego hook claude-code PreToolUse',
+      'npx ego hook claude-code Stop',
+      'node bin/ego.js hook claude-code UserPromptSubmit',
+      'ego decision answer d1 approve',
+      'ego budget extend 10',
+      './node_modules/.bin/ego hook claude-code PostToolUse',
+    ],
+  },
+  {
+    family: 'git',
+    // a commit message is data and the flag beside it is not
+    id: 'a commit that skips the hooks, whatever its message says',
+    floor: 'DENY',
+    cases: [
+      'git commit -m "docs: explain --no-verify" --no-verify',
+      'git commit --no-verify -m x',
+      'git commit -nm x',
+      'git commit -m x -n',
+      'git commit --dry-run=false --no-verify',
+    ],
+  },
+  {
+    family: 'fs',
+    // getopt takes any unambiguous prefix of a long option, and sort has one long option that begins with `o`
+    id: 'a governed file written by sort through a prefix of its output option',
+    floor: 'DENY',
+    cases: [
+      'sort --o .claude/settings.json package.json',
+      'sort --ou .claude/settings.json package.json',
+      'sort --outpu .claude/settings.json package.json',
+      'sort --output=.claude/settings.json package.json',
+      'sort -ro .claude/settings.json package.json',
+    ],
+  },
+  {
+    family: 'fs',
+    // a copy reads its sources and writes its last operand: the sources are not the place the act is done, the last one is
+    id: 'a copy INTO governed state, as against a copy out of it',
+    floor: 'DENY',
+    cases: [
+      'cp package.json .claude/hooks/pre-commit.sh',
+      'cp package.json .git/config',
+      'cp package.json .harness/runtime/state.json',
+      'cp package.json .husky/pre-commit',
+      'install -m 755 package.json .git/hooks/pre-commit',
+    ],
+  },
+  {
+    family: 'fs',
+    // the pattern is data, and a pattern that looks like a redirection is still a pattern: the FILE beside it is judged
+    id: 'a credential file read beside a pattern that looks like a redirection',
+    floor: 'DENY',
+    cases: [
+      'grep "=>" ~/.ssh/id_rsa',
+      'grep "2>/dev/null" ~/.ssh/id_rsa',
+      "grep '->' ~/.aws/credentials",
+      "grep '<div>' ~/.netrc",
+      'sudo grep "=>" ~/.ssh/id_rsa',
+      'git ls-files | xargs grep "=>" ~/.ssh/id_rsa',
+    ],
+  },
+  {
+    family: 'command',
+    // looking for a program by name is not starting it; starting it through a wrapper is
+    id: 'a nested agent host started behind a wrapper',
+    floor: 'DENY',
+    cases: ['claude -p x', 'xargs claude', 'strace claude -p x', 'env claude -p x', "find . -exec claude -p x ';'"],
+  },
+  {
+    family: 'git',
+    // a push is not a dry run unless the LAST dry-run flag says so, and its flags are not hidden by a redirection glued to them
+    id: 'a push that is not a dry run, with a redirection glued to its flags',
+    floor: 'DENY',
+    cases: [
+      'git push origin main -vn --no-dry-run',
+      'git push origin main --dry-run --no-dry-run>/dev/null',
+      'git push -f origin main>/dev/null',
+      'git push origin main --tags>/dev/null',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -2275,6 +2385,30 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'mongosh --eval "db.users.find()"',
     `mongosh --eval 'db.users.insertOne({name: "a"})'`,
     'clickhouse-client -q "select 1"',
+  ],
+  // LOOKING AT THE GATE IS NOT RUNNING IT (register cause F; review 11 #142, the critical one): a search for, a message
+  // about and a print of the words of an absolute deny, a probe and a dry run of an act, a read of a cluster or a
+  // configuration. Each has its doing form in a semantic class above, which stays refused.
+  proportionality: [
+    'grep -rn "hook claude-code PreToolUse" docs/',
+    'git log --grep="ego hook"',
+    'git commit -m "docs: explain --no-verify"',
+    'echo "ego hook claude-code Stop"',
+    'grep -rn "=>" src/',
+    'git grep core.hooksPath docs',
+    'grep -rn claude src/',
+    'jq . < .harness/runtime/state.json',
+    'cp .claude/settings.json /tmp/settings.bak',
+    'git stash list --all',
+    'git config --file .git/config --get remote.origin.url',
+    'git push --help origin main',
+    'git add -n .',
+    'git commit --dry-run --no-verify',
+    'git --exec-path',
+    'GIT_PAGER=cat git log',
+    'aws configure get region',
+    'gh pr merge -h',
+    'gh api -X GET search/issues -f q=foo',
   ],
   // the shapes exit review 4 found gated for no reason; each is now proven to execute nothing it is not named for
   pipelines: ['ls -la | grep x', 'git diff | head -20', 'cat package.json | jq .name', 'echo hi | wc -l'],

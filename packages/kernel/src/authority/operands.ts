@@ -23,6 +23,12 @@
 
 /** What a word is to the command it belongs to. Only `data` is ever masked; `operand` and `value` are named so that the
  *  scan for governed programs in argument position can tell a file name from an option value that may be a program. */
+/** What a word holds of the shell's redirection characters, by how it was WRITTEN: `none`; `real`, a `<` or `>` outside every quote -
+ *  the shell's operator; `literal`, only characters a quote, a backslash or an ANSI-C string turned into text (`"=>"`, `\\>x`,
+ *  `$'>'`); `mixed`, both (`''>x`: an empty word and a redirection). The tokenizer is the one reader that knows, and a caller that
+ *  does not have it passes nothing (see `redirectionWords`). */
+export type OperatorShape = 'none' | 'real' | 'literal' | 'mixed';
+
 export type WordRole = 'head' | 'option' | 'value' | 'data' | 'operand' | 'unread';
 
 interface OptionGrammar {
@@ -182,14 +188,25 @@ const isRedirection = (w: string): boolean => /[<>]/.test(w) && !/\s/.test(w);
 
 /** THE WORDS OF A LINE THAT ARE A REDIRECTION, and the word after a bare operator (its target). They are never data, even
  *  when the command prints: `echo x>.harness/runtime/ledger.json` is one word with the operator inside it, and masking it as
- *  the string it looks like hid a write to the runtime state (the bypass corpus). A word that has a `<` or a `>` anywhere in
- *  it is read as a redirection whether or not a quote kept it a plain string, because the quoting is gone by here and the
- *  cost of being wrong is a pattern left visible - the line as it was. */
-function redirectionWords(line: readonly string[], from: number): Set<number> {
+ *  the string it looks like hid a write to the runtime state (the bypass corpus).
+ *
+ *  WHETHER A WORD IS ONE DEPENDS ON ITS QUOTING, and only the caller that still has it can say: `grep => src` redirects, and
+ *  `grep "=>" src` searches for an arrow. Both reach here as the word `=>`. When the quoting is given, an unquoted word with
+ *  an operator in it is the redirection and a quoted one is a plain word. When it is not, the question has no answer, and a
+ *  wrong one MOVES THE PATTERN: reading the arrow as a redirection made the next word - the file, `~/.ssh/id_rsa` - the
+ *  pattern, and masked the path. So a line with such a word is not read at all (null). */
+function redirectionWords(line: readonly string[], from: number, shape?: readonly OperatorShape[]): Set<number> | null {
   const out = new Set<number>();
   for (let i = from; i < line.length; i++) {
     const w = line[i]!;
-    if (!isRedirection(w)) continue;
+    if (shape !== undefined) {
+      const sh = shape[i];
+      if (sh === 'mixed') return null;
+      if (sh !== 'real') continue;
+    } else {
+      if (!isRedirection(w)) continue;
+      return null;
+    }
     out.add(i);
     // a bare operator (`>`, `>>`, `2>`, `&>`, `<`, `>&`, `<<<`) takes the NEXT word as its target
     if (/^(?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>)$/.test(w) && i + 1 < line.length) out.add(++i);
@@ -199,11 +216,12 @@ function redirectionWords(line: readonly string[], from: number): Set<number> {
 
 /** Walks the options of one command under the grammar of its tool. Returns null as soon as it meets an option it does
  *  not know: from there on the line is not read. */
-function scan(line: readonly string[], from: number, g: OptionGrammar): Scan | null {
+function scan(line: readonly string[], from: number, g: OptionGrammar, shape?: readonly OperatorShape[]): Scan | null {
   const roles: WordRole[] = line.map((_, i) => (i < from ? 'head' : 'operand'));
   const glued = new Map<number, number>();
   const noPattern = (g.noPatternLong ?? []).some((n) => line.slice(from).includes(`--${n}`));
-  const redirected = redirectionWords(line, from);
+  const redirected = redirectionWords(line, from, shape);
+  if (redirected === null) return null;
   let supplied = false;
   let ended = false;
   for (let i = from; i < line.length; i++) {
@@ -362,29 +380,34 @@ function scanMessage(line: readonly string[], from: number, flags: string): Scan
 /** The role of every word of one command, or null when the head is not a tool this file has a grammar for, or the line
  *  has an option that grammar does not list. `at` is where the head stands in `line` (a wrapper or an assignment may be in
  *  front of it); every word in front of it has the role `head`. */
-export function wordRoles(line: readonly string[], at = 0): Scan | null {
+export function wordRoles(line: readonly string[], at = 0, shape?: readonly OperatorShape[]): Scan | null {
   const raw = line[at];
   if (raw === undefined) return null;
   const head = trustedName(raw);
   if (head === null) return null;
-  if (GREP_HEADS.has(head)) return scan(line, at + 1, GREP);
-  if (head === 'rg' || head === 'ripgrep') return scan(line, at + 1, RIPGREP);
-  if (head === 'pgrep') return scan(line, at + 1, PGREP);
+  if (GREP_HEADS.has(head)) return scan(line, at + 1, GREP, shape);
+  if (head === 'rg' || head === 'ripgrep') return scan(line, at + 1, RIPGREP, shape);
+  if (head === 'pgrep') return scan(line, at + 1, PGREP, shape);
   if (PRINTERS.has(head)) {
     // `echo -n -e text`: the leading options are echo's; everything from the first word that is not one is printed
+    const redirected = redirectionWords(line, at + 1, shape);
+    if (redirected === null) return null;
     const roles: WordRole[] = line.map((_, i) => (i <= at ? 'head' : 'data'));
     let i = at + 1;
     while (i < line.length && (head === 'echo' ? /^-[neE]+$/.test(line[i]!) : line[i] === '--')) roles[i++] = 'option';
-    for (const r of redirectionWords(line, at + 1)) roles[r] = 'option';
+    for (const r of redirected) roles[r] = 'option';
     return { roles, glued: new Map() };
   }
   if (head === 'git') {
     const v = gitVerbAt(line, at);
     if (v < 0) return null;
     const verb = line[v]!;
-    if (verb === 'grep') return scan(line, v + 1, GIT_GREP);
-    if (GIT_PICKAXE_VERBS.has(verb)) return scanPickaxe(line, v + 1);
+    if (verb === 'grep') return scan(line, v + 1, GIT_GREP, shape);
+    // (a line whose words may be redirections is not read for a message or a pickaxe either: see redirectionWords)
+    const pickaxe = GIT_PICKAXE_VERBS.has(verb);
     const flags = GIT_MESSAGE_VERBS[verb];
+    if ((pickaxe || flags !== undefined) && redirectionWords(line, v + 1, shape) === null) return null;
+    if (pickaxe) return scanPickaxe(line, v + 1);
     if (flags !== undefined) return scanMessage(line, v + 1, flags);
   }
   return null;
@@ -431,11 +454,11 @@ function execSpans(line: readonly string[], at: number): Array<[number, number]>
 /** The words of `line` with every DATA word replaced by `placeholder`, looking through the carriers that hand a command on
  *  (`sudo`, `xargs`, `parallel`, `find -exec`, `fd -x`). A word glued to its option keeps the option: `--grep=hook` becomes
  *  `--grep=<placeholder>`. A line the grammar cannot read is returned as it came. */
-export function maskDataWords(line: readonly string[], placeholder: string): string[] {
+export function maskDataWords(line: readonly string[], placeholder: string, shape?: readonly OperatorShape[]): string[] {
   const out = [...line];
   const apply = (from: number, to: number): void => {
     const slice = out.slice(from, to);
-    const masked = maskOne(slice, placeholder);
+    const masked = maskOne(slice, placeholder, 0, shape?.slice(from, to));
     for (let k = 0; k < masked.length; k++) out[from + k] = masked[k]!;
   };
   // the head: skip leading assignments, as the command starts after them
@@ -451,18 +474,18 @@ export function maskDataWords(line: readonly string[], placeholder: string): str
   } else if (head === 'find' || head === 'fd' || head === 'fdfind') {
     for (const [from, to] of execSpans(out, at)) apply(from, to);
   } else {
-    const masked = maskOne(out, placeholder, at);
+    const masked = maskOne(out, placeholder, at, shape);
     for (let k = 0; k < masked.length; k++) out[k] = masked[k]!;
   }
   return out;
 }
 
-function maskOne(line: readonly string[], placeholder: string, at = 0): string[] {
-  const s = wordRoles(line, at);
+function maskOne(line: readonly string[], placeholder: string, at = 0, shape?: readonly OperatorShape[]): string[] {
+  const s = wordRoles(line, at, shape);
   if (s === null) return [...line];
   return line.map((w, i) => {
-    // (a word with a redirection operator in it is a redirection, wherever the grammar put it: see redirectionWords)
-    if (s.roles[i] !== 'data' || isRedirection(w)) return w;
+    // (an UNQUOTED word with a redirection operator in it is a redirection, wherever the grammar put it: see redirectionWords)
+    if (s.roles[i] !== 'data' || (shape !== undefined && shape[i] === 'real')) return w;
     const cut = s.glued.get(i);
     return cut === undefined ? placeholder : w.slice(0, cut) + placeholder;
   });

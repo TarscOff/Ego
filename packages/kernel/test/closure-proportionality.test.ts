@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { RANK, table, workspace } from './support/corpus.ts';
 import { evaluate, type EvaluationContext } from '../src/authority/evaluate.ts';
-import { maskDataWords, runsNoOperand, wordRoles } from '../src/authority/operands.ts';
+import { maskDataWords, runsNoOperand, wordRoles, type OperatorShape } from '../src/authority/operands.ts';
 
 const EGO_HOME = mkdtempSync(join(tmpdir(), 'ego-prop-home-'));
 mkdirSync(join(EGO_HOME, 'trust'), { recursive: true });
@@ -75,6 +75,9 @@ function allGated(commands: readonly string[], dir: string, over: Over = {}, den
 
 const D = '<data>';
 const mask = (...line: string[]): string[] => maskDataWords(line, D);
+/** the same, for a caller that still has the quoting: every word of `line` was written unquoted */
+const maskUnquoted = (...line: string[]): string[] =>
+  maskDataWords(line, D, line.map((w): OperatorShape => (/[<>]/.test(w) ? 'real' : 'none')));
 
 test('the role reader: a search pattern, a commit message and a printed string are data, and nothing else is', () => {
   // grep and its twins: the first operand, unless an option supplies the pattern
@@ -119,9 +122,12 @@ test('the role reader: a search pattern, a commit message and a printed string a
 test('the role reader never hides a redirection, a program, or a line it cannot read', () => {
   // a redirection glued into a word is a redirection - `echo x>.harness/runtime/ledger.json` WRITES
   assert.deepEqual(mask('echo', 'x>.harness/runtime/ledger.json'), ['echo', 'x>.harness/runtime/ledger.json']);
-  assert.deepEqual(mask('echo', 'x', '>', '.harness/runtime/ledger.json'), ['echo', D, '>', '.harness/runtime/ledger.json']);
-  assert.deepEqual(mask('echo', 'x', '2>&1'), ['echo', D, '2>&1']);
-  assert.deepEqual(mask('grep', '>', 'out.txt', 'pat', 'f'), ['grep', '>', 'out.txt', D, 'f']);
+  assert.deepEqual(maskUnquoted('echo', 'x>.harness/runtime/ledger.json'), ['echo', 'x>.harness/runtime/ledger.json']);
+  assert.deepEqual(maskUnquoted('echo', 'x', '>', '.harness/runtime/ledger.json'), ['echo', D, '>', '.harness/runtime/ledger.json']);
+  assert.deepEqual(maskUnquoted('echo', 'x', '2>&1'), ['echo', D, '2>&1']);
+  assert.deepEqual(maskUnquoted('grep', '>', 'out.txt', 'pat', 'f'), ['grep', '>', 'out.txt', D, 'f']);
+  // (without the quoting a line with such a word is not read - see the test on arrows below)
+  assert.deepEqual(mask('echo', 'x', '>', '.harness/runtime/ledger.json'), ['echo', 'x', '>', '.harness/runtime/ledger.json']);
   // ...but a word with whitespace in it is a string, whatever characters it holds
   assert.deepEqual(mask('grep', '> control-plane/x.md', 'README.md'), ['grep', D, 'README.md']);
   // an option nobody listed has an arity nobody can tell: the line is not read
@@ -140,6 +146,35 @@ test('the role reader never hides a redirection, a program, or a line it cannot 
   assert.deepEqual(mask('xargs', '-n', '1', 'grep', '-n', 'a b'), ['xargs', '-n', '1', 'grep', '-n', D]);
   assert.deepEqual(mask('find', '.', '-exec', 'grep', '-n', 'a b', '{}', ';'), ['find', '.', '-exec', 'grep', '-n', D, '{}', ';']);
   assert.deepEqual(mask('xargs', 'ego', 'hook', 'claude-code', 'Stop'), ['xargs', 'ego', 'hook', 'claude-code', 'Stop']);
+});
+
+test('the role reader: a quoted arrow is a pattern and an unquoted one is a redirection - and a line that cannot tell is not read', () => {
+  // a word written as [text] was quoted (its operators are literal); a bare string was not
+  const q = (...bits: Array<string | [string]>): [string[], OperatorShape[]] => [
+    bits.map((b) => (typeof b === 'string' ? b : b[0])),
+    bits.map((b): OperatorShape => {
+      const text = typeof b === 'string' ? b : b[0];
+      return !/[<>]/.test(text) ? 'none' : typeof b === 'string' ? 'real' : 'literal';
+    }),
+  ];
+  // with the quoting: `grep "=>" src` searches for an arrow, `grep => src` redirects to src
+  const [quotedLine, quotedFlags] = q('grep', ['=>'], 'src/');
+  assert.deepEqual(maskDataWords(quotedLine, D, quotedFlags), ['grep', D, 'src/']);
+  const [bareLine, bareFlags] = q('grep', '=', '>', 'src/');
+  assert.deepEqual(maskDataWords(bareLine, D, bareFlags), ['grep', D, '>', 'src/']);
+  // without it the two are the same word, and reading it the wrong way would make the FILE the pattern and hide it
+  assert.deepEqual(mask('grep', '=>', '~/.ssh/id_rsa'), ['grep', '=>', '~/.ssh/id_rsa']);
+  assert.deepEqual(mask('git', 'log', '-S', 'a<b', '--', 'p'), ['git', 'log', '-S', 'a<b', '--', 'p']);
+  // a word that mixes a literal operator with a real one (`''>x`) cannot be placed: the line is not read
+  assert.deepEqual(
+    maskDataWords(['grep', '>x', '~/.ssh/id_rsa'], D, ['none', 'mixed', 'none']),
+    ['grep', '>x', '~/.ssh/id_rsa'],
+  );
+  // an escaped or ANSI-C operator is literal: `grep \\>x f` searches for ">x" and the file stays a file
+  assert.deepEqual(
+    maskDataWords(['grep', '>x', '~/.ssh/id_rsa'], D, ['none', 'literal', 'none']),
+    ['grep', D, '~/.ssh/id_rsa'],
+  );
 });
 
 test('the role reader: the roles the scan for governed programs reads', () => {
@@ -275,6 +310,37 @@ test('masking never hides a write: a redirection after a reader, or glued to its
   // an option that runs a program keeps it in view
   allGated(['rg --pre ./p.sh x .', 'git grep -O"sh -c id" x', 'grep --no-such-option "hook claude-code Stop" docs'], dir);
   assert.equal(verdictOf('grep --no-such-option "hook claude-code Stop" docs', dir), 'DENY', 'a line the grammar cannot place is read as it always was');
+});
+
+test('masking a pattern never hides the file beside it: a pattern that looks like a redirection is still a pattern', () => {
+  const dir = workspace({ src: 'x' });
+  allAllowed(['grep -rn "=>" src/', "grep '->' src", 'grep -rn "<div>" src', 'git log -S "=>" --oneline', 'git commit -m "feat: x <noreply@anthropic.com>"'], dir);
+  allAllowed(['grep foo > out.txt', 'grep "hook claude-code Stop" docs 2>/dev/null', 'grep "hook claude-code Stop" docs 2>&1 | head'], dir);
+  // the file operand is judged whatever the pattern looks like - these are credential reads, and a redirection onto one is a write
+  allGated(
+    [
+      'grep "=>" ~/.ssh/id_rsa',
+      'grep "2>/dev/null" ~/.ssh/id_rsa',
+      "grep '->' ~/.aws/credentials",
+      "grep '<div>' ~/.netrc",
+      'sudo grep "=>" ~/.ssh/id_rsa',
+      'git ls-files | xargs grep "=>" ~/.ssh/id_rsa',
+      'find . -exec grep "=>" ~/.ssh/id_rsa {} \\;',
+      'grep => ~/.ssh/id_rsa',
+      // a backslash, an ANSI-C string or an empty word in front of the operator: the shell's reading is not the tokenizer's first guess
+      'grep \\>x ~/.ssh/id_rsa',
+      "grep $'>x' ~/.ssh/id_rsa",
+      'grep \\<x ~/.ssh/id_rsa',
+      "grep ''>x ~/.ssh/id_rsa",
+      "grep 2\\>x ~/.ssh/id_rsa",
+      'grep foo >.harness/runtime/x',
+      'echo "=>" > .harness/runtime/x',
+      "git log -S '=>' > .harness/runtime/x",
+    ],
+    dir,
+    {},
+    true,
+  );
 });
 
 test('#194: looking for a program by name is not starting it', () => {

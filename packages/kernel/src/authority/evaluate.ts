@@ -6,7 +6,14 @@ import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.t
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
-import { XARGS_VALUE_OPTS, findPredicateValues, maskDataWords, runsNoOperand, wordRoles } from './operands.ts';
+import {
+  XARGS_VALUE_OPTS,
+  findPredicateValues,
+  maskDataWords,
+  runsNoOperand,
+  wordRoles,
+  type OperatorShape,
+} from './operands.ts';
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
   canonicalPath,
@@ -1847,7 +1854,8 @@ function normalizeSegmentInner(segment: string): string[] {
     if (!pair) break;
     s = s.replace(new RegExp(`^${pair[0]}\\s+${pair[1]}\\s+`), '');
   }
-  const tokens = tokenizeApart(s);
+  const apart = tokenizeApart(s);
+  const tokens = apart.map((x) => x.text);
   if (tokens.length === 0) return extra;
   // `command -v NAME` / `-V NAME` LOOKS THE NAME UP and prints where it is; it does not run it. Stripping
   // `command` as a transparent wrapper classified the idiom every script uses to test whether a tool exists as
@@ -1991,6 +1999,10 @@ function normalizeSegmentInner(segment: string): string[] {
     head = head.slice(head.lastIndexOf('/') + 1);
     rest = [head, ...rest.slice(1)];
   }
+  // THE DATA WORDS OF THE COMMAND ARE TAKEN OUT HERE, while the quoting still exists: whether `=>` is a redirection or an arrow
+  // being searched for is only known to the tokenizer (operands.ts). A later pass over the joined text (joinWords) catches the
+  // carriers this one does not, but it cannot tell the two apart, and reads a line with such a word as it came.
+  rest = maskDataWords(rest, DATA_WORD, apart.slice(idx).map((x) => x.shape));
   // git long options may be abbreviated: expand them before any matcher or flag test looks at them
   if (head === 'git') {
     rest = expandGitAbbreviations(rest);
@@ -2289,8 +2301,10 @@ function normalizeTail(rest: string[]): string[] {
     // `sh <<< "git push origin main"` feeds the interpreter a script on stdin: the herestring IS the command, and
     // the same text after `-c` is denied (exit review 4).
     const hereIdx = rest.findIndex((t) => t === '<<<');
+    // (the word is already the string the shell hands over: tokenizing removed the quotes that held it together, and removing the
+    // ones INSIDE it as well made `bash <<< 'grep "2>/dev/null" f'` the script `grep 2>/dev/null f`, a different command)
     if (hereIdx >= 0 && rest[hereIdx + 1])
-      return [`${head} <<<`, ...splitShellSegments(unquoteShellWord(rest[hereIdx + 1]!)).flatMap(normalizeSegment)];
+      return [`${head} <<<`, ...splitShellSegments(rest[hereIdx + 1]!).flatMap(normalizeSegment)];
     // `bash < script.sh` RUNS script.sh — the redirection names the program exactly as an operand would, and
     // reading it as an unclassified option left a workspace script unanalysed (exit review 5).
     const fromFile = /(?:^|\s)<\s*([^\s<>|&;]+)/.exec(rest.join(' '));
@@ -2299,7 +2313,8 @@ function normalizeTail(rest: string[]): string[] {
   // `trap 'CMD' EXIT` stores CMD and the shell runs it later: it is a carrier exactly like `sh -c`, and an
   // absolute core deny inside its quoted argument reached ASK (exit review 4).
   if (head === 'trap' && rest[1]) {
-    const body = unquoteShellWord(rest[1]!);
+    // (already one word with its quotes taken off, like the herestring above: unquoting it again rewrote the inner command)
+    const body = rest[1]!;
     if (body && !/^-/.test(rest[1]!))
       return ['trap', ...splitShellSegments(body).flatMap(normalizeSegment)];
   }
@@ -3037,17 +3052,37 @@ export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
 /** `expands` is true when the shell will substitute something into the word at run time: a `$name`, `${…}`, `$(…)`
  *  or backtick that is unquoted or inside double quotes. Single quotes and a backslash keep a `$` literal. The text of
  *  such a word is NOT what the program receives, which is the one fact a reader of a statement operand needs. */
-function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expands: boolean }> {
-  const out: Array<{ text: string; quoted: boolean; expands: boolean }> = [];
+function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expands: boolean; shape: OperatorShape }> {
+  const out: Array<{ text: string; quoted: boolean; expands: boolean; shape: OperatorShape }> = [];
   let cur = '';
   let quote: string | null = null;
   let wasQuoted = false;
   let expands = false;
+  // the `<` and `>` of the word, told apart by how they were written: the shell's OPERATORS are the ones outside any quote, and
+  // the ones a quote, a backslash or an ANSI-C string made into characters are LITERAL (see OperatorShape)
+  let real = 0;
+  let literal = 0;
+  const count = (text: string, into: 'real' | 'literal') => {
+    const n = (text.match(/[<>]/g) ?? []).length;
+    if (into === 'real') real += n;
+    else literal += n;
+  };
   const flush = () => {
-    if (cur || wasQuoted) out.push({ text: cutAtNul(cur), quoted: wasQuoted, expands });
+    if (cur || wasQuoted)
+      out.push({
+        text: cutAtNul(cur),
+        quoted: wasQuoted,
+        expands,
+        // (an operator in a word that has a quoted part is a MIXED word: `"foo">x` is the word foo and a redirection, `''>x` an empty
+        // word and a redirection, and this flat reading has one word where the shell has two)
+        shape:
+          real === 0 && literal === 0 ? 'none' : real === 0 ? 'literal' : literal === 0 && !wasQuoted ? 'real' : 'mixed',
+      });
     cur = '';
     wasQuoted = false;
     expands = false;
+    real = 0;
+    literal = 0;
   };
   const substitutes = (at: number): boolean =>
     s[at] === '`' || (s[at] === '$' && /[A-Za-z_{(0-9@*#?$!-]/.test(s[at + 1] ?? ''));
@@ -3062,6 +3097,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expan
         cur += ch;
         continue;
       }
+      count(s[i + 1]!, 'literal');
       cur += s[++i]!;
       continue;
     }
@@ -3069,6 +3105,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expan
       if (ch === quote) quote = null;
       else {
         if (quote === '"' && substitutes(i)) expands = true;
+        count(ch, 'literal');
         cur += ch;
       }
       continue;
@@ -3077,6 +3114,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expan
     const ansi = ch === '$' ? ansiCAt(s, i) : null;
     if (ansi) {
       // ANSI-C `$'...'` yields an ordinary word (a possible command head), so it is NOT marked quoted
+      count(ansi.text, 'literal');
       cur += ansi.text;
       i = ansi.end;
       continue;
@@ -3091,6 +3129,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expan
       continue;
     }
     if (substitutes(i)) expands = true;
+    count(ch, 'real');
     cur += ch;
   }
   flush();
@@ -3778,12 +3817,13 @@ function cutAtNul(w: string): string {
  *  read the one word `--dry-run>/dev/null` - which is no flag at all, so a dry run was a push and a database listing was a
  *  statement (review 11, #12/#13). Only an UNQUOTED word is taken apart (the quoting is what says a `>` is data), and only
  *  where the shell does: a file descriptor (`2>&1`), `&>` and an operator at the start of the word are already whole. */
-function tokenizeApart(s: string): string[] {
-  const out: string[] = [];
+function tokenizeApart(s: string): Array<{ text: string; quoted: boolean; shape: OperatorShape }> {
+  const out: Array<{ text: string; quoted: boolean; shape: OperatorShape }> = [];
   for (const w of tokenizeMarked(s)) {
     let text = w.text;
-    if (w.quoted) {
-      out.push(text);
+    // a word whose operators are not (all) the shell's is kept whole: quoted, or with a `\>` or a `$'>'` in it
+    if (w.quoted || w.shape === 'literal' || w.shape === 'mixed') {
+      out.push({ text, quoted: true, shape: w.shape });
       continue;
     }
     for (;;) {
@@ -3797,10 +3837,10 @@ function tokenizeApart(s: string): string[] {
         break;
       }
       if (at < 0) break;
-      out.push(text.slice(0, at));
+      out.push({ text: text.slice(0, at), quoted: false, shape: 'none' });
       text = text.slice(at);
     }
-    out.push(text);
+    out.push({ text, quoted: false, shape: /[<>]/.test(text) ? 'real' : 'none' });
   }
   return out;
 }
@@ -14581,7 +14621,7 @@ function analyzeSegments(
         // (`command` is a wrapper to the head reader, which then names the program it LOOKS UP as the head: the words after
         // `command -v` are skipped from `command` itself)
         const noExecFrom = looksUp ? lead : runsNoOperand(markedWords[headAt] ?? '') ? headAt : Number.POSITIVE_INFINITY;
-        const roles = wordRoles(markedWords, headAt);
+        const roles = wordRoles(markedWords, headAt, marked.map((t) => t.shape));
         const predicateValues = findPredicateValues(markedWords, headAt);
         for (let k = 1; k < marked.length; k++) {
           if (marked[k]!.quoted) continue; // a verb inside quotes is data
