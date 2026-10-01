@@ -5533,6 +5533,26 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     }
     return out.length ? out : [LEDGER_ANY];
   }
+  // A DELETION CHANGES WHAT IS THERE TO BE READ. `rm GNUmakefile && make` makes the next makefile in make's own order the one that
+  // runs, and `rm sub/Makefile` leaves a directory with no makefile; the ledger only knew the commands that put bytes in a file. A glob
+  // names the files it matches now (a deletion cannot create a match), and one that cannot be listed is a wildcard.
+  if (/^(rm|unlink|rmdir|shred)$/.test(head)) {
+    for (const w of words) {
+      if (!MAKE_WILDCARD.test(w)) {
+        out.push(...abs(w));
+        continue;
+      }
+      const { names, incomplete } = expandNamePattern(cwd, w);
+      if (incomplete) return [LEDGER_ANY];
+      for (const n of names) out.push(...abs(n));
+    }
+    return out;
+  }
+  if (head === 'git' && /^(rm|mv)$/.test(operands[0] ?? '')) {
+    const specs = words.filter((t) => t !== operands[0]);
+    if (specs.some((t) => /[*?[{]/.test(t))) return [LEDGER_ANY];
+    return specs.flatMap(abs);
+  }
   if (head === 'git' && /^(checkout|restore|clone)$/.test(operands[0] ?? '')) {
     // `--` IS OPTIONAL, AND GIT SAYS SO. `git checkout HEAD~1 control-plane/permissions/matchers.md` overwrites
     // that file from an arbitrary tree-ish exactly as the `--` spelling does, and `git checkout origin/evil
@@ -5557,10 +5577,15 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     if (dirArg) {
       for (const dir of abs(dirArg)) {
         out.push(dir);
-        for (const src of words.filter((o) => o !== dirArg)) out.push(`${dir}/${src.slice(src.lastIndexOf('/') + 1)}`);
+        for (const src of words.filter((o) => o !== dirArg)) {
+          out.push(`${dir}/${src.slice(src.lastIndexOf('/') + 1)}`);
+          if (head === 'mv') out.push(...abs(src));
+        }
       }
     }
   } else if (/^(cp|mv|install|ginstall|rsync|ln)$/.test(head) && words.length >= 2) {
+    // (`mv` takes its sources away: a makefile moved out of the way is a makefile that is no longer read)
+    if (head === 'mv') out.push(...words.slice(0, -1).flatMap(abs));
     // `cp SRC DIR` WRITES `DIR/basename(SRC)`, not DIR. The ledger recorded the destination operand verbatim,
     // so `cp evil/Makefile sub && make -C sub all` marked `sub` written and left `sub/Makefile` — the file the
     // next command reads — looking fresh (exit review 10). When the destination is an existing DIRECTORY, every

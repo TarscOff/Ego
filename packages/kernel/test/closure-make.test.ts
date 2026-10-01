@@ -25,6 +25,7 @@
 //   I. a pipeline and a background job run while the stages after them do.
 //   J. the words of a redirection are not make goals - `make 2>&1` ran under a proof that its "goal" `2>&1` had no rule.
 //   K. a command the makefile runs while it is read (`$(shell cp gen.in gen.mk)` above an include) may write what it reads next.
+//   L. a deletion is a write: `rm GNUmakefile && make` makes the next makefile in make's order the one that runs.
 //
 // The verdicts below are what a reader must give. `DENY` means the act is READ (the makefile is on the disk and nothing can have
 // changed it); `ASK` means something runs that could not be read; `ALLOW` is the control that must stay as it was.
@@ -589,5 +590,37 @@ test('K. a command run at parse time that may write is a command that may write 
     ['uname', 'make all', { Makefile: 'OS := $(shell uname -s)\n-include local.mk\nall:\n\techo ok\n' }, 'ALLOW'],
     ['!= pwd', 'make all', { Makefile: 'D != pwd\n-include local.mk\nall:\n\techo ok\n' }, 'ALLOW'],
     ['a script and nothing read after it', 'make all', { Makefile: 'X := $(shell ./gen.sh)\nall:\n\techo ok\n', 'gen.sh': '#!/bin/sh\necho hi\n' }, 'ALLOW'],
+  ]);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * L. A DELETION IS A WRITE
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('L. a makefile that is removed or moved away is not read, and the next one in make\'s order is', () => {
+  // make reads GNUmakefile, then makefile, then Makefile: removing the first makes the last the one that runs
+  const two = { GNUmakefile: OK, Makefile: EVIL };
+  check([
+    ['rm', 'rm GNUmakefile && make all', two, 'ASK'],
+    ['rm -f', 'rm -f GNUmakefile && make all', two, 'ASK'],
+    ['unlink', 'unlink GNUmakefile && make all', two, 'ASK'],
+    ['mv away', 'mv GNUmakefile gnu.bak && make all', two, 'ASK'],
+    ['mv into a directory', 'mkdir -p old && mv GNUmakefile old/ && make all', two, 'ASK'],
+    ['mv -t', 'mkdir -p old && mv -t old GNUmakefile && make all', two, 'ASK'],
+    ['git rm', 'git rm -f GNUmakefile && make all', two, 'ASK'],
+    ['git mv', 'git mv GNUmakefile gnu.bak && make all', two, 'ASK'],
+    ['rm with a glob', 'rm GNU* && make all', two, 'ASK'],
+    ['rm with a bracket', 'rm GNU[m]akefile && make all', two, 'ASK'],
+    ['find -delete', 'find . -name GNUmakefile -delete && make all', two, 'ASK'],
+    ['behind env -C', 'env -C sub rm GNUmakefile && make -C sub all', { 'sub/GNUmakefile': OK, 'sub/Makefile': EVIL }, 'ASK'],
+    ['behind nice', 'nice rm GNUmakefile && make all', two, 'ASK'],
+    ['in a function that is called before the make', 'f() { rm GNUmakefile; }; f && make all', two, 'ASK'],
+    ['a directory removed whole', 'rm -rf sub && make -C sub all', { 'sub/Makefile': OK }, 'ASK'],
+    ['an included makefile removed', 'rm gen.mk && make all', { Makefile: '-include gen.mk\nall::\n\techo ok\n', 'gen.mk': 'all::\n\techo one\n' }, 'ASK'],
+    ['a -f file removed', 'rm a.mk && make -f a.mk -f b.mk all', { 'a.mk': 'all::\n\techo a\n', 'b.mk': 'all::\n\techo b\n' }, 'ASK'],
+    // (the controls: what is removed is not read. `rm` with a glob or a variable asks by itself, whatever follows it)
+    ['an unrelated file', 'rm -f out.log && make all', { Makefile: OK, 'out.log': 'x' }, 'ALLOW'],
+    ['a build directory', 'rm -rf dist && make all', { Makefile: OK, 'dist/a': 'x' }, 'ALLOW'],
+    ['a moved data file', 'mv a.txt b.txt && make all', { Makefile: OK, 'a.txt': 'x' }, 'ALLOW'],
   ]);
 });
