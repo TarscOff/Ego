@@ -1745,6 +1745,73 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     },
   },
   /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-01, wave 3 (RC-PTH, RC-CWD). A wildcard is judged by the SET of names it can match in the
+   * directory - `.e*` is `.env` when `.env` is there - and a nest of wrappers deeper than the walk goes is unproved, never an
+   * end. The directory stack is edited by the OPTION a builtin is given (`pushd -n` does not move), not by its name.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'fs',
+    id: 'a wildcard that matches a hidden credential file without spelling it',
+    floor: 'ASK',
+    cases: [
+      'cat .e*',
+      'cat .??v',
+      'cat .e?v',
+      'cat .[a-f]nv',
+      'grep -h KEY .??*',
+      'awk 1 .e*',
+      'tar -czf /tmp/x.tgz .e*',
+      'rg KEY .e*',
+      'cat sub/.*',
+      'cat */.env',
+      'true; shopt -s dotglob; cat *',
+      'true; setopt glob_dots; cat *',
+      'cat *(D)',
+    ],
+    files: { '.env': 'KEY=1', 'sub/.env': 'K=2', 'a.txt': 'x' },
+  },
+  {
+    family: 'fs',
+    // zsh's `>!` forces the overwrite and the file is the word AFTER the `!`; bash's is a name that begins with it. Both are judged
+    id: "a write through zsh's clobber-override redirection",
+    floor: 'DENY',
+    cases: ['echo x >! /etc/hosts', 'echo x >>! /etc/hosts', 'echo x &>! /etc/hosts', 'echo x >&! /etc/hosts', 'echo x >! ~/.zshrc', 'echo x &>! .git/hooks/pre-commit'],
+  },
+  {
+    family: 'fs',
+    id: 'a directory-changing builtin whose option leaves the working directory where it was',
+    floor: 'DENY',
+    cases: [
+      'true; pushd -n sub; tee control-plane/a.md',
+      'true; pushd -n sub; pushd -n sub2; tee control-plane/a.md',
+      'true; pushd -n sub; echo x > control-plane/a.md',
+      'true; pushd sub; popd -n; tee ../control-plane/a.md',
+      'true; pushd sub; dirs -c; popd; tee ../control-plane/a.md',
+      'true; pushd control-plane; dirs -c; popd; tee a.md',
+      'true; pushd control-plane; popd -n; tee a.md',
+    ],
+    files: { 'control-plane/a.md': 'x', 'control-plane/permissions/matchers.md': 'x', 'sub/x': '', 'sub2/x': '' },
+  },
+  {
+    family: 'fs',
+    id: 'a directory named behind a nest of wrappers deeper than the walk',
+    floor: 'DENY',
+    cases: [
+      'env env env env env env env env env -C ~/.ssh cat id_rsa',
+      'echo x | env env env env env env env env env -C .claude tee settings.json',
+      `${'env nice -n 1 '.repeat(20)}-C ~/.ssh cat id_rsa`,
+    ],
+    files: { '.claude/keep': '' },
+  },
+  {
+    family: 'fs',
+    // past the depth the walk reads (RUN_DIR_NEST) the directory is UNPROVED: a question, never the directory the line started in
+    id: 'a directory named behind a nest of wrappers deeper than the walk reads at all',
+    floor: 'ASK',
+    cases: [`${'env '.repeat(70)}-C ~/.ssh cat id_rsa`, `echo x | ${'env '.repeat(200)}-C .claude tee settings.json`],
+    files: { '.claude/keep': '' },
+  },
+  /* ----------------------------------------------------------------------------------------------------------
    * CLOSURE AUDIT 2026-10-01, wave 2 (paths). `..` AFTER A LINK is the parent of the link's TARGET: the kernel follows
    * the link before it applies `..`, and a reader that applies `..` to the text reads another file. With
    * `dlnk -> .claude/sub`, `dlnk/..` is `.claude` — the agent's own configuration — and `hlnk -> .git/hooks/sub` makes

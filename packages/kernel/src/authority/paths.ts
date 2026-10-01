@@ -514,10 +514,10 @@ export function directoryCandidates(base: string, word: string, physicalOnly = f
  * on syntax this does not enumerate (an extended glob), `bounded` says the set is a lower bound and the caller asks.
  * ------------------------------------------------------------------------------------------------------------- */
 
-/** How many directory entries one expansion may read before it is read as unbounded. */
-export const GLOB_ENTRY_BUDGET = 4096;
-/** How many names one expansion may return. */
-const GLOB_RESULT_BUDGET = 512;
+/** How many directory entries one expansion may read before it is read as unbounded (a few milliseconds of `readdir`). */
+export const GLOB_ENTRY_BUDGET = 20000;
+/** How many names one expansion may return (each is classified by the caller). */
+const GLOB_RESULT_BUDGET = 1000;
 /** A recursive `**` does not descend into a dependency tree: what a package ships is not the user's secret, and the tree is
  *  larger than every budget. (A wildcard written INTO it, `node_modules/*`, is expanded like any other.) */
 const GLOB_SKIPPED_DIRS: ReadonlySet<string> = new Set(['node_modules']);
@@ -593,13 +593,15 @@ function segmentRegExp(seg: string): RegExp | null {
  * The names a glob WORD matches, in each directory the shell may be in. `dotfiles` is whether a wildcard matches a name that
  * begins with a dot: a shell's does not (unless `dotglob`/`GLOB_DOTS` is set, or zsh's `(D)` qualifier is on the word); a
  * search tool's explicit glob does (it overrides the hidden-file default). A segment that itself begins with a literal dot
- * (`.e*`) always may. Braces are the caller's to expand first.
+ * (`.e*`) always may. Braces are the caller's to expand first. `keep` narrows the answer to the names the caller will judge
+ * (a catch-all over a tree matches every file in it, and only the hidden ones can be credentials), before the result budget
+ * is spent: a name it drops is not "bounded", it is not asked about.
  */
 export function globMatches(
   cwds: string | readonly string[],
   word: string,
   old: readonly string[] | undefined,
-  options: { dotfiles: boolean },
+  options: { dotfiles: boolean; keep?: (path: string) => boolean },
 ): GlobMatches {
   const none: GlobMatches = { paths: [], directories: new Set(), bounded: false, dynamic: true };
   const dirs = directoriesOf(cwds);
@@ -617,7 +619,8 @@ export function globMatches(
   const found = new Set<string>();
   const directories = new Set<string>();
   for (const t of texts) for (const base of isAbsolute(t) ? [sep] : dirs) expandGlobText(base, t, dotfiles, budget, found, directories);
-  const paths = [...found];
+  const keep = options.keep;
+  const paths = keep === undefined ? [...found] : [...found].filter(keep);
   return { paths: paths.slice(0, GLOB_RESULT_BUDGET), directories, bounded: budget.bounded || paths.length > GLOB_RESULT_BUDGET, dynamic: false };
 }
 
