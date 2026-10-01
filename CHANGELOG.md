@@ -242,3 +242,25 @@ discipline of decision Q84 (authority changes are never patch releases).
 
   A growing recursion stops at the analysis depth and asks, as before. `$(MAKE)` in a recipe is still a variable this
   resolver does not read, so a recipe line that spells it asks.
+- **A wrapper is peeled by its own options, and a tool's options are read by the parser the tool has — one table each**
+  (closure audit 2026-10-01, wave 3; independent review 11). `timeout -s KILL 5 sed -n '1w .claude/settings.json' f`,
+  `env --unset A sed …`, `find -exec sed …`, `yarn exec git -C control-plane checkout …`, `watch 'git commit -nm x'` and
+  `env -S'git commit -m x' -n` hid the carried command from every reader of the line as written, because five readers kept
+  five copies of the wrapper loop and each knew the options its author had met. `authority/carriers.ts` is the one table of
+  carriers (their own options with values, clusters, glued forms and abbreviations; the command STRINGS they carry; the
+  operands they take) and `peelCarriers` the one reader, iterated to a fixed point: the normalizer, the head finder, the
+  awk scanner, the environment-input scan and the directory finder all use it. A STRICT carrier meeting an own option it
+  does not list, or a chain nested past twelve, makes the segment ask (`command.script-opaque`) instead of guessing where
+  the command begins. A `find -exec` / `fd -x` clause, a `watch` or `sem` argument and the words `env` appends to a `-S`
+  string are carried bodies, like `sh -c`. In the same way `authority/options.ts` (a GNU / Go / compiler option grammar) and
+  `authority/tools.ts` (one table per modelled tool, each option's value marked as a file written, a directory written into,
+  a file read, a program, code, a configuration or a Python module) replace the per-reader regexes for tar, sort, sed, the
+  shells, go, the C compilers, eslint, prettier, pylint, python and the git subcommands that write: `tar --extr -C
+  .git/hooks`, `tar --use=./x`, `sort --o=…`, `go build -o=.git/hooks/pre-commit`, `gcc -MF.git/hooks/x`, `git checkout-index
+  --prefix=.git/hooks/`, `git archive --out=…`, `git format-patch -o …` and `bash -n +n -c BODY` are judged by what the tool
+  would do. `authority/sed.ts` reads a sed script as a script, so a file glued to `w`, `W` or the `w` flag of `s` is a write
+  (and `r FILE` is a read). Visible changes for ordinary work: `time -p CMD`, `/usr/bin/time -v CMD` and `tar -xOf a.tgz
+  FILE` (extraction to standard output) are ALLOW where they asked; `echo 'rm -rf /' | bash -n` is a syntax check, not an
+  execution; an option that NAMES a program or module a bounded runner loads (`clang --ld-path=./x`, `gcc -fuse-ld=./x`,
+  `eslint -f ./fmt.js`, `prettier --config ./evil.json`, `pylint --init-hook "…"`, `python3 -m venv` with a `venv.py` beside
+  it) asks; `bun test` is bun's own runner, not the package script of the same name, and asks like `go test`.

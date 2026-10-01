@@ -80,7 +80,8 @@ test('ordinary development is gated in exactly the places that are accounted for
   // + the 20 cluster commands the one reader of a cluster command must leave alone (closure-k8s.test.ts)
   // + the 21 everyday container commands the container reader must leave alone (closure-containers.test.ts)
   // + the 5 ordering commands (closure-make.test.ts)
-  assert.equal(total, 169, 'the ordinary corpus changed size; update the count deliberately');
+  // + the 34 carrier and option spellings (closure-options.test.ts)
+  assert.equal(total, 203, 'the ordinary corpus changed size; update the count deliberately');
   assert.deepEqual(unexpected, [], `ordinary development gated without a reason:\n  ${unexpected.join('\n  ')}`);
   assert.deepEqual(stale, [], `EXPECTED_GATES is out of date:\n  ${stale.join('\n  ')}`);
 });

@@ -6,6 +6,10 @@ import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.t
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
+import { peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
+import { scanSedScript } from './sed.ts';
+import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
+import { SHELL_GRAMMAR, expandLongOptions, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
   canonicalPath,
@@ -112,103 +116,17 @@ export interface Evaluation {
   rule?: RuleExplanation;
 }
 
-const WRAPPERS = new Set([
-  // package-manager runners resolve a name to a local or fetched binary and then exec it. They were handled
-  // inside individual matcher regexes (`(npx\s+)?…`) but NOT by the normalizer, so the matcher pass and the
-  // producer dispatch read two different commands: `npx vitest run` matched `command.test` as if it were
-  // `vitest run`, while the dispatch saw the head `npx` and claimed a bounded closure (challenge 8, finding 4).
-  'npx',
-  'bunx',
-  'env',
-  'nice',
-  'time',
-  'nohup',
-  'command',
-  'exec',
-  'builtin',
-  'stdbuf',
-  'caffeinate',
-  'setsid',
-  'ionice',
-  'chronic',
-  'strace',
-  'ltrace',
-  'valgrind',
-  'watch',
-  'unbuffer',
-  'nocorrect',
-  'noglob',
-  'chrt',
-  'taskset',
-  'numactl',
-  'prlimit',
-  'cpulimit',
-  'eatmydata',
-  'fakeroot',
-  'proxychains',
-  'proxychains4',
-  'torsocks',
-  'rlwrap',
-  'sem',
-  'arch',
-  'daemonize',
-  'xvfb-run',
-  'firejail',
-  'unshare',
-  'nsenter',
-  'systemd-run',
-  'sandbox-exec',
-  'busybox',
-  'gtimeout',
-]);
-// `doas` is deliberately NOT a transparent wrapper: like `sudo`, it must keep its head so the command.privileged
-// matcher that names it can fire (its inner command is analysed separately in normalizeTail).
-/** wrapper options that consume the next token as their value (the command starts after it) */
+// THE WRAPPERS - which commands carry another, with what options of their own - are one table, carriers.ts, read by one
+// reader (peelCarriers). They were a name set, a regex of value-taking options per name, a regex of positionals per name, a set
+// of operand-taking names and a table of two-word runners here, and four more copies elsewhere; every wrapper added to one
+// list had to be added to the others, and was not (independent reviews 7-11: RC-CAR).
+// `doas` is deliberately NOT a transparent carrier: like `sudo`, it keeps its head so the command.privileged matcher that names
+// it can fire (its inner command is analysed separately in normalizeTail).
 /** `exec -a NAME prog` sets argv[0] to NAME and runs `prog`. Classifying NAME let an arbitrary program run as
  *  whatever the agent felt like calling it (exit review 3). */
 // `exec`'s OWN options may precede the argv0 alias: `exec -c -a echo curl …` hid the real program behind the
 // alias and reached ALLOW (exit review 4).
 const EXEC_ARGV0_RE = /^exec\s+(?:-(?!a\b)[a-zA-Z-]+\s+)*(?:-a|--argv0)\s+\S+\s+/;
-const WRAPPER_VALUE_OPTS: Record<string, RegExp> = {
-  env: /^(-u|--unset|-C|--chdir|-S|--split-string)$/,
-  nice: /^(-n|--adjustment)$/,
-  ionice: /^(-c|-n|-p|--class|--classdata)$/,
-  watch: /^(-n|--interval)$/, // `-d` is a flag (--differences), not a value option: it must not eat the command head
-  stdbuf: /^-[ioe]$/,
-  strace: /^-[opesEu]$/,
-  ltrace: /^-[opesu]$/,
-  valgrind: /^--tool$/,
-  time: /^(-o|--output|-f|--format)$/,
-  chrt: /^(-p|--pid)$/,
-  taskset: /^(-p|--pid)$/,
-  numactl: /^(-C|-N|-m|-p|--physcpubind|--cpunodebind|--membind|--preferred)$/,
-  prlimit: /^(-p|--pid)$/,
-  cpulimit: /^(-l|--limit|-p|--pid|-e|--exe)$/,
-  'xvfb-run': /^(-n|-s|-e|-f|--server-num|--server-args)$/,
-  'systemd-run': /^(-p|--property|-u|--unit|-E|--setenv|-M|--machine)$/,
-  'sandbox-exec': /^(-f|-p|-n|-D)$/,
-  nsenter: /^(-t|--target)$/,
-  // macOS `arch`: `-arch NAME` selects the slice, `-d NAME` deletes an environment variable and `-e NAME=VALUE`
-  // sets one. Without them `arch -arm64 -d ls bash -c '…'` handed `ls` to the head reader as the program and
-  // the real `bash -c` behind it was never seen (exit review 9).
-  arch: /^(-arch|-d|-e)$/,
-  sem: /^(-j|--jobs|--id)$/,
-  doas: /^(-u|-C)$/,
-  gtimeout: /^(-s|--signal|-k|--kill-after)$/,
-  timeout: /^(-s|--signal|-k|--kill-after)$/,
-};
-/** wrappers whose leading positional operands (a priority, a cpu mask, an architecture) precede the command */
-const WRAPPER_POSITIONALS: Record<string, RegExp> = {
-  chrt: /^\d+$/,
-  taskset: /^(0x[0-9a-fA-F]+|[0-9,-]+)$/,
-  timeout: /^\d+(\.\d+)?[smhd]?$/,
-  gtimeout: /^\d+(\.\d+)?[smhd]?$/,
-  arch: /^-?(arm64|arm64e|x86_64|i386)$/,
-};
-/** wrappers whose first argument is their own operand, not the command: the command starts after it */
-const WRAPPERS_WITH_OPERAND = new Set(['flock', 'su', 'runuser']);
-/** two-word runners: the pair is stripped so the real command is what everything downstream sees */
-const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'], ['yarn', 'exec']];
 /** environment assignments that change what a command executes or where governance looks: never silently stripped */
 /** A NAME ON THIS LIST RE-POINTS WHAT A PROGRAM LOADS OR WHERE IT LOOKS. The list is an ENUMERATION, which is a
  *  shape that is wrong by omission — and it was: `XDG_CONFIG_HOME=/tmp/evil git status` makes git read its
@@ -1287,6 +1205,9 @@ export function readsScriptFromStdin(segment: string): boolean {
   if (!STDIN_SCRIPT_HEAD_RE.test(head)) return false;
   const shellFamily = /^(?:ba|z|da|k|a)?sh$/.test(head);
   const rest = tokens.slice(1);
+  // A SYNTAX CHECK READS THE SCRIPT AND RUNS NOTHING: `echo 'rm -rf /' | bash -n` is how an author verifies a script, and reading
+  // it as an execution edge refused it. The shell's own option parser says whether the check is on at the end (`-n +n` is off)
+  if (shellFamily && shellSyntaxOnly(rest, 0)) return false;
   for (let i = 0; i < rest.length; i++) {
     const t = rest[i]!;
     // A REDIRECTION IS NOT AN OPERAND. `bash 2>&1` and `bash > log` still read their program from stdin, and
@@ -1377,7 +1298,14 @@ export function emitterTail(text: string): string {
     const before = out;
     out = out.replace(/^(?:if|then|else|elif|while|until|do|!|time|coproc)\s+/, '');
     out = out.replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+/, '');
-    out = out.replace(/^(?:command|builtin|exec|env|nohup|stdbuf\s+-\S+|nice(?:\s+-n\s+\S+)?|timeout\s+\S+)\s+/, '');
+    // the transparent carriers come off by the one carrier reader (carriers.ts), each by exactly its own options: a regex of the few
+    // spellings its author had met took `timeout -s` for the whole wrapper and left `KILL 5 echo …` as the command
+    const marked = tokenizeMarked(out);
+    const peeled = peelCarriers(marked.map((t) => t.text), 0, {
+      leadingAssignments: false,
+      stopAt: (_name: string, spec: Carrier) => spec.retains === true || spec.payload === true,
+    });
+    if (peeled.steps.length > 0 && peeled.at < marked.length && peeled.shellString === null) out = out.slice(marked[peeled.at]!.at);
     if (out === before) return out;
   }
 }
@@ -1573,14 +1501,12 @@ function helpProbeHead(segment: string): string | null {
   // any operand - or it belongs to the script. An option that takes a value (`--rcfile F`, `-o NAME`, `-O NAME`)
   // takes the next word with it: `bash --rcfile -n script.sh` sources a file called `-n`.
   if (/^(ba|z|da|k)?sh$/.test(head)) {
+    // The shell's own options are read by its option parser (tools.ts), and the LAST of `-n` / `+n` / `-o noexec` / `+o noexec`
+    // decides: `bash -n +n -c 'rm -rf /tmp/x'` turns the check back off and RUNS the body (independent review 11, r11-151).
+    // An option stops being the shell's at the first operand, and an option that takes a value (`--rcfile -n script.sh`) takes the
+    // next word with it - both are the parser's rules, not this loop's.
     const rest0 = commandWords(t.slice(hi + 1));
-    for (let i = 0; i < rest0.length; i++) {
-      const x = rest0[i]!;
-      if (x.quoted || !x.text.startsWith('-') || x.text === '--') break;
-      if (x.text === '--noexec' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(x.text)) return head;
-      if (/^(--rcfile|--init-file|-o|\+o|-O|\+O)$/.test(x.text)) i++;
-    }
-    return null;
+    return shellSyntaxOnly(rest0.map((x) => x.text), 0) ? head : null;
   }
   const isDb = PROBING_DB_CLIENTS.test(head);
   if (!HELP_FIRST_CLIS.test(head) && !isDb) return null;
@@ -1706,22 +1632,37 @@ function normalizeSegmentInner(segment: string): string[] {
   // `npm exec` is `npx` and `bun x` is `bunx` — npm-exec(1) documents them as the SAME command. Stripping the
   // two-word spelling as a transparent pair sent it down a different path from the one-word spelling, so the npx
   // ACQUISITION guard below (a runner carrying its own `--package` fetches) never saw it (exit review 4).
-  const WRAP = String.raw`(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)|env|command|nohup|setsid|stdbuf|nice(?:\s+-n\s+\S+)?|ionice|timeout(?:\s+\S+)?|caffeinate|chronic|unbuffer|time|builtin|--)\s+)*`;
+  // WHERE THE COMMAND STARTS is read by the one carrier reader (carriers.ts), not by a regex of the wrappers this guard
+  // happened to list: that regex took `timeout` with ONE word after it and `nice` with `-n N`, so `timeout -s KILL 5 npx
+  // --package=evil -c x` walked past the acquisition guard below. The carriers the guard looks through are the ones the
+  // normalizer strips - not `sudo` or `xargs`, whose tails are normalized on their own.
+  const guardStop = (name: string, spec: Carrier): boolean => spec.retains === true || spec.payload === true || /^(npm exec|npm x|bun x|npx|bunx)$/.test(name);
+  const lead0 = tokenizeMarked(s);
+  const chain0 = peelCarriers(lead0.map((x) => x.text), 0, { stopAt: guardStop });
   // the two-word spellings are the SAME command as the one-word ones, and the rewrite must find them behind a
   // wrapper too — `env npm exec tsc` reached command.unknown while `npx tsc` was an ordinary build
-  s = s.replace(new RegExp(`^(${WRAP})npm\\s+(?:exec|x)\\s+`), '$1npx ').replace(new RegExp(`^(${WRAP})bun\\s+x\\s+`), '$1bunx ');
+  {
+    const w0 = lead0[chain0.at]?.text;
+    const w1 = lead0[chain0.at + 1]?.text;
+    const rewrite = w0 === 'npm' && (w1 === 'exec' || w1 === 'x') ? 'npx' : w0 === 'bun' && w1 === 'x' ? 'bunx' : null;
+    if (rewrite !== null && lead0[chain0.at + 2] !== undefined)
+      s = `${s.slice(0, lead0[chain0.at]!.at)}${rewrite} ${s.slice(lead0[chain0.at + 2]!.at)}`;
+  }
   // THE ACQUISITION GUARD MUST SEE THE HEAD WHEREVER THE HEAD IS. It tested only the RAW head, so one transparent
   // wrapper hid it: `env npx --package=evil-thing -c "tsc --version"` fetched and ran an arbitrary package while
   // the kernel classified the decoy `tsc --version` as an ordinary build (exit review 7). The same shape as the
   // environment-prefix defect — a guard anchored at position 0 in a string the normalizer is about to rewrite.
-  const acq = new RegExp(`^${WRAP}(npx|bunx)\\s`).exec(s);
-  if (acq) {
-    const t = tokenize(s.slice(s.indexOf(acq[1]!)));
-    let k = 1;
-    while (k < t.length && t[k]!.startsWith('-')) {
-      if (/^(--package|-p)(=|$)/.test(t[k]!)) return [s];
-      if (t[k] === '--package' || t[k] === '-p' || t[k] === '-c' || t[k] === '--call') k++;
-      k++;
+  {
+    const lead = tokenizeMarked(s).map((x) => x.text);
+    const chain = peelCarriers(lead, 0, { stopAt: guardStop });
+    if (lead[chain.at] === 'npx' || lead[chain.at] === 'bunx') {
+      const t = lead.slice(chain.at);
+      let k = 1;
+      while (k < t.length && t[k]!.startsWith('-')) {
+        if (/^(--package|-p)(=|$)/.test(t[k]!)) return [s];
+        if (t[k] === '--package' || t[k] === '-p' || t[k] === '-c' || t[k] === '--call') k++;
+        k++;
+      }
     }
   }
   const extra: string[] = [];
@@ -1760,8 +1701,8 @@ function normalizeSegmentInner(segment: string): string[] {
   stripAssignments();
   // `exec -a NAME prog …` runs `prog` under the name NAME: strip the alias so the real head is classified
   s = s.replace(EXEC_ARGV0_RE, '');
-  // ...and behind a wrapper too: `command exec -a cat ./deploy.sh` forges argv[0] just the same (exit review 8)
-  s = s.replace(new RegExp(`^(${WRAP})exec\\s+(?:-[a-zA-Z]+\\s+)*-a\\s+\\S+\\s+`), '$1');
+  // ...and behind a wrapper too: `command exec -a cat ./deploy.sh` forges argv[0] just the same (exit review 8). `exec` is a
+  // carrier of the table, with `-a NAME` as its own option, so the carrier reader below skips the alias wherever `exec` stands.
   // shell prefix keywords (`if git push`, `do npm test`, `then rm -rf x`) are normalization, not a safety
   // judgement: stripping them in the analyzer gives every producer AND the top level the same treatment.
   //
@@ -1771,7 +1712,8 @@ function normalizeSegmentInner(segment: string): string[] {
   // a shell on a production daemon at ASK (exit review 6, generated cross-product).
   for (;;) {
     const m = /^(\S+)\s+/.exec(s);
-    if (m && PREFIX_KEYWORDS.has(m[1]!)) {
+    // (`time` is also a carrier with options of its own - `time -p make` - so the carrier reader takes it from here)
+    if (m && PREFIX_KEYWORDS.has(m[1]!) && m[1] !== 'time') {
       s = s.slice(m[0].length).trim();
       continue;
     }
@@ -1786,142 +1728,59 @@ function normalizeSegmentInner(segment: string): string[] {
   // already decided against.
   const dlx = /^(pnpm|yarn)\s+dlx\s+([\s\S]+)$/.exec(s);
   if (dlx) return [...extra, `${MARK}registry-fetch ${dlx[1]} dlx`, ...splitShellSegments(dlx[2]!).flatMap(normalizeSegment)];
-  // two-word runners, stripped before wrapper handling so `pnpm exec vitest run` is `vitest run` everywhere
-  for (;;) {
-    const pair = WRAPPER_PAIRS.find((p) => new RegExp(`^${p[0]}\\s+${p[1]}\\s+`).test(s));
-    if (!pair) break;
-    s = s.replace(new RegExp(`^${pair[0]}\\s+${pair[1]}\\s+`), '');
-  }
   const tokens = tokenize(s);
   if (tokens.length === 0) return extra;
+  // THE CARRIERS THE NORMALIZER STRIPS ARE THE TRANSPARENT ONES, and they are stripped by the one carrier reader
+  // (carriers.ts): each by exactly the options it really has - with their values, clusters, glued forms and abbreviations -
+  // iterated to a fixed point. `sudo` keeps its head so command.privileged can fire and `xargs` is read by the payload reader
+  // (normalizeTail), so the chain stops at them. This was a loop over a set of names and a regex of value-taking options per
+  // wrapper, and a second, different copy of it served every reader of the line as written (independent review 11: RC-CAR).
+  const keepsHead = (_name: string, spec: Carrier): boolean => spec.retains === true || spec.payload === true;
+  // (a shell keyword may stand between carriers - `time ! false`, `time if …` - and is structure, not a command)
+  const peeled: Peeled = peelCarriers(tokens, 0, { prefixes: HEAD_PREFIXES, stopAt: keepsHead, leadingAssignments: false });
+  const steps: PeelStep[] = peeled.steps;
+  const leading: string[] = peeled.leading;
   // `command -v NAME` / `-V NAME` LOOKS THE NAME UP and prints where it is; it does not run it. Stripping
   // `command` as a transparent wrapper classified the idiom every script uses to test whether a tool exists as
-  // RUNNING that tool, so `command -v node` asked (exit review 4).
-  if (tokens[0] === 'command' && /^-[vV]$/.test(tokens[1] ?? '')) return [...extra, s];
-  // ...and behind a wrapper too: `timeout 5 command -v node` is the same lookup, and it was classified as RUNNING
-  // node (exit review 7)
-  {
-    const cv = new RegExp(`^${WRAP}command\\s+-[vV]\\s`).exec(s);
-    if (cv) return [...extra, s.slice(cv[0].length - 'command -v '.length)];
+  // RUNNING that tool, so `command -v node` asked (exit review 4). ...and behind a wrapper too: `timeout 5 command -v
+  // node` is the same lookup, and it was classified as RUNNING node (exit review 7)
+  if (peeled.lookup) return [...extra, requote(tokens.slice(steps[steps.length - 1]!.at))];
+  // assignments passed through `env` (and `sudo`, `time`) are judged exactly like leading assignments - INCLUDING the ones
+  // that select the target, which this branch used to drop (round 15) - and through `env --` too: a value that cannot name a
+  // program does not change what runs
+  for (const tok of [...leading, ...steps.flatMap((st) => st.assignments)]) {
+    const name = tok.slice(0, tok.indexOf('='));
+    if (ENV_INJECT_RE.test(name) && envInjects(name, tok)) extra.push(`${MARK}env-inject ${name}`);
+    if (TARGET_ENV_RE.test(name)) targetEnv.push(tok);
   }
-  let idx = 0;
-  for (;;) {
-    const t = tokens[idx];
-    if (t === undefined) break;
-    if (WRAPPERS.has(t) || t === 'timeout') {
-      idx++;
-      const valueOpt = WRAPPER_VALUE_OPTS[t];
-      const positional = WRAPPER_POSITIONALS[t];
-      while (idx < tokens.length) {
-        const tok = tokens[idx]!;
-        if (tok === '--') {
-          idx++;
-          // after `env --` assignments may still follow: they are judged, then the command starts
-          if (t === 'env')
-            while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) {
-              const name = tokens[idx]!.slice(0, tokens[idx]!.indexOf('='));
-              // ...through `env --` too: a value that cannot name a program does not change what runs
-              if (ENV_INJECT_RE.test(name) && envInjects(name, tokens[idx]!)) extra.push(`${MARK}env-inject ${name}`);
-              if (TARGET_ENV_RE.test(name)) targetEnv.push(tokens[idx]!);
-              idx++;
-            }
-          break;
-        }
-        if (t === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) {
-          // assignments passed through `env` are judged exactly like leading assignments — INCLUDING the ones that
-          // select the target, which this branch used to drop (round 15)
-          const name = tok.slice(0, tok.indexOf('='));
-          // ...and through `env NAME=value` as well, by the same test as a leading assignment
-          if (ENV_INJECT_RE.test(name) && envInjects(name, tok)) extra.push(`${MARK}env-inject ${name}`);
-          if (TARGET_ENV_RE.test(name)) targetEnv.push(tok);
-          idx++;
-          continue;
-        }
-        // `env -S '<command>'` / `--split-string=<command>` re-splits its argument into a command line and runs it,
-        // exactly like `bash -c`: the whole string is the command, not an opaque option value
-        const splitCluster = t === 'env' ? /^-[0-9A-Za-z]*S/.exec(tok) : null;
-        const splitLong = t === 'env' && tok.startsWith('--s') && 'split-string'.startsWith(tok.slice(2).split('=')[0]!);
-        if (t === 'env' && (splitCluster !== null || splitLong)) {
-          // `-S` in a cluster (`-iS`, `-vS`), glued (`-S'cmd'`), or an abbreviation of --split-string (`--spl`)
-          let value: string;
-          let used = 1;
-          if (splitLong) {
-            if (tok.includes('=')) value = tok.slice(tok.indexOf('=') + 1);
-            else {
-              value = tokens[idx + 1] ?? '';
-              used = 2;
-            }
-          } else {
-            const glued = tok.slice(splitCluster![0].length);
-            if (glued) value = glued;
-            else {
-              value = tokens[idx + 1] ?? '';
-              used = 2;
-            }
-          }
-          // the split value is env's OWN argv: leading -u/-C/-i/-0 options and VAR=val assignments precede the command,
-          // so re-parse it through the env wrapper again rather than treating its first token as the command head.
-          // ...AND ENV APPENDS ITS OWN REMAINING ARGUMENTS to what the string split into: `env -S 'tee' FILE` writes FILE,
-          // `env -S 'psql' -h prod-db -c 'DROP TABLE users'` connects there (exit review 10)
-          const rest = tokens.slice(idx + used);
-          return [...extra, ...splitShellSegments('env ' + value + (rest.length ? ' ' + requote(rest) : '')).flatMap(normalizeSegment)];
-        }
-        if (tok.startsWith('-')) {
-          idx++;
-          if (valueOpt && valueOpt.test(tok) && !tok.includes('=')) idx++;
-          continue;
-        }
-        if (positional && positional.test(tok)) {
-          idx++;
-          continue;
-        }
-        break;
-      }
-      // `watch`'s argument - and `sem`'s, and a sandbox's default-shell one - is a SHELL STRING, run by `sh -c`: what
-      // follows the first `;` or `&&` in `watch 'git status; git push origin main'` is a command of its own, and
-      // reading the string as one command by its first word judged `git status` and nothing else (exit review 10)
-      if ((t === 'watch' || t === 'sem') && idx < tokens.length && !tokens.some((x) => x === '-x' || x === '--exec')) {
-        const shellString = tokens.slice(idx).join(' ');
-        if (/[;&|<>$`(]|\n/.test(shellString)) return [...extra, ...splitShellSegments(shellString).flatMap(normalizeSegment)];
-      }
-      continue;
-    }
-    if (WRAPPERS_WITH_OPERAND.has(t)) {
-      // flock [opts] <file> cmd | flock [opts] <file> -c 'cmd', su [-] user -c cmd, su --command='cmd' user,
-      // runuser -u user -- cmd
-      const body = operandWrapperBody(tokens, idx);
-      if (body !== null)
-        return [...extra, ...splitShellSegments(body).flatMap(normalizeSegment), tokens.slice(idx).join(' ')];
-      idx++;
-      let sawSeparator = false;
-      let userGiven = false;
-      while (idx < tokens.length && tokens[idx]!.startsWith('-')) {
-        const opt = tokens[idx]!;
-        idx++;
-        if (opt === '--') {
-          sawSeparator = true;
-          break;
-        }
-        if (/^(-u|--user)$/.test(opt)) {
-          userGiven = true;
-          idx++;
-        } else if (/^(-w|--timeout|-E|--conflict-exit-code|-g|--group|-s|--shell)$/.test(opt)) idx++;
-        else if (/^--user=/.test(opt)) userGiven = true;
-      }
-      // the lock file / user operand is only positional when it was not already given as an option and no `--`
-      // separator has started the command line (round 13: `runuser -u root -- cp …` ate `cp` as the user name)
-      if (
-        !sawSeparator &&
-        !userGiven &&
-        (t === 'flock' ||
-          t === 'su' ||
-          (t === 'runuser' && tokens[idx] !== undefined && !tokens[idx]!.startsWith('-')))
-      )
-        idx++;
-      continue;
-    }
-    break;
+  // `env -S '<command>'` / `--split-string=<command>` re-splits its argument into a command line and runs it, exactly like
+  // `bash -c`: the whole string is the command, not an opaque option value. It is env's OWN argv - leading -u/-C/-i/-0
+  // options and VAR=val assignments precede the command, so it is re-parsed through env again rather than read by its first
+  // word - AND ENV APPENDS ITS OWN REMAINING ARGUMENTS to what the string split into: `env -S 'tee' FILE` writes FILE,
+  // `env -S 'psql' -h prod-db -c 'DROP TABLE users'` connects there (exit review 10)
+  const split = peeled.strings.find((x) => x.carrier === 'env');
+  if (split) return [...extra, ...splitShellSegments('env ' + split.body + (split.appended.length ? ' ' + requote(split.appended) : '')).flatMap(normalizeSegment)];
+  // flock [opts] <file> -c 'cmd', su [-] user -c cmd, su --command='cmd' user, runuser -u user -- cmd: the string is a command
+  // line of its own, and the wrapper itself is still classified
+  // `su` and `runuser` change the user the command runs as: whatever they carry, the wrapper itself is still a privilege change,
+  // and command.privileged must see it
+  const switcher = steps.find((st) => st.carrier === 'su' || st.carrier === 'runuser');
+  if (switcher && peeled.strings.length === 0) extra.push(tokens.slice(switcher.at).join(' '));
+  const owned = peeled.strings[0];
+  if (owned) {
+    const bodies = splitShellSegments(owned.body).flatMap(normalizeSegment);
+    const own = steps.find((st) => st.carrier === owned.carrier);
+    return /^(flock|su|runuser)$/.test(owned.carrier) && own ? [...extra, ...bodies, tokens.slice(own.at).join(' ')] : [...extra, ...bodies];
   }
+  // `watch`'s argument - and `sem`'s - is a SHELL STRING, run by `sh -c`: what follows the first `;` or `&&` in `watch 'git
+  // status; git push origin main'` is a command of its own, and reading the string as one command by its first word judged
+  // `git status` and nothing else (exit review 10). A string with no shell syntax in it is a command line like any other, and is
+  // normalized as one: `watch -n 5 'SWIFT_EXEC=/tmp/evil swift build'` has an assignment in front of its command, which read as
+  // ONE word is no assignment at all (the generated cross-product). What the outer line assigned to it (`PGHOST=prod watch psql`)
+  // goes with it.
+  if (peeled.shellString !== null)
+    return [...extra, ...splitShellSegments((targetEnv.length ? targetEnv.join(' ') + ' ' : '') + peeled.shellString).flatMap(normalizeSegment)];
+  const idx = peeled.at;
   let rest = tokens.slice(idx);
   if (rest.length === 0) return extra;
   let head = rest[0]!;
@@ -1961,6 +1820,9 @@ function normalizeSegmentInner(segment: string): string[] {
       rest.some((t) => new RegExp(`^-[a-zA-Z]*[${letters}][a-zA-Z]*$`).test(t));
     if (forced) rest = [...rest, `${MARK}force-ref-reset`];
   }
+  // A LONG OPTION CUT TO A UNIQUE PREFIX IS THE SAME OPTION, for every tool whose table lists them all (tools.ts): `tar --use=./x`
+  // runs a program and `tar --rem` deletes what it archives, and the matchers read the full spellings only
+  rest = expandLongOptions(rest);
   if (targetEnv.length && TARGET_ENV_HEADS.has(head)) rest = [...rest, ...targetEnv];
   const stripped = stripToolGlobalOptions(head, rest);
   rest = canonicalDryRun(stripped.rest);
@@ -2075,7 +1937,10 @@ function matchPayloads(cmd: readonly string[], roots: readonly string[], named: 
     // (the root form stays too: a search root that is itself governed is a deny whatever the matches are)
     if (writes && placed) out.push(requote(words.map((c) => (isMatch(c) ? root : c))));
     // `-execdir` and `-okdir` run the payload IN THE DIRECTORY OF EACH MATCH, which is somewhere inside the search root: its
-    // relative operands are judged under the root, which is governed wherever any of its files is
+    // relative operands are judged under the root, which is governed wherever any of its files is. That reading prefixes EVERY
+    // bare word, the subcommand and the flags' values among them (`podman ./login -u ./bot`), so a rule that reads the words as
+    // they are written never matches it: the payload AS WRITTEN is classified too (the generated cross-product)
+    if (inMatchDir) out.push(requote(words.map((c) => (isMatch(c) ? (writes ? '$FIND_MATCH' : root) : c))));
     out.push(
       requote(
         words.map((c, k) =>
@@ -2189,25 +2054,18 @@ function normalizeTail(rest: string[]): string[] {
     rest = [head, ...rest.slice(1)];
   }
   if (head === 'bash' || head === 'sh' || head === 'zsh' || head === 'dash' || head === 'ksh' || head === 'fish') {
-    // -c, or a combined short-flag cluster CONTAINING c (`-euc`, `-ec`, `-lc`, `-xc`, `-cx`) — `-c` takes the next
-    // operand as the command string wherever it sits in the cluster. A `--` may separate it from that operand.
+    // -c, or a combined short-flag cluster CONTAINING c (`-euc`, `-ec`, `-lc`, `-xc`, `-cx`) — the first OPERAND is then the
+    // command string. A `--` may separate it from that operand.
     // It must come BEFORE the first operand: in `bash run.sh -c ls` the `-c` is the SCRIPT'S argument, and reading
     // it as the shell's hijacked the interpreter so run.sh was never resolved at all (exit review 4).
     // AN OPTION'S VALUE IS NOT AN OPERAND. `bash -o pipefail -c CMD` has `pipefail` where the scan looked for the
     // script, so the `-c` after it was read as the SCRIPT'S argument and the inline program was never analysed
-    // (exit review 6).
-    const operandAt: number[] = [];
-    for (let i = 1; i < rest.length; i++) {
-      if (STDIN_HEAD_VALUE_FLAG_RE.test(rest[i]!)) {
-        i++;
-        continue;
-      }
-      if (!rest[i]!.startsWith('-')) operandAt.push(i);
-    }
-    const firstOperand = operandAt.length ? operandAt[0]! : -1;
-    const cIdx = rest.findIndex((t) => t === '-c' || /^-[a-z]*c[a-z]*$/i.test(t));
-    if (cIdx >= 0 && (firstOperand < 0 || cIdx < firstOperand)) {
-      const inner = rest[cIdx + 1] === '--' ? rest[cIdx + 2] : rest[cIdx + 1];
+    // (exit review 6). ...and a `+x` is an option too: `bash +e -c CMD` counted `+e` as the first operand, so the body was
+    // never read (independent review 11). All of it is the shell's option parser (tools.ts), which is the reader of flags for
+    // the `-n` check above and this one alike.
+    const sp = parseOptions(SHELL_GRAMMAR, rest, 1);
+    if (sp.options.some((o) => o.name === 'c' && o.sign === '-') && sp.end < rest.length) {
+      const inner = rest[sp.end];
       if (inner) return [`${head} -c`, ...splitShellSegments(inner).flatMap(normalizeSegment)];
     }
     // `sh <<< "git push origin main"` feeds the interpreter a script on stdin: the herestring IS the command, and
@@ -2240,19 +2098,12 @@ function normalizeTail(rest: string[]): string[] {
 
   if (head === 'sudo' || head === 'doas') {
     // skip the privilege tool's own options (and the values of the ones that take one) so the inner command head is
-    // found wherever it sits: `sudo -u root -H cp …`, `doas -u root cp …`
-    let i = 1;
-    while (i < rest.length) {
-      const t = rest[i]!;
-      if (t === '--') {
-        i++;
-        break;
-      }
-      if (!t.startsWith('-')) break;
-      i += /^(-u|-g|-p|-C|-h|-U|-r|-t|-D|--user|--group|--prompt|--host|--role|--type|--chdir|--close-from)$/.test(t)
-        ? 2
-        : 1;
-    }
+    // found wherever it sits: `sudo -u root -H cp …`, `doas -u root cp …`. The options are the ones the carrier table
+    // lists for the tool (carriers.ts), in every spelling its parser takes - `-p PROMPT`, `-pPROMPT`, `--prompt=PROMPT`,
+    // `-D DIR`, `--chdir DIR` - not the nine this branch happened to know. `NAME=value` words after them stay with the
+    // tail, which judges them like any leading assignment.
+    const privilege = peelCarriers(rest, 0, { maxSteps: 1 });
+    const i = privilege.at - (privilege.steps[0]?.assignments.length ?? 0);
     // THE TAIL IS A COMMAND, so it is normalized like one — from the ORIGINAL TEXT. Handing the tail back as a
     // re-joined token list erases the quoting, and a `-c` body is ONE WORD: `sudo bash -c 'git push origin main'`
     // became `bash -c git push origin main`, whose inline program is the single token `git` (exit review 6). The
@@ -2969,22 +2820,29 @@ export function expandBraces(seg: string, overflow?: { hit: boolean }): string {
 /** `expands` is true when the shell will substitute something into the word at run time: a `$name`, `${…}`, `$(…)`
  *  or backtick that is unquoted or inside double quotes. Single quotes and a backslash keep a `$` literal. The text of
  *  such a word is NOT what the program receives, which is the one fact a reader of a statement operand needs. */
-function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expands: boolean }> {
-  const out: Array<{ text: string; quoted: boolean; expands: boolean }> = [];
+function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expands: boolean; at: number; end: number }> {
+  const out: Array<{ text: string; quoted: boolean; expands: boolean; at: number; end: number }> = [];
   let cur = '';
   let quote: string | null = null;
   let wasQuoted = false;
   let expands = false;
+  // where the word sits in `s`: a reader that strips a PREFIX of a command (a chain of wrappers) needs the text after it
+  // exactly as it was written, quoting included, and re-joining the words does not give that back
+  let start = -1;
+  let here = 0;
   const flush = () => {
-    if (cur || wasQuoted) out.push({ text: cutAtNul(cur), quoted: wasQuoted, expands });
+    if (cur || wasQuoted) out.push({ text: cutAtNul(cur), quoted: wasQuoted, expands, at: start, end: here });
     cur = '';
     wasQuoted = false;
     expands = false;
+    start = -1;
   };
   const substitutes = (at: number): boolean =>
     s[at] === '`' || (s[at] === '$' && /[A-Za-z_{(0-9@*#?$!-]/.test(s[at + 1] ?? ''));
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
+    here = i;
+    if (start < 0 && (quote !== null || !IFS_RE.test(ch))) start = i;
     if (ch === '\\' && quote !== "'" && i + 1 < s.length) {
       // INSIDE DOUBLE QUOTES A BACKSLASH ESCAPES ONLY `$`, A BACKTICK, `"`, `\\` AND A NEWLINE (POSIX 2.2.3); before any
       // other character it is LITERAL. `psql -c "\dt"` hands psql the two characters `\dt`, and dropping the
@@ -3025,6 +2883,7 @@ function tokenizeMarked(s: string): Array<{ text: string; quoted: boolean; expan
     if (substitutes(i)) expands = true;
     cur += ch;
   }
+  here = s.length;
   flush();
   return out;
 }
@@ -3930,6 +3789,9 @@ function editsInPlace(head: string, tokens: string[]): boolean {
     return tokens.some((t, i) =>
       /^(-i|--include)$/.test(t) ? tokens[i + 1] === 'inplace' : /^(-i|--include=)inplace$/.test(t),
     );
+  // sed's `-i` is read by sed's own option parser (tools.ts): `-i`, `-i.bak`, `-ni`, `-Ei`, `-s -i`, `--in-place[=SUFFIX]` and any
+  // unique prefix of it, wherever among the operands it stands - GNU sed permutes, so `sed 's/a/b/' -i f` edits f
+  if (/^(sed|gsed)$/.test(head)) return sedProgram(tokens, 1).inPlace;
   // `-i`, `-i.bak` (the backup suffix is glued to it), or the letter inside a cluster of flags that take no
   // argument. The cluster is spelled out rather than `[A-Za-z]*` because perl's `-Ilib` names an include PATH
   // and a loose test read the `i` of `lib` as the in-place flag.
@@ -5165,26 +5027,33 @@ function dataConfigNamingCode(ctx: EvaluationContext, cwd: string, tool: string)
             }
           })()
         : text;
-    // `plugins` and the rest always name a package the tool imports. `extends` is the exception: a value in the
-    // tool's OWN namespace (`eslint:recommended`) is built in and loads nothing, so flagging it would gate the
-    // most ordinary configuration there is.
-    // JSON writes `"plugins": ["x"]`, YAML writes `plugins:` then a list on the following lines. Requiring a
-    // bracket on the same line saw only the JSON shape (decision challenge, finding 6).
-    // JSON writes `"plugins": [...]`, YAML writes `plugins:` then a list, INI and TOML write `plugins = ...`.
-    // Requiring a colon saw only the first two, so `mypy.ini` with `plugins = evil.py` read as plain data.
-    if (
-      /(^|["\s])(plugins|presets|preset|require|requires|loader|transform)["\s]*[:=]\s*(\[|\{|["']|\S|\r?\n\s*-)/m.test(
-        scope,
-      )
-    )
-      return f;
-    const ext = /["\s]extends["\s]*[:=]\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
-    if (ext) {
-      const values = [...ext[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
-      if (values.some((v) => !v.startsWith(`${tool}:`))) return f;
-    }
+    if (configTextNamesCode(scope, tool)) return f;
   }
   return null;
+}
+
+/** Whether the TEXT of a data configuration makes its tool import or run something.
+ *  `plugins` and the rest always name a package the tool imports. `extends` is the exception: a value in the
+ *  tool's OWN namespace (`eslint:recommended`) is built in and loads nothing, so flagging it would gate the
+ *  most ordinary configuration there is.
+ *  JSON writes `"plugins": ["x"]`, YAML writes `plugins:` then a list on the following lines. Requiring a
+ *  bracket on the same line saw only the JSON shape (decision challenge, finding 6).
+ *  JSON writes `"plugins": [...]`, YAML writes `plugins:` then a list, INI and TOML write `plugins = ...`.
+ *  Requiring a colon saw only the first two, so `mypy.ini` with `plugins = evil.py` read as plain data.
+ *  pylint's own keys are `load-plugins` and `init-hook`: the second one is Python SOURCE the tool executes before it reads a file. */
+function configTextNamesCode(scope: string, tool: string): boolean {
+  if (
+    /(^|["\s])(plugins|presets|preset|require|requires|loader|transform|load[-_]plugins|init[-_]hook)["\s]*[:=]\s*(\[|\{|["']|\S|\r?\n\s*-)/m.test(
+      scope,
+    )
+  )
+    return true;
+  const ext = /["\s]extends["\s]*[:=]\s*(\[[^\]]*\]|"[^"]*")/.exec(scope);
+  if (ext) {
+    const values = [...ext[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    if (values.some((v) => !v.startsWith(`${tool}:`))) return true;
+  }
+  return false;
 }
 
 /** Operations that replace repository content wholesale. Listed by what they DO, not by spelling: each one swaps
@@ -5246,51 +5115,30 @@ export function segmentEnvInputs(segment: string, allAssignments = false): Recor
   // (`timeout 60 env VAR=x cmd`). Anchoring on the LEADING position only made the dimension blind to spellings
   // the normalizer already knew how to parse — two readers for one dimension (challenge 8, finding 1).
   const scan = (text: string): void => {
-    let s = text.trim();
-    for (;;) {
-      // skip wrappers and their options so `timeout 60 env FOO=1 make` is reached
-      const w = /^(\S+)\s+/.exec(s);
-      // `sudo`, `doas` and `xargs` are NOT transparent for the verdict — sudo keeps `command.privileged` — but
-      // they are transparent for the ENVIRONMENT: `sudo DOCKER_HOST=tcp://prod… docker exec` really does set that
-      // variable for the command. Stopping at them left the normalized `docker exec` with no engine to resolve,
-      // so a shell on a production daemon asked instead of being denied (exit review 6, generated cross-product).
-      // ...and so is a shell KEYWORD: a segment that begins `then`, `do` or `else` holds the same command a bare one
-      // does, and the assignment in front of it configures it just the same (exit review 10, cross-product: the
-      // linker variable was seen at the top of a line and missed inside every branch)
-      if (w && (WRAPPERS.has(w[1]!) || PREFIX_KEYWORDS.has(w[1]!) || /^(timeout|sudo|doas|xargs|--)$/.test(w[1]!))) {
-        s = s.slice(w[0].length);
-        continue;
-      }
-      const m = /^([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|\S*)\s+/.exec(s);
-      if (m) {
-          // npm matches `npm_config_*` case-insensitively, so `npm_config_SCRIPT_SHELL` is the same setting
-      const name = /^npm_config_/i.test(m[1]!) ? m[1]!.toLowerCase() : m[1]!;
+    // THE ASSIGNMENTS OF THE CHAIN, wherever its carriers put them: `VAR=x cmd`, `env VAR=x cmd`, `timeout 60 env VAR=x cmd`,
+    // `sudo VAR=x cmd` and behind a shell keyword. `sudo`, `doas` and `xargs` are NOT transparent for the verdict - sudo keeps
+    // `command.privileged` - but they are transparent for the ENVIRONMENT: `sudo DOCKER_HOST=tcp://prod… docker exec` really
+    // does set that variable for the command (exit review 6, generated cross-product). One reader of the chain (carriers.ts)
+    // instead of a regex of the wrappers and the options with values this scan happened to know
+    const peeled = peelCarriers(tokenize(text), 0, { prefixes: HEAD_PREFIXES });
+    for (const assignment of [...peeled.leading, ...peeled.steps.flatMap((st) => st.assignments)]) {
+      const eq = assignment.indexOf('=');
+      // npm matches `npm_config_*` case-insensitively, so `npm_config_SCRIPT_SHELL` is the same setting
+      const name = /^npm_config_/i.test(assignment.slice(0, eq)) ? assignment.slice(0, eq).toLowerCase() : assignment.slice(0, eq);
+      const value = assignment.slice(eq + 1);
       // THE TARGET-SELECTING NAMES ARE ENVIRONMENT INPUTS TOO. `PGHOST`, `MYSQL_HOST`, `KUBECONFIG` and their
       // siblings live in TARGET_ENV_RE, which the NORMALIZER consults to re-attach an assignment to the segment
       // it configures. They were absent from this set, so a standalone `export PGHOST=prod-db.acme.com` carried
       // nothing to the next segment and `export PGHOST=… && psql -c 'DROP TABLE users'` was ALLOW, while the
       // one-segment spelling was an absolute deny (exit review 7).
-      if (EXECUTION_ENV_INPUTS.test(name) || TARGET_ENV_RE.test(name))
-        out[name] = m[2]!.replace(/^['"]|['"]$/g, '');
+      if (EXECUTION_ENV_INPUTS.test(name) || TARGET_ENV_RE.test(name)) out[name] = value;
       // ...and EVERY assignment under a private key: a process the command starts inherits all of them, and a `make` two
       // producers down reads its recipe's variables from its environment (`CMD=… npm run build` reaching `make other`)
-      if (allAssignments) out[`\0env:${name}`] = m[2]!.replace(/^['"]|['"]$/g, '');
-        s = s.slice(m[0].length);
-        continue;
-      }
-      // a numeric or flag operand of a wrapper (`timeout 60`, `env -C dir`, `nice -n 5`)
-      const opt = /^(-\S*|\d+\S*)\s+/.exec(s);
-      if (opt && /^(-|\d)/.test(opt[1]!)) {
-        s = s.slice(opt[0].length);
-        // an option's VALUE is not a command either: `sudo -u root -H VAR=x cmd` stopped the scan at `root`
-        if (/^(-u|-g|-p|-C|-U|-r|-t|-D|--user|--group|--prompt|--role|--type|--chdir)$/.test(opt[1]!)) {
-          const val = /^(\S+)\s+/.exec(s);
-          if (val && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(val[1]!)) s = s.slice(val[0].length);
-        }
-        continue;
-      }
-      break;
+      if (allAssignments) out[`\0env:${name}`] = value;
     }
+    // `watch FOO=1 make` runs `sh -c 'FOO=1 make'`: the string a carrier hands to a shell is a command line, and its assignments are the
+    // command's environment like any other
+    if (peeled.shellString) scan(peeled.shellString);
   };
   scan(segment);
   // `env -S 'VAR=x cmd'` carries a whole command line in one quoted value
@@ -5551,6 +5399,10 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
   // link (`cp evil.mk d/../Makefile` replaces the Makefile beside the link's TARGET), and the ledger is a set of names
   // later reads are compared against - recording both can only make a later read more careful, never less
   const abs = (t: string): string[] => pathCandidates(cwd, t).paths;
+  // THE MODELLED TOOLS' OWN TABLE (tools.ts) names what they write: the same reading the verdict uses, so a file the verdict
+  // judged as written is a file the ledger will not call fresh
+  const tableWrites = toolEffects(head, tokens.slice(hi));
+  if (tableWrites !== null) for (const w of [...tableWrites.writes, ...tableWrites.writeDirs]) if (!/[$`]/.test(w) && !discardWord(cwd, w)) out.push(...abs(w));
   // A WRITE THIS LEDGER CANNOT ENUMERATE is a wildcard, and pretending otherwise is how a makefile replaced by `cp
   // evil/* .` looked untouched: a glob or bracket in an operand of a writer, `find … -exec`, `xargs` running a writer,
   // and the tools that name an output file as an OPERAND (exit review 10, self-attack)
@@ -5692,14 +5544,31 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
 const OUTPUT_FLAG_RE =
   /^(?:--(?:outfile|out-file|out-dir|outdir|output-dir|output-directory|output-path|output-file|output|dist-dir|dest|destination|emit-to|out)|--file|-D|--directory)(?:=(.*))?$/;
 
+/** Whether an earlier unit of this command wrote this path, or an ancestor of it, or something nobody could enumerate. */
+function writtenEarlier(written: ReadonlySet<string>, abs: string): boolean {
+  if (written.has('\0any')) return true;
+  const c = foldName(canonicalPath(abs));
+  for (const w of written) {
+    if (w.startsWith('\0')) continue;
+    const f = foldName(w);
+    if (c === f || c.startsWith(f + '/')) return true;
+  }
+  return false;
+}
+
 /** True when a segment writes an UNENUMERABLE set of files: an archive extraction, or a recursive copy whose
  *  destination is a directory. The per-path ledger cannot express either, and `tar -xf p.tar -C sub && make -C sub
  *  build` was judged from a Makefile the extraction may have just replaced. */
 function writesUnenumerably(segment: string): boolean {
   const tokens = tokenize(segment);
   const head = tokens[0] ?? '';
-  if (/^(tar|bsdtar|gtar|pax)$/.test(head))
-    return tokens.some((t) => /^-{0,2}[a-zA-Z-]*x/.test(t) && !t.startsWith('--exclude'));
+  // an EXTRACTION is read from tar's own parse (tools.ts): `--extr`, `-xvf`, `xf a.tar` and `--get` are one mode, and one that
+  // goes to standard output (`-O`) writes nothing
+  if (/^(tar|bsdtar|gtar)$/.test(head)) {
+    const shape = tarShape(tokens);
+    return shape === null ? true : shape.extracts && !shape.toStdout;
+  }
+  if (head === 'pax') return tokens.some((t) => /^-{0,2}[a-zA-Z-]*x/.test(t) && !t.startsWith('--exclude'));
   if (/^(unzip|7z|7za|unrar|bsdcpio|cpio)$/.test(head)) return true;
   if (/^(rsync|cp)$/.test(head) && tokens.some((t) => /^-[a-zA-Z]*[ra]/.test(t))) return true;
   if (head === 'git' && tokens.includes('checkout-index')) return true;
@@ -7978,7 +7847,11 @@ function resolveScriptCommand(
     };
   }
   // package manager scripts
-  if (head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') {
+  // `bun test` IS BUN'S OWN TEST RUNNER, not the package script called `test`: unlike npm, pnpm and yarn - where `test` is an alias
+  // of `run test` - a bun BUILT-IN wins over a script of the same name, so reading `bun test` as the manifest's `"test": "echo ok"`
+  // resolved a body that never runs while the runner executed every `*.test.ts` the repository holds (independent review 11,
+  // r11-214). The built-in is not this producer's: it falls to the vocabulary, which says it discovers content it was never shown.
+  if ((head === 'npm' || head === 'pnpm' || head === 'yarn' || head === 'bun') && !(head === 'bun' && tokens[1] === 'test')) {
     // A workspace/prefix/filter selector changes WHICH manifest the script comes from. EGO does not model the
     // workspace graph, so reading the root manifest would be a confident wrong answer.
     // `--ws` IS `--workspaces`, `-ws` is the single-dash spelling npm accepts for it, and `--workspaces=true`
@@ -9766,7 +9639,10 @@ function optionValues(tokens: string[], short: string, longs: string[]): string[
     // `h` inside `-url=jdbc:postgresql://localhost:5432/app` reads as `-h` and invents a host (round 14)
     if (!/^-[A-Za-z0-9]*$/.test(t.slice(0, at))) continue;
     const glued = t.slice(at + 1);
-    if (glued) out.push(glued);
+    // `-o=file` IS THE FILE `file` TO A GO TOOL (the flag package) AND THE FILE `=file` TO A GNU ONE: this reader does not know which
+    // tool it is reading, so both are values, and a destination judged only as `=file` was a write nobody looked at
+    // (independent review 11, r11-212)
+    if (glued) out.push(...valueReadings(glued));
     else if (tokens[i + 1] !== undefined) out.push(tokens[i + 1]!);
   }
   return out;
@@ -12472,30 +12348,6 @@ const CREDENTIAL_DIRS = [
 ];
 /** The archive file an archiver writes/reads: `-f X`, `--file=X`, a combined short cluster ending in `f` (`-cf X`,
  *  `-czf X`, `-wf X`), or a glued value (`-fX`). Returns the archive path, or null (stdin/stdout `-` handled by caller). */
-/** tar function letters that consume an argument: everything after them in the same token is their VALUE, not more
- *  function letters (`-Ccontrol-plane` is "change directory to control-plane", not "create"). */
-const TAR_ARG_LETTERS = new Set(['f', 'b', 'C', 'V', 'L', 'N', 'X', 'T', 'I', 'H', 'K']);
-
-/** The tar function letters actually requested, across the dashed (`-xf`), clustered and dash-less (`xf`) spellings. */
-function tarFunctionLetters(tokens: string[]): string {
-  let out = '';
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    if (t.startsWith('--')) continue;
-    const body = t.startsWith('-')
-      ? t.slice(1)
-      : i === 1 && /^[A-Za-z]+$/.test(t)
-        ? t // traditional dash-less mode operand: `tar xf a.tar`
-        : '';
-    for (const ch of body) {
-      if (!/[A-Za-z]/.test(ch)) break;
-      out += ch;
-      if (TAR_ARG_LETTERS.has(ch)) break;
-    }
-  }
-  return out;
-}
-
 function archiveFileOperand(tokens: string[]): string | null {
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!;
@@ -12659,6 +12511,69 @@ function classifyShellPaths(
       absolute: false,
       opaqueUnread: true,
     });
+  // THE MODELLED TOOLS ANSWER FROM THEIR OWN TABLE (tools.ts). tar, sort, go, the C compilers and the git subcommands that write
+  // are read by the option parser they really have - clusters, glued values, `-o=file`, any unique prefix of a long option -
+  // and the table says what each value IS: a file written, a directory written into, a program run. Before this each of those
+  // questions was a regex that knew the spellings its author had met, and the spellings it missed were writes into a git hook
+  // (`tar --extr -C .git/hooks`, `go build -o=.git/hooks/pre-commit`, `git checkout-index --prefix=.git/hooks/`) and programs
+  // run at ALLOW (`tar --use=./x`, `clang --ld-path=./x`) - independent review 11: RC-OPT, RC-WRT.
+  const effects = toolEffects(head, tokens);
+  // destinations the table found, judged below as the write destinations they are
+  const extraDests = new Set<string>();
+  if (effects !== null) {
+    for (const prog of effects.programs)
+      hits.push({
+        capability: 'command.script-opaque',
+        verdict: verdictFor(table, ctx, 'command.script-opaque'),
+        via: `the option value ${prog} names a program the command class does not bound`,
+        segment: seg,
+        absolute: false,
+        opaqueUnread: true,
+      });
+    const runs = (why: string): void => {
+      hits.push({
+        capability: 'command.script-opaque',
+        verdict: verdictFor(table, ctx, 'command.script-opaque'),
+        via: why,
+        segment: seg,
+        absolute: false,
+        opaqueUnread: true,
+      });
+    };
+    // code the command line carries (`pylint --init-hook "…"`) is run by the tool before it reads a file
+    for (const c of effects.code) runs(`the option value ${c} is code the command runs`);
+    // a CONFIGURATION named on the command line: a script one is a program; a data one is read here, because the lookup the
+    // closure rule makes for the files a tool FINDS never sees the one it is TOLD (`prettier --config ./evil.json`, whose
+    // `plugins` entry runs ./pl.js - independent review 11, r11-208)
+    for (const c of effects.configs) {
+      if (/[$`*?]/.test(c)) continue;
+      // a file that is not there - and that no earlier unit of this command writes - is nothing for the tool to load
+      const cfgAt = openedPath(cwd, c);
+      if (cfgAt !== null && !fileExists(cfgAt) && !writtenEarlier(written, cfgAt)) continue;
+      if (/\.(c|m)?[jt]s$|\.py$|\.rb$/.test(c)) runs(`the configuration ${c} is a script the command runs`);
+      else {
+        const text = readWordFile(ctx, cwd, c);
+        if (text === null) runs(`the configuration ${c} could not be read, so it cannot be shown to name no code`);
+        else if (configTextNamesCode(text, head)) runs(`the configuration ${c} names code the command loads`);
+      }
+    }
+    // `python -m MOD` and `pylint --load-plugins=MOD` import MOD from the working directory FIRST: a file of that name there
+    // is the program that runs, whatever the module is called in the standard library (`python3 -m venv` with a venv.py beside
+    // it, r11-209). Isolated mode (-I) and -P leave the working directory off the path.
+    if (effects.pythonModules.length && !(effects.key === 'python' && (isOn(effects.parsed, 'I') || isOn(effects.parsed, 'P'))))
+      for (const mod of effects.pythonModules) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(mod)) continue;
+        // (the candidate names go through the one path resolver, like every other word the evaluator opens)
+        const local = [`${mod}.py`, `${mod}/__init__.py`, `${mod}.so`, `${mod}.pyd`].find((f) => ((o) => o !== null && fileExists(o))(openedPath(cwd, f)));
+        if (local !== undefined) runs(`the module ${mod} is imported from the working directory first, where ${local} is what runs`);
+      }
+    for (const w of [...effects.writes, ...effects.writeDirs]) {
+      // (`-` is standard output: `wget -qO- URL`)
+      if (!w || w === '-' || /[$`]/.test(w) || discardWord(cwd, w, old)) continue;
+      extraDests.add(w);
+      if (!paths.some((q) => q.raw === w)) paths.push(...pathEntries(cwd, w, old));
+    }
+  }
   // A database client handed a program file, or carrying an in-band shell escape, executes code the kernel never
   // read: `psql -f x.sql`, `\!`, sqlite3 `.shell`/`.system`, mysql `SYSTEM`, `COPY … TO PROGRAM` (challenge
   // finding 5). This is an ADDITIONAL hit so it can never mask a stronger verdict from the target resolution.
@@ -12932,9 +12847,25 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // destination is judged here, on its own, rather than through the coarse "every operand is a write" switch —
   // which would have made reading a governed file a write and reintroduced the defect closed one commit ago.
   for (const w of sedWrittenFiles(rawSeg, ctx, cwd)) {
+    // a name built at run time (`w $OUT`) is a file nobody can judge: an approvable question, never a silent yes
+    if (/[$`]/.test(w)) {
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: `sed writes ${w}, a path built at run time`,
+        segment: seg,
+        absolute: false,
+      });
+      continue;
+    }
     // a device sink is a DISCARD, exactly as it is for `> /dev/null` (self-attack on exit review 9)
-    if (/[$`]/.test(w) || discardWord(cwd, w)) continue;
+    if (discardWord(cwd, w)) continue;
     judgeInto(hits, table, ctx, 'Write', cwd, w, seg, (v) => `sed writes ${w} (${v})`, old);
+  }
+  // ...AND A SED SCRIPT'S `r FILE` / `R FILE` READ A FILE INTO THE OUTPUT: `sed 'r ~/.ssh/id_rsa' f` prints a key as surely as `cat` does
+  for (const r of sedReadFiles(rawSeg, ctx, cwd)) {
+    if (/[$`]/.test(r) || /^\/dev\//.test(r)) continue;
+    judgeInto(hits, table, ctx, 'Read', cwd, r, seg, (v) => `sed reads ${r} (${v})`, old);
   }
   // EVERY RUNTIME THE MODEL KNOWS, not two of them. The privileged-mount MATCHER already named nerdctl, so the
   // command was recognised as a bind mount of `/` and asked — while the identical docker line was denied,
@@ -13065,7 +12996,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     // unless its own SCRIPT names a file to write, which `w FILE` does (exit review 9)
     (/^(sed|gsed|perl|ruby|gawk|awk|mawk|nawk)$/.test(head) &&
       (editsInPlace(head, tokens) || sedWrittenFiles(rawSeg, ctx, cwd).length > 0)) ||
-    (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv|merge-file)$/.test(tokens[1] ?? '')) ||
+    (head === 'git' && /^(checkout|restore|clone|revert|cherry-pick|rm|mv|merge-file|checkout-index|bundle|init)$/.test(tokens[1] ?? '')) ||
+    extraDests.size > 0 ||
     (genericOutput !== null && /[/.]/.test(genericOutput));
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
@@ -13098,47 +13030,17 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       tokens.some((t) => /^(-w|--write|-i|--in-place|--fix|--fix-dry-run)$/.test(t))) dest = 'ALL';
     else if (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))) dest = 'ALL';
     else if (head === 'tar' || head === 'bsdtar' || head === 'gtar') {
-      // traditional tar also takes a DASH-LESS function-letter operand as its first argument: `tar xf a`, `tar cf a`,
-      // `tar czf a` — recognise it alongside the dashed `-cf`/`-xf` forms
-      const modeTok = tokens[1] && !tokens[1].startsWith('-') && /^[a-z]+$/i.test(tokens[1]) ? tokens[1] : '';
-      const letters = tarFunctionLetters(tokens);
-      // every archive-WRITING mode: create (c), append (r), update (u), catenate (A) — not just create
-      const writeMode =
-        tokens.some(
-          (t) =>
-            t === '--create' ||
-            t === '--append' ||
-            t === '--update' ||
-            t === '--catenate' ||
-            t === '--concatenate',
-        ) || /[cruA]/.test(letters);
-      const extract =
-        tokens.some((t) => t === '--extract' || t === '--get') || /x/.test(letters);
-      if (writeMode) {
-        // dash-less `cf`/`czf`/`rf`/`cbf`: the archive is `f`'s positional argument. Function letters before `f` that
-        // themselves consume an argument (b blocking-factor, V volume, L length, N newer, X exclude, T files-from)
-        // shift it, so `tar cbf 20 ARCHIVE` has its archive at tokens[3], not tokens[2].
-        let arc = archiveFileOperand(tokens);
-        if (!arc && modeTok && /f/.test(modeTok)) {
-          const argLetters = new Set(['f', 'b', 'V', 'L', 'N', 'X', 'T']);
-          let before = 0;
-          for (const ch of modeTok) {
-            if (ch === 'f') break;
-            if (argLetters.has(ch)) before++;
-          }
-          arc = tokens[2 + before] ?? null;
-        }
-        dest = arc && arc !== '-' ? arc : null; // writing the archive is a write to that path
-      } else if (extract) {
-        // the change-directory flag has several spellings: -C DIR, -CDIR, -xCDIR, --directory DIR, --directory=DIR,
-        // --cd DIR, and --one-top-level[=DIR] creates and extracts into its own directory
-        // SUCCESSIVE `-C` ARE CUMULATIVE. tar enters each in turn, so `-C .harness -C runtime` extracts into
-        // `.harness/runtime`; taking only the LAST one read it as `runtime` relative to the working directory,
-        // which is a different place entirely and not a protected one (exit review 9).
-        const cds = optionValues(tokens, 'C', ['--directory', '--cd']);
-        const top = optionValue(tokens, '', ['--one-top-level']);
-        dest = top ?? (cds.length ? cds.reduce((acc, d) => (isAbsolute(d) ? d : `${acc}/${d}`)) : '.');
-      } else dest = null; // list / compare: read-only
+      // tar's mode, archive and directory are read from the PARSE (tools.ts): the dashed, clustered, glued and dash-less spellings
+      // (`-xvf`, `-xCdir`, `xf a.tar`, `--extr`, `--dir=`) are one reading, and a mode given only as an abbreviation is still the mode
+      const shape = tarShape(tokens);
+      if (shape === null) dest = null;
+      // every archive-WRITING mode: create, append, update, catenate and delete - writing the archive is a write to that path
+      else if (shape.writesArchive) dest = shape.archive && shape.archive !== '-' ? shape.archive : null;
+      // an extraction lands in the cumulative `-C` directories, or in the working directory - unless it goes to standard output
+      else if (shape.extracts) dest = shape.toStdout ? null : shape.extractDir;
+      else dest = null; // list / compare: read-only
+      // `--remove-files` DELETES every file it archived
+      if (shape?.writesArchive && shape.effects.parsed.options.some((o) => o.name === 'remove-files' || o.candidates?.includes('remove-files'))) dest = 'ALL';
     } else if (head === 'ar') {
       // `ar` WRITES ITS ARCHIVE, and the archive is the first operand after the key letters. `ar rcS
       // .harness/runtime/state.json payload/blob` replaces a runtime file EGO alone may write, under a name
@@ -13185,8 +13087,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // renaming a protected file over another) — the source side is not merely a read
       dest = 'ALL';
     } else if (head === 'sort') {
-      // `sort -o FILE` / `sort -oFILE` / `sort --output=FILE` writes FILE (in place, even when FILE is an input too)
-      dest = optionValue(tokens, 'o', ['--output']);
+      // `sort -o FILE` / `-oFILE` / `--output=FILE` / `--o=FILE` writes FILE (in place, even when FILE is an input too): the
+      // table reads it, and it is judged with the other destinations the table found
+      dest = null;
     } else if (head === 'uniq') {
       // `uniq [input [output]]`: a second bare operand is the output file
       const operands = bareOperands();
@@ -13265,6 +13168,28 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         const specs = operandsOf(words, /^(-L|--marker-size|--diff-algorithm)$/);
         const options = words.indexOf('--') < 0 ? words : words.slice(0, words.indexOf('--'));
         dest = specs.length && !options.some((t) => /^(-p|--stdout)$/.test(t)) ? specs[0]! : null;
+      } else if (sub === 'checkout-index') {
+        // `git checkout-index` WRITES THE INDEX'S FILES TO DISK: into the working tree (as `git checkout` does), or - with `--prefix` -
+        // into `<prefix><path>`, which is wherever the prefix says: `--prefix=.git/hooks/ pre-commit` installs a hook and
+        // `-a --prefix=control-plane/` rewrites the policy (independent review 11, r11-90 / r11-106). The prefix is glued to the
+        // path as a STRING, so `a/` + `b` is `a/b` and `a` + `b` is `ab`; both readings of a prefix without its slash are judged.
+        const prefix = lastOf(effects!.parsed, 'prefix') ?? '';
+        const ops = effects!.parsed.operands.map((o) => o.text);
+        const specs: string[] = [];
+        if (has(effects!.parsed, 'all')) specs.push(prefix === '' ? '.' : prefix);
+        for (const op of ops) specs.push(`${prefix}${op}`, ...(prefix !== '' && !prefix.endsWith('/') ? [`${prefix}/${op}`] : []));
+        if (specs.length) {
+          gitPathspecs = specs;
+          dest = 'ALL_PATHSPECS';
+        } else dest = null;
+      } else if (sub === 'bundle') {
+        // `git bundle create FILE ...` WRITES FILE
+        const words = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        dest = words[0] === 'create' && words[1] ? words[1] : null;
+      } else if (sub === 'init') {
+        // `git init DIR` creates DIR
+        const words = tokens.slice(2).filter((t) => !t.startsWith('-'));
+        dest = words[words.length - 1] ?? null;
       } else if (sub === 'rm' || sub === 'mv') {
         // `git rm -n` and `git mv -n` (`--dry-run`) SHOW what would be removed or moved and touch nothing. The flag is
         // the last such one BEFORE `--`: after it everything is a path, so `git rm -f -- -n control-plane/x.md` removes
@@ -13517,6 +13442,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // reads the link, `cp /tmp/x "sp l/x"` writes through it
       (write && wholeWords.has(p.raw) && wholeIsDest(p.raw)) ||
       (dest === 'AFTER_DASHDASH' && tokens.indexOf(p.raw) > tokens.indexOf('--')) ||
+      extraDests.has(p.raw) ||
       (dest !== null && p.raw === dest);
     // reads: credential stores (any spelling, canonicalized), env files; recursive reads of HOME or `/` reach them too
     if (!write || !isDest) {
@@ -13726,13 +13652,13 @@ function commitBypassFlag(cmdStr: string): boolean {
  *  carried `git commit` can be scanned the same way as a top-level one. */
 /** WHERE A COMMAND RUNS BECAUSE OF ITS OWN OPTIONS: `env -C DIR`, `env --chdir=DIR`, `git -C DIR`, through whatever
  *  wrappers stand in front of it. One reader, with the option parsers the tools really have:
- *    - env: `-u NAME` takes a value, clusters (`-iC dir`, `-iCdir`), unique abbreviations of the long options
- *      (`--chd=`, `--ch=`), and `-S STRING`, which is a command line of its own that env splits and runs;
+ *    - every `env` in the chain is read by the carrier table (carriers.ts): `-u NAME` takes a value, clusters (`-iC dir`,
+ *      `-iCdir`), unique abbreviations of the long options (`--chd=`, `--ch=`), and `-S STRING`, which is a command line of
+ *      its own that env splits and runs - and the chain may be any other carrier in front of it (`timeout -s KILL 5 env -C d`);
  *    - git: a global option either takes a value (`-C`, `-c`, `--git-dir`, …) or does not (`--no-pager`, `--bare`, …),
  *      and one this table does not know leaves the verb's position - and so the directory - unknown.
  *  Three regexes had been doing this job, each assuming every option is one token and every word is spelled plainly
  *  (exit review 10, self-attack: seven findings). Returns null when the command names no directory. */
-const RUN_DIR_HEADS: ReadonlySet<string> = new Set(['env', 'git']);
 /** The directory an option's word leaves the command in. A word nobody can resolve (`$X`, a glob) leaves it somewhere
  *  unknown, and says so: the caller then stops treating the directory as proven. */
 function enterDirectory(dir: string, word: string, known: boolean): { dir: string; known: boolean } {
@@ -13740,77 +13666,34 @@ function enterDirectory(dir: string, word: string, known: boolean): { dir: strin
   return next === null ? { dir, known: false } : { dir: next, known };
 }
 function runDirectory(seg: string, base: string): { dir: string; known: boolean } | null {
-  let words = commandWords(tokenizeMarked(expandBraces(seg.trim()))).map((x) => x.text);
+  const words = commandWords(tokenizeMarked(expandBraces(seg.trim()))).map((x) => x.text);
   let dir = base;
   let found = false;
   let known = true;
-  for (let guard = 0; guard < 8; guard++) {
-    const hi = commandHeadIndex(words, RUN_DIR_HEADS);
-    const head = (words[hi] ?? '').replace(/^.*\//, '');
-    if (head === 'env') {
-      let i = hi + 1;
-      let next: string[] | null = null;
-      const LONG = ['ignore-environment', 'null', 'unset', 'chdir', 'split-string', 'debug', 'argv0', 'default-signal', 'ignore-signal', 'block-signal', 'list-signal-handling', 'help', 'version'];
-      const VALUED_LONG = new Set(['unset', 'chdir', 'split-string', 'argv0', 'default-signal', 'ignore-signal', 'block-signal']);
-      for (; i < words.length; i++) {
-        const w = words[i]!;
-        if (w === '--') {
-          i++;
-          break;
-        }
-        if (!w.startsWith('-') || w === '-') break;
-        const takeValue = (glued: string): string | undefined => (glued !== '' ? glued : words[++i]);
-        if (w.startsWith('--')) {
-          const eq = w.indexOf('=');
-          const name = w.slice(2, eq < 0 ? undefined : eq);
-          const cands = LONG.filter((l) => l === name || l.startsWith(name));
-          const l = cands.includes(name) ? name : cands.length === 1 ? cands[0]! : null;
-          if (!l) {
-            known = false;
-            continue;
-          }
-          const v = VALUED_LONG.has(l) ? (eq >= 0 ? w.slice(eq + 1) : words[++i]) : undefined;
-          if (l === 'chdir' && v !== undefined) {
-            ({ dir, known } = enterDirectory(dir, v, known));
-            found = true;
-          } else if (l === 'split-string' && v !== undefined) {
-            next = [...tokenize(v), ...words.slice(i + 1)];
-            i = words.length;
-          }
-          continue;
-        }
-        // a cluster of short options: `-i`, `-0`, `-v` take nothing; `-u`, `-C`, `-S`, `-a` take a value, glued or next
-        for (let k = 1; k < w.length; k++) {
-          const c = w[k]!;
-          if (c === 'C' || c === 'S' || c === 'u' || c === 'a') {
-            const v = takeValue(w.slice(k + 1));
-            if (c === 'C' && v !== undefined) {
-              ({ dir, known } = enterDirectory(dir, v, known));
-              found = true;
-            } else if (c === 'S' && v !== undefined) {
-              next = [...tokenize(v), ...words.slice(i + 1)];
-              i = words.length;
-            }
-            break;
-          }
-          if (!/[i0vx]/.test(c)) known = false;
-        }
-        if (next) break;
+  const walk = (ws: string[], depth: number): void => {
+    // the chain is read by the one carrier reader: every `env` in it, with its own options in whatever spelling, and the
+    // `git` the chain ends in. A directory option that is spelled in a way nobody can place leaves the directory UNKNOWN
+    const peeled = peelCarriers(ws, 0, { prefixes: HEAD_PREFIXES });
+    for (const step of peeled.steps) {
+      if (step.carrier !== 'env') continue;
+      if (step.unknown.length) known = false;
+      for (const dirValue of stepValues(step, 'chdir')) {
+        ({ dir, known } = enterDirectory(dir, dirValue, known));
+        found = true;
       }
-      // a `-S` string is env's OWN argv - its options, assignments and command - so it is read as `env` again
-      words = next ? ['env', ...next] : words.slice(i);
-      // env's own remaining words: assignments precede the command
-      while (words.length && words[0] !== 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) words = words.slice(1);
-      continue;
     }
-    if (head === 'git') {
-      let i = hi + 1;
+    // an `env -S` string is env's OWN argv - its options, assignments and command - and env appends what follows it
+    if (depth < 8)
+      for (const str of peeled.strings)
+        if (str.carrier === 'env') walk(['env', ...tokenize(str.body), ...str.appended], depth + 1);
+    if ((ws[peeled.at] ?? '').replace(/^.*\//, '') === 'git') {
+      let i = peeled.at + 1;
       const t = GLOBAL_OPTIONS['git']!;
-      for (; i < words.length; i++) {
-        const w = words[i]!;
+      for (; i < ws.length; i++) {
+        const w = ws[i]!;
         if (!w.startsWith('-')) break;
         if (w === '-C' || /^-C./.test(w)) {
-          const v = w === '-C' ? words[++i] : w.slice(2);
+          const v = w === '-C' ? ws[++i] : w.slice(2);
           if (v !== undefined) {
             ({ dir, known } = enterDirectory(dir, v, known));
             found = true;
@@ -13822,10 +13705,9 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
           break;
         }
       }
-      return found ? { dir, known } : null;
     }
-    break;
-  }
+  };
+  walk(words, 0);
   return found ? { dir, known } : null;
 }
 
@@ -13894,9 +13776,9 @@ function carrierCommandValues(seg: string): string[] {
   const out: string[] = [];
   // `sh -n -c BODY` PARSES the body and executes nothing - a syntax check, the way an author verifies a script
   // before trusting it (exit review 10). The body is not a command the shell will run.
-  const shellAt = m.findIndex((t) => /^(?:.*\/)?(ba|z|da|k)?sh$/.test(t.text));
-  if (shellAt >= 0 && m.slice(shellAt + 1).some((t) => !t.quoted && (t.text === '--noexec' || /^-[a-zA-Z]*n[a-zA-Z]*$/.test(t.text)))) return out;
   const words = m.map((x) => x.text);
+  const shellAt = m.findIndex((t) => /^(?:.*\/)?(ba|z|da|k)?sh$/.test(t.text));
+  if (shellAt >= 0 && shellSyntaxOnly(words, shellAt + 1)) return out;
   // the wrappers that take their command as an option value: `flock LOCK -c BODY`, `--command BODY`, `--comm=BODY`, `-xc BODY`
   const wi = words.findIndex((w) => /^(?:.*\/)?(flock|su|runuser)$/.test(w));
   if (wi >= 0) {
@@ -13907,20 +13789,32 @@ function carrierCommandValues(seg: string): string[] {
   // first word is a command. What such a statement can do to the host is judged where it belongs - the client's own
   // shell escapes (`\!`, `COPY … PROGRAM`) are the db opacity check, not a second shell parse.
   const sqlClientAt = m.findIndex((t) => !t.quoted && /^(?:.*\/)?(psql|pgcli|usql)$/.test(t.text));
+  // ENV APPENDS ITS OWN REMAINING ARGUMENTS TO THE STRING IT SPLIT: `env -S'git commit -m x' -n` runs `git commit -m x -n`, and
+  // the `-n` that makes it a hook bypass is not in the string (independent review 11, sa10-73). The words after the value
+  // belong to the line, whichever way the value was spelled
+  const withRest = (value: string, from: number): string => {
+    const rest = m.slice(from).map((x) => x.text);
+    return rest.length ? `${value} ${requote(rest)}` : value;
+  };
   for (let i = 0; i < m.length; i++) {
     const t = m[i]!.text;
     if (t === '-c' && sqlClientAt >= 0 && i > sqlClientAt) continue;
-    if ((t === '-c' || t === '-S' || t === '--split-string') && m[i + 1]) out.push(m[i + 1]!.text);
-    else if (t.startsWith('--split-string=')) out.push(t.slice('--split-string='.length));
-    else if (t.startsWith('-S') && t.length > 2 && !t.startsWith('--')) out.push(t.slice(2));
+    if (t === '-c' && m[i + 1]) out.push(m[i + 1]!.text);
+    else if ((t === '-S' || t === '--split-string') && m[i + 1]) out.push(withRest(m[i + 1]!.text, i + 2));
+    else if (t.startsWith('--split-string=')) out.push(withRest(t.slice('--split-string='.length), i + 1));
+    else if (t.startsWith('-S') && t.length > 2 && !t.startsWith('--')) out.push(withRest(t.slice(2), i + 1));
     // `-iS`, `-vS` and the abbreviations of --split-string: env's option parser accepts all of them
-    else if (/^-[0-9A-Za-z]+S$/.test(t) && m[i + 1]) out.push(m[i + 1]!.text);
+    else if (/^-[0-9A-Za-z]+S$/.test(t) && m[i + 1]) out.push(withRest(m[i + 1]!.text, i + 2));
     else if (t.startsWith('--s') && t.length > 3 && 'split-string'.startsWith(t.slice(2).split('=')[0]!)) {
-      if (t.includes('=')) out.push(t.slice(t.indexOf('=') + 1));
-      else if (m[i + 1]) out.push(m[i + 1]!.text);
+      if (t.includes('=')) out.push(withRest(t.slice(t.indexOf('=') + 1), i + 1));
+      else if (m[i + 1]) out.push(withRest(m[i + 1]!.text, i + 2));
     }
   }
-  return out;
+  // ...and what the table of carriers says is a command string, whichever option carries it (`npx --call`, `su --session-command`)
+  // - the same reader the normalizer and the head finder use, so no spelling is carried for one and not for another
+  const peeled = peelCarriers(words, 0, { prefixes: HEAD_PREFIXES });
+  for (const str of peeled.strings) out.push(str.appended.length ? `${str.body} ${requote(str.appended)}` : str.body);
+  return [...new Set(out)];
 }
 
 /** Every command string this segment CARRIES: `sh -c BODY`, `env -S BODY`, `trap BODY SIG`, `sh <<< BODY`. The
@@ -13934,6 +13828,37 @@ function carriedShellBodies(seg: string): string[] {
   if (head === 'trap' && t[1] !== undefined && !t[1].startsWith('-')) out.push(t[1]);
   const here = t.indexOf('<<<');
   if (here >= 0 && t[here + 1] !== undefined) out.push(t[here + 1]!);
+  // A CARRIER THAT RUNS A STRING OR A PAYLOAD IS A CARRIER LIKE `sh -c`. `watch 'git commit -nm x'` is `sh -c 'git commit -nm x'`,
+  // and `find . -exec sed -n 'w FILE' f \;` runs that sed: the normalizer reaches both on its own, but every reader that
+  // works on the line AS WRITTEN (the sed `w` scan, the commit hook-bypass argv, `git -C`) saw only `watch` and `find`
+  // (independent review 11: r11-22, r11-25, r11-27)
+  const peeled = peelCarriers(t, 0, { prefixes: HEAD_PREFIXES });
+  if (peeled.shellString !== null) out.push(peeled.shellString);
+  out.push(...payloadCommands(t, peeled.at));
+  return [...new Set(out)];
+}
+
+/** Why the command a chain of carriers carries cannot be located with certainty (an own option the carrier table does not
+ *  know, a chain nested past the cap), or null. A segment with such a carrier asks: see peelCarriers. */
+function carrierPartialOf(seg: string): string | null {
+  return peelCarriers(tokenize(seg), 0, { prefixes: HEAD_PREFIXES }).partial;
+}
+
+/** THE COMMANDS A PAYLOAD CARRIER RUNS, as text with the quoting kept: every `-exec`/`-execdir`/`-ok`/`-okdir` clause of a
+ *  `find`, every `-x`/`-X` clause of an `fd`. The clause ends at `;` or `+`. `{}` is left where it stands. */
+function payloadCommands(t: readonly string[], at: number): string[] {
+  const head = (t[at] ?? '').replace(/^.*\//, '');
+  const out: string[] = [];
+  const clauseOpts = /^(find|gfind)$/.test(head) ? /^-(exec|execdir|ok|okdir)$/ : /^(fd|fdfind)$/.test(head) ? /^(-x|--exec|-X|--exec-batch)$/ : null;
+  if (clauseOpts === null) return out;
+  for (let i = at + 1; i < t.length; i++) {
+    if (!clauseOpts.test(t[i]!)) continue;
+    const clause: string[] = [];
+    let j = i + 1;
+    while (j < t.length && t[j] !== ';' && t[j] !== '\\;' && !(t[j] === '+' && /^(find|gfind)$/.test(head) && t[j - 1] === '{}')) clause.push(t[j++]!);
+    if (clause.length) out.push(requote(clause));
+    i = j;
+  }
   return out;
 }
 
@@ -13948,44 +13873,17 @@ function carriedShellBodies(seg: string): string[] {
  *  all the same invocation as the bare one; a carrier anchored at token 0 sees none of them, which the producer
  *  cross-product finds the moment such a carrier is added. */
 function commandHeadIndex(t: readonly string[], stopAt?: ReadonlySet<string>): number {
-  let i = 0;
-  while (i < t.length) {
-    const w = t[i]!;
-    // a caller that wants to read a wrapper's OWN options (env -C) stops at it instead of looking through it
-    if (stopAt?.has(w)) break;
-    // `flock [-nsxuo] [-w SECS] [-E N] LOCKFILE COMMAND` - the lock file is an operand of the wrapper, and the command
-    // follows it (the `-c CMD` spelling is a carrier and is read as one)
-    if (w === 'flock' && !t.slice(i).some((x) => /^(-[a-zA-Z]*c|--command)/.test(x))) {
-      i++;
-      while (i < t.length && t[i]!.startsWith('-')) {
-        const opt = t[i]!;
-        i++;
-        if (/^(-w|--timeout|-E|--conflict-exit-code)$/.test(opt)) i++;
-      }
-      i++; // the lock file
-      continue;
-    }
-    if (
-      /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) ||
-      WRAPPERS.has(w) ||
-      PREFIX_KEYWORDS.has(w) ||
-      /^(timeout|sudo|doas|xargs|--)$/.test(w)
-    ) {
-      i++;
-      // a wrapper's own operands: `nice -n 5`, `timeout 60`, `exec -c -a NAME`, `command -p`
-      while (i < t.length && /^(-|\d)/.test(t[i]!)) {
-        const opt = t[i]!;
-        i++;
-        // ...and only the ones that TAKE a value consume the next token: `command -p sed …` has none, and
-        // treating `-p` as valued swallowed `sed` itself (self-attack on exit review 9)
-        if (/^(-n|-a|-C|-u|-g|-t)$/.test(opt) && i < t.length && !t[i]!.startsWith('-')) i++;
-      }
-      continue;
-    }
-    break;
-  }
-  return i;
+  // ONE READER OF THE CARRIER CHAIN (carriers.ts): the options each carrier really has, with their values, clusters and
+  // abbreviations. This was a second copy of the wrapper loop with a generic "any option, and these few letters take a
+  // value", which took KILL for the command in `timeout -s KILL 5 sed ...` and `A` in `env --unset A sed ...`, so the
+  // sed `w` scanner never saw a sed (independent review 11)
+  return peelCarriers(t, 0, {
+    prefixes: HEAD_PREFIXES,
+    ...(stopAt ? { stopAt: (carrier: string) => stopAt.has(carrier) } : {}),
+  }).at;
 }
+/** shell structure in front of a command, and a stray `--` */
+const HEAD_PREFIXES: ReadonlySet<string> = new Set([...PREFIX_KEYWORDS, '--']);
 
 /** THE COMMANDS A SED SCRIPT RUNS. GNU sed's `e` command executes a shell command and splices its output into
  *  the stream: `gsed '1e git push origin main' f.txt` pushes. The text is RIGHT THERE in the script, and
@@ -14004,84 +13902,65 @@ function sedScripts(
   const t = tokenize(seg);
   const i = commandHeadIndex(t);
   if (!/^(sed|gsed)$/.test((t[i] ?? '').replace(/^.*\//, ''))) return null;
-  // the script is every `-e`/`--expression` value, or — when none was given — the first bare operand
-  const texts: string[] = [];
+  // THE SCRIPT IS WHAT sed's OPTION PARSER SAYS IT IS (tools.ts): every `-e`/`--expression` value in any spelling (`-e S`, `-eS`,
+  // `--expression=S`, `--expr S`, a cluster `-ne S`), the script FILES of every `-f` (`-fF`, `-nf F`, `--file=F`), and - only when
+  // there is neither - the first operand. The scan below was a loop of regexes for the spellings its author had met.
+  const prog = sedProgram(t, i + 1);
+  const texts = [...prog.scripts];
   const unread: string[] = [];
-  let sawE = false;
-  let sawF = false;
-  const readScript = (f: string): void => {
-    sawF = true;
+  for (const f of prog.scriptFiles) {
     if (!ctx || cwd === undefined || /[$`*?]/.test(f)) {
       unread.push(f);
-      return;
+      continue;
     }
     const text = readWordFile(ctx, cwd, f);
     if (text === null) unread.push(f);
     else texts.push(text);
-  };
-  for (let j = i + 1; j < t.length; j++) {
-    const w = t[j]!;
-    if (w === '-e' || w === '--expression') {
-      if (t[j + 1] !== undefined) { texts.push(t[j + 1]!); sawE = true; j++; }
-      continue;
-    }
-    const eq = /^(?:--expression=|-e)(.+)$/.exec(w);
-    if (eq) { texts.push(eq[1]!); sawE = true; continue; }
-    // a script FILE — and `-f` also means NO bare operand is the script: with it every operand is an INPUT, so
-    // reading the first one as a script made `sed -f s.sed '1e git push'` deny a file whose NAME happens to
-    // look like a script (self-attack, exit review 8)
-    // `-f` MAY SIT IN A CLUSTER. `sed -nf evil.sed` is `-n -f evil.sed`, and matching only the bare and glued
-    // forms left the script file unread — so a `w .claude/settings.json` inside it installed nothing anyone saw
-    // (self-attack on exit review 9). In a cluster `f` must be LAST, because it consumes the rest.
-    if (w === '-f' || w === '--file' || /^-[a-zA-Z]*f$/.test(w)) {
-      if (t[j + 1] !== undefined) readScript(t[j + 1]!);
-      j++;
-      continue;
-    }
-    const feq = /^(?:--file=|-[a-zA-Z]*f)(.+)$/.exec(w);
-    if (feq) { readScript(feq[1]!); continue; }
-    if (w.startsWith('-')) continue;
-    if (!sawE && !sawF && !texts.length) texts.push(w);
   }
   return { texts, unread };
 }
 
-function sedShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
+/** What every script of this sed command does to the world outside the pattern space, by the scanner that reads a script the
+ *  way sed does (sed.ts). `confused` scripts fall back to the coarser regex reading this used to be, so a script the scanner
+ *  cannot follow is never read as doing LESS than it did before. */
+function sedEffects(seg: string, ctx?: EvaluationContext, cwd?: string): { writes: string[]; reads: string[]; commands: string[] } | null {
   const scripts = sedScripts(seg, ctx, cwd);
-  if (!scripts) return [];
-  const out: string[] = [];
-  for (const script of scripts.texts)
-    for (const line of script.split('\n'))
-      // an address may select the lines: a line number, `$`, a range, or a `/regex/`. `e` then takes the REST
-      // of the line as the command.
-      for (const m of line.matchAll(/(?:^|;)\s*(?:\/(?:\\.|[^/])*\/|[0-9$,~+]+)?\s*!?\s*e[ \t]+([^\n]+)/g))
-        out.push(m[1]!.trim());
-  return out;
+  if (!scripts) return null;
+  const out = { writes: [] as string[], reads: [] as string[], commands: [] as string[] };
+  for (const script of scripts.texts) {
+    const eff = scanSedScript(script);
+    out.writes.push(...eff.writes);
+    out.reads.push(...eff.reads);
+    out.commands.push(...eff.commands);
+    if (!eff.confused) continue;
+    for (const line of script.split('\n')) {
+      for (const m of line.matchAll(/(?:^|;)\s*(?:\/(?:\\.|[^/])*\/|[0-9$,~+]+)?\s*!?\s*e[ \t]+([^\n]+)/g)) out.commands.push(m[1]!.trim());
+      for (const m of line.matchAll(
+        /(?:^|[;{])\s*(?:(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+)(?:\s*,\s*(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+))?)?\s*!?\s*\{?\s*[wW][ \t]*([^\n;}]+)/g,
+      ))
+        out.writes.push(m[1]!.trim());
+      for (const m of line.matchAll(/s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpiImMe0-9]*w[ \t]*([^\n]+)/g)) out.writes.push(m[2]!.trim());
+    }
+  }
+  return { writes: [...new Set(out.writes)], reads: [...new Set(out.reads)], commands: [...new Set(out.commands)] };
+}
+
+function sedShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
+  return sedEffects(seg, ctx, cwd)?.commands ?? [];
 }
 
 /** The files a sed script WRITES. `w FILE` and `W FILE` write the pattern space to FILE, and `s/x/y/w FILE`
  *  writes it when the substitution succeeds — an ordinary `sed -n '1w .claude/settings.json' README.md` replaces
  *  the agent's own configuration, at ALLOW, because nothing read the script for its destinations (exit review 9).
- *  The filename runs to the END OF THE LINE, which is what sed documents: a `;` after it is part of the name. */
+ *  The file name runs to the END OF THE LINE, which is what sed documents, and may be GLUED to the command letter
+ *  (`w.claude/settings.json`, `s/a/b/w.env`) - both of which the regexes this was did not know (independent review 11). */
 function sedWrittenFiles(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
-  const scripts = sedScripts(seg, ctx, cwd);
-  if (!scripts) return [];
-  const out: string[] = [];
-  for (const script of scripts.texts)
-    for (const line of script.split('\n')) {
-      // the bare `w`/`W` command, with its optional address in front
-      // AN ADDRESS MAY BE A RANGE, AND A COMMAND MAY SIT IN A BRACED BLOCK. `1,/x/w FILE` and `1{w FILE\n}` are
-      // both ordinary sed, and an address pattern that allowed only ONE line number or ONE regex matched
-      // neither, so the destination went unread (self-attack on exit review 9).
-      for (const m of line.matchAll(
-        /(?:^|[;{])\s*(?:(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+)(?:\s*,\s*(?:\/(?:\\.|[^/])*\/|\$|[0-9~+]+))?)?\s*!?\s*\{?\s*[wW][ \t]+([^\n;}]+)/g,
-      ))
-        out.push(m[1]!.trim());
-      // the `w` FLAG of a substitution, which comes after the closing delimiter and its other flags
-      for (const m of line.matchAll(/s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpiImMe0-9]*w[ \t]+([^\n]+)/g))
-        out.push(m[2]!.trim());
-    }
-  return out;
+  return sedEffects(seg, ctx, cwd)?.writes ?? [];
+}
+
+/** The files a sed script READS into its output: `r FILE`, `R FILE`. `sed 'r ~/.ssh/id_rsa' f` prints a key. */
+function sedReadFiles(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
+  return sedEffects(seg, ctx, cwd)?.reads ?? [];
 }
 
 /** THE VALUE OF AN EXECUTING GIT CONFIG KEY IS A COMMAND, AND IT IS RIGHT THERE. `git -c
@@ -14128,33 +14007,24 @@ function gitPagerCommands(seg: string): string[] {
     const m = /^(?:-O|--open-files-in-pager=)(.+)$/.exec(w);
     if (m?.[1]) out.push(m[1]);
   }
-  return out;
+  // ...and by git's own option parser for `grep` (tools.ts), which reads any unique prefix of the long name: `--open-f='…'` is the pager
+  // too, and a scan for the full spelling saw only `--open-files-in-pager=`
+  const hi = commandHeadIndex(t);
+  const after = t.slice(hi + 1);
+  const vi = verbIndex('git', after.map((text) => ({ text, quoted: false })));
+  if (vi >= 0 && after[vi] === 'grep') {
+    const eff = toolEffects('git', ['git', ...after.slice(vi)]);
+    if (eff) for (const v of valuesOf(eff.parsed, 'open-files-in-pager')) if (v) out.push(v);
+  }
+  return [...new Set(out)];
 }
 
 function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): string[] {
   const t = tokenize(seg);
   // THE HEAD IS FOUND WHERE THE COMMAND STARTS, not at token 0: `FOO=bar awk …` and `command awk …` are the same
-  // awk invocation, and anchoring at position 0 missed both (exit review 7, cross-product).
-  let i = 0;
-  while (i < t.length) {
-    const w = t[i]!;
-    if (
-      /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) ||
-      WRAPPERS.has(w) ||
-      PREFIX_KEYWORDS.has(w) ||
-      /^(timeout|sudo|doas|xargs|--)$/.test(w)
-    ) {
-      i++;
-      // a wrapper's own operands: `nice -n 5`, `timeout 60`, `exec -c -a NAME`
-      while (i < t.length && /^(-|\d)/.test(t[i]!)) {
-        const opt = t[i]!;
-        i++;
-        if (/^(-n|-a|-C|-u|-g|-p|-t)$/.test(opt) && i < t.length && !t[i]!.startsWith('-')) i++;
-      }
-      continue;
-    }
-    break;
-  }
+  // awk invocation, and anchoring at position 0 missed both (exit review 7, cross-product). It is the one head finder - a
+  // private copy of its wrapper loop is how `timeout -s KILL 5 awk …` stayed unread
+  const i = commandHeadIndex(t);
   const head = (t[i] ?? '').replace(/^.*\//, '');
   if (!/^(awk|gawk|mawk|nawk)$/.test(head)) return [];
   const out: string[] = [];
@@ -14164,13 +14034,20 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
   const fromFiles: string[] = [];
   const unread: string[] = [];
   let sawF = false;
+  // THE PROGRAM FILES are read from awk's own option parser where this is gawk (tools.ts): `--file`, `--fil=` and every unique prefix of
+  // it name a program, as `-f` does, and a scan for the spellings its author had met read none of the prefixes
+  const named = new Set<string>();
   for (let j = i + 1; j < t.length; j++) {
     const w = t[j]!;
     const f =
       w === '-f' || w === '--file' || w === '--source-file'
         ? (t[++j] ?? null)
         : (/^(?:--file=|--source-file=|-f)(.+)$/.exec(w)?.[1] ?? null);
-    if (f === null) continue;
+    if (f !== null) named.add(f);
+  }
+  const awkParsed = /^(awk|gawk)$/.test(head) ? toolEffects(head, t.slice(i))?.parsed : undefined;
+  if (awkParsed) for (const f of valuesOf(awkParsed, 'file')) named.add(f);
+  for (const f of named) {
     sawF = true;
     if (ctx && cwd !== undefined && !/[$`*?]/.test(f)) {
       const text = readWordFile(ctx, cwd, f);
@@ -14629,6 +14506,11 @@ function analyzeSegments(
     ))
       for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
+    // A CARRIER WHOSE OWN OPTION THIS KERNEL CANNOT PLACE HAS NO KNOWN COMMAND. `timeout --future-flag 5 sed ...` reads one
+    // way if the flag takes a value and another if it does not, so the position of the carried command is unknown and
+    // nothing may be granted on it (the carrier table, carriers.ts): an approvable question, never a silent yes
+    const unplaced = carrierPartialOf(seg);
+    if (unplaced !== null) hits.push(opaqueHit(table, ctx, seg, unplaced));
     // A PIPELINE INSIDE A CARRIER IS STILL A PIPELINE, and the normalizer cannot carry the edge across: it returns
     // strings. The body re-enters the canonical analyzer whole, which is the only place the edge can be seen.
     // An awk program's shell commands have no other route in, so they are always handed over. Read from the RAW
@@ -14663,7 +14545,12 @@ function analyzeSegments(
       // the BODY is brace-expanded before these questions are asked of it: the carrier's quoting keeps the
       // braces literal at this level and the inner shell expands them, so `git commit -m x -{n..n}` only looks
       // like a hook bypass once it has been through the same expansion the inner shell performs
-      const body = expandBraces(rawBody);
+      // ...and a nesting the expander gives up on is not an absence of what it holds: a body that overflows is reported, exactly as
+      // the same words at the top of a line are (`env -S`, `watch`, `su -c` carry the same string `sh -c` does)
+      const bodyOverflow = { hit: false };
+      const body = expandBraces(rawBody, bodyOverflow);
+      if (bodyOverflow.hit)
+        hits.push(opaqueHit(table, ctx, seg, 'a brace expansion produces more words than this kernel enumerates'));
       // the condition is asked of the body AND of every body IT carries: `bash -c "flock l --command 'cd d && tee f'"` has
       // nothing to re-read at the first level and everything at the second
       const needsReentry = (b: string, depth = 0): boolean =>
@@ -14676,7 +14563,8 @@ function analyzeSegments(
         redirectionTargets(b).length > 0 ||
         runDirectory(b, env.cwd) !== null ||
         commitBypassFlag(b) ||
-        (depth < 4 && carrierCommandValues(b).some((x) => needsReentry(expandBraces(x), depth + 1)));
+        carrierPartialOf(b) !== null ||
+        (depth < 4 && carriedShellBodies(b).some((x) => needsReentry(expandBraces(x), depth + 1)));
       if (needsReentry(body))
         for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
@@ -14924,6 +14812,14 @@ function analyzeSegments(
     // the pairs that EARLIER segments recorded - taken before this segment adds its own, so the `ln` that creates a
     // link is not itself a write through it
     linkPairsNow = [...written].filter((w) => w.startsWith('\0link:')).map((w) => w.slice(6).split('\0->') as [string, string]);
+    // THE DIRECTORY A WRITER RUNS IN IS THE ONE ITS OWN OPTIONS LEFT IT IN: `env -C sub cp ../evil.mk Makefile` writes `sub/Makefile`, and a
+    // ledger that recorded `Makefile` beside the shell's directory left the file the next `make -C sub` reads looking untouched. The
+    // classification of the same segment already follows `env -C` / `git -C` (env.cwd); the ledger is the same question.
+    // ...and two readers answered it, one from the writer's own words (runDirectory) and one from the environment the carrier
+    // unwrapper left (env.cwd): every place either names is recorded - a write recorded in one place too many only makes a
+    // later read look stale, which asks
+    const where = writerDirectories(seg, [effectiveCwd, ...altDirs]);
+    const ledgerDirs = [...new Set([...where.dirs, ...(env.cwd === effectiveCwd ? [] : [env.cwd])])];
     // THE WRITER IS FOUND WHERE THE COMMAND STARTS, not at the first word. `env cp evil/plan.mk sub && make -C sub
     // -f plan.mk` copies through a wrapper, and reading the raw head left the ledger empty, so the makefile the
     // next command read looked untouched (exit review 10, cross-product: every wrapper the corpus knows).
@@ -14941,8 +14837,7 @@ function analyzeSegments(
           }
         }
       }
-      const where = writerDirectories(seg, [effectiveCwd, ...altDirs]);
-      for (const dir of where.dirs) {
+      for (const dir of ledgerDirs) {
         for (const w of writtenPathOperands(n, dir)) {
           if (w === LEDGER_ANY || where.unknown) written.add('\0any');
           if (w !== LEDGER_ANY) recordWrite(w);
@@ -14951,14 +14846,11 @@ function analyzeSegments(
     }
     // a sed script's `w FILE` writes it whatever the operands say - read from the segment AS WRITTEN, where the script
     // is still one quoted word
-    {
-      const where = writerDirectories(seg, [effectiveCwd, ...altDirs]);
-      for (const dir of where.dirs)
-        for (const f of sedWrittenFiles(seg, ctx, dir)) {
-          if (where.unknown) written.add('\0any');
-          for (const q of pathCandidates(dir, f).paths) recordWrite(q);
-        }
-    }
+    for (const dir of ledgerDirs)
+      for (const f of sedWrittenFiles(seg, ctx, dir)) {
+        if (where.unknown) written.add('\0any');
+        for (const q of pathCandidates(dir, f).paths) recordWrite(q);
+      }
     // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
     // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect
     if ([seg, ...normalizeSegment(seg)].some(writesUnenumerably)) written.add('\0any');

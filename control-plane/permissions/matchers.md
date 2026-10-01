@@ -1033,7 +1033,7 @@ matchers:
   # --- command classes ---
   - capability: command.privileged
     tool: Bash
-    command: '^(sudo|doas|su)\b'
+    command: '^(sudo|doas|su|runuser)\b'
   # `pnpm dlx` / `yarn dlx` fetch a package from the registry and run it: a network transfer whose payload EGO
   # never reads. The marker is emitted by the normalizer, which also hands the inner command to the analyzer, so
   # a denied effect inside a dlx invocation is still denied on its own (exit review 4).
