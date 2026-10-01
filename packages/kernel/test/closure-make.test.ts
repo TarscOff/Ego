@@ -18,6 +18,12 @@
 //      (r11-53).
 //   F. an `=` in a sed script is not a reason to drop the script from the writer's operands, and the file with it (r11-132).
 //
+// ...and three neighbours of the same question that the eight findings did not name but that follow from it:
+//
+//   G. `make -j` runs recipes at the same time, so a read may come after a write that is later in the text.
+//   H. `-I DIR` is part of where an `include` is looked for.
+//   I. a pipeline and a background job run while the stages after them do.
+//
 // The verdicts below are what a reader must give. `DENY` means the act is READ (the makefile is on the disk and nothing can have
 // changed it); `ASK` means something runs that could not be read; `ALLOW` is the control that must stay as it was.
 import { test } from 'node:test';
@@ -215,6 +221,13 @@ test('C. a function is read again at its call when a file or the directory moved
     ['two functions', 'c() { make all; }; g() { c; }; cp evil.mk Makefile; g', root, 'ASK'],
     ['three functions', 'c() { make all; }; g() { c; }; h() { g; }; cp evil.mk Makefile; h', root, 'ASK'],
     ['called twice', 'f() { make all; }; f; cp evil.mk Makefile; f', root, 'ASK'],
+    ['the last definition is the one that runs', 'f() { make all; }; f() { make -C sub all; }; cp evil.mk sub/Makefile; f', { ...sub, Makefile: OK }, 'ASK'],
+    ['inside a command substitution', 'f() { make all; }; cp evil.mk Makefile; echo $(f)', root, 'ASK'],
+    ['in a pipeline', 'f() { make all; }; cp evil.mk Makefile; f | cat', root, 'ASK'],
+    ['in a group', 'f() { make all; }; cp evil.mk Makefile; { f; }', root, 'ASK'],
+    ['in a subshell', 'f() { make all; }; cp evil.mk Makefile; (f)', root, 'ASK'],
+    ['in a loop', 'f() { make all; }; cp evil.mk Makefile; for i in 1 2; do f; done', root, 'ASK'],
+    ['with an argument', 'f() { make -C "$1" all; }; cp evil.mk sub/Makefile; f sub', { ...sub, Makefile: OK }, 'ASK'],
     ['a different directory at the call', 'f() { make all; }; cd sub; f', { Makefile: OK, 'sub/Makefile': EVIL }, 'DENY'],
     ['a different directory, behind a pushd', 'f() { make all; }; pushd sub; f', { Makefile: OK, 'sub/Makefile': EVIL }, 'DENY'],
     ['a different directory in a subshell', 'f() { make all; }; (cd sub && f)', { Makefile: OK, 'sub/Makefile': EVIL }, 'DENY'],
@@ -230,6 +243,7 @@ test('C. a function whose files did not move is not read twice, and nothing is g
     ['an unrelated write between definition and call', 'f() { make all; }; echo x > out.txt; f', root, 'ALLOW'],
     ['called from a function', 'c() { make all; }; g() { c; }; g', root, 'ALLOW'],
     ['the call is the act itself', 'f() { make all; }; f', { Makefile: EVIL }, 'DENY'],
+    ['a function redefined after the write is the one that runs', 'f() { make all; }; cp evil.mk Makefile; f() { echo hi; }; f', root, 'ALLOW'],
     ['a recursive function', 'f() { make all; [ -e stop ] || f; }; f', root, 'ALLOW'],
     ['a function that writes and calls itself stops', 'f() { touch x; [ -e stop ] || f; }; f', root, 'ALLOW'],
   ]);
@@ -298,6 +312,30 @@ test('E. a glob in -f is expanded against the directory, as the shell does (r11-
   ]);
 });
 
+test('E. the glob is the same one behind every wrapper, and reads what the shell would not hide', () => {
+  const files = { Makefile: OK, 'evil.mk': EVIL };
+  const gen = EVIL.replace('all:', 'all::');
+  check([
+    ['nice', 'nice make -f ev*.mk', files, 'DENY'],
+    ['env', 'env make -f ev*.mk', files, 'DENY'],
+    ['sudo', 'sudo make -f ev*.mk', files, 'DENY'],
+    ['sh -c', "sh -c 'make -f ev*.mk'", files, 'DENY'],
+    ['bash -c', 'bash -c "make -f ev*.mk"', files, 'DENY'],
+    ['inside a function', 'f() { make -f ev*.mk; }; f', files, 'DENY'],
+    ['from a recipe', 'make top', { ...files, Makefile: 'top:\n\tmake -f ev*.mk\n' }, 'DENY'],
+    // (a hidden file matches too: the shell hides it only until `dotglob` is set, and a file nobody read is the worse mistake)
+    ['a hidden match', "make -f '*.mk'", { Makefile: OK, '.evil.mk': EVIL }, 'DENY'],
+    ['a pattern that begins with the dot', 'make -f .ev*.mk', { Makefile: OK, '.evil.mk': EVIL }, 'DENY'],
+    // (the shell compares names as written: `E*` does not match `evil`, on any filesystem)
+    ['a pattern of the wrong case', "make -f 'E*.mk'", files, 'ALLOW'],
+    ['outside the workspace', 'make -f /etc/ma*.mk', { Makefile: OK }, 'ASK'],
+    ['a glob include: a question mark', 'make all', { Makefile: 'include ev?l.mk\nall::\n\techo ok\n', 'evil.mk': gen }, 'DENY'],
+    ['a glob include: a bracket class', 'make all', { Makefile: '-include ev[a-z]l.mk\nall::\n\techo ok\n', 'evil.mk': gen }, 'DENY'],
+    ['a glob include: a directory component', 'make all', { Makefile: 'include s*/x.mk\nall::\n\techo ok\n', 'sub/x.mk': gen }, 'DENY'],
+    ['a glob include under a directory that is not there', 'make all', { Makefile: '-include nosuch/*.mk\nall:\n\techo ok\n' }, 'ALLOW'],
+  ]);
+});
+
 test('E. a glob no file matches yet is stale if an earlier segment writes one', () => {
   const files = { Makefile: OK };
   check([
@@ -360,5 +398,88 @@ test('F. an edit of another file leaves the makefile fresh', () => {
   check([
     ['sed -i on a source file', "sed -i 's/a=1/a=2/' main.c && make all", { Makefile: OK, 'main.c': 'int a=1;' }, 'ALLOW'],
     ['cp of a data file', 'cp ev=il.txt data.txt && make all', { Makefile: OK, 'ev=il.txt': 'x' }, 'ALLOW'],
+  ]);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * G. RECIPES THAT RUN AT THE SAME TIME
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('G. under -j a recipe is read against the writes of every recipe, whatever order the text has them in', () => {
+  const race = (extra = ''): Record<string, string> => ({
+    Makefile: `${extra}all: build tamper\nbuild:\n\tsleep 1; make -C sub all\ntamper:\n\tcp evil.mk sub/Makefile\n`,
+    'sub/Makefile': OK,
+    'evil.mk': EVIL,
+  });
+  check([
+    ['-j2', 'make -j2 all', race(), 'ASK'],
+    ['-j with no number', 'make -j all', race(), 'ASK'],
+    ['--jobs', 'make --jobs=4 all', race(), 'ASK'],
+    ['--jobs with a separate number', 'make --jobs 4 all', race(), 'ASK'],
+    ['a cluster ending in j', 'make -kj3 all', race(), 'ASK'],
+    ['MAKEFLAGS in the makefile', 'make all', race('MAKEFLAGS += -j2\n'), 'ASK'],
+    ['MAKEFLAGS with a long option', 'make all', race('MAKEFLAGS += --jobs=2\n'), 'ASK'],
+    // (the recipe that replaces the makefile comes FIRST in the text, which the serial order already handles)
+    ['the write is first in the text', 'make -j2 all', { ...race(), Makefile: 'all: tamper build\ntamper:\n\tcp evil.mk sub/Makefile\nbuild:\n\tmake -C sub all\n' }, 'ASK'],
+  ]);
+});
+
+test('G. without -j, or with -j1, the recipes run one after the other and are read in that order', () => {
+  const ordered = {
+    Makefile: 'all: build tamper\nbuild:\n\tmake -C sub all\ntamper:\n\tcp evil.mk sub/Makefile\n',
+    'sub/Makefile': OK,
+    'evil.mk': EVIL,
+  };
+  check([
+    ['serial', 'make all', ordered, 'ALLOW'],
+    ['-j1', 'make -j1 all', ordered, 'ALLOW'],
+    ['--jobs=1', 'make --jobs=1 all', ordered, 'ALLOW'],
+    ['-j that writes nothing anyone reads', 'make -j4 all', { Makefile: 'all: a b\na:\n\techo x > a.out\nb:\n\techo y > b.out\n' }, 'ALLOW'],
+    ['-j with a sub-make that nothing rewrites', 'make -j4 all', { Makefile: 'all: a b\na:\n\tmake -C sub all\nb:\n\techo y > b.out\n', 'sub/Makefile': OK }, 'ALLOW'],
+  ]);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * H. WHERE `include` LOOKS
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('H. an include that is not in the make directory is looked for in the -I directories', () => {
+  const gen = { 'evil/gen.mk': `all::\n\t${ACT}\n` };
+  const optional = '-include gen.mk\nall::\n\techo ok\n';
+  check([
+    ['-I DIR, optional include', 'make -I evil all', { Makefile: optional, ...gen }, 'DENY'],
+    ['-IDIR glued', 'make -Ievil all', { Makefile: optional, ...gen }, 'DENY'],
+    ['--include-dir=DIR', 'make --include-dir=evil all', { Makefile: optional, ...gen }, 'DENY'],
+    ['--include-dir DIR', 'make --include-dir evil all', { Makefile: optional, ...gen }, 'DENY'],
+    ['a plain include', 'make -I evil all', { Makefile: 'include gen.mk\nall::\n\techo ok\n', ...gen }, 'DENY'],
+    ['sinclude', 'make -I evil all', { Makefile: 'sinclude gen.mk\nall::\n\techo ok\n', ...gen }, 'DENY'],
+    ['the first directory that has it wins', 'make -I none -I evil all', { Makefile: optional, ...gen }, 'DENY'],
+    ['the make directory comes first', 'make -I evil all', { Makefile: optional, 'gen.mk': 'all::\n\techo here\n', ...gen }, 'ALLOW'],
+    ['a file written into the directory by the same command', `printf 'all::\\n\\t${ACT}\\n' > evil/gen.mk && make -I evil all`, { Makefile: optional, 'evil/keep': '' }, 'ASK'],
+    ['an include directory nobody can resolve', 'make -I "$D" all', { Makefile: optional }, 'ASK'],
+    ['no -I: the optional include stays absent', 'make all', { Makefile: optional, ...gen }, 'ALLOW'],
+  ]);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * I. A PIPELINE AND A BACKGROUND JOB RUN WHILE THE STAGES AROUND THEM DO
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('I. a read in a background job or a pipeline sees the writes of the stages that run beside it', () => {
+  const sub = { 'sub/Makefile': OK, 'evil.mk': EVIL };
+  check([
+    ['a background job and a copy after it', '(sleep 1; make -C sub all) & cp evil.mk sub/Makefile', sub, 'ASK'],
+    ['a background make', 'make -C sub all & cp evil.mk sub/Makefile', sub, 'ASK'],
+    ['a backgrounded list', 'sleep 1 && make -C sub all & cp evil.mk sub/Makefile', sub, 'ASK'],
+    ['a background job and a redirection after it', '(sleep 1; make -C sub all) & cat evil.mk > sub/Makefile', sub, 'ASK'],
+    ['nohup', 'nohup make -C sub all & cp evil.mk sub/Makefile', sub, 'ASK'],
+    ['a write in the other end of a pipe', '(sleep 1; make -C sub all) | cat | tee sub/Makefile', sub, 'ASK'],
+    ['a copy in a pipeline with the read', 'make -C sub all | cp evil.mk sub/Makefile', sub, 'ASK'],
+    ['trap on exit', "trap 'make -C sub all' EXIT; cp evil.mk sub/Makefile", sub, 'ASK'],
+    // (the controls: nothing is rewritten, or the copy is of something nobody reads)
+    ['a background job and an unrelated write', 'make -C sub all & echo done > out.txt', sub, 'ALLOW'],
+    ['a pipeline that writes a log', 'make -C sub all 2>&1 | tee build.log', sub, 'ALLOW'],
+    ['a background job alone', 'make -C sub all &', sub, 'ALLOW'],
+    ['sequential: the read is first and the shell waits for it', 'make -C sub all; cp evil.mk sub/Makefile', sub, 'ALLOW'],
   ]);
 });
