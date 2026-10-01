@@ -1306,6 +1306,46 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   },
   {
     family: 'command',
+    // make's name grammar is not the shell's: a backslash in front of a blank, a colon or a hash is part of the target, and a
+    // command-line goal is ONE name whatever it holds (closure audit F20)
+    id: 'a makefile target whose name make reads differently from the shell',
+    floor: 'DENY',
+    cases: ["make -f names.mk 'a b'", 'make -f names.mk a\\ b', "make -f names.mk 'a:b'", "make -f names.mk 'a#b'", "make -f names.mk 'k\\ l'", 'make -f names.mk all'],
+    files: {
+      'names.mk':
+        'all: x\\ y\nx\\ y:\n\tgit push --force origin main\na\\ b:\n\tgit push --force origin main\na\\:b:\n\tgit push --force origin main\na\\#b:\n\tgit push --force origin main\nk\\\\\\ l:\n\tgit push --force origin main\n',
+    },
+  },
+  {
+    family: 'command',
+    // `npm_config_<name>` IS the npm key `<name>`: the variable family used to be a list of the dangerous names (closure audit F20)
+    id: 'an npm option spelled as an environment variable',
+    floor: 'ASK',
+    cases: [
+      "npm_config_node_options='--require ./evil.js' npm run build",
+      "NPM_CONFIG_NODE_OPTIONS='--require ./evil.js' npm run build",
+      "npm_config_node_options='--require ./evil.js' npm test",
+      'npm_config_onload_script=./evil.js npm run build',
+      'npm_config_node_gyp=./evil.sh npm run build',
+      'npm_config_somethingnew=1 npm run build',
+    ],
+    files: { 'package.json': '{"scripts":{"build":"tsc -p .","test":"tsc -p ."}}', 'evil.js': '1' },
+  },
+  {
+    family: 'k8s',
+    // a dry run is the LAST dry-run flag the tool sees, and a word the shell fills in after it may be `--dry-run=none`
+    id: 'a dry run that a word of the shell could undo',
+    floor: 'DENY',
+    cases: [
+      'kubectl --context production apply -f x.yaml --dry-run=client $FLAG',
+      'kubectl --context production apply -f x.yaml --dry-run=client "$@"',
+      'helm --kube-context production upgrade rel chart --dry-run $FLAG',
+      'helm --kube-context production rollback rel 3 --dry-run $ARGS',
+    ],
+    files: { 'x.yaml': 'a: 1' },
+  },
+  {
+    family: 'command',
     // a path is stale when it OR an ancestor was written: a glob, a directory made in the same command, a rename, a
     // loop's second pass, a differently cased name, a writer that names its output as an operand
     id: 'a makefile replaced in a way the ledger must read through an ancestor, a glob, a loop or a case-fold',
@@ -1892,6 +1932,25 @@ export const PRODUCERS: readonly Producer[] = [
       'git commit -m x',
     ],
   },
+  // lint-staged uses the configuration nearest to EACH staged file, so one BELOW the directory it starts in runs too
+  {
+    name: 'lint-staged config below the working directory',
+    build: (c) => [
+      { '.lintstagedrc.json': JSON.stringify({ '*.md': 'prettier --check' }), 'packages/a/.lintstagedrc.json': JSON.stringify({ '*.ts': [c] }) },
+      'npx lint-staged',
+    ],
+  },
+  {
+    name: 'lint-staged manifest below the working directory',
+    build: (c) => [
+      { '.lintstagedrc.json': JSON.stringify({ '*.md': 'prettier --check' }), 'packages/a/package.json': JSON.stringify({ 'lint-staged': { '*.ts': [c] } }) },
+      'lint-staged',
+    ],
+  },
+  // make's name grammar: a backslash in front of a blank, colon or hash is part of the target
+  { name: 'make target with an escaped space', build: (c) => [{ Makefile: `a\\ b:\n\t${c}\n` }, "make 'a b'"], safe: noDollar },
+  { name: 'make target with an escaped colon', build: (c) => [{ Makefile: `a\\:b:\n\t${c}\n` }, "make 'a:b'"], safe: noDollar },
+  { name: 'make target with an escaped space as a prerequisite', build: (c) => [{ Makefile: `run: a\\ b\na\\ b:\n\t${c}\n` }, 'make run'], safe: noDollar },
   {
     name: 'nested: make -> npm',
     build: (c) => [{ Makefile: 'run:\n\tnpm run inner\n', 'package.json': JSON.stringify({ scripts: { inner: c } }) }, 'make run'],

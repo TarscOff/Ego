@@ -9058,8 +9058,10 @@ function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolea
       if (valued(t)) i++;
       continue;
     }
-    // a word that starts with a literal character other than a dash is not a flag whatever follows it
-    const filledIn = words[i]!.expands === true && /^[$`]/.test(t);
+    // a word that starts with a literal character other than a dash is not a flag whatever follows it. The quoting is NOT
+    // asked: a segment that was carried (`docker exec c kubectl …`, `sh -c '…'`) is requoted, and the requoting single-quotes a
+    // `$` that the OUTER shell fills in - so a `$` or a backtick at the start of the word is a word made at run time
+    const filledIn = /^[$`]/.test(t);
     if (i > at && filledIn && limit !== null && bare >= limit) return true;
     bare++;
   }
