@@ -183,7 +183,9 @@ is not absence. A file that exists and is outside the registered roots, behind a
 permission, too large or unparsable is `UNREADABLE`. A candidate that is merely not there *yet* is stale if the same
 command writes it (`mkdir sub && printf … > sub/package.json && cd sub && npm run build`), exactly as for a Makefile.
 Where a tool merges or picks per input (yarn's `.yarnrc.yml`, `lint-staged`'s per-file configuration), every file on
-the way up is read, not the first name found.
+the way up is read, not the first name found - and for `lint-staged`, which uses the configuration nearest to each staged
+file, every configuration BELOW the working directory too (tracked files from the git index, untracked ones from a bounded walk
+that skips only what the ignore files provably exclude; a reached bound is an ask, never an absence).
 
 EGO does **not** reimplement GNU make, the shell, npm or git. It models a subset and records every construct it does
 not model; the unmodelled part fails safe.

@@ -34,6 +34,13 @@ budgets:
 narrow:
   - capability: git.local.commit
     verdict: ASK
+  # NARROW IS NOT INHERITED FROM STRICT, so everything STRICT narrows is listed here again: a merge and a cherry-pick
+  # create a commit exactly as `git commit` does, and were ALLOW in the strongest profile while STRICT asked. The
+  # compiler refuses a profile that is looser than a weaker one for any capability in any mode.
+  - capability: git.local.merge
+    verdict: ASK
+  - capability: git.local.cherry-pick
+    verdict: ASK
   - capability: command.local-mutation
     verdict: ASK
   - capability: command.network-tool
@@ -50,12 +57,15 @@ narrow:
 The strongest assurance EGO is designed to give. The design asks for more than the code yet provides, so this page has
 two halves, as STRICT's does: what is enforced today, and what is declared and not enforced. Assurance is meant to
 come from enforcement and evidence, not from more prompt text, which is why the context budget is the same as
-STRICT's. Today what separates this profile from STRICT is its own `narrow` list, which is not inherited from STRICT's,
-and its tighter budgets.
+STRICT's. Today what separates this profile from STRICT is its own `narrow` list and its tighter budgets. The list is not
+inherited from STRICT's, so it repeats everything STRICT narrows; the compiler refuses a control plane in which this
+profile is looser than STRICT (or STRICT looser than STANDARD) for any capability in any mode, so a list that falls
+behind fails the build instead of opening a door in the strongest profile.
 
 **Enforced today.** The same signed-release-trust requirement as STRICT (`requires_signed_release_trust`, enforced by
-the profile's identity and not by reading the setting) and BLOCK budgets. `narrow` makes `command.network-tool` and
-`network.public-read` DENY and makes local commits and local mutation commands ask. The network clients the classifier
+the profile's identity and not by reading the setting) and BLOCK budgets. `narrow` makes `command.network-tool`,
+`network.external-write` and `network.public-read` DENY and makes local commits, merges, cherry-picks and local
+mutation commands ask. The network clients the classifier
 recognises (curl, wget, scp, ssh and their kin), WebFetch of any URL that is not localhost and WebSearch are refused.
 That is a rule about the commands EGO recognises, not an egress restriction: git remote operations, forge reads,
 package-registry reads and container runs are not covered, and no OS-level restriction exists

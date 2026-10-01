@@ -1,6 +1,6 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, type Dirent } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
@@ -183,7 +183,7 @@ const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'
  *  documents and this list lacks is the same defect again.
  */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|(?:npm|NPM)_config_[A-Za-z_]+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|REDISCLI_RCFILE|PSQLRC|PSQL_PAGER|PSQL_EDITOR|PSQL_EDITOR_LINENUMBER_ARG|PSQL_HISTORY|PGSYSCONFDIR|PGLOCALEDIR|PGSSLKEY|PGSSLCERT|PGSSLCRL|PGSSLCRLDIR|LIBMYSQL_PLUGIN_DIR|LIBMYSQL_PLUGINS|MYSQL_HISTFILE|MYSQL_TEST_LOGIN_FILE|MYSQL_DEBUG|SQLITE_HISTORY|SQLITE_TMPDIR|REDISCLI_HISTFILE|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES|CLICKHOUSE_CONFIG|CQLSH_[A-Z_]*|MONGOSH_[A-Z_]*|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|[Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_\w+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|REDISCLI_RCFILE|PSQLRC|PSQL_PAGER|PSQL_EDITOR|PSQL_EDITOR_LINENUMBER_ARG|PSQL_HISTORY|PGSYSCONFDIR|PGLOCALEDIR|PGSSLKEY|PGSSLCERT|PGSSLCRL|PGSSLCRLDIR|LIBMYSQL_PLUGIN_DIR|LIBMYSQL_PLUGINS|MYSQL_HISTFILE|MYSQL_TEST_LOGIN_FILE|MYSQL_DEBUG|SQLITE_HISTORY|SQLITE_TMPDIR|REDISCLI_HISTFILE|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES|CLICKHOUSE_CONFIG|CQLSH_[A-Z_]*|MONGOSH_[A-Z_]*|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
 
 /** Options of a governed variable that actually LOAD CODE. `NODE_OPTIONS=--max-old-space-size=4096 npm test` is
  *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
@@ -208,11 +208,75 @@ function envInjects(name: string, assignment: string): boolean {
   // a flags variable is inert unless its value reaches for a linker, a plugin or a wrapper program
   if (/^(?:RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*RUSTFLAGS)$/.test(name))
     return /linker|link-arg|wrapper|-Z|plugin|codegen-backend|--config|--emit/.test(value0);
-  // npm reads `npm_config_*` case-insensitively; most settings are harmless (`loglevel`, `color`), and these are not
-  if (/^npm_config_/i.test(name))
-    return /script[-_]shell|^npm_config_shell$|userconfig|globalconfig|prefix|cache|init[-_]module|node[-_]gyp|editor|git$|onload|scripts[-_]prepend|foreground|ignore[-_]scripts|registry|proxy|cafile|ca$|tmp/i.test(name);
+  // `npm_config_<name>` IS the npm configuration key `<name>`, so what it does is a property of the KEY: read by the
+  // names npm accepts, not by a list of the dangerous ones (see NPM_CONFIG_INERT)
+  if (/^npm_config_/i.test(name)) {
+    // npm drops a variable whose value is empty; nothing is set
+    if (value0.trim() === '') return false;
+    return !NPM_CONFIG_INERT.has(npmConfigKey(name));
+  }
   return true;
 }
+
+/**
+ * NPM CONFIGURATION, READ BY THE KEYS NPM ACCEPTS. One key reaches npm as a flag (`--node-options`), as an `.npmrc`
+ * line (`node-options=`) or as a variable (`npm_config_node_options`), and the three were read by three separate lists
+ * of the dangerous names. The variable's list asked for `ignore-scripts` and `foreground-scripts` and not for
+ * `node-options` - the key whose flag and rc spellings the manifest reader had refused for a round - so
+ * `npm_config_node_options='--require ./evil.js' npm run build` was ALLOW (closure audit F20).
+ *
+ * A VARIABLE NAMED `npm_config_X` IS THE KEY `X` BY CONSTRUCTION - npm's loader takes the prefix in any case, turns
+ * every underscore after the first character into a hyphen and lower-cases the rest - so for the variable the question
+ * is answered the other way round: the keys below are the ones that execute nothing, redirect nothing and open no
+ * connection, and every other key asks. A key missing here costs an approvable ask; a key missing from a list of the
+ * dangerous ones was an unreviewed program (`onload-script` and `init-module` load a module, `node-gyp`, `git`,
+ * `editor` and `browser` name a program, `store-dir` and `pnpmfile` are pnpm's, which reads the same prefix).
+ * A flag is a different question: most `--words` before the script name are the options of the COMMAND, not
+ * configuration keys, so the flag and the rc readers name the keys that run something (NPM_CONFIG_RUNS) and nothing else.
+ */
+const NPM_CONFIG_INERT: ReadonlySet<string> = new Set([
+  // presentation: what is printed and how
+  'color', 'loglevel', 'progress', 'unicode', 'timing', 'json', 'parseable', 'long', 'heading', 'logs-max',
+  // notices and reports
+  'update-notifier', 'fund', 'audit', 'audit-level',
+  // resolution and install policy that selects what is installed and runs nothing of its own
+  'legacy-peer-deps', 'strict-peer-deps', 'package-lock', 'package-lock-only', 'lockfile-version', 'save', 'save-dev',
+  'save-prod', 'save-optional', 'save-peer', 'save-bundle', 'save-exact', 'save-prefix', 'global-style',
+  'legacy-bundling', 'install-strategy', 'install-links', 'bin-links', 'prefer-dedupe', 'prefer-offline',
+  'prefer-online', 'offline', 'engine-strict', 'omit', 'include', 'production', 'omit-lockfile-registry-resolved',
+  // which workspace, and what a dry run would do
+  'workspaces', 'workspace', 'include-workspace-root', 'workspaces-update', 'if-present', 'dry-run', 'depth', 'all',
+  // limits of the network client
+  'maxsockets', 'fetch-retries', 'fetch-retry-factor', 'fetch-retry-mintimeout', 'fetch-retry-maxtimeout',
+  'fetch-timeout',
+]);
+/** npm's name for a key that reached it as a variable: the prefix in any case, then underscores after the first
+ *  character as hyphens, lower-cased (a key that starts `//` is a registry credential and is kept as written) */
+function npmConfigKey(envName: string): string {
+  const rest = envName.replace(/^npm_config_/i, '');
+  return rest.startsWith('//') ? rest : rest.replace(/(?!^)_/g, '-').toLowerCase();
+}
+/** Keys that name a program, a module or a shell that npm, or a script it starts, will RUN: the ones a flag or an
+ *  `.npmrc` line may not set without the resolver saying it did not see what runs. */
+const NPM_CONFIG_RUNS: readonly string[] = [
+  'script-shell', 'shell', 'node-options', 'onload-script', 'init-module', 'node-gyp', 'editor', 'git', 'browser',
+  'viewer', 'scripts-prepend-node-path',
+];
+/** ...as a flag (the flag also keeps the settings that relocate npm's configuration or turn script output on). npm's option
+ *  parser takes ANY UNAMBIGUOUS PREFIX of a key as that key (`npm config get node-options --node-opt=X` prints X on npm 11), so
+ *  `--node-opt` is `--node-options`, `--onload` is `--onload-script` and `--shel` is `--shell`; an ambiguous prefix is ignored by
+ *  npm, and is read as the key here, which can only ask more. An underscore or a capital is no abbreviation: npm does not
+ *  normalise a flag as it does a variable. `--ignore-scripts=false` is the one flag whose VALUE decides. */
+const NPM_FLAG_KEYS: readonly string[] = [...NPM_CONFIG_RUNS, 'foreground-scripts', 'userconfig', 'globalconfig', 'prefix'];
+function npmFlagRuns(token: string): boolean {
+  const m = /^--([^=]+)(?:=([\s\S]*))?$/.exec(token);
+  if (m === null) return false;
+  const name = m[1]!;
+  if (name.length >= 2 && 'ignore-scripts'.startsWith(name)) return m[2] === 'false';
+  return NPM_FLAG_KEYS.some((k) => name === k || (name.length >= 2 && k.startsWith(name)));
+}
+/** ...and as a line of an rc file (plus the yarn berry spellings that hand the package manager to a program) */
+const NPM_RUNS_RC = new RegExp(`^\\s*(${NPM_CONFIG_RUNS.join('|')}|scriptShell|yarnPath|plugins)\\s*[:=]`, 'm');
 /** NODE_OPTIONS members that execute nothing and open nothing */
 const NODE_OPTIONS_INERT =
   /^--(max-old-space-size|max-semi-space-size|stack-size|stack-trace-limit|enable-source-maps|no-warnings|trace-warnings|trace-deprecation|no-deprecation|throw-deprecation|unhandled-rejections|dns-result-order|openssl-legacy-provider|use-openssl-ca|use-bundled-ca|preserve-symlinks|preserve-symlinks-main|experimental-strip-types|experimental-transform-types|no-experimental-fetch|no-experimental-global-navigator|disable-warning|title|max-http-header-size|abort-on-uncaught-exception|experimental-default-type|no-network-family-autoselection)(=[\w.,:/-]*)?$|^[0-9]+$/;
@@ -4278,6 +4342,35 @@ const LINT_STAGED_CONFIGS: readonly string[] = [
   ...['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'].flatMap((e) => [`.lintstagedrc${e}`, `lint-staged.config${e}`]),
 ];
 
+const LINT_STAGED_NAME_SET: ReadonlySet<string> = new Set(LINT_STAGED_CONFIGS);
+
+/** Whether the files an earlier unit of this command writes could add a lint-staged configuration below `cwd`, or change
+ *  which directories git ignores: a config-named file, an ignore file, a directory that is written or exists (moved or
+ *  copied into place, its contents come with it) or a name without an extension that is probably one about to be created.
+ *  An ordinary source file written beside the staged ones is none of these. */
+function writesMayChangeNestedConfigs(written: ReadonlySet<string>, cwd: string): boolean {
+  if (written.size === 0) return false;
+  const below = foldName(canonicalPath(cwd));
+  const names = new Set([...LINT_STAGED_CONFIGS, '.gitignore'].map(foldName));
+  for (const w of written) {
+    if (w.startsWith('\0')) continue;
+    const f = foldName(w);
+    const base = f.slice(f.lastIndexOf('/') + 1);
+    // an ignore file anywhere changes which directories git ignores below it - and so which files lint-staged sees
+    if (base === '.gitignore' || (base === 'exclude' && f.endsWith('/.git/info/exclude'))) return true;
+    if (f !== below && !f.startsWith(below + '/')) continue;
+    if (f === below || names.has(base)) return true;
+    let directory = false;
+    try {
+      directory = statSync(w).isDirectory();
+    } catch {
+      /* not there yet */
+    }
+    if (directory || !base.includes('.')) return true;
+  }
+  return false;
+}
+
 /** the configuration files a package manager reads beside the manifest, from the package directory upwards */
 const RC_FILES: readonly string[] = ['.npmrc', '.yarnrc.yml', '.yarnrc'];
 
@@ -4451,6 +4544,285 @@ function locateEvery(
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
+ * THE FILES git LISTS BELOW A DIRECTORY - the universe lint-staged searches for nested configurations.
+ *
+ * lint-staged 13+ finds its configurations with `git ls-files` (the tracked files, and the untracked ones git does not
+ * ignore) and uses the nearest to EACH staged file, so a configuration below the directory it is started in is one a run
+ * may use. The walk UP from the working directory never meets it.
+ *
+ * THE CLASSIFIER DOES NOT RUN GIT FOR THIS. A repository can name a program in its own configuration (`core.fsmonitor`),
+ * and a classifier that starts one while it decides whether a command may run has handed the repository the decision.
+ * The tracked paths are read from the index file, which is a documented sequential format, and the untracked ones from a
+ * walk of the work tree that skips only what the ignore files PROVABLY exclude. Anything the reader does not understand
+ * (a sparse or split index, an unknown layout, a directory it cannot list) and any bound it reaches is reported as such:
+ * the caller turns it into an ask that says so, never into "nothing there".
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** The bound on what the search below a directory looks at: config-named entries found, and untracked entries walked.
+ *  Tracked entries are read from the index in one pass and cost nothing to skip. */
+const NESTED_SEARCH_BOUND = 20_000;
+/** A sanity ceiling for the pieces that are not bounded by the above: the size of the index file and the number of
+ *  directory entries a walk may list in total. A work tree larger than this is not searched by guesswork. */
+const NESTED_INDEX_BYTES = 128 * 1024 * 1024;
+const NESTED_WALK_CEILING = 2_000_000;
+
+export type IndexedPaths = { paths: string[] } | { problem: string };
+
+/**
+ * The paths a git index lists - what `git ls-files --cached` prints - read from the file itself. Layouts 2, 3 and 4 (the
+ * last prefix-compresses every path against the one before), with a 20-byte or a 32-byte object name. A missing file is
+ * a repository nothing has been added to yet. A sparse index (a directory entry stands for files it does not list) and a
+ * split index (the entries live in a second file) list less than is tracked, so they are a problem, not a short list.
+ */
+export function listIndexedPaths(indexFile: string): IndexedPaths {
+  let buf: Buffer;
+  try {
+    const st = statSync(indexFile);
+    if (!st.isFile()) return { problem: 'the git index is not a file' };
+    if (st.size > NESTED_INDEX_BYTES) return { problem: 'the git index is larger than this resolver reads' };
+    buf = readFileSync(indexFile);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? { paths: [] } : { problem: `the git index could not be read (${code ?? 'error'})` };
+  }
+  if (buf.length < 12 || buf.toString('latin1', 0, 4) !== 'DIRC') return { problem: 'the git index does not start with the DIRC signature' };
+  const version = buf.readUInt32BE(4);
+  const count = buf.readUInt32BE(8);
+  if (version < 2 || version > 4) return { problem: `the git index has a layout this resolver does not read (version ${version})` };
+  for (const hash of [20, 32]) {
+    const r = parseIndexEntries(buf, version, count, hash);
+    if (r !== null) return r;
+  }
+  return { problem: 'the git index is not in a layout this resolver can read' };
+}
+
+/** null: the bytes are not laid out this way (the other object-name size may fit); otherwise the answer */
+function parseIndexEntries(buf: Buffer, version: number, count: number, hash: number): IndexedPaths | null {
+  const paths: string[] = [];
+  let sparse = false;
+  let prev: Buffer = Buffer.alloc(0);
+  let p = 12;
+  for (let i = 0; i < count; i++) {
+    const nameAt = 40 + hash + 2;
+    if (p + nameAt > buf.length) return null;
+    const mode = buf.readUInt32BE(p + 24);
+    const flags = buf.readUInt16BE(p + 40 + hash);
+    let q = p + nameAt;
+    if (version >= 3 && (flags & 0x4000) !== 0) q += 2;
+    let name: Buffer;
+    if (version === 4) {
+      // the number of bytes to cut from the end of the previous path, in git's offset encoding, then the new tail
+      if (q >= buf.length) return null;
+      let c = buf[q++]!;
+      let cut = c & 0x7f;
+      while ((c & 0x80) !== 0) {
+        if (q >= buf.length) return null;
+        c = buf[q++]!;
+        cut = (cut + 1) * 128 + (c & 0x7f);
+      }
+      const end = buf.indexOf(0, q);
+      if (end < 0 || cut > prev.length) return null;
+      name = Buffer.concat([prev.subarray(0, prev.length - cut), buf.subarray(q, end)]);
+      p = end + 1;
+    } else {
+      const end = buf.indexOf(0, q);
+      if (end < 0) return null;
+      name = buf.subarray(q, end);
+      // the entry is padded with NULs to a multiple of eight bytes, the terminator included
+      p += (q - p + (end - q) + 8) & ~7;
+    }
+    if (name.length === 0 || p > buf.length) return null;
+    if (mode >>> 12 === 0o4) sparse = true;
+    prev = name;
+    paths.push(name.toString('utf8'));
+  }
+  // the extensions, then the checksum: the walk must land exactly on it, which is what tells the object-name sizes apart
+  const stop = buf.length - hash;
+  let split = false;
+  while (p < stop) {
+    if (p + 8 > stop) return null;
+    const size = buf.readUInt32BE(p + 4);
+    if (p + 8 + size > stop) return null;
+    if (buf.toString('latin1', p, p + 4) === 'link') split = true;
+    p += 8 + size;
+  }
+  if (p !== stop) return null;
+  if (split) return { problem: 'the git index is a split index, whose entries are in another file' };
+  if (sparse) return { problem: 'the git index is sparse, so it does not list every tracked file' };
+  return { paths };
+}
+
+/** The git directory of a work tree whose `.git` is a directory, or a file that points to one (a worktree, a submodule). */
+function gitDirOf(root: string): string | null {
+  const dotGit = join(root, '.git');
+  try {
+    const st = statSync(dotGit);
+    if (st.isDirectory()) return dotGit;
+    if (!st.isFile() || st.size > 4096) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
+    return m ? resolve(root, m[1]!) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** git's own test for "this directory is another repository, and is listed as one entry": a git directory of its own. */
+function isNestedRepository(dir: string): boolean {
+  const gd = gitDirOf(dir);
+  if (gd === null) return false;
+  return fileExists(join(gd, 'HEAD')) && fileExists(join(gd, 'objects')) && fileExists(join(gd, 'refs'));
+}
+
+/** What one ignore file provably excludes: directories it names outright. Anything it cannot prove (a wildcard, a
+ *  pattern in the middle of a path, an escape) is not claimed, and the directory is walked. */
+interface IgnoreLayer {
+  /** the directory the ignore file sits in, relative to the work tree root ('' for the root) */
+  base: string;
+  /** names excluded at any depth below `base` */
+  anywhere: Set<string>;
+  /** paths excluded relative to `base` */
+  anchored: Set<string>;
+  /** the file contains a negation: a later line may bring a directory back, so no exclusion below is certain */
+  negated: boolean;
+}
+function readIgnoreLayer(file: string, base: string): IgnoreLayer | null {
+  let text: string;
+  try {
+    const st = statSync(file);
+    if (!st.isFile()) return null;
+    if (st.size > 512 * 1024) return { base, anywhere: new Set(), anchored: new Set(), negated: true };
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  const layer: IgnoreLayer = { base, anywhere: new Set(), anchored: new Set(), negated: false };
+  for (const raw of text.split('\n')) {
+    let line = raw.replace(/\r$/, '').replace(/ +$/, '');
+    if (line === '' || line.startsWith('#')) continue;
+    if (line.startsWith('!')) {
+      layer.negated = true;
+      continue;
+    }
+    // a directory and everything under it
+    line = line.replace(/\/\*{1,2}$/, '').replace(/\/$/, '');
+    const everywhere = line.startsWith('**/');
+    if (everywhere) line = line.slice(3);
+    if (line === '' || /[*?[\\]/.test(line)) continue;
+    if (everywhere) {
+      if (!line.includes('/')) layer.anywhere.add(line);
+    } else if (line.startsWith('/')) layer.anchored.add(line.slice(1));
+    else if (line.includes('/')) layer.anchored.add(line);
+    else layer.anywhere.add(line);
+  }
+  return layer;
+}
+function ignoredByLayers(layers: readonly IgnoreLayer[], rel: string): boolean {
+  const name = rel.slice(rel.lastIndexOf('/') + 1);
+  for (const l of layers) {
+    if (l.base !== '' && !rel.startsWith(l.base + '/')) continue;
+    const within = l.base === '' ? rel : rel.slice(l.base.length + 1);
+    if (l.anchored.has(within)) return true;
+    if (l.anywhere.has(name)) return true;
+  }
+  return false;
+}
+
+export interface NestedSearch {
+  /** absolute paths of files below the directory whose name is one lint-staged reads a configuration from */
+  found: string[];
+  /** set when the search could not be completed: why. `found` is then only what was seen before it stopped */
+  problem: string | null;
+  /** the search ran at all: false when the directory is not inside a git work tree */
+  inRepository: boolean;
+}
+
+/** Every file below `dir` that git would list (tracked, or untracked and not ignored) and that has a name in `names`. */
+function findConfigsBelow(ctx: EvaluationContext, dir: string, names: ReadonlySet<string>): NestedSearch {
+  const start = canonicalPath(dir);
+  let root: string | null = null;
+  walkUp(ctx, start, true, (d) => {
+    if (fileExists(join(d, '.git'))) {
+      root = d;
+      return true;
+    }
+    return false;
+  });
+  if (root === null) return { found: [], problem: null, inRepository: false };
+  const top: string = root;
+  const gitDir = gitDirOf(top);
+  if (gitDir === null) return { found: [], problem: 'the git directory of this work tree could not be found', inRepository: true };
+  const prefix = start === top ? '' : start.slice(top.length + 1) + '/';
+  const found = new Set<string>();
+  const done = (problem: string | null): NestedSearch => ({ found: [...found], problem, inRepository: true });
+
+  // 1. the tracked files, from the index
+  const indexed = listIndexedPaths(join(gitDir, 'index'));
+  if ('problem' in indexed) return done(indexed.problem);
+  const tracked = new Set<string>();
+  for (const p of indexed.paths) {
+    tracked.add(p);
+    if (!p.startsWith(prefix)) continue;
+    // an entry whose file is gone is listed by git and fails to load: nothing runs from it
+    if (names.has(p.slice(p.lastIndexOf('/') + 1)) && fileExists(join(top, p))) {
+      found.add(join(top, p));
+      if (found.size > NESTED_SEARCH_BOUND)
+        return done(`the search reached its bound of ${NESTED_SEARCH_BOUND} tracked files named like a configuration`);
+    }
+  }
+
+  // 2. the untracked files git does not ignore, from the work tree
+  const layers: IgnoreLayer[] = [];
+  const exclude = readIgnoreLayer(join(gitDir, 'info', 'exclude'), '');
+  if (exclude) layers.push(exclude);
+  // the ignore files of the directories ABOVE the starting one, from the work tree root down, apply to everything beneath
+  const above = prefix === '' ? [] : prefix.slice(0, -1).split('/').slice(0, -1);
+  let relAbove = '';
+  for (const seg of ['', ...above]) {
+    relAbove = relAbove === '' ? seg : `${relAbove}/${seg}`;
+    const l = readIgnoreLayer(join(top, relAbove, '.gitignore'), relAbove);
+    if (l) layers.push(l);
+  }
+  let untracked = 0;
+  let visited = 0;
+  const stack: Array<{ abs: string; rel: string; layers: IgnoreLayer[] }> = [{ abs: start, rel: prefix.slice(0, -1), layers }];
+  while (stack.length) {
+    const here = stack.pop()!;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(here.abs, { withFileTypes: true });
+    } catch {
+      return done(`the directory ${here.abs} could not be listed`);
+    }
+    visited += entries.length;
+    if (visited > NESTED_WALK_CEILING) return done('the work tree is larger than this resolver walks');
+    // this directory's own ignore file joins the ones above it for everything beneath
+    const own = entries.some((e) => e.name === '.gitignore') ? readIgnoreLayer(join(here.abs, '.gitignore'), here.rel) : null;
+    const active = own ? [...here.layers, own] : here.layers;
+    const negated = active.some((l) => l.negated);
+    for (const e of entries) {
+      if (e.name === '.git') continue;
+      const rel = here.rel === '' ? e.name : `${here.rel}/${e.name}`;
+      const abs = join(here.abs, e.name);
+      if (e.isDirectory()) {
+        if (isNestedRepository(abs)) continue;
+        if (!negated && ignoredByLayers(active, rel)) continue;
+        stack.push({ abs, rel, layers: active });
+        continue;
+      }
+      if (tracked.has(rel)) continue;
+      if (++untracked > NESTED_SEARCH_BOUND)
+        return done(`the search reached its bound of ${NESTED_SEARCH_BOUND} untracked files that nothing ignores`);
+      if (names.has(e.name)) {
+        found.add(abs);
+        if (found.size > NESTED_SEARCH_BOUND)
+          return done(`the search reached its bound of ${NESTED_SEARCH_BOUND} files named like a configuration`);
+      }
+    }
+  }
+  return done(null);
+}
+
+/* ------------------------------------------------------------------------------------------------------------- *
  * THE VERIFIED EXECUTION ENVIRONMENT (product decision, 2026-09-22).
  *
  * `{cwd, cwdVerified}` was one dimension, and it was the only one EGO made earn its keep. Everything else that
@@ -4592,7 +4964,7 @@ const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   ],
   'npm-script': [
     PROGRAM_NAMING_ENV,
-    /^(npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/,
+    /^(npm_config_\w+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|SHELL|PATH|NODE_OPTIONS|NODE_PATH)$/,
   ],
   'shell-script': [PROGRAM_NAMING_ENV, /^(SHELL|BASH_ENV|ENV|PATH|CDPATH)$/],
   'git-ambient': [PROGRAM_NAMING_ENV, /^(GIT_[A-Z_]+|PATH)$/],
@@ -4746,7 +5118,7 @@ function endpointEnvHit(seg: string): string | null {
 const EXECUTION_ENV_INPUTS =
   // ... plus the variables whose VALUE IS A PROGRAM the tool will run: an editor, a pager, a diff or merge
   // driver, an askpass helper. `EDITOR=<prog> git commit` runs <prog> (decision challenge, finding 33).
-  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_[a-z_]+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*(RUNNER|LINKER|AR)|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
+  /^(MAKEFILES|MAKEFLAGS|MAKE|GNUMAKEFLAGS|SHELL|BASH_ENV|ENV|PS4|BASH_XTRACEFD|CDPATH|PATH|NODE_OPTIONS|NODE_PATH|npm_config_\w+|YARN_[A-Z_]+|PNPM_[A-Z_]+|BUN_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|EDITOR|VISUAL|PAGER|DIFFPROG|MERGE|SSH_ASKPASS|SUDO_ASKPASS|TERMINAL|BROWSER|MANPAGER|LESSOPEN|LESSCLOSE|CC|CXX|LD|AR|RANLIB|OBJCOPY|CARGO_TARGET_[A-Z0-9_]*(RUNNER|LINKER|AR)|RUSTC_WRAPPER|RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTDOC|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|BUILDX_BUILDER|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|KUBECONFIG|KUBE_CONTEXT|AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_[A-Z0-9_]+|AWS_S3_ENDPOINT|CLOUDSDK_API_ENDPOINT_OVERRIDES_[A-Z0-9_]+|(?:STORAGE|PUBSUB|FIRESTORE|DATASTORE|BIGTABLE|SPANNER)_EMULATOR_HOST|GOFLAGS|GOTOOLCHAIN|RUSTFLAGS|CGO_[A-Z]+|CFLAGS|CXXFLAGS|LDFLAGS|MAKEFLAGS)$/;
 
 export function segmentEnvInputs(segment: string, allAssignments = false): Record<string, string> {
   const out: Record<string, string> = {};
@@ -5675,6 +6047,73 @@ export function expandMakeText(
   return { text: opaque ? null : out, prefix, ran };
 }
 
+/**
+ * A LIST OF FILE NAMES IN A MAKEFILE, READ THE WAY MAKE READS IT - THE ONE READER OF THE QUESTION "WHAT ARE THE NAMES
+ * HERE". A rule's targets, its prerequisites, an `include` and a default goal all name files, and each was split on
+ * `\s+`: make's grammar is not the shell's. Names are separated by unescaped blanks; a backslash in front of a blank,
+ * a colon or a hash is part of the name (`a\ b:` defines ONE target, `a b`), and a RUN of backslashes in front of one
+ * halves (`q\\:` is the name `q\` followed by the colon, `k\\\ l` is the name `k\ l`); a backslash in front of
+ * anything else stays as written. Checked against GNU make 3.81. The split left the target `a b` registered as `a\` and `b`, so
+ * `make 'a b'` found no rule, the goal came out "absent" and the recipe ran under ALLOW (closure audit F20); the same
+ * split on the cut at the colon dropped `a\:b` and `a\#b` altogether.
+ *
+ * Returns the names and, when `stopAtColon`, the index of the first colon that ends the list (-1 when none), so the
+ * caller reads a rule's head and its tail from the SAME scan. `=` outside an escape is an assignment, not a rule head:
+ * the scan reports it as `assignment` and the caller does not take the line for a rule.
+ */
+function readMakeNames(text: string, stopAtColon: boolean): { names: string[]; colon: number; assignment: boolean } {
+  const names: string[] = [];
+  let cur = '';
+  let open = false;
+  let colon = -1;
+  const flush = (): void => {
+    if (open) names.push(cur);
+    cur = '';
+    open = false;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '\\') {
+      let n = 1;
+      while (text[i + n] === '\\') n++;
+      const next = text[i + n];
+      open = true;
+      if (next === ' ' || next === '\t' || next === ':' || next === '#') {
+        // pairs collapse to one backslash; an odd one out escapes the blank, colon or hash, which is then part of the
+        // name. After an EVEN run the character keeps its own meaning and is read on the next turn
+        cur += '\\'.repeat(n >> 1);
+        i += n - 1;
+        if (n % 2 === 1) {
+          cur += next;
+          i++;
+        }
+      } else {
+        cur += '\\'.repeat(n);
+        i += n - 1;
+      }
+      continue;
+    }
+    if (c === ' ' || c === '\t') {
+      flush();
+      continue;
+    }
+    if (c === '#') break; // an unescaped hash starts a comment: nothing after it is a name
+    if (stopAtColon && c === ':') {
+      colon = i;
+      break;
+    }
+    if (stopAtColon && c === '=') return { names, colon: -1, assignment: true };
+    cur += c;
+    open = true;
+  }
+  flush();
+  return { names, colon, assignment: false };
+}
+
+/** A name make expands against the files that exist (`*`, `?`, `[`): the makefile text does not name the targets or
+ *  the prerequisites it defines, the directory does. */
+const MAKE_WILDCARD = /[*?[]/;
+
 /** Joins backslash continuations OUTSIDE recipe lines; a recipe's continuation stays one logical shell line. */
 function makeLogicalLines(text: string): string[] {
   const raw = text.split(/\r?\n/);
@@ -5927,7 +6366,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
 
     // `include a.mk b.mk` — the included rules really execute, so an unreadable one is not "no such target"
     const inc = /^([-s]?)include\s+(.+)$/.exec(trimmed);
-    if (inc && !/[$`]/.test(inc[2]!)) included.push(...inc[2]!.split(/\s+/).filter(Boolean));
+    if (inc && !/[$`]/.test(inc[2]!)) included.push(...readMakeNames(inc[2]!, false).names);
     if (inc) {
       current = null;
       // `-include` and `sinclude` exist PRECISELY so that a missing file is not an error: make carries on. Marking
@@ -5947,7 +6386,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       // concluded the goal it did not see was proven absent. `evil.mk` holding `deploy: git push origin main`
       // then ran under a proven-absent claim (exit review 7).
       const names: string[] = [];
-      for (const name of inc[2]!.split(/\s+/).filter(Boolean)) {
+      for (const name of readMakeNames(inc[2]!, false).names) {
         if (!/[*?[]/.test(name)) {
           names.push(name);
           continue;
@@ -6126,13 +6565,23 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     }
     // `override` and `export` may precede it, exactly as they may precede any other assignment: without them
     // `override .DEFAULT_GOAL = deploy` selected no goal at all (exit review 9).
-    const goal = /^(?:override\s+|export\s+)*\.DEFAULT_GOAL\s*[:+?]?=\s*(\S+)/.exec(trimmed);
-    if (goal) {
+    const goal = /^(?:override\s+|export\s+)*\.DEFAULT_GOAL\s*[:+?]?=\s*(\S.*)$/.exec(trimmed);
+    // THE VALUE IS READ BY MAKE'S NAME GRAMMAR (GNU make 3.81 runs the target `a b` for `.DEFAULT_GOAL := a\ b`), and a
+    // value of several words is an error to make unless the WHOLE text is itself the name of a target - so it is the
+    // first name, and every further name, and the whole text, that are candidates; an over-reading here walks a goal
+    // make would refuse, never one it would run unread
+    const goalNames = goal ? readMakeNames(goal[1]!, false).names : [];
+    if (goal && goalNames.length > 0) {
+      const whole = goal[1]!.replace(/(^|[^\\])#.*$/, '$1').trim();
       // INSIDE A CONDITIONAL, EVERY BRANCH IS POSSIBLE — the same rule `altVars` applies to an ordinary
       // variable. Outside one, assignments are SEQUENTIAL and make takes the last, which this resolver can
       // determine exactly; recording every sequential assignment as a candidate would walk goals the file has
       // already overwritten and gate a makefile EGO can read perfectly well.
-      const g = goal[1]!.replace(/^(?:\.\/+)+/, '') || goal[1]!;
+      const canon = (n: string): string => n.replace(/^(?:\.\/+)+/, '') || n;
+      const g = canon(goalNames[0]!);
+      if (goalNames.length > 1) {
+        for (const extra of [...goalNames.slice(1), whole]) model.altGoals.add(canon(extra));
+      }
       if (openConditions.length) {
         if (model.defaultGoal) model.altGoals.add(model.defaultGoal);
         model.altGoals.add(g);
@@ -6163,12 +6612,26 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
     // GNU make strips the COMMENT before it looks for the `;` that starts a one-line recipe, so in `deploy: ## Deploy;
     // never run git push by hand` the text after the semicolon is prose (exit review 10, self-attack)
     const ruleLine = line.replace(/(^|[^\\])#.*$/, '$1');
-    const rule = /^([^:=#]+?)\s*::?(?!=)\s*([^;]*)(?:;(.*))?$/.exec(ruleLine);
+    // THE HEAD OF A RULE IS READ BY MAKE'S NAME GRAMMAR, NOT CUT BY A REGULAR EXPRESSION: `a\ b:`, `a\:b:` and
+    // `a\#b:` each define ONE target, and the cut that stopped at the first `:`, `=` or `#` and split on every blank
+    // registered other names than the ones `make 'a b'` looks up (closure audit F20)
+    const head = readMakeNames(ruleLine, true);
+    let rule: { prereqText: string; recipeText: string | undefined } | null = null;
+    if (!head.assignment && head.colon >= 0) {
+      // `::` is a double-colon rule; `:=` is an assignment and was never a rule
+      let at = head.colon + 1;
+      if (ruleLine[at] === ':' && ruleLine[at + 1] !== '=') at++;
+      if (ruleLine[at] !== '=') {
+        const tail = ruleLine.slice(at);
+        const semi = tail.indexOf(';');
+        rule = { prereqText: semi < 0 ? tail : tail.slice(0, semi), recipeText: semi < 0 ? undefined : tail.slice(semi + 1) };
+      }
+    }
     // ONLY A TAB MARKS A RECIPE. GNU make accepts a rule line indented with SPACES, and rejecting every
     // whitespace-led line made `  deploy:` invisible: `make deploy` force-pushed under a proven-absent claim
     // (exit review 7).
     if (rule && !/^\t/.test(line)) {
-      const targets = rule[1]!.trim().split(/\s+/).filter(Boolean);
+      const targets = head.names;
       // A TARGET-SPECIFIC VARIABLE IS NOT A PREREQUISITE LIST. `deploy: DOCKER = docker --context production rm
       // -f app` overrides DOCKER for that target's recipes, and it was parsed as a rule whose prerequisites are
       // the words of the assignment — so the recipe `$(DOCKER)` was expanded with the GLOBAL value and the
@@ -6177,7 +6640,7 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
       // - a `;` and what follows it included - and creates no recipe: `run: V = true; echo X` gives V the value
       // `true; echo X`, which runs only where `$(V)` is expanded. (An earlier revision of this parser read the tail as a
       // recipe on the strength of an experiment that could not tell the two apart; both print the same lines.)
-      const whole = (rule[3] !== undefined ? `${rule[2]};${rule[3]}` : rule[2]!).trim();
+      const whole = (rule.recipeText !== undefined ? `${rule.prereqText};${rule.recipeText}` : rule.prereqText).trim();
       const tsv = /^((?:override\s+|export\s+|private\s+)*)([A-Za-z_][A-Za-z0-9_.]*)\s*(::?:?=|[+?!]=|=)\s*(.*)$/.exec(whole);
       if (tsv) {
         // what this parser does not model is REPORTED, not approximated: an appending or conditional assignment, a
@@ -6197,20 +6660,23 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
         if (unmodelled && targets.some((t) => t.includes('%'))) model.unsupported.push(`${unmodelled}: ${whole}`);
         continue;
       }
-      const prereqs = rule[2]!.trim().split(/\s+/).filter(Boolean);
+      const prereqs = readMakeNames(rule.prereqText, false).names;
       // A target that can build something NO LITERAL RULE DEFINES makes "this goal has no rule, so nothing runs"
       // false. A `%` pattern is one; so are `.DEFAULT`, which make runs for any goal with no rule of its own, and
       // an old-style SUFFIX rule like `.c.o:` — both reached ALLOW by proving a target absent that make in fact
-      // builds (exit review 6).
-      if (targets.some((t) => /[%$]/.test(t) || /^\.DEFAULT$/i.test(t) || /^\.[A-Za-z0-9_+-]+\.[A-Za-z0-9_+-]+$/.test(t)))
+      // builds (exit review 6). A WILDCARD IS ANOTHER: make expands `*`, `?` and `[` in a target name against the
+      // files that exist, so `dep*:` is a rule for `deploy` whenever that file is there - the text names no target.
+      if (targets.some((t) => /[%$]/.test(t) || MAKE_WILDCARD.test(t) || /^\.DEFAULT$/i.test(t) || /^\.[A-Za-z0-9_+-]+\.[A-Za-z0-9_+-]+$/.test(t)))
         model.hasPatternRules = true;
       const shared: MakeRule = { recipes: [], prereqs };
-      if (rule[3] && rule[3].trim()) shared.recipes.push(rule[3].trim()); // `target: ; cmd` one-line form
+      if (rule.recipeText && rule.recipeText.trim()) shared.recipes.push(rule.recipeText.trim()); // `target: ; cmd` one-line form
       // the recipes array is the LIVE one: the recipe lines that follow this rule are appended to it
       for (const t of targets)
         if (t.includes('%') && !t.includes('$')) model.patternRules.push({ target: t, prereqs, recipes: shared.recipes });
       const localBlind = [...openConditions];
       if (prereqs.some((p) => /[$]/.test(p))) localBlind.push(`computed prerequisites: ${trimmed}`);
+      // ...AND A WILDCARD PREREQUISITE NAMES WHATEVER FILES EXIST, any of which may be a target with a rule of its own
+      if (prereqs.some((p) => MAKE_WILDCARD.test(p))) localBlind.push(`wildcard prerequisites: ${trimmed}`);
       for (const raw of targets) {
         // `./deploy:` AND `deploy:` ARE THE SAME TARGET: make canonicalises a leading `./` away, so a makefile
         // may define the safe recipe under one spelling and the dangerous one under the other. Registered
@@ -7301,6 +7767,11 @@ function resolveScriptCommand(
           reason: 'npm start default',
           resolution: 'RESOLVED_COMPLETE',
         };
+      // YARN AND PNPM RUN THE BINARY OF THAT NAME WHEN NO SCRIPT HAS IT: `pnpm lint-staged` is `lint-staged`, and a binary is
+      // judged by its own producer. The matcher that grants `pnpm lint…` its class has no word boundary, so the line was
+      // ALLOW over a configuration nobody read.
+      if ((head === 'yarn' || head === 'pnpm') && sub === script && script === 'lint-staged')
+        return resolveScriptCommand(table, ctx, requote(['lint-staged', ...tokens.slice(2)]), env);
       // the manifest was fully read and genuinely has no such script: nothing executes. This is the narrow case
       // where absence is PROVEN, and the only one that keeps a declared ALLOW.
       return {
@@ -7338,9 +7809,7 @@ function resolveScriptCommand(
     );
     // npm accepts its configuration as flags anywhere on the line, including AFTER the script name, and
     // `--script-shell` re-points the interpreter of every script (challenge 8, finding 3)
-    const npmFlags = tokens.filter((t) =>
-      /^--(script-shell|node-options|shell|ignore-scripts=false|foreground-scripts|userconfig|globalconfig|prefix)(=|$)/.test(t),
-    );
+    const npmFlags = tokens.filter(npmFlagRuns);
     // the same settings live in `.npmrc` / `.yarnrc.yml`, which npm reads from the package directory upwards.
     // A flag on the command line was modelled and the FILE that sets the identical key was not (challenge 8).
     // A CONFIGURATION FILE THIS COMMAND REWRITES IS NOT THE ONE npm WILL READ. `printf 'script-shell=/tmp/evil.sh'
@@ -7370,7 +7839,7 @@ function resolveScriptCommand(
       // every `yarn` command to the program it names
       return (
         rcText === null ||
-        /^\s*(script-shell|node-options|shell|scriptShell|yarnPath|plugins)\s*[:=]/m.test(rcText) ||
+        NPM_RUNS_RC.test(rcText) ||
         /^\s*yarn-path(\s*[:=]|\s+\S)/m.test(rcText)
       );
     });
@@ -7436,7 +7905,20 @@ function resolveScriptCommand(
     // has `make` inside a single QUOTED word, so the scan finds no `make` at all and the raw tokens are `sh`,
     // `-c` and the body — under which the `-f` file and the goal were both misread (found by the cross-product).
     // The normalized text IS the command in that case, and it is what the producer was invoked on.
-    const rawMarked = makeAt >= 0 ? allRawMarked.slice(makeAt) : tokenizeMarked(norm);
+    // ...BUT THE NORMALISED TEXT HAS LOST THE QUOTING, and a goal is one name whatever it holds: `env -S 'make -f x.mk "a b"'`
+    // read the goal as `a` and `b`, found no rule for either, and ran the recipe of `a\ b` at ALLOW (found by the generated
+    // cross-product). The command a shell CARRIES still has its own quoting in the body it was carried in, so that body is
+    // read - when, and only when, it says what the normaliser says: the same words once the quoting is taken off.
+    const carriedRaw = (): ReturnType<typeof tokenizeMarked> | null => {
+      for (const body of carriedShellBodies(env.rawSegment ?? norm))
+        for (const piece of splitShellSegments(body)) {
+          const words = tokenizeMarked(piece);
+          const at = words.findIndex((t) => /^(?:.*\/)?(make|gmake)$/.test(t.text));
+          if (at >= 0 && words.slice(at).map((t) => t.text).join(' ') === norm) return words.slice(at);
+        }
+      return null;
+    };
+    const rawMarked = makeAt >= 0 ? allRawMarked.slice(makeAt) : (carriedRaw() ?? tokenizeMarked(norm));
     const rawTokens = rawMarked.map((t) => t.text);
     // ONE READER FOR THE COMMAND LINE: clusters, abbreviations, options that take a value, and `--` (see
     // parseMakeCommandLine). Nine self-attack findings came from three scans that each knew a different subset.
@@ -7921,6 +8403,12 @@ function resolveScriptCommand(
         resolution: 'PARTIAL',
       };
     const candidates = [...search.found];
+    // ...AND SINCE 13 IT USES THE ONE NEAREST TO EACH STAGED FILE, which may be BELOW the directory it starts in: a
+    // `.lintstagedrc` under `packages/a` runs on the files staged there when lint-staged is started at the root. The walk
+    // up never met it. Every file git would list below the working directory (tracked, or untracked and not ignored)
+    // that is named like a configuration joins the candidates and is judged exactly as the ones above are.
+    const below = findConfigsBelow(ctx, cwd, LINT_STAGED_NAME_SET);
+    for (const f of below.found) if (!candidates.includes(f)) candidates.push(f);
     // with nothing at all inside the roots, the nearest manifest beyond them still decides (exit review 10)
     if (!outward && !candidates.some((f) => f.endsWith('/package.json'))) {
       const beyond = locateUp(ctx, cwd, ['package.json'], true);
@@ -7946,8 +8434,28 @@ function resolveScriptCommand(
         resolution: 'STALE',
         unresolved: [{ what: 'freshness', where: cwd, why: 'the configuration is rewritten earlier in the same command' }],
       };
+    // ...and a configuration this command writes BELOW the working directory (or a directory it moves into place, or an
+    // ignore file it rewrites) is not one the search saw either. Writes that cannot be any of those leave it alone.
+    if (below.inRepository && writesMayChangeNestedConfigs(written, cwd))
+      return {
+        kind: 'shell-script',
+        key: `lint-staged:stale-below:${cwd}`,
+        body: null,
+        reason: 'a lint-staged configuration or an ignore file is written below the working directory earlier in the same command, so what was read is not what runs',
+        resolution: 'STALE',
+        unresolved: [{ what: 'freshness', where: cwd, why: 'a nested configuration may be created earlier in the same command' }],
+      };
     const confs: Array<{ path: string; text: string; conf: unknown }> = [];
     const problems: Array<{ path: string; why: string; outcome: 'UNSUPPORTED' | 'UNREADABLE' }> = [];
+    // A SEARCH THAT COULD NOT BE COMPLETED IS NOT A SEARCH THAT FOUND NOTHING: the bound, an index in a layout this
+    // resolver does not read, a directory it could not list. What was found is still judged; the gap is added to it.
+    if (below.problem !== null)
+      problems.push({ path: cwd, why: `the search below the working directory for nested lint-staged configurations could not be completed: ${below.problem}`, outcome: 'UNREADABLE' });
+    // `--shell <path>` HANDS EVERY TASK TO THE PROGRAM IT NAMES, which is the same re-pointing of the interpreter that
+    // `--script-shell` is for npm: the tasks the configuration spells are read as commands and run by something else
+    const shellAt = tokens.findIndex((t) => t === '-x' || t === '--shell' || t.startsWith('--shell='));
+    if (shellAt >= 0 && (tokens[shellAt]!.includes('=') || /^[^-]/.test(tokens[shellAt + 1] ?? '')))
+      problems.push({ path: tokens[shellAt]!, why: 'lint-staged is told which shell runs its tasks, so the commands it was read to run are handed to another program', outcome: 'UNSUPPORTED' });
     for (const f of candidates) {
       const base = f.slice(f.lastIndexOf('/') + 1);
       // a JS/CJS/MJS config is code, and code is not resolvable by reading - whether or not the file can be opened
@@ -8233,7 +8741,59 @@ const DB_EXECUTES_UNREAD =
   // `\ifile`), and a script path may be followed by a quote or a parenthesis rather than whitespace
   // (`mongosh --eval 'load("/tmp/evil.js")'`) — each of which put an unread program back out of reach
   // (exit review 10).
-  /\s\S*\.(sql|psql|ddl|cql|js|py|rb|lua)(\s|$|["'),;])|\s(-f|--file|-init|--init)(=|\s|\S)|\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(|--queries?[-_]file\b|--(multi)?query[-_]file\b/i;
+  /\\!|\\i(r|nclude|file)?(\s|$)|\\\.(\s|$)|(^|[\s;"'])\\?(i(nclude|r|file)?|\.)(\s+\S)|(-c|--command|--eval|-e|--execute)(=|\s+)["']?\s*!|\.(shell|system|read|load|import|output|once|excel|cd)\b|\bSYSTEM\b|\b(load_extension|sqlite3_load_extension)\b|\bCREATE\s+(VIRTUAL\s+TABLE|FUNCTION|EXTENSION)\b|COPY\b[\s\S]*\b(TO|FROM)\s+PROGRAM\b|\\copy\b[\s\S]*\bPROGRAM\b|\bsource\s+\S|\bload\s*\(|--queries?[-_]file\b|--(multi)?query[-_]file\b/i;
+
+/** THE OPTIONS THAT HAND A CLIENT A SCRIPT, case-sensitively: the net above is case-insensitive for the SQL words it looks
+ *  for, which made `-F` - pg_dump's format (`-Fc`), psql's field separator - the same flag as `-f`. A client's options
+ *  are spelled as they are. */
+const DB_SCRIPT_FLAG = /\s(-f|--file|-init|--init)(=|\s|\S)/;
+/** A WORD THAT NAMES A SCRIPT BY ITS EXTENSION - the part of the net above that is about a file's NAME, kept apart because
+ *  it is only true of a file the client READS. `pg_dump app > dump.sql` is the standard way to dump a database, and its
+ *  output file is a file the command WRITES: read as "runs an unread program" it asked on every dump. The words that the
+ *  command line itself marks as written (a redirection target, the value of an output option) are subtracted
+ *  one-for-one, so a name that is also an operand the client reads (`mongosh a.js > a.js`) still counts once. */
+const DB_SCRIPT_BY_NAME = /\s(\S*\.(?:sql|psql|ddl|cql|js|py|rb|lua))(?=\s|$|["'),;])/gi;
+function namesAScript(text: string, written: readonly string[]): boolean {
+  const budget = new Map<string, number>();
+  for (const w of written) budget.set(w, (budget.get(w) ?? 0) + 1);
+  for (const m of text.matchAll(DB_SCRIPT_BY_NAME)) {
+    // `--output=out.sql` is one word of the line and names the file after its `=`
+    const name = [m[1]!, m[1]!.replace(/^-[^=]*=/, '')].find((n) => (budget.get(n) ?? 0) > 0);
+    if (name === undefined) return true;
+    budget.set(name, budget.get(name)! - 1);
+  }
+  return false;
+}
+/** THE OPTIONS THROUGH WHICH A CLIENT WRITES A FILE, for the heads that have no grammar of their own (the modelled clients
+ *  report theirs as `DbEscape.writes`): `pg_dump`'s `-f` and `mysqldump`'s `-r` are output, where `psql`'s `-f` is a script. */
+const DB_OUTPUT_OPTIONS: Readonly<Record<string, { short: string; long: string }>> = {
+  pg_dump: { short: 'f', long: 'file' },
+  pg_dumpall: { short: 'f', long: 'file' },
+  pg_restore: { short: 'f', long: 'file' },
+  mysqldump: { short: 'r', long: 'result-file' },
+};
+/** The files a head with no grammar writes through its output option, and its words with that option and value taken
+ *  out. A value built at run time is NOT set aside: a file nobody can name is not one the client was shown to write. */
+function dbOutputOptions(head: string, words: readonly string[]): { files: string[]; rest: string[] } {
+  const spec = DB_OUTPUT_OPTIONS[head];
+  const files: string[] = [];
+  const rest: string[] = [];
+  if (spec === undefined) return { files, rest: [...words] };
+  const take = (value: string | undefined, ...originals: string[]): void => {
+    if (value === undefined || /[$`]/.test(value)) rest.push(...originals);
+    else files.push(value);
+  };
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === `-${spec.short}` || w === `--${spec.long}`) {
+      take(words[i + 1], w, ...(words[i + 1] === undefined ? [] : [words[i + 1]!]));
+      i++;
+    } else if (w.startsWith(`--${spec.long}=`)) take(w.slice(spec.long.length + 3), w);
+    else if (w.startsWith(`-${spec.short}`) && !w.startsWith('--') && w.length > 2) take(w.slice(2), w);
+    else rest.push(w);
+  }
+  return { files, rest };
+}
 
 const TARGET_ENV_RE =
   // THE CONTAINER ENGINE IS SELECTED BY ENVIRONMENT TOO. `DOCKER_HOST` and `DOCKER_CONTEXT` were enrolled in the
@@ -8467,8 +9027,84 @@ function isDryRun(seg: string): boolean {
   // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
   // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
   // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
-  const words = commandWords(tokenizeMarked(seg)).map((x) => x.text);
-  return dryRunOf(words, K8S_DRY_RUN) === 'dry';
+  const words = commandWords(tokenizeMarked(seg));
+  const { state, at } = dryRunDecision(words.map((x) => x.text), K8S_DRY_RUN);
+  return state === 'dry' && !flagFilledInAfter(words, at);
+}
+
+/** options of kubectl and helm KNOWN to take a value, beyond the global ones in K8S_VALUE_OPTS: the word after one is
+ *  that value, whatever the shell fills in, and never a flag */
+const K8S_DRY_RUN_VALUED =
+  /^(--grace-period|--timeout|--field-manager|--image|--replicas|--type|--patch|--patch-file|-p|--subresource|--container|-c|--description|--history-max|--wait-timeout|--max|--min|--cpu-percent|--labels|-L|--sort-by|--chunk-size|--template|--revision|--overrides|--port|--target-port|--name|--env|--limits|--requests|--annotations|--set-json|--set-literal|--cert-file|--key-file|--ca-file)$/;
+/** the bare words (neither options nor their values) a kubectl or helm verb takes after itself, or null for any number.
+ *  A verb that names its object by a file takes none, and `helm upgrade RELEASE CHART` has taken all it takes by its
+ *  second: what stands after those can only be a flag. Every other verb names its objects (`delete TYPE NAME...`,
+ *  `label TYPE NAME KEY=VALUE...`, `uninstall RELEASE...`), and there a bare word cannot be told from a name. */
+function k8sPositionalLimit(head: string, verb: string, words: readonly string[]): number | null {
+  if (head === 'helm') return ({ install: 2, upgrade: 2, rollback: 2, test: 1, push: 2 } as Record<string, number>)[verb] ?? null;
+  // `apply view-last-applied TYPE/NAME` and its siblings are the one use of `apply` that takes names
+  if (verb === 'apply') return words.some((t) => /^(view|edit|set)-last-applied$/.test(t)) ? null : 0;
+  if (verb === 'replace') return 0;
+  const byFile = words.some((t) => /^(-[fk]|--filename|--kustomize)(=|$)|^-[fk]\S/.test(t));
+  if (byFile && /^(create|delete|patch|edit|scale|autoscale|expose)$/.test(verb)) return 0;
+  if (byFile && verb === 'rollout') return 1; // the subcommand
+  return null;
+}
+
+/** A WORD THE SHELL FILLS IN AFTER THE LAST DRY-RUN FLAG IS NOT A DRY RUN THAT WAS PROVED. The tool reads the line after
+ *  expansion, `$FLAG` may be `--dry-run=none`, and the last flag wins: `kubectl apply -f x.yaml --dry-run=client $FLAG`
+ *  was read as the dry run its last readable flag asks for. The line is then judged as the act (the ask on an unclassified
+ *  target, the absolute refusal on a production one).
+ *
+ *  WHICH WORDS ARE A FLAG IS KUBECTL'S AND HELM'S GRAMMAR, not the property of being dynamic - `delete --dry-run=client
+ *  pod $NAME` is the ordinary preview of a delete, and refusing it would be refusing to look. A word is NOT where a flag
+ *  can stand when it is the value of an option that takes one (`-n $NS`, `--grace-period $GP`, `-f $FILE`, a glued
+ *  `--namespace=$NS`), when its literal start is not a dash (`app=$APP`, `pod/$NAME`), or when it falls in a name slot of
+ *  the verb (`delete pod $NAME`, `uninstall $RELEASE`, `upgrade $RELEASE $CHART`). It IS where a flag can stand when the
+ *  verb has no slot left for it (`apply -f x.yaml $FLAG`, `helm upgrade rel chart --dry-run $FLAG`), when the option's own
+ *  name is filled in (`--$OPT`), and when nothing the tool takes as a value precedes it. A verb that names any number of
+ *  objects cannot tell a name from a flag by position, so there the word is read as a name; that is the residual. Words
+ *  after `--` are operands. */
+function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolean }>, at: number): boolean {
+  const text = words.map((w) => w.text);
+  // the line is the segment AS WRITTEN: an assignment, `env`, `timeout 30` or a path may stand in front of the tool
+  const headAt = text.findIndex((t) => /(^|\/)(kubectl|oc|helm)$/.test(t));
+  if (headAt < 0) return false;
+  const head = text[headAt]!.replace(/^.*\//, '');
+  const end = text.indexOf('--') >= 0 ? text.indexOf('--') : text.length;
+  const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
+  const valued = (t: string): boolean => !t.includes('=') && (K8S_VALUE_OPTS.test(t) || K8S_DRY_RUN_VALUED.test(t));
+  let verbAt = -1;
+  for (let i = headAt + 1; i < end; i++) {
+    const t = text[i]!;
+    if (t.startsWith('-')) {
+      if (valued(t)) i++;
+      continue;
+    }
+    if (known.has(t)) {
+      verbAt = i;
+      break;
+    }
+  }
+  if (verbAt < 0) return false;
+  const limit = k8sPositionalLimit(head, text[verbAt]!, text);
+  let bare = 0;
+  for (let i = verbAt + 1; i < end; i++) {
+    const t = text[i]!;
+    if (t.startsWith('-') && t !== '-') {
+      // the NAME of an option the shell fills in can be any flag at all; its glued value (`--namespace=$NS`) cannot
+      if (i > at && /[$`]/.test(t.split('=')[0]!)) return true;
+      if (valued(t)) i++;
+      continue;
+    }
+    // a word that starts with a literal character other than a dash is not a flag whatever follows it. The quoting is NOT
+    // asked: a segment that was carried (`docker exec c kubectl …`, `sh -c '…'`) is requoted, and the requoting single-quotes a
+    // `$` that the OUTER shell fills in - so a `$` or a backtick at the start of the word is a word made at run time
+    const filledIn = /^[$`]/.test(t);
+    if (i > at && filledIn && limit !== null && bare >= limit) return true;
+    bare++;
+  }
+  return false;
 }
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
 const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
@@ -9170,7 +9806,10 @@ function isPlainSelect(q: string): boolean {
   if (q.length > 4000 || !/^select\b/i.test(q)) return false;
   type Tok = { k: 'word' | 'quoted' | 'str' | 'num' | 'sysvar' | 'op'; v: string };
   const toks: Tok[] = [];
-  const OPS = ['->>', '->', '<=', '>=', '<>', '!=', '||', '::'];
+  // `~`, `~*`, `!~` and `!~*` are PostgreSQL's regular-expression MATCH operators (`~` is also the bitwise NOT of both
+  // engines): comparisons, pure, and the ordinary way to filter on a pattern. Refused as an unknown character they made
+  // `select count(*) from t where code ~ '^[0-9]+$'` a statement that acts, and against a production host an absolute deny.
+  const OPS = ['->>', '->', '<=', '>=', '<>', '!=', '||', '::', '!~*', '!~', '~*'];
   let i = 0;
   while (i < q.length) {
     const c = q[i]!;
@@ -9218,7 +9857,7 @@ function isPlainSelect(q: string): boolean {
     }
     // `--` and `/*` open comments; MySQL's `/*!` and `/*+` are executed or interpreted, so no comment is accepted
     if ((c === '-' && q[i + 1] === '-') || (c === '/' && q[i + 1] === '*')) return false;
-    const op = OPS.find((o) => rest.startsWith(o)) ?? (/^[=<>+\-*/%,.()]/.test(c) ? c : undefined);
+    const op = OPS.find((o) => rest.startsWith(o)) ?? (/^[=<>+\-*/%,.()~]/.test(c) ? c : undefined);
     if (op === undefined) return false;
     toks.push({ k: 'op', v: op });
     i += op.length;
@@ -9248,12 +9887,52 @@ function isPlainSelect(q: string): boolean {
   return depth === 0;
 }
 
+/** A BACKSLASH INSIDE A SINGLE-QUOTED LITERAL IS A CHARACTER OF THE LITERAL, and is the ordinary way to write a pattern:
+ *  `where code ~ '^\d+$'`. The rule below refuses every backslash because mysql's `\g`, `\G`, `\!` and `\.` send a
+ *  statement, run a shell or source a file - and none of them is recognised by either client inside a quote. So the
+ *  backslashes of a literal are set aside (returned as a plain letter, so the rest of the grammar reads the same
+ *  statement) and the ones outside a literal stay for that rule to refuse. null when a literal cannot be read the same
+ *  way by every engine: a backslash in front of a quote is an escaped quote to mysql and a literal backslash that closes
+ *  the string to PostgreSQL, so the two clients disagree about where the statement goes on. */
+function literalBackslashesBlanked(s: string): string | null {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    out += c;
+    if (c !== "'") continue;
+    // `E'...'` is PostgreSQL's ESCAPE string: a backslash in it is an escape (`E'\x27'` is a quote the lexer never saw), not
+    // a character - the one literal whose backslashes are not data
+    const escapeString = /(^|[^A-Za-z0-9_$])[Ee]'$/.test(out);
+    let j = i + 1;
+    for (; ; j++) {
+      if (j >= s.length) return null; // an unterminated literal: not a statement to read
+      const d = s[j]!;
+      if (d === '\\') {
+        if (escapeString || s[j + 1] === "'") return null;
+        out += 'x';
+        continue;
+      }
+      out += d;
+      if (d === "'") {
+        if (s[j + 1] === "'") {
+          out += "'";
+          j++;
+          continue;
+        }
+        break;
+      }
+    }
+    i = j;
+  }
+  return out;
+}
+
 /** A statement that is a READ of schema, plan or server state - by a strict grammar, not by the absence of words.
  *  A blocklist of write verbs is wrong by omission (`created_at` contains `create`; `\g` ends a statement in mysql
  *  without a semicolon), so what is accepted is described positively and everything else is not a read. */
 function isReadStatement(q: string): boolean {
-  const s0 = q.trim().replace(/;\s*$/, '');
-  if (s0 === '' || /;/.test(s0)) return false;
+  const s0 = literalBackslashesBlanked(q.trim().replace(/;\s*$/, ''));
+  if (s0 === null || s0 === '' || /;/.test(s0)) return false;
   // psql metacommands: the whole statement, one optional argument, nothing that chains (`\g`, `\gexec`, `\;`, `\!`)
   if (s0.startsWith('\\')) return /^\\(?:d[a-zA-Z+]{0,3}|l\+?|z|sf|ef|conninfo)(?:\s+[\w."*?$-]+)?$/.test(s0);
   // nothing else may carry a backslash: mysql's `\g`, `\G`, `\!` and `\.` send, run a shell or source a file
@@ -11520,7 +12199,17 @@ function classifyShellPaths(
   // operand as a filesystem read made `dirname -- "$0"` — the first line of a real husky hook — ask, and with it
   // every commit in that repository (exit review 4).
   if (STRING_OPERAND_HEADS.has(head)) return hits;
-  const paths = pathTokens(bare, cwd).filter((p) => !patternWords.includes(p.raw));
+  // A DATABASE CLIENT'S STATEMENT IS DATA, NOT A PATH OPERAND. The normalised segment has lost the quotes around it, so
+  // `psql -c "... where c ~ '^\d+$'"` reached this scan as a run of bare words and the SQL operator `~` was the home
+  // directory: an ask for a read outside the workspace on the most ordinary regular-expression match. A word of the
+  // statement that names no directory is not a path; one that does (`/etc/hostname`, `~/.ssh/id_rsa`) is still scanned,
+  // beside the reader that knows which server-side functions open a file.
+  const rawWords = tokenizeMarked(rawSeg);
+  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
+  const statementWords = new Set(
+    (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
+  );
+  const paths = pathTokens(bare, cwd).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
   // approvable question, never a silent yes.
@@ -11582,7 +12271,6 @@ function classifyShellPaths(
     mongosh: /^--eval$/,
     mongo: /^--eval$/,
   };
-  const rawWords = tokenizeMarked(rawSeg);
   const clientAt = rawWords.findIndex((t) => !t.quoted && STATEMENT_FLAG[t.text.replace(/^.*\//, '')] !== undefined);
   let unquotedSeg = seg;
   let unquotedWords = rawWords.map((w) => w.text);
@@ -11601,9 +12289,17 @@ function classifyShellPaths(
   // THE CLIENT'S OTHER CHANNELS - a program, a file it writes, native code - are read by ONE grammar (dbClientEscape)
   // rather than found by their spelling. A statement the reader recognised is set aside from the redirection test
   // below, for the same reason a statement flag's value is: `where id < 10` is a comparison, not `< file`.
-  const dbEscape = DB_CLIENT_HEADS.has(head) ? dbClientEscape(head, dbWordsOf(head, rawWords, seg)) : null;
   if (dbEscape !== null && dbEscape.statements.length > 0)
     unquotedSeg = unquotedWords.filter((w) => !dbEscape.statements.some((st) => w === st || w.endsWith(`=${st}`))).join(' ');
+  // A FILE THE CLIENT WRITES IS JUDGED AS A WRITE, NOT TAKEN FOR A PROGRAM IT RUNS. The modelled clients report theirs
+  // (`DbEscape.writes`); the dump tools have no grammar and their output option is read here. The redirection targets
+  // are the shell's, and are read with the quoting still on the line.
+  const dbArgs = DB_CLIENT_HEADS.has(head) ? dbWordsOf(head, rawWords, seg) : [];
+  const dbAt = dbArgs.findIndex((w) => w.text.replace(/^.*\//, '') === head);
+  const dumped = dbOutputOptions(head, dbAt < 0 ? [] : dbArgs.slice(dbAt + 1).map((w) => w.text));
+  const writtenByName = [...(dbEscape?.writes ?? []), ...dumped.files, ...redirectionTargets(rawSeg)].filter((f) => !/[$`]/.test(f));
+  const readSurface =
+    dumped.files.length === 0 ? seg : requote([...dbArgs.slice(0, dbAt + 1).map((w) => w.text), ...dumped.rest]);
   if (dbEscape !== null)
     for (const why of [...dbEscape.opaque, ...dbEscape.unproven])
       hits.push({
@@ -11615,14 +12311,21 @@ function classifyShellPaths(
         opaqueUnread: true,
       });
   if (dbEscape !== null)
-    for (const [mode, dests] of [['Write', dbEscape.writes], ['Read', dbEscape.reads]] as const)
+    for (const [mode, dests] of [['Write', [...dbEscape.writes, ...dumped.files]], ['Read', dbEscape.reads]] as const)
       for (const dest of dests) {
         const expanded = expandHome(dest, cwd);
         if (expanded === null || /[$`]/.test(expanded)) continue;
         const w = classifyPath(table, ctx, mode, canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)));
         if (w.verdict !== 'ALLOW') hits.push({ ...w, via: `the client ${mode === 'Write' ? 'writes' : 'reads'} ${dest} (${w.via})`, segment: seg });
       }
-  if (DB_CLIENT_HEADS.has(head) && (DB_EXECUTES_UNREAD.test(seg) || /\s<\s*\S/.test(' ' + unquotedSeg) || redisReadsScript))
+  if (
+    DB_CLIENT_HEADS.has(head) &&
+    (DB_EXECUTES_UNREAD.test(readSurface) ||
+      DB_SCRIPT_FLAG.test(readSurface) ||
+      namesAScript(readSurface, writtenByName) ||
+      /\s<\s*\S/.test(' ' + unquotedSeg) ||
+      redisReadsScript)
+  )
     hits.push({
       capability: 'command.script-opaque',
       verdict: verdictFor(table, ctx, 'command.script-opaque'),
