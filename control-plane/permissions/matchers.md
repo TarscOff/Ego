@@ -898,6 +898,18 @@ matchers:
     # `--output type=registry` is what `--push` is shorthand FOR. Naming only `--push` covered neither, so an
     # upload to a shared registry reached ALLOW through the two spellings buildx documents (exit review 9).
     command: '^((docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?|docker-compose\s+|podman-compose\s+)[^|;&]*?\s?(push\b|publish\b|imagetools\s+create\b|(build|bake)\b[^|;&]*(--push\b|--cache-to[= ][^\s]*type=registry|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
+  # THE CONTAINER READER NAMES THE EFFECTS A VERB HAS THAT NO SPELLING OF THE LINE SAYS (containers.ts). The patterns
+  # above and below are written for the spellings people use; the reader knows the verbs - which of them destroy what
+  # they name or rewrite the credential store, whatever program, group, alias or option stands around them - and says so
+  # once, beside the command, as a marker. `podman pod rm`, `podman machine reset`, `nerdctl namespace remove`, `colima
+  # delete`, `podman login` and `docker logout` are the same acts as the ones the patterns name, and each was the
+  # catch-all `container.run` ALLOW because no pattern had been written for that spelling (exit review 11).
+  - capability: container.prune
+    tool: Bash
+    command: '^\x00ego\x00container-effect remove\b'
+  - capability: fs.credential-store.write
+    tool: Bash
+    command: '^\x00ego\x00container-effect credential\b'
   # Handing a registry password on the command line writes it into the shell history and the process table.
   # SCOPED TO THE VERBS THAT TAKE ONE: docker's `-p` is `--publish`, so an unscoped rule turned `docker run -p
   # 8080:80 nginx` — the most ordinary container command there is — into a credential exposure (exit review 8).
@@ -912,6 +924,11 @@ matchers:
   - capability: command.credential-exposure
     tool: Bash
     command: '^(docker|podman|nerdctl)\s+(container\s+)?(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s*)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
+  # ...AND THE SAME THROUGH COMPOSE: `docker compose run -e AWS_SECRET_ACCESS_KEY svc env` forwards the host's variable
+  # to a container exactly as `docker run -e` does, and the pattern above stopped at `run` (exit review 11).
+  - capability: command.credential-exposure
+    tool: Bash
+    command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\s(run|create|exec)\b[^|;&]*\s(-e|--env)(=|\s*)"?''?(AWS_|GOOGLE_|GCP_|AZURE_|ARM_|VAULT_|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|KUBECONFIG|PG|MYSQL_PWD|OPENAI_|ANTHROPIC_)'
   # `kubectl config view --raw` PRINTS THE KUBECONFIG UNREDACTED — client certificates, bearer tokens and the
   # credentials of every cluster the developer can reach, production included. Without `--raw` the values are
   # redacted, so the flag is the whole difference (exit review 7). `--flatten` inlines the certificate files and
@@ -959,8 +976,11 @@ matchers:
   - capability: command.script-opaque
     tool: Bash
     command: '^((docker|podman|nerdctl)\s+compose|docker-compose|podman-compose)\b[^|;&]*\srun\b[^|;&]*--build\b'
-  # `docker compose build` builds whatever the compose FILE names, which EGO does not parse: the Dockerfile it
-  # chooses, its context and its build args are all decided by a file this kernel never read.
+  # `docker compose build` builds whatever the compose FILE names: the Dockerfile it chooses, its context and its
+  # outputs are decided by a file. The container reader (containers.ts) now READS that file and the Dockerfile each
+  # service points at, so a build whose inputs were read is judged by what its Dockerfiles run, and the capability
+  # below is what answers when they were not: an anchor, an include, a variable in a path, a remote context, a
+  # file this very command line has just written (exit review 11).
   - capability: command.script-opaque
     tool: Bash
     # the COMPOSE form only: `(compose\s+)?` was optional, so this swallowed every plain `docker build` and made

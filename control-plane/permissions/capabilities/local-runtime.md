@@ -21,8 +21,15 @@ production denies, not by these capabilities.
 - [x] `db.local.backup` — back up a local database.
 - [x] `db.local.restore` — restore a local database.
 - [x] `db.local.schema` — schema manipulation locally.
-- [x] `container.build` — build images locally.
-- [x] `container.run` — run containers, compose stacks, local registries, networks, volumes.
+- [x] `container.build` — build images locally: `build`, `buildx build`, `buildx bake` and `compose build`. The build is
+  judged by what it READS - the Dockerfile, the bake files (HCL, JSON) and compose files the tool finds by default or by
+  `-f`, a `--set` override, an inline Dockerfile - and by what it PRODUCES: an output that publishes asks, one that writes
+  outside the workspace is a write there. A source the kernel cannot read, or that the same command line has just
+  written, is a question, never an absence.
+- [x] `container.run` — run containers, compose stacks, local registries, networks, volumes: the verbs the container
+  reader (`authority/containers.ts`) has a decision for, in every spelling of the program, group, alias and global
+  option. A verb it has no decision for - a plugin such as `docker pass` or `docker debug`, a verb built at run time, an
+  option whose arity is unknown where the verb belongs - is `command.unmodelled-closure`, not this.
 - [x] `container.inspect` — inspect images and containers.
 - [x] `k8s.local.apply` — apply manifests, Helm charts, operators and CRDs to a local cluster (kind, k3d, minikube, Docker Desktop).
 - [x] `k8s.local.test` — network policy, ingress and egress tests against a local cluster.

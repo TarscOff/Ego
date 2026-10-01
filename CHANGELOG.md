@@ -168,6 +168,31 @@ discipline of decision Q84 (authority changes are never patch releases).
   a tier declared outside the core layer is still refused, and an unknown `lock:` value still fails closed. Code that
   reads `table.organizationLocked` or compares `lock === 'organization'` must follow the rename (TypeScript reports
   both); a CI job that keeps a stored table to diff against needs nothing, because the diff reads old tables.
+- **The container tools are read by one reader** (closure audit 2026-10-01, wave 3, root cause RC-CTR). docker, podman,
+  nerdctl, compose, buildx, builder and bake were read in six places — the help-probe test, the global-option
+  stripper, the engine resolver, the image detector, the bake reader and the Dockerfile reader — each with its own idea
+  of where the verb sits, and a fix at one spelling left its siblings open. `authority/containers.ts` is now the only
+  one: the options of each program with their arity, the management groups with their own options, a table of the verbs
+  the product decided about, the engine options accepted past the verb, and one reading of what a build reads and
+  produces. Visible changes: (1) a verb that is not in the table — `docker debug`, `docker pass`, `docker scout`, a
+  plugin, a word built at run time — or an option of unknown arity where the verb belongs asks
+  (`command.unmodelled-closure`) where the catch-all ALLOW answered before; (2) `--host`, `-H`, `--context` and `--builder`
+  are engine options wherever docker accepts them — before the verb, after it, glued, `=`-joined — and stop at the
+  words a container program is given (`docker run IMG tool --context x` names no engine, and was a DENY for `--builder`);
+  a quoted verb is the verb; `buildx create`/`builder create` against any endpoint binds that engine; (3) `docker buildx
+  bake`, `docker bake`, `docker builder bake` and `docker compose build|up --build|run --build` read the bake files
+  (HCL and JSON) and compose files the tool reads by default or by `-f`, the Dockerfile each target names, an inline
+  Dockerfile and `--set` overrides, and judge the RUN lines like any Dockerfile — `docker compose build` with a read,
+  ordinary Dockerfile is no longer an ASK of its own; a file written earlier in the same command, a variable, a matrix, an
+  anchor, an include or a remote definition asks; (4) outputs, caches and secrets are the pushes, writes and reads they
+  are for a flag, `--set SELECTOR.KEY=` and a file alike: `-otype=registry` and `--set '*.output=type=registry'` ask, and
+  `--set default.output=/etc` is a write to `/etc`; (5) `docker logout` and `podman|nerdctl login|logout` are credential
+  writes like `docker login`; `docker compose run -e AWS_…` is a credential exposure like `docker run -e`; `compose
+  down --volumes=true`, `podman pod rm|prune`, `podman machine rm|reset`, `nerdctl namespace rm` and `colima delete` are
+  destruction like `docker rm`. A command after `--` in a plugin verb (`docker pass run -- psql -h prod-db …`) is
+  analysed as the command it is, also behind `sudo`, `env` or `sh -c`. Ordinary container development (`docker ps`,
+  `run`, `build`, `compose up`, `logs`; `docker exec` still asks) is unchanged, and so is the accepted behaviour that a
+  plain `docker compose up` does not read the compose file.
 - Provenance `file` names and the target-resolution reason no longer lose their first character when the control-plane
   root is given with a trailing slash (`ermissions/…`).
 - **A shell word is judged by what it resolves to — one resolver for the shell layer** (closure audit 2026-10-01, wave 2).
