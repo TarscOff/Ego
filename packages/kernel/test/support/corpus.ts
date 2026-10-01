@@ -15,8 +15,8 @@
 // any list, `eval` and a `$`-headed command are irreducibly dynamic, and a transformation nobody wrote down is not
 // tested by writing down the others. What earns the claim is that the transformations are the general form of the
 // classes EGO has actually met, and that adding one costs a line.
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { loadControlPlane } from '../../src/control-plane/load.ts';
 import { compileAuthority } from '../../src/authority/compile.ts';
@@ -43,6 +43,12 @@ writeFileSync(
 );
 writeFileSync(join(UNREAD_DIR, 'Makefile'), 'build:\n\ttsc -p .\n');
 
+const LINK_MARK = '\0symlink:';
+/** A fixture entry that is a SYMLINK rather than a file: `files: { lnk: link('.git/hooks/zz-new') }`. The target is
+ *  stored as given, so a relative one resolves beside the link and a missing one stays missing — the case a
+ *  repository cloned with a link already in it presents. */
+export const link = (target: string): string => LINK_MARK + target;
+
 /** A throwaway repository: a git directory, a manifest, and whatever files the case needs. */
 export function workspace(files: Record<string, string> = {}): string {
   const dir = mkdtempSync(join(CORPUS_TMP, 'ws-'));
@@ -51,6 +57,10 @@ export function workspace(files: Record<string, string> = {}): string {
   for (const [name, content] of Object.entries(files)) {
     const p = join(dir, name);
     mkdirSync(dirname(p), { recursive: true });
+    if (content.startsWith(LINK_MARK)) {
+      symlinkSync(content.slice(LINK_MARK.length), p);
+      continue;
+    }
     writeFileSync(p, content);
     if (/\.sh$|hooks\//.test(name)) chmodSync(p, 0o755);
   }
@@ -1499,6 +1509,43 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'find . -name pre-commit -exec cp src/a.ts {} \\;',
       'fd pre-commit -x chmod +x',
     ],
+  },
+  /* ----------------------------------------------------------------------------------------------------------
+   * AUDIT 2026-10-01, C3. A link whose target does not exist yet is still a link: `open(O_CREAT)` creates the
+   * TARGET. `realpath` fails on it exactly as on a file never created, and the fallback judged the link's own name.
+   * The links below arrive already in the repository (a clone ships them); none is made by the command.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'fs',
+    id: 'a write through a link whose target does not exist yet',
+    floor: 'DENY',
+    cases: [
+      'echo x > lnk-hook',
+      'echo x >> lnk-hook',
+      ': > lnk-hook',
+      'printf x > ./lnk-hook',
+      'echo x | tee lnk-hook',
+      'echo x | tee -a lnk-cfg',
+      'cat package.json > lnk-cfg',
+      'dd if=package.json of=lnk-hook',
+      'echo x > lnk-dir/pre-commit',
+      'echo x > sub/lnk-up',
+      'echo x > chain-a',
+      `echo x > lnk-ssh`,
+    ],
+    files: {
+      'lnk-hook': link('.git/hooks/zz-new'),
+      'lnk-cfg': link('.claude/settings.json'),
+      // a link to a directory that does not exist: the name beneath it is in the hooks tree too
+      'lnk-dir': link('.git/hooks/zz-dir'),
+      // relative to the link's own directory, through `..`
+      'sub/lnk-up': link('../.git/hooks/zz-up'),
+      // a chain of links, none of which points at anything yet
+      'chain-a': link('chain-b'),
+      'chain-b': link('.git/hooks/zz-chain'),
+      // an absolute target in a credential store
+      'lnk-ssh': link(`${homedir()}/.ssh/zz-corpus-link-target`),
+    },
   },
 ];
 

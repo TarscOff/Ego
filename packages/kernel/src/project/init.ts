@@ -423,7 +423,7 @@ ASK → DENY) and never widen. Absolute denies cannot be referenced. Identifiers
 <!-- example: - [x] \`command.network-tool\` — no curl/wget from agent shells in this product -->
 `;
 
-const MCP_TRUST_TEMPLATE = `---
+export const MCP_TRUST_TEMPLATE = `---
 schema: ego.mcp-trust/1
 id: mcp-trust
 title: MCP server trust
@@ -431,10 +431,17 @@ servers: []
 ---
 # MCP server trust
 
-Reachability never implies trust. List each MCP server this product trusts with its class and per-tool capability
-grants; an unlisted server or tool is \`mcp.unknown\` (DENY). Privileged or destructive tools are DENY by default.
+**Listing a server here currently has NO EFFECT.** Nothing reads this file yet: the resolver that turns a listed
+server into per-tool capabilities is phase-2 work (EGO issue #10). Until it lands, EVERY \`mcp__<server>__<tool>\` call
+is \`mcp.unknown\` and is DENIED, whether the server is listed below or not. The file is kept so that the declaration
+exists when the resolver does; do not rely on it to enable anything today, and do not treat a listed server as trusted.
+
+Reachability never implies trust. The intended contract: list each MCP server this product trusts with its class and
+per-tool capability grants; an unlisted server or tool stays \`mcp.unknown\` (DENY), and privileged or destructive
+tools are DENY by default.
 
 \`\`\`yaml
+# not read by anything yet (see above)
 servers:
   - id: filesystem
     scope: local            # local | remote

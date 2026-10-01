@@ -73,6 +73,42 @@ listed, with their residual risk, in [`phase-1-residuals.md`](phase-1-residuals.
 which *suppresses the host's own prompt* — so returning `ALLOW` for something unmodelled was strictly worse than
 saying nothing.
 
+### The structured tool surface, and what it costs
+
+"Structured path" in the Phase-1 exit criterion means every call that is **not a Bash string** — `Write`, `Edit`,
+`MultiEdit`, `NotebookEdit`, `apply_patch`, `Read`, `Grep`, `Glob`, `LS`, `WebFetch`, `WebSearch`, an `mcp__` tool, a tool
+nobody modelled — *and the two host adapters that turn a raw payload into one*. The input shape is part of the surface,
+not only the tool name. Pinned in [`closure-tools.test.ts`](../../packages/kernel/test/closure-tools.test.ts), at the
+evaluator and through the real hook path of both hosts:
+
+- **One operand per tool.** `TOOL_OPERANDS` in the evaluator says which key a tool is judged by (`file_path`, or
+  `notebook_path` for the notebook tool; `url` only for `WebFetch`, so a `WebSearch` is always `network.public-read`).
+  An operand that is present and not a string, or a second operand-shaped key beside it (`path` on a `Write`, `cmd` on a
+  `Bash`), is read as the kind of operand it names and the call asks — it is not known which key the host honours.
+- **A path is judged by what it resolves to.** A link is followed even when its target does not exist yet (the nearest
+  existing ancestor of the destination is judged), `..` after a link names the parent of the link target, and a path with
+  leading or trailing whitespace or a NUL is classified under every reading and always asks, never judged as if it had been
+  trimmed. The shell shares the same resolver.
+- **`apply_patch` headers are read the way the host's parser reads them:** every line is trimmed, a trimmed line that is a
+  header is a write target wherever it sits, and a trimmed `*** ` line that is none of the known headers makes the whole
+  patch unparseable (DENY).
+- **Codex sends an argv, not a string.** The codex-cli dialect turns `["ls","-la"]` into the shell-quoted line that
+  executes, the host's own `["bash","-lc",<script>]` wrapper into the script, and a `workdir` into its `cd`; any other
+  shape is left as it arrived and asked about (refused on codex-cli, where `ASK` is refused until conformance).
+- **MCP.** Every `mcp__` tool is `mcp.unknown` (DENY). `.harness/mcp-trust.md` is written by `ego init` and read by
+  nothing, so listing a server there has no effect; the resolver is phase-2 work (issue #10), and the `mcp.local.*` /
+  `mcp.remote.*` classes are not reachable until it lands.
+
+**The cost of "nothing falls through to ALLOW".** A tool the evaluator does not model asks. On claude-code that is a
+prompt for every host tool EGO has not read — `Task`, `Skill`, `KillShell`, a tool shipped next month — and on codex-cli
+it is a refusal. The noise pushes people to switch the hook off, which is worse than any one tool, so the host tools
+that cannot act on anything are listed **by name, with the reason beside the name** (`INERT_HOST_TOOLS` in the
+evaluator): `TodoWrite` (the agent's own checklist) and `BashOutput` (reads the output of a shell whose start was
+already judged). The list is spelled exactly — `todowrite` or `TodoWrite ` is an unmodelled tool — and it stays this
+small. `ExitPlanMode` and `AskUserQuestion` are deliberately **not** on it: they do nothing to the machine, but their
+whole function is the host's prompt to the human, and a hook `allow` suppresses that prompt, so asking costs nothing
+and allowing would answer for the human.
+
 ## Positive security claims must be earned
 
 The fifth challenge found the failure that four rounds of enumeration had been circling: **a parser failing to find

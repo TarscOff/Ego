@@ -364,7 +364,7 @@ the instances are not the point:
 | Cause (lens counts in brackets) | What is open |
 |---|---|
 | **A table is wrong by omission** (runners 13, policy-layer 13, containers 13, k8s-cloud 13, db 8) | tools that run a program named by their OWN option or config: `clang --ld-path`, `gcc -fuse-ld`, `prettier --config`, `eslint -f ./x.js`, `pylint --init-hook`, `npm --script-shell`, `yarn-path`, `bun test`, `python -m black`; `docker buildx bake` (≈10 spellings: the bake file names Dockerfiles and targets), `docker pass`, `docker debug --host`, `buildx create --driver remote`; `kubectl --cluster`, `config view --flatten`, `get -f s.yaml` of a Secret, `--kubeconfig` with a kind context; `dbmate --env`. (The database-client rows - `sqlite3 … writefile()/edit()`, `psql -o '\|cmd'`, `mysql -e'…'` - are CLOSED, see below.) |
-| **A path is judged by its spelling, not by the file** (fs-paths 14, hostapi 7, absolutes 12, errors 4) | a leading space in a tool `file_path`; a symlink whose NAME contains a glob character; `git checkout-index --prefix=.git/hooks/`; `tar --extr`/`--use=`; `cat .e*` and other wildcard shell operands that reach credential stores; `echo x > /dev/disk0`; a `Write` through a symlink to a path that does not exist yet. |
+| **A path is judged by its spelling, not by the file** (fs-paths 14, hostapi 7, absolutes 12, errors 4) | a symlink whose NAME contains a glob character; `git checkout-index --prefix=.git/hooks/`; `tar --extr`/`--use=`; `cat .e*` and other wildcard shell operands that reach credential stores; `echo x > /dev/disk0`. (A leading space in a tool `file_path` and a write through a symlink to a path that does not exist yet were in this row; both are closed - see "Structured tool surface" below.) |
 | **A reached bound is still not an absence, on surfaces that were not wired** (limits 8, expansion-new 14) | `env env env …` nested past the depth cap, a `cd` chain past the path cap, `flock -c "flock -c …"` nested past four, a brace budget over 64 in `Glob`/`Grep` (the overflow report was wired only into the Bash loop). |
 | **Carried commands and producers** (carriers 14, producers-deep 14, claims 14) | `find … -exec` payloads of several kinds; `timeout -s KILL`, `env --unset A` before `sed 'w …'`; `yarn exec git -C …`; `watch 'git commit -nm x'`; a Dockerfile written in the same command before `docker buildx bake`; `lint-staged` config written or chosen by a variable; a `make -f ev*.mk` glob; `DF=x; docker build -f "$DF"` (a variable assigned earlier names the file). |
 | **Variables a line assigned** (claims, carriers, crossproduct) | partly closed (literals substituted; a run-time writer operand asks). Still open: `O=--context; docker $O production rm -f app`, `R=secret; kubectl get $R`, a variable holding a SUBCOMMAND or an OPTION. |
@@ -516,6 +516,26 @@ any other runner. An earlier revision of this table listed it as permitted, whic
 gate; *compiling* code already acquired is a containment dependency. The seam is imperfect — a cold cargo cache
 acquires — and it is drawn here deliberately rather than left implicit, because drawing it somewhere is the only
 alternative to gating every build in every ecosystem.
+
+## Structured tool surface: closed 2026-10-01, and what stays recorded
+
+Audit of 2026-10-01 re-ran the structured-tool findings (apply_patch headers, WebSearch, MCP trust, unknown tools, operand
+shapes, the Codex adapter) and criterion check C3. Closed and pinned in `packages/kernel/test/closure-tools.test.ts`, at the
+evaluator and through the real hook path of both hosts: an indented or padded `apply_patch` header (any Unicode
+whitespace, CRLF, after an Add / Delete / Update) is a header; an unrecognised `*** ` header refuses the patch; a write
+through a symlink whose target does not exist yet is judged by the target (the resolver is shared with the shell); `..`
+after a link; a path with leading or trailing whitespace or a NUL; `WebSearch` with a `url` key; an optional operand
+that is present and not a string; a second operand-shaped key beside a tool's own; the Codex argv / JSON `arguments`
+shapes; the MCP trust wording in the host matrix, the `ego init` template and the capability page.
+
+| Item | Class | Severity | Disposition | Why it stays recorded |
+|---|---|---|---|---|
+| A shell redirection or writer operand with `..` AFTER a symlink (`echo x > d/../settings.json`, `d -> .claude/sub`) | a path is judged by its spelling | MEDIUM | **MUST_FIX (open)** | Found while closing the structured tools, where `d/../x` now resolves the way the kernel does. The shell layer collapses `..` as text (`resolve(cwd, token)`) at about twenty call sites before `classifyPath` sees the path, and `cd d && echo x > ../settings.json` is already DENY because `cd` tracks both readings. Fixing it means classifying the physical reading beside the lexical one at each of those sites; not done here. |
+| The Codex `apply_patch` parser differential | a path is judged by its spelling | HIGH if Codex trims as upstream suggests | **UNVERIFIED until conformance (K4)** | EGO's reader is now a superset of what the upstream parser (`codex-rs/apply-patch`, read from a summary, not executed here) accepts as a header; whether the installed Codex agrees line for line is confirmed only by a conformance run on a machine with Codex installed. Over-reading can only add write targets, never hide one. |
+| Whether a host forwards undeclared or mistyped operand keys to `PreToolUse` | operand shape | LOW | **FAIL-SAFE** | A spec-valid host rejects them first. If it does not, they now ask (`command.unknown`) and any path or command they name is classified. |
+| Hook `allow` for `TodoWrite` / `BashOutput` | proportionality | LOW | **ACCEPTED_PRODUCT_BEHAVIOR** | Listed by name in `INERT_HOST_TOOLS`; every other unmodelled tool still asks. `ExitPlanMode` and `AskUserQuestion` ask on purpose (a hook `allow` would suppress the prompt that is their function). |
+| Codex `bash -lc <script>` is judged as the script | claims | LOW | **ACCEPTED_PRODUCT_BEHAVIOR** | The exact three-element wrapper is the host's own spelling of "run this script"; login-shell start-up files are the host's baseline, not model input. Any other wrapper shape keeps its words and asks. |
+| `mcp.local.*` / `mcp.remote.*` unreachable | unmodelled producer | MEDIUM | **UNKNOWN_PRODUCER/FAIL-SAFE** | Every `mcp__` tool is `mcp.unknown` (DENY); the resolver is phase-2 work (issue #10). |
 
 ## What this changes about the exit criterion
 

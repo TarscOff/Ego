@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { HookEvent, HookDecision, HookEventName } from '../../kernel/src/hooks/events.ts';
 import { isHookEventName } from '../../kernel/src/hooks/events.ts';
 import { writeAtomic } from '../../kernel/src/util/fs.ts';
+import { argvToCommandLine, shellQuote } from '../../kernel/src/util/shell-quote.ts';
 
 export const HOST_ID = 'codex-cli' as const;
 
@@ -31,13 +32,16 @@ export function parseCodexEvent(
   const toolName = firstString(payload, ['tool_name', 'toolName', 'tool']);
   if (toolName) {
     const inputRaw = payload['tool_input'] ?? payload['input'] ?? payload['arguments'];
+    const name = normalizeCodexTool(toolName);
     const input =
-      inputRaw && typeof inputRaw === 'object'
-        ? (inputRaw as Record<string, unknown>)
-        : typeof inputRaw === 'string'
-          ? { command: inputRaw }
-          : {};
-    ev.tool = { name: normalizeCodexTool(toolName), input };
+      name === 'Bash'
+        ? shellInput(inputRaw)
+        : inputRaw && typeof inputRaw === 'object'
+          ? (inputRaw as Record<string, unknown>)
+          : typeof inputRaw === 'string'
+            ? { command: inputRaw }
+            : {};
+    ev.tool = { name, input };
     if ('tool_response' in payload) ev.tool.response = payload['tool_response'];
     if ('output' in payload) ev.tool.response = payload['output'];
   }
@@ -54,9 +58,74 @@ function firstString(p: Record<string, unknown>, keys: string[]): string | undef
   return undefined;
 }
 
+/**
+ * Codex runs a shell STRING as `["bash","-lc",<script>]`: that argv is how it spells "run this script", it is the HOST's
+ * wrapper rather than anything the model chose, and judging it as the command `bash -lc '…'` (an unknown head, ASK)
+ * would refuse EVERY real call while adding nothing, because the kernel reads the script inside it either way. The
+ * exact three-element form (a shell, `-c`/`-lc`/`-cl`, one script) is therefore judged as the script. Any other shape —
+ * a fourth element that becomes `$0`, `-i`, `-x`, `--rcfile` — keeps its wrapper and is judged as written.
+ */
+const HOST_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
+function hostShellScript(argv: unknown): string | null {
+  if (!Array.isArray(argv) || argv.length !== 3 || !argv.every((a) => typeof a === 'string')) return null;
+  const [shell, flag, script] = argv as [string, string, string];
+  return HOST_SHELLS.has(shell.replace(/^.*\//, '')) && (flag === '-c' || flag === '-lc' || flag === '-cl')
+    ? script
+    : null;
+}
+function commandLine(argv: unknown): string | null {
+  return hostShellScript(argv) ?? argvToCommandLine(argv);
+}
+
+/**
+ * THE COMMAND A CODEX SHELL CALL WILL RUN, AS THE STRING THE KERNEL CLASSIFIES. Codex does not send a string: its `shell`
+ * tool sends an argv array (`["bash","-lc","git push"]`), often inside a JSON text in `arguments`, and `exec_command`
+ * sends `cmd`. Wrapping that JSON as the command made every real call an unknown head — refused, which is safe and
+ * unusable (audit 2026-10-01, item 13). The argv is therefore turned into the shell-quoted line that executes as that
+ * very vector, so `["ls","-la"]` is judged as `ls -la`, `["git","push"]` as `git push`, and `["bash","-lc","git push"]`
+ * as the script it runs; a `workdir` becomes the `cd` it is, so relative paths are judged against the directory the
+ * command really runs in. Anything this does not recognise is left exactly as it arrived, and the kernel asks about a
+ * call it cannot read.
+ */
+function shellInput(raw: unknown): Record<string, unknown> {
+  let value = raw;
+  if (typeof value === 'string' && /^\s*[[{]/.test(value)) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      /* not JSON after all (`[ -f x ] && ls`, `{ ls; }`): it is the command text itself */
+    }
+  }
+  if (typeof value === 'string') return { command: value };
+  if (Array.isArray(value)) {
+    const line = commandLine(value);
+    return line === null ? {} : { command: line };
+  }
+  if (!value || typeof value !== 'object') return {};
+  const obj = { ...(value as Record<string, unknown>) };
+  for (const key of ['command', 'cmd', 'argv']) {
+    if (!(key in obj)) continue;
+    const v = obj[key];
+    const line = typeof v === 'string' ? v : commandLine(v);
+    const workdir = obj['workdir'];
+    if (line === null || (workdir !== undefined && (typeof workdir !== 'string' || workdir === ''))) return obj;
+    delete obj[key];
+    delete obj['workdir'];
+    return { ...obj, command: typeof workdir === 'string' ? `cd ${shellQuote(workdir)} && ${line}` : line };
+  }
+  return obj;
+}
+
 /** Codex tool names map onto the neutral vocabulary the kernel evaluates (shell → Bash, apply_patch stays). */
 export function normalizeCodexTool(name: string): string {
-  if (name === 'shell' || name === 'local_shell' || name === 'exec_command') return 'Bash';
+  if (
+    name === 'shell' ||
+    name === 'local_shell' ||
+    name === 'exec_command' ||
+    name === 'shell_command' ||
+    name === 'container.exec'
+  )
+    return 'Bash';
   if (name === 'read_file' || name === 'view_image') return 'Read';
   if (name === 'write_file') return 'Write';
   return name;
