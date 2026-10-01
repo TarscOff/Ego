@@ -239,7 +239,8 @@ function init(io: CliIo, flags: Record<string, string | boolean>, argv: string[]
   // only question this ever asks is on a human terminal - stdin and stdout both TTYs - about widenings already waiting
   const localTargets = flagValues(argv, 'local-target');
   if (localTargets.length) opts.localTargets = localTargets;
-  if (flags['no-local-targets'] !== undefined) opts.noLocalTargets = true;
+  const declined = flags['no-local-targets'];
+  if (declined !== undefined && declined !== 'false') opts.noLocalTargets = true;
   if (process.stdin.isTTY && process.stdout.isTTY && io.env['EGO_NONINTERACTIVE'] !== '1')
     opts.confirmWidening = (widenings) =>
       ttyConfirm(
