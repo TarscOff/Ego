@@ -5247,8 +5247,29 @@ export function segmentEnvInputs(segment: string, allAssignments = false): Recor
 
 interface EffectState {
   depth: number;
-  seen: Set<string>;
+  /** the producer invocations on the way down to here (their `key`), each with the size of the write ledger when it was
+   *  entered: a cycle is only a REPEAT if nothing was written since (see classifyNormalized) */
+  seen: ReadonlyMap<string, number>;
   env: ExecutionEnvironment;
+}
+
+/** A SHELL FUNCTION AS IT STOOD WHEN ITS DEFINITION ENDED. The stages of the body are analysed where the definition is - they are
+ *  the commands the definition CONTAINS - but a function runs when it is CALLED, in the directory and against the files of the
+ *  call: `f() { make -C sub all; }; cp evil.mk sub/Makefile; f` runs the replaced makefile. `ledger` and `dirs` are what the write
+ *  ledger and the working directory were when the body was last analysed; a call that finds either changed reads the body again
+ *  (closure audit wave 2, RC-MK). */
+interface FunctionDef {
+  body: readonly ShellStage[];
+  ledger: number;
+  dirs: string;
+}
+/** A function body to analyse again at a call: its stages (already split), the definitions of the unit it came from, the names its
+ *  caller had bound, and the functions being run again on the way down - a recursion is a repeat, not a new body. */
+interface InheritedUnit {
+  stages: readonly ShellStage[];
+  functions: Map<string, FunctionDef[]>;
+  names: ReadonlySet<string>;
+  active: ReadonlySet<string>;
 }
 
 function stripComment(line: string): string {
@@ -5456,11 +5477,20 @@ function directoryExists(abs: string): boolean {
 /** Destination operands of the write-ish commands, resolved against `cwd`. Feeds the A4 freshness ledger so that
  *  `cp evil.mk Makefile && make build` can no longer be judged from the Makefile that was replaced. */
 const LEDGER_ANY = '\0any';
+/** An in-place edit flag: a short cluster holding `i` (`-i`, `-i.bak`, `-pi`, `-Ei`), or a long option that abbreviates
+ *  `--in-place` - with or without a suffix (`--in-place=.bak`, `--in`). */
+const IN_PLACE_FLAG_RE = /^-[a-zE]*i|^--i(?:n(?:-(?:p(?:l(?:a(?:ce?)?)?)?)?)?)?(?:=.*)?$/;
 function writtenPathOperands(segment: string, cwd: string): string[] {
   const tokens = tokenize(withoutRedirections(segment));
   const hi = commandHeadIndex(tokens);
   const head = tokens[hi] ?? '';
   const operands = tokens.slice(hi + 1).filter((t) => !t.startsWith('-') && !t.includes('='));
+  // THE WORDS A WRITER NAMES FILES WITH. `operands` drops every word holding an `=` (it exists for `git -c k=v`), and a FILE NAME
+  // or a SCRIPT may hold one: `sed -i 's/^CMD=true/CMD=sh/' Makefile` lost its script, the file then took the script's place
+  // (`operands.slice(1)`) and the write to Makefile was never recorded - the next `make` read the pre-image (closure audit wave 2,
+  // RC-MK). Everything after `--` is an operand even when it begins with a dash.
+  const dd = tokens.indexOf('--', hi + 1);
+  const words = tokens.filter((t, i) => i > hi && (dd >= 0 && i > dd ? true : !t.startsWith('-')) && i !== dd);
   const out: string[] = [];
   // EVERY READING OF A DESTINATION is a destination: the lexical one and the physical one differ when a `..` follows a
   // link (`cp evil.mk d/../Makefile` replaces the Makefile beside the link's TARGET), and the ledger is a set of names
@@ -5484,7 +5514,7 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     }
     return out;
   }
-  if (head === 'uniq' && operands.length >= 2) return abs(operands[1]!);
+  if (head === 'uniq' && words.length >= 2) return abs(words[1]!);
   if (head === 'curl') {
     for (const [i, t] of tokens.entries()) {
       if ((t === '-o' || t === '--output') && tokens[i + 1]) out.push(...abs(tokens[i + 1]!));
@@ -5525,18 +5555,18 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     if (dirArg) {
       for (const dir of abs(dirArg)) {
         out.push(dir);
-        for (const src of operands.filter((o) => o !== dirArg)) out.push(`${dir}/${src.slice(src.lastIndexOf('/') + 1)}`);
+        for (const src of words.filter((o) => o !== dirArg)) out.push(`${dir}/${src.slice(src.lastIndexOf('/') + 1)}`);
       }
     }
-  } else if (/^(cp|mv|install|ginstall|rsync|ln)$/.test(head) && operands.length >= 2) {
+  } else if (/^(cp|mv|install|ginstall|rsync|ln)$/.test(head) && words.length >= 2) {
     // `cp SRC DIR` WRITES `DIR/basename(SRC)`, not DIR. The ledger recorded the destination operand verbatim,
     // so `cp evil/Makefile sub && make -C sub all` marked `sub` written and left `sub/Makefile` — the file the
     // next command reads — looking fresh (exit review 10). When the destination is an existing DIRECTORY, every
     // source contributes the name it lands under.
-    for (const last of abs(operands[operands.length - 1]!)) {
+    for (const last of abs(words[words.length - 1]!)) {
       out.push(last);
       if (directoryExists(last))
-        for (const src of operands.slice(0, -1))
+        for (const src of words.slice(0, -1))
           out.push(`${last}/${src.slice(src.lastIndexOf('/') + 1)}`);
     }
     // A HARD LINK IS A SECOND NAME FOR THE SAME INODE. `cp -l control-plane/permissions/absolute-denies.md
@@ -5544,17 +5574,21 @@ function writtenPathOperands(segment: string, cwd: string): string[] {
     // `ln` without `-s`. The SOURCE is therefore part of the act, which is why it is added to the ledger here
     // (exit review 7).
     if ((head === 'ln' && !tokens.includes('-s')) || (head === 'cp' && tokens.some((t) => /^-[a-zA-Z]*l/.test(t))))
-      out.push(...operands.slice(0, -1).flatMap(abs));
+      out.push(...words.slice(0, -1).flatMap(abs));
   }
   else if (/^(tee|truncate|touch)$/.test(head))
     // a device sink is a DISCARD, exactly as it is for `> /dev/null`, which redirectionTargets already knows;
     // `ls | tee /dev/null` was classified as an outside-workspace write (exit review 5)
-    out.push(...operands.filter((t) => !discardWord(cwd, t)).flatMap(abs));
+    out.push(...words.filter((t) => !discardWord(cwd, t)).flatMap(abs));
   else if (head === 'dd') {
     const of = tokens.find((t) => t.startsWith('of='));
     if (of) out.push(...abs(of.slice(3)));
-  } else if (/^(sed|gsed|perl|ruby|gawk)$/.test(head) && tokens.some((t) => /^-[a-z]*i/.test(t) || t === '--in-place') && operands.length)
-    out.push(...operands.slice(1).flatMap(abs));
+  } else if (/^(sed|gsed|perl|ruby|gawk)$/.test(head) && tokens.some((t) => IN_PLACE_FLAG_RE.test(t)))
+    // EVERY WORD IS A CANDIDATE FILE. Which word is the script and which the file depends on the dialect (`-e SCRIPT`, `-f FILE`,
+    // BSD `-i SUFFIX`, perl's `-pi -e`), and the ledger is a set of names that later reads are compared against: a script recorded
+    // as if it were a path names a file nobody reads, a file left out is the pre-image a producer trusts. Dropping the first
+    // operand as "the script" was right for one dialect and lost the file in the others.
+    out.push(...words.flatMap(abs));
   // A BUILD TOOL'S OUTPUT FLAG IS A WRITE DESTINATION. Every bundler, compiler and archiver names where it writes
   // with a flag, and none of them were read: `esbuild src/a.ts --outfile=.git/hooks/pre-commit` installed a git
   // hook, `--outfile=control-plane/permissions/matchers.md` rewrote the policy that decides every later verdict,
@@ -5971,6 +6005,153 @@ function listDirectory(dir: string): string[] | null {
   } catch {
     return null;
   }
+}
+
+/** One component of a glob as a regular expression: `*`, `?` and a bracket expression (`[a-c]`, `[!x]`, `[^x]`, `[[:digit:]]`).
+ *  A `[` that never closes is an ordinary character, as it is for the shell. */
+function globComponentRe(part: string): RegExp {
+  const CLASSES: Record<string, string> = { alpha: 'A-Za-z', digit: '0-9', alnum: 'A-Za-z0-9', upper: 'A-Z', lower: 'a-z', space: ' \\t', punct: '!-\\/:-@\\[-`{-~', xdigit: '0-9A-Fa-f' };
+  let re = '';
+  for (let i = 0; i < part.length; i++) {
+    const c = part[i]!;
+    if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else if (c === '[') {
+      // the bracket ends at the first `]` after its first member (a leading `]` is a member), stepping over `[:class:]`
+      let j = i + 1;
+      if (part[j] === '!' || part[j] === '^') j++;
+      if (part[j] === ']') j++;
+      let close = -1;
+      for (; j < part.length; j++) {
+        if (part[j] === '[' && part[j + 1] === ':') {
+          const end = part.indexOf(':]', j + 2);
+          if (end >= 0) {
+            j = end + 1;
+            continue;
+          }
+        }
+        if (part[j] === ']') {
+          close = j;
+          break;
+        }
+      }
+      if (close < 0) re += '\\[';
+      else {
+        let body = part.slice(i + 1, close);
+        const negate = body.startsWith('!') || body.startsWith('^');
+        if (negate) body = body.slice(1);
+        body = body.replace(/\[:([a-z]+):\]/g, (_m, n: string) => CLASSES[n] ?? '').replace(/[\\\]^]/g, '\\$&');
+        re += `[${negate ? '^' : ''}${body}]`;
+        i = close;
+      }
+    } else re += c.replace(/[.+^${}()|\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/**
+ * THE NAMES A GLOB WORD DENOTES, read the way the shell (and make's own `wildcard`, `include` and prerequisite lists) read it
+ * - against the directory listing, one component at a time. A makefile is opened by the name the shell hands to make, and a
+ * word that holds `*`, `?` or `[` is not a name: `make -f ev*.mk` opens whatever matches, and a reader that took it for a literal
+ * file found none and called the makefile ABSENT (closure audit wave 2, RC-MK). Every place that turns such a word into files -
+ * `-f`, `include`, a generated include - asks here, so they cannot drift.
+ *
+ * The matches are returned as the words they would be (`sub/evil.mk`), not as paths, because the directory they are OPENED in is
+ * not always the one they were listed in: the shell expands `-f ev*.mk` where it stands and make opens the result after `-C`.
+ * A leading dot is matched too: the shell would skip a hidden file unless `dotglob` is set, and a reader that is wrong in the
+ * direction of reading one makefile too many gates a file nobody runs; the other direction runs a file nobody read.
+ * `incomplete` is true when a directory could not be listed or there are more matches than this reader follows - that is a gap,
+ * never an empty set.
+ */
+function expandNamePattern(baseDir: string, word: string, limit = 64): { names: string[]; incomplete: boolean } {
+  const parts = word.split('/');
+  const names: string[] = [];
+  let incomplete = false;
+  const walkDir = (physical: string, shown: string, i: number): void => {
+    if (incomplete) return;
+    if (i === parts.length) {
+      names.push(shown);
+      if (names.length > limit) incomplete = true;
+      return;
+    }
+    const part = parts[i]!;
+    const last = i === parts.length - 1;
+    if (part === '' || part === '.') {
+      walkDir(physical, part === '' && i === 0 ? '/' : shown, i + 1);
+      return;
+    }
+    const join2 = (s: string, p: string): string => (s === '' ? p : s.endsWith('/') ? s + p : `${s}/${p}`);
+    if (!MAKE_WILDCARD.test(part)) {
+      const next = part === '..' ? (chdirPath(physical, '..') ?? dirname(physical)) : join(physical, part);
+      walkDir(next, join2(shown, part), i + 1);
+      return;
+    }
+    const listed = listDirectory(physical);
+    if (listed === null) {
+      // a directory that is PROVEN not to be there matches nothing; one that is there and cannot be listed is a gap
+      if (fileExists(physical)) incomplete = true;
+      return;
+    }
+    const re = globComponentRe(part);
+    for (const entry of listed.sort()) {
+      if (!re.test(entry)) continue;
+      const next = join(physical, entry);
+      if (!last) {
+        let isDir = false;
+        try {
+          isDir = statSync(next).isDirectory();
+        } catch {
+          /* a dangling link names no directory */
+        }
+        if (!isDir) continue;
+      }
+      walkDir(next, join2(shown, entry), i + 1);
+    }
+  };
+  walkDir(word.startsWith('/') ? '/' : baseDir, '', 0);
+  return { names, incomplete };
+}
+
+/**
+ * THE MAKEFILES AN INVOCATION OPENS FIRST - the one reader of "which file is the makefile". With no `-f`, GNU make's own
+ * precedence (GNUmakefile, then makefile, then Makefile) in the make directory; with `-f`, every word, in order, because make
+ * reads them ALL. A word with a glob character is expanded against `shellDir` - the shell does it where the command STANDS,
+ * before make has entered its `-C` directory - and the matches are opened in `makeDir`. A word that cannot be turned into a
+ * file (`$X`, an empty string) is `unresolved`: it used to be dropped, which left "no makefile" and a positive claim of
+ * absence over a file that decides what runs. `patterns` are the glob words as absolute patterns, for the freshness ledger: a
+ * file an earlier segment creates that the glob would match is a makefile that was not there when it was listed.
+ */
+function makefileRoots(
+  shellDir: string,
+  makeDir: string,
+  files: readonly string[],
+): { paths: string[]; patterns: string[]; unresolved: string[] } {
+  if (files.length === 0)
+    // GNU make's own precedence is GNUmakefile, then makefile, then Makefile. Reading them in the wrong order named a file
+    // make never opens while claiming RESOLVED_COMPLETE (challenge 6, findings 2, 8, 20). The candidate is resolved to the
+    // REAL directory entry: on a case-insensitive filesystem `makefile` and `Makefile` are the same file but canonicalise to
+    // different strings, which silently unhooked the freshness ledger.
+    return { paths: defaultMakefile(makeDir), patterns: [], unresolved: [] };
+  const paths: string[] = [];
+  const patterns: string[] = [];
+  const unresolved: string[] = [];
+  for (const f of files) {
+    if (MAKE_WILDCARD.test(f)) {
+      const { names, incomplete } = expandNamePattern(shellDir, f);
+      patterns.push(f.startsWith('/') ? f : `${shellDir === '/' ? '' : shellDir}/${f}`);
+      if (incomplete) unresolved.push(f);
+      for (const name of names) {
+        const opened = openedPath(makeDir, name);
+        if (opened === null) unresolved.push(name);
+        else paths.push(opened);
+      }
+      continue;
+    }
+    const opened = openedPath(makeDir, f);
+    if (opened === null) unresolved.push(f);
+    else paths.push(opened);
+  }
+  return { paths, patterns, unresolved };
 }
 
 /** make functions whose RESULT is text this resolver does not evaluate. Naming them is what makes an UNKNOWN
@@ -6462,21 +6643,15 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
           names.push(name);
           continue;
         }
-        // the directory make LISTS is the physical one: `include d/../*.mk` reads the parent of d's TARGET
-        const globDir = openedPath(dir, name.includes('/') ? name.slice(0, name.lastIndexOf('/')) || '/' : '.') ?? dir;
-        const pattern = name.includes('/') ? name.slice(name.lastIndexOf('/') + 1) : name;
-        const prefix = name.includes('/') ? name.slice(0, name.lastIndexOf('/') + 1) : '';
-        const re = new RegExp('^' + pattern.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
-        const listed = listDirectory(globDir);
-        if (listed === null) {
-          model.unsupported.push(`include with a pattern whose directory could not be read: ${trimmed}`);
-          continue;
-        }
-        for (const entry of listed) if (re.test(entry)) names.push(prefix + entry);
+        // the same reader `-f` uses (expandNamePattern): the directory make LISTS is the physical one, so `include d/../*.mk`
+        // reads the parent of d's TARGET, and a glob in a directory component is expanded too
+        const { names: matched, incomplete } = expandNamePattern(dir, name);
+        if (incomplete) model.unsupported.push(`include with a pattern whose directory could not be read: ${trimmed}`);
+        names.push(...matched);
         // A PATTERN INCLUDE TAKES WHATEVER MATCHES WHEN MAKE RUNS, and an earlier unit of the same command may
         // have created a file that matches it. The directory listing is a snapshot from BEFORE that write, so
         // the pattern itself is recorded and the producer tests it against the ledger (self-attack).
-        model.pendingIncludes.push(`${globDir === '/' ? '' : globDir}/${pattern}`);
+        model.pendingIncludes.push(name.startsWith('/') ? name : `${dir === '/' ? '' : dir}/${name}`);
       }
       for (const name of names) {
         // AN INCLUDED MAKEFILE THAT IS ITSELF A TARGET IS REMADE, and make then re-executes itself with the new
@@ -6788,6 +6963,70 @@ function parseMakefile(ctx: EvaluationContext, path: string, dir: string, depth 
   for (const name of included)
     if (model.rules.has(name)) model.unsupported.push(`an included makefile is remade by this makefile: ${name}`);
   return model;
+}
+
+/**
+ * THE RULE THAT REMAKES A MAKEFILE, if the makefiles read can name one - the one reader of "can what I read be replaced while
+ * it runs". GNU make treats every makefile it reads (the first ones and every include) as a TARGET: it brings it up to date
+ * first, with ANY rule that can build it, and starts over when the file changed. So what was read is a PRE-IMAGE of what runs
+ * when a rule builds the file - and the recipe of that rule runs for every goal, `make -n` included. The check used to be an
+ * exact-name lookup (`gen.mk: gen.in`), which missed the rules that build a name without writing it: a pattern rule
+ * (`%.mk: %.in`), a suffix rule (`.in.mk:`), a wildcard target (`gen*:`), a computed target and `.DEFAULT` (closure audit
+ * wave 2, RC-MK: `-include gen.mk` with `%.mk: %.in` copied evil text in and ran it).
+ *
+ * `names` are the spellings the file goes by (relative to the make directory, `./`-prefixed, absolute). A target built from a
+ * variable is compared when its value is known; a value nobody can read leaves the question open and is NOT counted - counting
+ * it would make the include of every C project that builds `$(OBJS): %.o: %.c` ask - and that is recorded as a residual.
+ * Returns the rule's description, or null.
+ */
+function remadeBy(model: Pick<MakeFileModel, 'rules' | 'vars'>, names: readonly string[]): string | null {
+  const bare = names.map((n) => n.replace(/^(?:\.\/+)+/, ''));
+  const hit = (key: string): string | null => {
+    const t = key.replace(/^(?:\.\/+)+/, '');
+    if (t === '.DEFAULT') return 'a .DEFAULT rule';
+    if (/^\.[A-Za-z0-9_+-]+\.[A-Za-z0-9_+-]+$/.test(t)) {
+      const second = t.slice(t.lastIndexOf('.'));
+      return bare.some((n) => n.endsWith(second) && n.length > second.length) ? `the suffix rule ${t}` : null;
+    }
+    if (/^\.[A-Za-z0-9_+-]+$/.test(t)) return bare.some((n) => !n.slice(n.lastIndexOf('/') + 1).includes('.')) ? `the suffix rule ${t}` : null;
+    if (t.includes('%')) {
+      const [pre, post] = t.split('%') as [string, string];
+      // a pattern without a slash is matched against the file part and the directory is put back
+      const ok = bare.some((n) => {
+        const subject = t.includes('/') ? n : n.slice(n.lastIndexOf('/') + 1);
+        return subject.startsWith(pre) && subject.endsWith(post) && subject.length > pre.length + post.length;
+      });
+      return ok ? `the pattern rule ${t}` : null;
+    }
+    if (MAKE_WILDCARD.test(t)) {
+      const re = globComponentRe(t);
+      return bare.some((n) => re.test(n)) ? `the wildcard target ${t}` : null;
+    }
+    return bare.includes(t) ? `a rule for ${t}` : null;
+  };
+  for (const key of model.rules.keys()) {
+    if (key.includes('$')) {
+      const expanded = expandMakeText(key, model.vars).text;
+      if (expanded === null) continue;
+      for (const part of readMakeNames(expanded, false).names) {
+        const found = hit(part);
+        if (found) return found;
+      }
+      continue;
+    }
+    const found = hit(key);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The spellings a makefile at `path` goes by as a make TARGET: relative to the make directory (when it lies under it), with
+ *  the leading `./` make strips, and absolute. */
+function makefileNames(makeDir: string, path: string): string[] {
+  const abs = canonicalPath(path);
+  const base = canonicalPath(makeDir);
+  const rel = abs === base ? '' : abs.startsWith(base + '/') ? abs.slice(base.length + 1) : null;
+  return [...new Set([...(rel ? [rel, `./${rel}`] : []), abs, path])];
 }
 
 /** The default makefile `make` would open in `dir`, in GNU make's precedence order, named by its REAL directory
@@ -8086,14 +8325,20 @@ function resolveScriptCommand(
         reason: 'the makefile, directory or target is built at runtime and cannot be resolved',
         resolution: 'DYNAMIC',
       };
-    const paths = makeFiles.length
-      ? makeFiles.flatMap((f) => openedPath(makeDir, f) ?? [])
-      : // GNU make's own precedence is GNUmakefile, then makefile, then Makefile. Reading them in the wrong order
-        // named a file make never opens while claiming RESOLVED_COMPLETE (challenge 6, findings 2, 8, 20). The
-        // candidate is resolved to the REAL directory entry: on a case-insensitive filesystem `makefile` and
-        // `Makefile` are the same file but canonicalise to different strings, which silently unhooked the
-        // freshness ledger.
-        defaultMakefile(makeDir);
+    // THE MAKEFILES THIS INVOCATION OPENS FIRST come from ONE reader (makefileRoots): the default names in GNU make's own order,
+    // or every `-f` word - a glob expanded against the directory as the shell does, a word nobody can resolve reported rather
+    // than dropped. The includes they pull in are followed by parseMakefile.
+    const roots = makefileRoots(cwd, makeDir, makeFiles);
+    if (roots.unresolved.length)
+      return {
+        kind: 'make-target',
+        key: `make:unresolved:${norm}`,
+        body: null,
+        reason: `the makefile ${roots.unresolved[0]} cannot be resolved to a file`,
+        resolution: 'DYNAMIC',
+        unresolved: [{ what: 'body', where: 'makefile', why: `-f ${roots.unresolved[0]} names no file this resolver can open` }],
+      };
+    const paths = roots.paths;
     // A FILE THIS COMMAND JUST WROTE IS NOT ABSENT. `defaultMakefile` returns nothing when no makefile is on
     // disk — which is exactly the state after `printf 'x:\n\tgit push origin main\n' > Makefile` and before
     // `make x` runs — so the stale test had nothing to test and the producer claimed ABSENT_VERIFIED, a POSITIVE
@@ -8110,7 +8355,14 @@ function resolveScriptCommand(
     // WHAT WAS READ IS STILL HANDED OVER — the same rule the script producer follows. Staleness says "this may
     // not be what runs"; it does not say the contents are harmless, and a null body threw away a makefile that
     // had already been read, so a recipe holding an absolute deny arrived as an approvable opacity.
-    const staleNow = staleCandidates.some((p) => stale(p));
+    // a pattern names whatever matches WHEN MAKE RUNS, so it is stale when anything under its literal prefix was written.
+    // the ledger holds CANONICAL paths - on this filesystem `/var/...` canonicalises to `/private/var/...` - so the pattern's
+    // directory is canonicalised before the prefix comparison, or the two never meet
+    const patternStale = (f: string): boolean => {
+      const dirPart = canonicalPath(f.slice(0, f.search(/[*?[]/)) || '/');
+      return written.has('\0any') || [...written].some((w) => w.startsWith(dirPart));
+    };
+    const staleNow = staleCandidates.some((p) => stale(p)) || roots.patterns.some(patternStale);
     if (!paths.length || !paths.some((p) => readInsideWorkspace(ctx, p) !== null)) {
       // ...AND AN ABSENCE CANNOT BE CLAIMED OVER A FILE THIS COMMAND CREATES. With nothing on disk there is no
       // body to hand over, so the staleness is the whole answer — and it must be given BEFORE the absence,
@@ -8208,13 +8460,9 @@ function resolveScriptCommand(
     // ...AND SO DOES AN OPTIONAL INCLUDE THAT WAS NOT THERE. `-include gen.mk` is skipped when the file is
     // missing, which is the whole point of the spelling — but "missing" is a claim about NOW, and `printf
     // 'x:\n\tgit push origin main\n' > gen.mk && make x` writes it first (exit review 9).
-    // the ledger holds CANONICAL paths — on this filesystem `/var/...` canonicalises to `/private/var/...` —
-    // so the pattern's directory is canonicalised before the prefix comparison, or the two never meet
-    const includeStale = [...merged.pendingIncludes, ...merged.sources].some((f) => {
-      if (!/[*?[]/.test(f)) return stale(f);
-      const dirPart = canonicalPath(f.slice(0, f.search(/[*?[]/)) || '/');
-      return written.has('\0any') || [...written].some((w) => w.startsWith(dirPart));
-    });
+    const includeStale = [...merged.pendingIncludes, ...merged.sources].some((f) =>
+      MAKE_WILDCARD.test(f) ? patternStale(f) : stale(f),
+    );
     // ...and this one hands over what was read too. Returning a null body here discarded a makefile that had
     // already been parsed, so its parse-time `$(shell …)` and its recipes vanished the moment ANY earlier
     // segment of the command line could not be classified — which the wildcard ledger entry makes easy. An
@@ -8268,7 +8516,7 @@ function resolveScriptCommand(
     // command executes (challenge 5, finding 8). Walked transitively with a cycle guard and a depth bound.
     const visited = new Set<string>();
     const touchedBlind: string[] = [];
-    const walk = (t: string, depth: number): void => {
+    const walk = (t: string, depth: number, always = false): void => {
       if (visited.has(t)) return;
       visited.add(t);
       touchedBlind.push(...(merged.unsupportedFor.get(t) ?? []));
@@ -8314,13 +8562,13 @@ function resolveScriptCommand(
           into.set(k, val);
           merged.targetVars.set('\0inherited', into);
         }
-      for (const p of rule.prereqs) walk(p, depth + 1);
+      for (const p of rule.prereqs) walk(p, depth + 1, always);
       for (const rl of rule.recipes) {
         const cmd = rl.replace(/^[@+\s-]*[@+-]/, '').trimStart().replace(/^[@+-]+/, '').trim();
         if (!cmd) continue;
             // make's recipe PREFIX CHARACTERS may appear in any order AND BE SEPARATED BY WHITESPACE, so `@ +cmd`
         // carries the `+` exactly as `+@cmd` does — and `+` is what still runs under `-n` (exit review 9).
-        const runs = !noRecipes || /^[@\s-]*\+/.test(rl) || /\$[({]MAKE[)}]/.test(rl);
+        const runs = always || !noRecipes || /^[@\s-]*\+/.test(rl) || /\$[({]MAKE[)}]/.test(rl);
         // make expands the line BEFORE the shell sees it: the variables it splices in can carry whole commands,
         // and `$(shell …)` runs while it expands. Both are handed over as what they are (exit review 4).
         const tv0 = merged.targetVars.get(t);
@@ -8378,6 +8626,21 @@ function resolveScriptCommand(
     // whatever make runs while PARSING runs whichever target was asked for
     for (const c of merged.parseRan) body.push(c);
     for (const t of wanted) walk(t, 0);
+    // ...AND WHATEVER REMAKES A MAKEFILE RUNS BEFORE ANY GOAL, for a dry run too (`-n`, `-t` and `-q` do not apply to the update of
+    // the makefiles themselves). The rule is found by remadeBy - the one reader - and its recipe is part of the body, whether or
+    // not any goal reaches it; the makefile it builds is a PRE-IMAGE (see the gap below).
+    const remade: Array<{ path: string; name: string; by: string; root: boolean }> = [];
+    {
+      const includes = [...merged.sources.filter((s) => !paths.includes(s)), ...merged.pendingIncludes.filter((f) => !MAKE_WILDCARD.test(f))];
+      for (const [path, root] of [...paths.map((p) => [p, true] as const), ...includes.map((p) => [p, false] as const)]) {
+        const names = makefileNames(makeDir, path);
+        const by = remadeBy(merged, names);
+        if (by === null) continue;
+        remade.push({ path, name: names[0]!, by, root });
+        const target = names.find((n) => merged.rules.has(n) || merged.rules.has(n.replace(/^(?:\.\/+)+/, ''))) ?? names[0]!;
+        walk(target.replace(/^(?:\.\/+)+/, ''), 0, true);
+      }
+    }
     const provenance = { source: merged.sources.join(','), fingerprint: fingerprint(merged.text) };
     const mkName = merged.sources[0] ?? makeDir;
     const rebinds = [...cliRebinds, ...merged.rebinds];
@@ -8419,7 +8682,12 @@ function resolveScriptCommand(
     // the cycle guard stopped it - while `./x.sh` inside it is `sub/x.sh`, a different file (exit review 10).
     // the dry-run and question state is part of the identity: under `-n` only the `+` and `$(MAKE)` lines run, and a real
     // `make x` reached from one of them (`env -u MAKEFLAGS make x`) must not be skipped as a repeat of the dry one
-    const key = `make:${makeDir}:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}:${cliKey}:${noRecipes ? 'norecipes' : 'run'}`;
+    // ...AND THE ENVIRONMENT IT WAS STARTED WITH, which is what a recipe's `CMD="git push origin main" make run` changes: the
+    // variable beats the makefile's `?=` and, under `-e`, its `=` too. Without it the re-entered invocation had the key of the
+    // one that ran it, the cycle guard took it for a repeat, and the command it carried was never read (closure audit wave 2,
+    // RC-MK: the recursion with a value a conditional picks).
+    const envKey = `${cl.envOverrides ? 'e' : ''}${makeEnvVars.map(([k, v]) => `${k}=${v}`).sort().join('\u0000')}`;
+    const key = `make:${makeDir}:${merged.sources.join('\u0000') || makeDir}:${wanted.join('\u0000')}:${cliKey}:${envKey}:${noRecipes ? 'norecipes' : 'run'}`;
     if (!wanted.length)
       return { kind: 'make-target', key, body: null, reason: 'no target and no default goal', resolution: 'ABSENT_VERIFIED' };
     const gaps: Unresolved[] = [];
@@ -8457,13 +8725,14 @@ function resolveScriptCommand(
       gaps.push({ what: 'context', where: i.slice(0, i.indexOf('=')), why: `make is given ${i}, which changes what it reads` });
     // SELF-MODIFYING PRODUCER — make REMAKES a makefile that is itself a target, then restarts and runs the new
     // one. The source EGO read is then the pre-image of what executes (challenge 6, finding 9).
-    for (const src of merged.sources)
-      if (merged.rules.has(src) || merged.rules.has(src.slice(makeDir.length + 1)))
-        gaps.push({
-          what: 'freshness',
-          where: src,
-          why: 'this makefile is itself a target of this makefile: make remakes it and restarts',
-        });
+    for (const r of remade)
+      gaps.push({
+        what: 'freshness',
+        where: r.path,
+        why: r.root
+          ? `this makefile is itself a target of this makefile (${r.by}): make remakes it and restarts`
+          : `an included makefile is remade by this makefile (${r.by}): make runs the rule, then reads the file it wrote`,
+      });
     return {
       kind: 'make-target',
       key,
@@ -12006,8 +12275,28 @@ function classifyNormalized(
   // the ladder, because "no producer matched" is not itself a conclusion about execution. An early return here
   // short-circuited the ladder and restored the very defect the typed dispatch was introduced to remove
   // (challenge 7, finding 20).
-  if (state.seen.has(effect.key)) return hits;
-  const seen = new Set(state.seen).add(effect.key);
+  const enteredAt = state.seen.get(effect.key);
+  if (enteredAt !== undefined) {
+    // A RE-ENTRY IS A SECOND PASS, NOT A REPEAT. The guard exists so a recipe that runs its own make again does not recurse
+    // for ever, and it answers "this was already analysed" - which holds only if the second pass reads what the first one
+    // did. When the body wrote anything since the invocation was entered (a makefile replaced, a stamp file, a directory
+    // moved), the second pass runs against a tree the first pass changed: `run: ; cp evil.mk Makefile ; make run` re-reads the
+    // new makefile, and `make -C sub all ; cp evil.mk sub/Makefile ; [ -e stamp ] || { touch stamp; make run; }` runs the
+    // replaced sub-makefile on its second pass (closure audit wave 2, RC-MK). It is the loop rule the shell already
+    // follows - the writes of the body are in force before it runs again - applied to the recursion.
+    if (state.env.written.size > enteredAt)
+      return [
+        ...hits,
+        opaqueHit(
+          table,
+          ctx,
+          norm,
+          `${effect.reason}: this invocation runs again from inside itself after writing files, so its second pass reads what the first pass wrote`,
+        ),
+      ];
+    return hits;
+  }
+  const seen = new Map(state.seen).set(effect.key, state.env.written.size);
   // THE WHOLE RULE, total over ResolutionOutcome (product decision, 2026-09-22 — "positive security claims must be
   // earned"). Exactly two outcomes carry a positive claim; every other value — including any added later — is
   // opacity, because `resolutionEffect` names the proven ones rather than enumerating the unproven ones.
@@ -13494,6 +13783,29 @@ function runDirectory(seg: string, base: string): { dir: string; known: boolean 
   return found ? { dir, known } : null;
 }
 
+/**
+ * THE DIRECTORIES A WRITER'S RELATIVE OPERANDS ARE READ IN, for the freshness ledger. `env -C sub cp ../evil.mk Makefile`
+ * writes `sub/Makefile`: the normalizer strips the `env -C`, so the writer reached the ledger as `cp ../evil.mk Makefile`
+ * and was recorded against the directory the SHELL is in - the wrong file - while the producer that read `sub/Makefile`
+ * next saw nothing written (closure audit wave 2, RC-MK). The path judgement already reads a command's operands in the
+ * directory it runs in (`runDirectory`); the ledger asked the same question with its own answer. A directory that cannot be
+ * resolved (`env -C "$D"`) is a write to somewhere unknown: `unknown` says so, and the caller records the wildcard.
+ */
+function writerDirectories(seg: string, dirs: readonly string[]): { dirs: string[]; unknown: boolean } {
+  const out = new Set<string>();
+  let unknown = false;
+  for (const d of dirs) {
+    const r = runDirectory(seg, d);
+    if (r === null) out.add(d);
+    else if (r.known) out.add(r.dir);
+    else {
+      out.add(d);
+      unknown = true;
+    }
+  }
+  return { dirs: [...out], unknown };
+}
+
 function carrierCommandValues(seg: string): string[] {
   const m = tokenizeMarked(seg);
   const out: string[] = [];
@@ -13843,6 +14155,9 @@ function analyzeSegments(
   /** true when each segment runs in its OWN shell, so a `cd` must not leak to the next one. GNU make starts a shell
    *  per recipe line, and npm runs pre/main/post as separate processes (challenge 4, findings 4, 19, 26, 33). */
   isolatedShells = false,
+  /** a function body being RUN AGAIN at a call (see `FunctionDef`): the stages are already split - by the splitter, which is the
+   *  only thing that may write a marker - so they are analysed as they stand */
+  inherited?: InheritedUnit,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
   // THE SECOND LOCK ON MARKER FORGERY. Every string that reaches this function came from OUTSIDE the analyzer —
@@ -13878,10 +14193,15 @@ function analyzeSegments(
   // splitter's cross-line state, and a `case` construct whose branches sit below `case "$1" in` kept its pattern
   // glued to the command — the multi-line spelling of the defect exit review 4 found on one line. Make recipe
   // lines and npm pre/post scripts ARE separate shells, and keep their per-line split.
-  const units = isolatedShells
-    ? segments.map((u) => splitShellPipeline(u))
-    : [splitShellPipeline(segments.join('\n'))];
+  const units: Array<readonly ShellStage[]> = inherited
+    ? [inherited.stages]
+    : isolatedShells
+      ? segments.map((u) => splitShellPipeline(u))
+      : [splitShellPipeline(segments.join('\n'))];
   for (const unit of units) {
+    /** the functions this unit defined, with what was true when each definition ended (shared with a body run again at a call) */
+    const fnDefs: Map<string, FunctionDef[]> = inherited ? inherited.functions : new Map();
+    const openFns: Array<{ name: string; from: number }> = [];
     if (isolatedShells) {
       // a fresh shell per recipe line / per pre|main|post script: its timeline starts from the caller's directory
       carriedEnv = {};
@@ -13934,8 +14254,13 @@ function analyzeSegments(
         if (/^done\b/.test(body) && --depth === 0) break;
         if (lj === li) continue;
         const dirs = (timeline[lj]?.dirs.length ? timeline[lj]!.dirs : [state.env.cwd]) as string[];
+        const where = writerDirectories(body, dirs);
         for (const n of new Set([body, ...normalizeSegment(body)])) {
-          for (const d of dirs) for (const w of writtenPathOperands(n, d)) { if (w === LEDGER_ANY) written.add('\0any'); else recordWrite(w); }
+          for (const d of where.dirs)
+            for (const w of writtenPathOperands(n, d)) {
+              if (w === LEDGER_ANY || where.unknown) written.add('\0any');
+              if (w !== LEDGER_ANY) recordWrite(w);
+            }
           if (writesUnenumerably(n)) written.add('\0any');
         }
         for (const t of redirectionTargets(body)) {
@@ -13962,7 +14287,8 @@ function analyzeSegments(
     // its header), either side of a pipe - a definition is the stage after the whole BODY of `git() { echo hi; } | cat` -,
     // a background job, or after `&&`/`||` (`false && git() { true; }` never defines it) - all read by the timeline
     const binding = bindings[stageIndex]!;
-    const functionNames = binding.must;
+    // (a body run again at a call knows the names its caller had bound: its own timeline starts at the body)
+    const functionNames = inherited ? new Set([...binding.must, ...inherited.names]) : binding.must;
     const bindingIsProven = binding.unconditional;
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
     const stdinParts = stage.pipedFromPrevious ? upstreamParts : [];
@@ -14014,7 +14340,21 @@ function analyzeSegments(
     // a consumed function header binds a name for everything after it, and is not a command; the timeline has already
     // said whether it binds, and the commands of the body that follow are the FUNCTION's, not the caller's: they are
     // analysed, but a `cd`, a definition or an `unset` inside them takes effect when the function is CALLED
-    if (cdTrimmed.startsWith(`${FUNCTION_DEF_PREFIX} `) || cdTrimmed === FUNCTION_BODY_END) continue;
+    if (cdTrimmed.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
+      openFns.push({ name: cdTrimmed.slice(FUNCTION_DEF_PREFIX.length + 1), from: stageIndex + 1 });
+      continue;
+    }
+    if (cdTrimmed === FUNCTION_BODY_END) {
+      // WHAT WAS TRUE WHEN THE DEFINITION ENDED is kept with the body: a call reads the body again if the files or the directory
+      // moved since (see the call below)
+      const closed = openFns.pop();
+      if (closed !== undefined) {
+        const list = fnDefs.get(closed.name) ?? [];
+        list.push({ body: stages.slice(closed.from, stageIndex), ledger: written.size, dirs: (timeline[stageIndex]?.dirs ?? []).join('\0') });
+        fnDefs.set(closed.name, list);
+      }
+      continue;
+    }
     if (cdTrimmed.startsWith(`${FUNCTION_UNBIND} `)) {
       definedNames.delete(cdTrimmed.slice(FUNCTION_UNBIND.length + 1));
       continue;
@@ -14104,6 +14444,44 @@ function analyzeSegments(
         env.cwd = runDir.dir;
         env.cwdVerified = env.cwdVerified && directoryExists(env.cwd) && repoRootFor(ctx, env.cwd) !== null;
       } else env.cwdVerified = false;
+    }
+    // A CALL RUNS THE BODY AGAIN, WHERE THE CALL STANDS. The body was analysed at the definition, against the files and in the
+    // directory of THAT moment, and `calling it adds no closure` was true only while nothing moved in between: `f() { make -C sub
+    // all; }; cp evil.mk sub/Makefile; f` and `f() { make all; }; cd sub; f` both ran a makefile the definition never saw, at
+    // ALLOW (closure audit wave 2, RC-MK). When the write ledger or the directory is not what it was when the definition ended, the
+    // body is analysed again from here; the one reader of "is this still fresh" is the same ledger, so nothing new is judged by
+    // a second rule. A function run again from inside itself is a repeat.
+    {
+      const calleeWord = tokenize(seg)[0] ?? '';
+      const defs = functionNames.has(segHead) && !calleeWord.includes('/') ? fnDefs.get(segHead) : undefined;
+      if (defs !== undefined && inherited?.active.has(segHead) !== true) {
+        const dirsNow = point.dirs.join('\0');
+        for (const def of defs.slice(-4)) {
+          if (written.size === def.ledger && dirsNow === def.dirs) continue;
+          const runIn = point.dirs.filter((d) => d !== CWD_UNKNOWN);
+          for (const dir of runIn.length ? runIn : [env.cwd]) {
+            const callEnv: ExecutionEnvironment = {
+              ...env,
+              cwd: dir,
+              get treeFresh(): boolean {
+                return !written.has(TREE_DIRTY);
+              },
+            };
+            for (const h of analyzeSegments(
+              table,
+              ctx,
+              compiled,
+              [],
+              { ...state, depth: state.depth + 1, env: callEnv },
+              false,
+              { stages: def.body, functions: fnDefs, names: functionNames, active: new Set([...(inherited?.active ?? []), segHead]) },
+            ))
+              hits.push({ ...h, via: `${h.via ?? ''} (the body of ${segHead}, run at its call)`.trim() });
+          }
+          def.ledger = written.size;
+          def.dirs = dirsNow;
+        }
+      }
     }
     const carried = execCarriedCommand(seg);
     if (carried !== null)
@@ -14418,17 +14796,24 @@ function analyzeSegments(
           }
         }
       }
-      for (const dir of [effectiveCwd, ...altDirs]) {
+      const where = writerDirectories(seg, [effectiveCwd, ...altDirs]);
+      for (const dir of where.dirs) {
         for (const w of writtenPathOperands(n, dir)) {
-          if (w === LEDGER_ANY) written.add('\0any');
-          else recordWrite(w);
+          if (w === LEDGER_ANY || where.unknown) written.add('\0any');
+          if (w !== LEDGER_ANY) recordWrite(w);
         }
       }
     }
     // a sed script's `w FILE` writes it whatever the operands say - read from the segment AS WRITTEN, where the script
     // is still one quoted word
-    for (const dir of [effectiveCwd, ...altDirs])
-      for (const f of sedWrittenFiles(seg, ctx, dir)) for (const q of pathCandidates(dir, f).paths) recordWrite(q);
+    {
+      const where = writerDirectories(seg, [effectiveCwd, ...altDirs]);
+      for (const dir of where.dirs)
+        for (const f of sedWrittenFiles(seg, ctx, dir)) {
+          if (where.unknown) written.add('\0any');
+          for (const q of pathCandidates(dir, f).paths) recordWrite(q);
+        }
+    }
     // an extraction or a recursive copy writes a set of files nobody enumerated, so nothing resolved after it in
     // this unit is provably fresh — the same wildcard the ledger already uses for an undetermined effect
     if ([seg, ...normalizeSegment(seg)].some(writesUnenumerably)) written.add('\0any');
@@ -14533,7 +14918,7 @@ export function classifyCommand(
   const cwdVerified = directoryExists(cwd) && repoRootFor(ctx, cwd) !== null;
   return analyzeSegments(table, ctx, compiled, [command], {
     depth: 0,
-    seen: new Set(),
+    seen: new Map(),
     env: baseEnvironment(cwd, cwdVerified),
   });
 }
