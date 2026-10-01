@@ -8638,6 +8638,49 @@ function retargetLocalCapability(
   };
 }
 
+/** A request's DOCUMENT body is appended to the text its patterns are matched against, after this sentinel. The
+ *  patterns that name an endpoint or a verb read only up to it (`[^\x00]*`), so a body cannot steer WHICH act a
+ *  request is; the patterns that look for a protection being switched off read past it, because that is where the
+ *  switch is. `externalText` has already mangled any forged sentinel the document carried. */
+const BODY_MARK = `${MARK}body `;
+
+/** The text of a file or stream named in a body position, when the kernel can read it. Standard input counts only
+ *  where a heredoc put it there; a pipe, a path outside the workspace, an unreadable or oversized file does not. */
+function bodyDocument(ctx: EvaluationContext, env: ExecutionEnvironment, operand: string): string | null {
+  if (operand === '-') return env.stdinText ?? null;
+  const target = expandHome(operand, env.cwd);
+  if (target === null || /[$`*?[{]/.test(target)) return null;
+  return readInsideWorkspace(ctx, isAbsolute(target) ? target : resolve(env.cwd, target));
+}
+
+/** THE BODY OF A FORGE WRITE IS PART OF WHAT IT DOES. `gh api -X PUT …/protection --input protection.json` and
+ *  `-F config=@ruleset.json` hand the forge a DOCUMENT the command line only names, and the document is where
+ *  enforcement is switched off for administrators or a bypass actor is added — the standard way to write a nested
+ *  protection is exactly this, because `-f` cannot nest. Matching the command line alone made the bypass the one
+ *  spelling that could not be seen. When the kernel can read the document it is put in front of the patterns;
+ *  when it cannot, nothing is added and the call is judged as the administrable act it provably is, behind the
+ *  human gate, never as a bypass it could not prove and never as less than the act. */
+function forgeApiSubject(ctx: EvaluationContext, norm: string, env: ExecutionEnvironment): string {
+  if (!/^(gh|glab)\s+api\b/i.test(norm)) return norm;
+  const words = tokenize(norm);
+  const docs: string[] = [];
+  const take = (operand: string | undefined): void => {
+    if (operand === undefined) return;
+    const text = bodyDocument(ctx, env, operand);
+    if (text !== null) docs.push(externalText(text).replace(/\s+/g, ' ').trim());
+  };
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === '--input') take(words[i + 1]);
+    else if (w.startsWith('--input=')) take(w.slice('--input='.length));
+    // a TYPED field reads a file when its value begins with `@`: `-F key=@FILE`, `--field key=@FILE`, glued `-Fkey=@FILE`
+    else if (w === '-F' || w === '--field') take(/^[^=]+=@(.+)$/.exec(words[i + 1] ?? '')?.[1]);
+    else if (w.startsWith('--field=')) take(/^--field=[^=]+=@(.+)$/.exec(w)?.[1]);
+    else if (/^-F[^=]+=@/.test(w)) take(/^-F[^=]+=@(.+)$/.exec(w)?.[1]);
+  }
+  return docs.length ? `${norm} ${BODY_MARK}${docs.join(' ')}` : norm;
+}
+
 function classifyNormalized(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -8647,8 +8690,9 @@ function classifyNormalized(
 ): CapabilityHit[] {
   let outer: CapabilityHit | null = null;
   const additive: CapabilityHit[] = [];
+  const subject = forgeApiSubject(ctx, norm, state.env);
   for (const { m, re } of compiled) {
-    if (re.test(norm)) {
+    if (re.test(subject)) {
       // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
       // Letting one win first-match terminated classification of the rest: `git clone --template=evil -o up URL`
       // matched the `--output|-o` write matcher, which sits above the `--template` hook-install deny, and a
@@ -10768,6 +10812,14 @@ function analyzeSegments(
       // A HEREDOC IS STANDARD INPUT THE KERNEL CAN READ. `docker build -f - . <<EOF … EOF` writes the whole
       // Dockerfile right there on the command line.
       ...(stage.heredocBody !== undefined ? { stdinText: stage.heredocBody } : {}),
+      // ...AND SO IS A LITERAL PIPED INTO A FORGE CALL: `echo '{"enforce_admins":false}' | gh api -X PUT …/protection
+      // --input -` is the same document as the same text in a heredoc, and the one place a switch-off can be read.
+      ...(stage.heredocBody === undefined && stdinFrom !== null && /^(gh|glab)$/.test(commandHead(seg))
+        ? (() => {
+            const piped = literalStdout(stdinFrom, upstreamHeredoc ?? undefined);
+            return piped !== null ? { stdinText: piped } : {};
+          })()
+        : {}),
       ...(bindingWhy !== null ? { binding: { kind: 'redefined' as const, why: bindingWhy } } : {}),
       get treeFresh(): boolean {
         return !written.has(TREE_DIRTY);
@@ -10916,8 +10968,9 @@ function analyzeSegments(
           if (!LOCKED_HEADS.has(name)) continue;
           const suffix = [name, ...marked.slice(k + 1).map((t) => t.text)].join(' ');
           for (const sub of normalizeSegment(suffix)) {
+            const subject = forgeApiSubject(ctx, sub, env);
             for (const { m, re } of compiled) {
-              if (!re.test(sub)) continue;
+              if (!re.test(subject)) continue;
               const lock = table.capabilities[m.capability]?.lock;
               if (
                 lock === 'absolute' ||

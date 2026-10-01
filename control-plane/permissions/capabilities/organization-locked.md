@@ -41,10 +41,13 @@ the schema.
 - [x] `forge.pr.merge` — merging is the integration decision.
 - [x] `forge.pr.approve` — self-approval defeats review unless the organization explicitly defines otherwise.
 - [x] `forge.release.publish` — releases are signed human acts.
-- [x] `forge.branch.protection.modify` — protected-branch rules are governance.
-- [x] `forge.repo.permissions.modify` — repository permissions are governance.
+- [x] `forge.release.delete` — deleting a release or one of its assets (`gh release delete`, `delete-asset`, `DELETE …/releases/…`): the inverse of a signed human act, and it breaks provenance for everyone who already pulled it.
+- [x] `forge.repo.delete` — deleting a repository or project on the forge (`gh repo delete`, `glab repo delete`, `DELETE repos/OWNER/REPO`): irreversible and shared.
+- [x] `forge.branch.protection.modify` — protected-branch rules are governance: branch protection, rulesets, protected tags, required approvals (`gh api` and `glab api` writes to `…/branches/*/protection`, `…/rulesets`, `…/protected_branches`, `az repos policy`). CHANGING a rule is administrable; defeating one (`enforce_admins=false`, a bypass actor, `gh pr merge --admin`) is `forge.protection.bypass`, an absolute deny.
+- [x] `forge.repo.permissions.modify` — repository permissions and settings are governance: collaborators, teams, deploy keys, invitations, visibility, archiving, renaming (`gh repo edit|rename|archive`, `gh repo deploy-key`, `gh api` writes to `…/collaborators`, `…/keys`, `…/teams`, a repository PATCH).
 - [x] `forge.issue.create` — create issues or work items.
 - [x] `forge.issue.edit` — edit issue title, body, labels or milestone.
-- [x] `forge.issue.transition` — change issue state or workflow column.
+- [x] `forge.issue.transition` — change issue state or workflow column (`gh issue reopen`, `gh project item-edit|item-add|item-archive|item-delete`).
 - [x] `forge.issue.close` — close issues.
-- [x] `forge.api.mutate` — any mutating call through the forge API escape hatch (`gh api -X POST|PUT|PATCH|DELETE`, field flags, GraphQL mutations); the specific operation cannot be told apart from a PR merge or an issue edit.
+- [x] `forge.issue.delete` — delete an issue or work item (`gh issue delete`): unlike closing, it cannot be undone.
+- [x] `forge.api.mutate` — any mutating call through the forge API escape hatch (`gh api -X POST|PUT|PATCH|DELETE`, field flags, GraphQL mutations) that no more specific identifier names. A request whose path names an act this file lists (a merge, a repository delete, a protection or permission change) is judged as that act: the organization locks the act, not the spelling.

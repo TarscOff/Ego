@@ -178,6 +178,77 @@ matchers:
   - capability: git.hooks.bypass
     tool: Bash
     command: '^git\s+(commit-tree|update-ref)\b'
+  # --- forge governance: the BYPASS (absolute), then the administrable acts that change the rules (Q98) ---
+  # DEFEATING a control and CHANGING it are different acts with different tiers. A bypass has no administrable
+  # form: `forge.protection.bypass` is an absolute deny. The acts below it are administrable, DENY by default, and
+  # sit AHEAD of the generic `gh api` escape hatch because matching is first-match-wins: behind it, enabling
+  # `forge.branch.protection.modify` changed nothing, since every such call was already `forge.api.mutate`.
+  # A raw `gh api` call, a `glab api` call and the same request sent with curl (judged below, by the target) are one
+  # act under one identifier. `--admin` is read from the normalized segment, where quoting is already gone, so the
+  # word `--admin` standing alone inside a quoted value of the same command reads as the flag: the over-approximation
+  # is in the safe direction and the command is one that is DENY or behind a human gate anyway.
+  # `--admin=false` names the flag and turns it off; it is the ordinary merge.
+  - capability: forge.protection.bypass
+    tool: Bash
+    command: '^gh\s+pr\s+merge\b.*\s--admin(?![\w-])(?!=(false|f|0)(\s|$))'
+  - capability: forge.protection.bypass
+    tool: Bash
+    command: '^az\s+repos\s+pr\s+update\b.*\s--bypass-policy(?![\w-])(?!(\s+|=)(false|f|no|n|0)(\s|$))'
+  # enforcement for administrators switched off by its own endpoint...
+  - capability: forge.protection.bypass
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*branches/\S+/protection/enforce_admins(\s|\?|$))(?=[^\x00]*\s(-X|--method|--request)(\s+|=)?DELETE\b)'
+  # ...or by the body of a write to a protection or a ruleset: administrators exempt, a bypass actor or allowance
+  # added, a ruleset that enforces nothing. The BODY is searched, wherever it came from: `-f`/`-F` fields, a file the
+  # kernel could read (`--input`, `-F key=@file`), a heredoc it can see, or the `-d` of a curl. A body that is a
+  # DOCUMENT (a file, standard input) is appended by the evaluator after a NUL sentinel, so a pattern that names the
+  # ENDPOINT or the VERB reads only up to it (`[^\x00]*`) and a body cannot steer which identifier applies; only
+  # this last lookahead reads past it, because the keys it looks for live in the body. An empty bypass list
+  # (`bypass_actors: []`) removes bypasses and is not one.
+  - capability: forge.protection.bypass
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*(branches/\S+/protection|/rulesets)(/\S*)?(\s|\?|$))(?=[^\x00]*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))(?=.*(enforce_admins\W{0,8}(false|null|0)\b|bypass_actors(?!\x22?\x27?\s*[:=]\s*\[\s*\])|bypass_pull_request_allowances|bypass_mode|enforcement\W{0,8}(disabled|evaluate)\b))'
+  # the rules themselves: branch protection, rulesets, protected tags, required approvals
+  - capability: forge.branch.protection.modify
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*(branches/\S+/protection|tags/protection|/rulesets|protected_(branches|tags)|/approval_rules|/approvals|/push_rule)(/\S*)?(\s|\?|$))(?=[^\x00]*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
+  - capability: forge.branch.protection.modify
+    tool: Bash
+    command: '^az\s+repos\s+policy\b(?=[^\x00]*\s(create|update|delete)\b)'
+  # who may do what to the repository: collaborators, teams, deploy keys, invitations, members, and the repository's
+  # own settings (visibility, archiving, renaming), which are the same governance by another endpoint
+  - capability: forge.repo.permissions.modify
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*((repos|projects)/[^/\s]+(/[^/\s]+)?/(collaborators|invitations|keys|members|share|deploy_keys|access_tokens|teams)|orgs/[^/\s]+/(teams|members|memberships|invitations|outside_collaborators)|groups/[^/\s]+/(members|share)|teams/[^/\s]+/(repos|members|memberships))(/\S*)?(\s|\?|$))(?=[^\x00]*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
+  - capability: forge.repo.permissions.modify
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*(repos/[^/\s]+/[^/\s?#]+|projects/[^/\s?#]+)/?(\?\S*)?(\s|$))(?=[^\x00]*\s(-X|--method|--request)(\s+|=)?(PATCH|PUT)\b)'
+  - capability: forge.repo.permissions.modify
+    tool: Bash
+    command: '^(gh\s+repo\s+(edit|rename|archive|unarchive|deploy-key\s+(add|delete)|autolink\s+(create|delete))|glab\s+repo\s+(update|archive|unarchive|transfer|mirror))\b'
+  # destroying what cannot be recreated
+  - capability: forge.repo.delete
+    tool: Bash
+    command: '^(gh|glab)\s+repo\s+delete\b'
+  - capability: forge.repo.delete
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*(repos/[^/\s]+/[^/\s?#]+|projects/[^/\s?#]+)/?(\?\S*)?(\s|$))(?=[^\x00]*\s(-X|--method|--request)(\s+|=)?DELETE\b)'
+  - capability: forge.release.delete
+    tool: Bash
+    command: '^(gh\s+release\s+(delete|delete-asset)|glab\s+release\s+delete)\b'
+  - capability: forge.release.delete
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*(repos/[^/\s]+/[^/\s]+/releases(/assets)?/[^/\s]+|projects/[^/\s]+/releases/[^/\s]+)(\s|\?|$))(?=[^\x00]*\s(-X|--method|--request)(\s+|=)?DELETE\b)'
+  - capability: forge.issue.delete
+    tool: Bash
+    command: '^(gh|glab)\s+issue\s+delete\b'
+  - capability: forge.issue.transition
+    tool: Bash
+    command: '^((gh|glab)\s+issue\s+reopen|gh\s+project\s+item-(edit|add|archive|delete))\b'
+  # the integration decision by its raw-API spelling is the integration decision
+  - capability: forge.pr.merge
+    tool: Bash
+    command: '^(gh|glab)\s+api\b(?=[^\x00]*\s\S*((repos/[^/\s]+/[^/\s]+/pulls|projects/[^/\s]+/merge_requests)/[^/\s]+/merge)(\s|\?|$))(?=[^\x00]*(\s(-X|--method|--request)(\s+|=)?(POST|PUT|PATCH|DELETE)\b|\s(-f|-F|--field|--raw-field|--input|--form)(\s|=|\S*=)))'
   # --- forge CLIs (organization-locked PR and issue mutation, narrow writes) ---
   - capability: forge.pr.merge
     tool: Bash

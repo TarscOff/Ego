@@ -9,7 +9,13 @@ title: Forge read, narrow write, issues and work items
 The forge abstraction covers GitHub, GitLab, Azure DevOps, Bitbucket and future providers through one contract.
 Reading is broadly allowed; writing is narrow and separate from repository mutation. Pull-request creation,
 modification, closing, merging, self-approval and release publication are organization-locked denies (Q98): DENY
-unless the organization policy layer says otherwise.
+unless the organization policy layer says otherwise. So is every act that changes the rules or the permissions of a
+repository, and every deletion of what cannot be recreated (a repository, a release, an issue). Defeating a
+protection instead of changing it (`gh pr merge --admin`, enforcement switched off for administrators, a bypass
+actor) is `forge.protection.bypass`, an absolute deny that no layer can widen.
+
+An act is judged by what it does, not by the tool that spells it: `gh pr merge` and `gh api -X PUT …/merge` are the
+same act under the same identifier. A write that no more specific identifier names is `forge.api.mutate`.
 
 ## Allowed
 

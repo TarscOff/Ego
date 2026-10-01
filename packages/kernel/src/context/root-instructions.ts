@@ -63,7 +63,7 @@ export function generateRootInstructions(input: RootInstructionInput): RootInstr
     '',
     '## Authority summary',
     '',
-    `- Absolute denies (${input.table.absoluteDenies.length}): production mutation, destructive roots, credential stores, writes outside the workspace, gate and hook bypass, trust tampering, nested hosts.`,
+    `- Absolute denies (${input.table.absoluteDenies.length}): production mutation, destructive roots, credential stores, writes outside the workspace, gate, hook and protection bypass (\`--no-verify\`, \`gh pr merge --admin\`), trust tampering, nested hosts.`,
     `- Organization-locked denies (${input.table.organizationLocked.length}): pushes, pull-request and release mutation, issue mutation, unless the organization policy says otherwise.`,
     `- Requires human approval here: ${askClasses.slice(0, 14).join(', ')}${askClasses.length > 14 ? ', …' : ''}.`,
     '- Commands are judged by their effect: scripts, package scripts and make targets are classified by what they run.',

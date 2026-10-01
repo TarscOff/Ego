@@ -1191,7 +1191,9 @@ test('round-14 residuals: git long-option abbreviations, transport programs, awk
   // [6] wrappers, interpreters, forge and containers
   assert.equal(bash('su -lc "rm -rf /" root', c).decisive?.capability, 'fs.destructive-root');
   assert.notEqual(bash('python3 -uc "import os; os.system(\'git push origin main\')"', c).verdict, 'ALLOW');
-  assert.equal(bash('gh api -i -X DELETE repos/o/r', c).decisive?.capability, 'forge.api.mutate');
+  // (a repository DELETE is the repository-delete act since the Q98 closure, not the generic escape hatch; the
+  // point of this line is that `-i` is a boolean and does not eat `-X`)
+  assert.equal(bash('gh api -i -X DELETE repos/o/r', c).decisive?.capability, 'forge.repo.delete');
   assert.equal(bash('gh api --method $M repos/o/r', c).decisive?.capability, 'forge.api.mutate');
   assert.equal(bash('gh api repos/o/r', c).verdict, 'ALLOW');
   // a bind mount hands the container the host path
@@ -1288,7 +1290,8 @@ test('round-15 residuals: semantic classes, not spellings', () => {
   );
   assert.equal(bash('DATABASE_URL=postgres://localhost/app npx dbmate up', c).verdict, 'ALLOW');
   // the graphql lookahead binds to the SUBCOMMAND: a repository named "graphql-gateway" is not a graphql call
-  assert.equal(bash('gh api -X DELETE repos/acme/graphql-gateway', c).decisive?.capability, 'forge.api.mutate');
+  assert.equal(bash('gh api -X DELETE repos/acme/graphql-gateway', c).decisive?.capability, 'forge.repo.delete');
+  assert.equal(bash('gh api -X POST repos/acme/graphql-gateway/issues -f title=x', c).decisive?.capability, 'forge.api.mutate');
   assert.equal(bash('gh api repos/o/r', c).verdict, 'ALLOW');
   // a local tag is a ref: deleting or moving it destroys it exactly as a branch does
   assert.equal(bash('git tag -d v1.0.0', c).decisive?.capability, 'git.local.branch.delete');

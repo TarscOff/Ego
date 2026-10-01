@@ -304,6 +304,41 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'glab mr create',
     ],
   },
+  /* PHASE-1 CLOSURE, AUTHORITY TIERS (2026-10-01). Defeating a protection is a bypass and has no administrable form;
+   * changing the rules, changing who may act, and destroying what the forge cannot recreate are administrable acts
+   * that are DENY by default. Each class is the act, spelled through every door the forge has. */
+  {
+    family: 'forge',
+    id: 'defeating a branch or repository protection',
+    floor: 'DENY',
+    cases: [
+      'gh pr merge 12 --squash --admin',
+      'az repos pr update --id 3 --status completed --bypass-policy true',
+      'gh api -X DELETE repos/o/r/branches/main/protection/enforce_admins',
+      'gh api -X PUT repos/o/r/branches/main/protection -F enforce_admins=false',
+      'gh api -X POST repos/o/r/rulesets -f name=x -f enforcement=disabled',
+      "gh api -X PUT repos/o/r/rulesets/5 -f 'bypass_actors[][actor_id]=1'",
+      `echo '{"enforce_admins": false}' | gh api -X PUT repos/o/r/branches/main/protection --input -`,
+    ],
+  },
+  {
+    family: 'forge',
+    id: 'the rules, the permissions and the existence of a repository',
+    floor: 'DENY',
+    cases: [
+      'gh api -X PUT repos/o/r/branches/main/protection -F enforce_admins=true',
+      'gh api -X DELETE repos/o/r/rulesets/5',
+      'gh api -X PUT repos/o/r/collaborators/bob -f permission=admin',
+      'gh api -X PATCH repos/o/r -f visibility=public',
+      'gh repo edit o/r --visibility public',
+      'gh repo delete o/r --yes',
+      'gh api -X DELETE repos/o/r',
+      'gh release delete v1.0.0 --yes',
+      'gh issue reopen 3',
+      'gh issue delete 3 --yes',
+      'gh api -X PUT repos/o/r/pulls/3/merge',
+    ],
+  },
   {
     family: 'fs',
     id: 'credential store read',
