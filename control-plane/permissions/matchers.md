@@ -137,6 +137,13 @@ matchers:
     # /tmp/keys-backup.json` reads a key out of the trust store, which is not tampering with it (exit review 10).
     command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod|cp\b\s+(?:-\S+\s+)*\S+\s+[^|;&]*)\b.*\.ego/(trust|index|releases|runtimes)/'
   # --- git remote (organization-locked) ---
+  # `--no-verify` ON A PUSH SKIPS THE PRE-PUSH HOOK, which is EGO's own repository-side gate for this very verb. It
+  # sits ABOVE the push rules because matching is first-match-wins: below them the flag was read as the push it
+  # decorated, so an organization that had enabled pushing turned the same flag that is an absolute deny on
+  # `git commit` into an ASK (Q98 follow-up 1, tier marking).
+  - capability: git.hooks.bypass
+    tool: Bash
+    command: '^git\s+push\b.*\s--no-verify\b'
   - capability: git.remote.push.force
     tool: Bash
     command: '^git\s+push\b(?![^|;&]*\s(--dry-run|-n)(\s|$)).*(\s--force(-with-lease)?\b|\s-f\b|\s\+)'
@@ -159,7 +166,7 @@ matchers:
     command: '^git\s+commit\b.*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
-    command: '^git\s+(push|merge|pull|rebase|cherry-pick|revert|am)\b.*\s--no-verify\b'
+    command: '^git\s+(merge|pull|rebase|cherry-pick|revert|am)\b.*\s--no-verify\b'
   - capability: git.hooks.bypass
     tool: Bash
     # `-c core.hooksPath=…` is a bypass wherever it sits, including AFTER the verb (`git clone -c core.hooksPath=…`,

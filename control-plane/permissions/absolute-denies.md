@@ -31,6 +31,8 @@ Operations an organization may legitimately decide to allow live in `capabilitie
 - [x] `mcp.remote.production.mutate` — production mutation through a remote MCP server.
 - [x] `fs.destructive-root` — recursive deletion of a filesystem root, home directory or the checkout root.
 - [x] `fs.credential-store.write` — writing SSH keys, cloud credential files, password stores, netrc, npmrc, pypirc.
+- [x] `fs.outside-workspace.write` — writing files outside the registered repositories and the EGO home. It is the reach of every other protection on this list: a path the governed tree does not contain is a path no protected-path rule, no hook and no ledger can see, and no organization has a reason to delegate it. It was DENY in every cell and widenable by nobody long before it was marked; the mark makes the refusal say so (Q98 follow-up 1).
+- [x] `git.hooks.bypass` — `--no-verify`, `-n` on commit, `core.hooksPath` changes, plumbing that skips hooks (`commit-tree`, `update-ref`). The hooks are the repository-side half of the gate; skipping them defeats the control rather than changing a rule it enforces, which is the line Q98 draws between an administrable act and a bypass (Q98 follow-up 1).
 - [x] `ego.gate.bypass` — any attempt to convert HUMAN_DECISION_REQUIRED into approval, answer a decision from a tool, run the human prompt hook from a shell, or write decision records directly.
 - [x] `ego.trust.tamper` — editing the trust store, release keys or the cached runtimes under EGO_HOME from any tool.
 - [x] `ego.runtime.tamper` — writing runtime state (`.harness/runtime/`), generated artifacts (`.harness/generated/`), hook shims or the pin from any tool; the kernel alone writes them through its own commands.

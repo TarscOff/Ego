@@ -59,10 +59,12 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
 
 ## Denied
 
+`fs.outside-workspace.write` (a write outside the registered repositories and the EGO home) is an absolute deny and
+lives in `../absolute-denies.md`.
+
 - [x] `command.env-inject` — a leading environment assignment that changes what a command executes or where governance looks (`LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `NODE_OPTIONS`, `GIT_CONFIG_*`, `GIT_DIR`, `EGO_*`, `CLAUDE_*`, `CODEX_*`, `IFS`).
 
 - [x] `fs.generated.write` — hand-editing generated artifacts (`.harness/generated/`, `policies/generated/`, generated adapter configs); regenerate through the approved generators instead.
-- [x] `fs.outside-workspace.write` — write files outside registered repositories and the EGO home.
 - [x] `fs.env-file.write` — write `.env` and similar local secret files.
 - [x] `fs.credential-store.read` — read SSH keys, cloud credential files, kubeconfig credentials, password stores, netrc, npmrc, pypirc.
 - [x] `fs.hook-config.write` — edit host hook or permission configuration (`.claude/settings*.json`, `.codex/**`, `.git/hooks/**`, `.husky/**`, `core.hooksPath`) outside EGO_MAINTENANCE in the EGO repository.

@@ -11429,6 +11429,11 @@ export function evaluate(
       },
     ];
   }
+  // WHETHER A HIT IS ABSOLUTE IS A FACT ABOUT THE CAPABILITY, not about the code path that produced the hit. Thirty-odd
+  // construction sites each spelled the flag themselves, and the ones that wrote `false` for an identifier that was
+  // later moved into the absolute tier (Q98 follow-up 1) kept labelling its refusal "ordinary" and weighing it as such.
+  // One reader, applied where the decision is taken.
+  hits = hits.map((h) => (h.absolute || !isAbsoluteCap(table, h.capability) ? h : { ...h, absolute: true }));
   hits = hits.map((h) => applyGrants(h, ctx));
   if (hits.length === 0) {
     // NOTHING fell through to ALLOW any more. A tool the evaluator does not model, or a modelled tool whose
