@@ -1617,7 +1617,7 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
    * the link before it applies `..`, and a reader that applies `..` to the text reads another file. With
    * `dlnk -> .claude/sub`, `dlnk/..` is `.claude` — the agent's own configuration — and `hlnk -> .git/hooks/sub` makes
    * `hlnk/..` the hooks directory. The structured tools already judged this; the shell layer joined a directory and a
-   * word with `resolve()` at about twenty places and did not. One resolver (authority/paths.ts) answers for all of
+   * word with `resolve()` at about forty places and did not. One resolver (authority/paths.ts) answers for all of
    * them, and these classes pin four kinds of site: a redirection, a writer's operand, an extraction, and a payload that
    * another command runs.
    * -------------------------------------------------------------------------------------------------------- */
