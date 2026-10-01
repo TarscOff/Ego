@@ -91,3 +91,77 @@ test('sqlite3: the database file operand is a file the client WRITES, judged lik
   // opened read-only, nothing is written
   assert.equal(verdict(`sqlite3 -readonly .git/hooks/pre-commit "select 1"`, dir), 'ALLOW');
 });
+
+test('psql: output, meta-commands, startup files and statements that leave the database are judged, not spelled', () => {
+  const dir = workspace();
+  notAllowed(
+    [
+      // output handed to a program, by option and in-band
+      `psql -o '|cmd' -c 'select 1'`,
+      `psql --output='|cmd' -c 'select 1'`,
+      `psql -c '\\o |cmd'`,
+      `psql -c '\\w |cmd'`,
+      `psql -c 'select 1 \\g |cmd'`,
+      // an editor, an include, an environment write, a program in a COPY
+      `psql -c '\\e'`,
+      `psql -c '\\i script.sql'`,
+      `psql -c '\\setenv EDITOR cmd'`,
+      `psql -c "\\copy t to program 'cmd'"`,
+      // a file the client writes is a write like any other: the path decides
+      `psql -c '\\o .git/hooks/pre-commit'`,
+      `psql -L .git/hooks/pre-commit -c 'select 1'`,
+      `psql -c "\\copy t to '.git/hooks/pre-commit'"`,
+      // the server reads or writes a file on this machine
+      `psql -c "copy t to '/tmp/out'"`,
+      `psql -c "select pg_read_file('/etc/hostname')"`,
+      `psql -c "select lo_export(1, '/tmp/x')"`,
+      `psql -c "do \\$\\$ begin perform 1; end \\$\\$"`,
+      // a statement built at run time is a statement nobody read
+      `psql -c "$STATEMENT"`,
+      `psql -c "$(cat statement.txt)"`,
+      // an option this reader does not know
+      `psql --some-new-option -c 'select 1'`,
+    ],
+    dir,
+  );
+  // the environment makes the client run a startup script, a pager, an editor or write a history file
+  notAllowed(
+    [
+      `PSQLRC=rc.sql psql -c 'select 1'`,
+      `PSQL_PAGER=cmd psql -c 'select 1'`,
+      `PSQL_EDITOR=cmd psql -c '\\e'`,
+      `PSQL_HISTORY=.git/hooks/pre-commit psql -c 'select 1'`,
+      `PGSYSCONFDIR=conf psql -c 'select 1'`,
+      `export PSQLRC=rc.sql; psql -c 'select 1'`,
+      `env PSQLRC=rc.sql psql -c 'select 1'`,
+    ],
+    dir,
+  );
+  // a program-valued option on a PRODUCTION host is not the read the plain SELECT decision covers
+  assert.equal(verdict(`psql -h prod-db.acme.com -U ro -c 'select 1' -o '|cmd'`, dir), 'DENY');
+  assert.equal(verdict(`psql -h prod-db.acme.com -U ro -c 'select 1'`, dir), 'ALLOW');
+  allowed(
+    [
+      `psql -c "select 1"`,
+      `psql -h localhost -U app -d app -c "select count(*) from users"`,
+      `psql -c "\\dt"`,
+      `psql -c "\\d users"`,
+      `psql -c "\\l"`,
+      `psql -At -c "select 1"`,
+      `psql -X -q -c "select 1"`,
+      `psql -v ON_ERROR_STOP=1 -c "select 1"`,
+      `psql --csv -c "select * from users"`,
+      `psql -c "insert into t values (1)"`,
+      `psql -c "create table t (id serial primary key, name text)"`,
+      `psql -c "update t set a = a + 1 where id < 10"`,
+      `psql -c "drop table t"`,
+      `psql "postgres://localhost:5432/app_dev" -c "select 1"`,
+      `psql -o out.txt -c "select 1"`,
+      `psql -c "\\copy users to 'users.csv' csv header"`,
+      `psql -h /tmp -c 'select 1'`,
+      `psql --version`,
+      `echo "select 1" | psql`,
+    ],
+    dir,
+  );
+});

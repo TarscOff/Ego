@@ -154,9 +154,15 @@ const WRAPPER_PAIRS: ReadonlyArray<readonly [string, string]> = [['pnpm', 'exec'
  *  global configuration, aliases and hooks path from an attacker-chosen directory; `PERL5LIB` is the path twin
  *  of the `PERL5OPT` already listed; `LD_AUDIT` was in the code and missing from the matcher's own copy of the
  *  same set (exit review 10). The two copies are now generated from THIS one, so they cannot disagree again.
+ *
+ *  A DATABASE CLIENT READS ITS OWN. `PSQLRC` names a script psql runs before the statement it was given - even with
+ *  `-c` - and `PSQL_PAGER`, `PSQL_EDITOR` and `LIBMYSQL_PLUGIN_DIR` name a program or a library; the history variables
+ *  name a file the client writes, and `OPENSSL_CONF` makes any TLS client load an engine from a path. They are the
+ *  variables each client documents in its environment section (independent audit of 2026-10-01, item 5); one a client
+ *  documents and this list lacks is the same defect again.
  */
 const ENV_INJECT_RE =
-  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|(?:npm|NPM)_config_[A-Za-z_]+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|MONGOSH_[A-Z_]*|REDISCLI_RCFILE|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
+  /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_CONFIG[A-Z_]*|GIT_(DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|SSH_COMMAND|SSH|PROXY_COMMAND|EXTERNAL_DIFF|EDITOR|PAGER|ASKPASS|CEILING_DIRECTORIES|NAMESPACE|ALTERNATE_OBJECT_DIRECTORIES|OBJECT_DIRECTORY|EXEC_PATH|TEMPLATE_DIR|ATTR_SOURCE)|EGO_[A-Z_]+|CLAUDE_[A-Z_]+|CODEX_[A-Z_]+|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]+|HOME|PATH|SHELL|IFS|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|PYTHONEXECUTABLE|RUBYLIB|GEM_HOME|GEM_PATH|LUA_PATH|LUA_CPATH|CLASSPATH|JAVA_HOME|NODE_PATH|NODE_REPL_EXTERNAL_MODULE|BUN_INSTALL|DENO_DIR|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|R_PROFILE_USER|R_HOME|MANPATH|TERMINFO|LD_BIND_NOW|LD_DEBUG_OUTPUT|GLIBC_TUNABLES|MALLOC_CONF|OBJC_INSERT_LIBRARIES|PHPRC|PHP_INI_SCAN_DIR|PYTHONUSERBASE|PYTHONPLATLIBDIR|GOCACHEPROG|GOENV|GOTOOLCHAIN|PKG_CONFIG|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_TARGET_[A-Z0-9_]*(?:RUSTFLAGS|LINKER|RUNNER)|CARGO_BUILD_RUSTC[A-Z_]*|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|RUSTC|(?:npm|NPM)_config_[A-Za-z_]+|LIQUIBASE_COMMAND_DEFAULTS_FILE|LIQUIBASE_COMMAND_[A-Z_]*FILE|FLYWAY_CONFIG_FILES|PGSERVICEFILE|PGPASSFILE|PGSSLROOTCERT|MYSQL_HOME|MYSQLSH_USER_CONFIG_HOME|REDISCLI_RCFILE|PSQLRC|PSQL_PAGER|PSQL_EDITOR|PSQL_EDITOR_LINENUMBER_ARG|PSQL_HISTORY|PGSYSCONFDIR|PGLOCALEDIR|PGSSLKEY|PGSSLCERT|PGSSLCRL|PGSSLCRLDIR|LIBMYSQL_PLUGIN_DIR|LIBMYSQL_PLUGINS|MYSQL_HISTFILE|MYSQL_TEST_LOGIN_FILE|MYSQL_DEBUG|SQLITE_HISTORY|SQLITE_TMPDIR|REDISCLI_HISTFILE|OPENSSL_CONF|OPENSSL_MODULES|OPENSSL_ENGINES|CLICKHOUSE_CONFIG|CQLSH_[A-Z_]*|MONGOSH_[A-Z_]*|AWS_CA_BUNDLE|CURL_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|NODE_EXTRA_CA_CERTS|BUNDLE_GEMFILE|BUNDLE_PATH|PIP_CONFIG_FILE)$/;
 
 /** Options of a governed variable that actually LOAD CODE. `NODE_OPTIONS=--max-old-space-size=4096 npm test` is
  *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
@@ -8312,6 +8318,8 @@ interface DbEscape {
   opaque: string[];
   /** files the client writes: judged by the path rules, like an output flag */
   writes: string[];
+  /** files the client reads into the database: judged as reads, so a credential store stays one */
+  reads: string[];
   /** the statement texts the client will run, so a caller can set them aside from a redirection test */
   statements: string[];
 }
@@ -8640,7 +8648,7 @@ const SQLITE_OPTIONS: DbOptionSpec = {
 };
 
 function sqliteEscape(args: readonly DbWord[]): DbEscape {
-  const out: DbEscape = { opaque: [], writes: [], statements: [] };
+  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
   // sqlite3 takes `--name` for `-name`, and `-A`/`-lookaside`/`-pagecache` take values this parser does not model
   const normalised = args.map((w) => (w.text.startsWith('--') && w.text.length > 2 ? { ...w, text: w.text.slice(1) } : w));
   const dashA = normalised.findIndex((w) => w.text === '-A' || w.text === '-lookaside' || w.text === '-pagecache');
@@ -8677,6 +8685,231 @@ function statementProblem(w: DbWord, judge: (text: string) => string | null): st
   return judge(w.text);
 }
 
+type SqlDialect = 'pg' | 'mysql' | 'plain';
+interface SqlScan {
+  /** the text with every string literal blanked and every dollar-quoted body kept as code */
+  code: string;
+  /** the client's own commands (psql `\name args`, mysql `\c`), which the server never sees */
+  metas: Array<{ name: string; args: string }>;
+}
+
+/** Splits SQL text into what the SERVER reads (code) and what the CLIENT reads (backslash commands), with the strings
+ *  taken out so a word inside a literal is not mistaken for one outside it.
+ *
+ *  Three things are refused rather than guessed, because each makes this scanner and the engine disagree about where a
+ *  string ends - and a scanner that thinks text is inside a literal hides it: a comment of any kind (the engines differ
+ *  on what opens one and whether it nests), and a session setting that changes how a backslash or a double quote is
+ *  read (`standard_conforming_strings`, `NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`). */
+function sqlScan(text: string, dialect: SqlDialect): SqlScan | { refused: string } {
+  if (/--|\/\*/.test(text)) return { refused: 'a comment, which this reader cannot place the end of' };
+  if (dialect === 'mysql' && text.includes('#')) return { refused: 'a # comment' };
+  if (dialect === 'pg' && /standard_conforming_strings|backslash_quote|escape_string_warning/i.test(text))
+    return { refused: 'a setting that changes how a backslash is read' };
+  if (dialect === 'mysql' && /sql_mode|no_backslash_escapes|ansi_quotes/i.test(text))
+    return { refused: 'a setting that changes how a quote is read' };
+  let code = '';
+  const metas: SqlScan['metas'] = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === "'" || c === '"' || c === '`') {
+      // a backslash escapes inside a MySQL string and a PostgreSQL E'' string, and nowhere else
+      const prefixE = dialect === 'pg' && c === "'" && /[eE]$/.test(code) && !/[A-Za-z0-9_]$/.test(code.slice(0, -1));
+      const escapes = (dialect === 'mysql' && c !== '`') || prefixE;
+      let j = i + 1;
+      for (;;) {
+        if (j >= text.length) return { refused: 'a quote that is never closed' };
+        if (escapes && text[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (text[j] === c) {
+          if (text[j + 1] === c) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      // an identifier is a NAME and stays visible (`"pg_read_file"(…)` is still that call); a literal is blanked
+      const isName = c === '`' || (c === '"' && dialect !== 'mysql');
+      code += isName ? ` ${text.slice(i + 1, j)} ` : "''";
+      i = j;
+      continue;
+    }
+    if (c === '$' && dialect === 'pg' && !/[A-Za-z0-9_]$/.test(code)) {
+      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(text.slice(i));
+      if (tag) {
+        const end = text.indexOf(tag[0], i + tag[0].length);
+        if (end < 0) return { refused: 'a dollar-quoted body that is never closed' };
+        // a body is CODE as often as it is text (`DO $$ … $$`), so it is read as code
+        code += ` ${text.slice(i + tag[0].length, end)} `;
+        i = end + tag[0].length - 1;
+        continue;
+      }
+    }
+    if (c === '\\' && dialect !== 'plain') {
+      const eol = text.indexOf('\n', i);
+      const line = text.slice(i + 1, eol < 0 ? text.length : eol);
+      const name = dialect === 'pg' ? (/^(?:[A-Za-z0-9_]+\+?|.)/s.exec(line)?.[0] ?? '') : line.slice(0, 1);
+      const args = line.slice(name.length).trim();
+      // `\\` ends a meta-command and the line goes on as new input; this reader does not follow it
+      if (args.includes('\\\\')) return { refused: 'a second backslash command on the same line' };
+      metas.push({ name, args });
+      i = eol < 0 ? text.length : eol;
+      code += '\n';
+      continue;
+    }
+    code += c;
+  }
+  return { code, metas };
+}
+
+/** Functions that reach outside the database wherever they are called: a file on the machine the server runs on, a URL,
+ *  another server, a program. A name not on a list of the pure ones cannot be proven to stay inside, but a statement
+ *  is not a SELECT, so what is refused here is what is KNOWN to leave: the server of a local development database runs
+ *  as the same user, and `pg_read_file` reads that user's credentials as surely as `cat`. */
+const SQL_REACHES_OUT_CALLS = new Set(
+  (
+    // PostgreSQL: server-side files, large objects, other servers
+    'pg_read_file pg_read_binary_file pg_ls_dir pg_ls_logdir pg_ls_waldir pg_ls_tmpdir pg_ls_archive_statusdir ' +
+    'pg_ls_logicalmapdir pg_ls_logicalsnapdir pg_ls_replslotdir pg_stat_file pg_file_write pg_file_rename pg_file_unlink ' +
+    'pg_logdir_ls lo_import lo_export dblink dblink_connect dblink_connect_u dblink_exec dblink_send_query dblink_open ' +
+    // MySQL / MariaDB: server-side files and user-defined functions that run programs
+    'load_file sys_exec sys_eval do_system ' +
+    // SQL Server
+    'openrowset opendatasource openquery xp_cmdshell ' +
+    // ClickHouse table functions: a URL, a bucket, a file, a remote server, a program, another database
+    'url urlcluster s3 s3cluster gcs hdfs hdfscluster azureblobstorage azureblobstoragecluster remote remotesecure ' +
+    'cluster clusterallreplicas file filecluster executable executablepool mysql postgresql jdbc odbc mongodb sqlite ' +
+    'redis deltalake iceberg hudi input'
+  ).split(' '),
+);
+/** statements whose FIRST word reaches outside: a library, a file, a plugin, an import */
+const SQL_REACHING_STARTS = new Set(
+  'load do install uninstall clone backup restore attach source system capture import'.split(' '),
+);
+
+/** Why SQL (as a scan's code) reaches outside the database, or null. A proven-pure read never gets here. */
+function sqlReachProblem(code: string): string | null {
+  const lower = code.toLowerCase();
+  for (const m of lower.matchAll(/\b([a-z_][a-z0-9_$]*)\s*\(/g))
+    if (SQL_REACHES_OUT_CALLS.has(m[1]!)) return `the statement calls ${m[1]}, which reads or writes outside the database`;
+  if (/\binto\s+(outfile|dumpfile)\b/.test(lower)) return 'INTO OUTFILE writes a file on the server';
+  if (/\bload\s+(data|xml)\b/.test(lower)) return 'LOAD DATA reads a file';
+  if (/\binsert\s+into\s+function\b/.test(lower)) return 'INSERT INTO FUNCTION writes through a table function';
+  if (/\bengine\s*=\s*(url|s3|hdfs|file|mysql|postgresql|mongodb|jdbc|odbc|redis|kafka|rabbitmq|nats|executable|azureblobstorage|sqlite)\b/.test(lower))
+    return 'the table engine reads or writes outside the database';
+  for (const chunk of lower.split(';')) {
+    const words = chunk.trim().split(/\s+/);
+    const first = words[0] ?? '';
+    if (SQL_REACHING_STARTS.has(first)) return `${first.toUpperCase()} loads or reads something outside the database`;
+    // COPY reads or writes a server-side file or runs a program, unless it is the STDIN/STDOUT form
+    if (first === 'copy' && !/\b(to|from)\s+(stdin|stdout)\b/.test(chunk)) return 'COPY reads or writes a file, or runs a program, on the server';
+    const second = words[1] === 'or' && words[2] === 'replace' ? (words[3] ?? '') : (words[1] ?? '');
+    if (first === 'create' && /^(function|procedure|language|extension|server|foreign|access|event|aggregate|trusted|untrusted|library|directory)$/.test(second))
+      return `CREATE ${second.toUpperCase()} defines code or a connection that runs outside the database`;
+    if (first === 'alter' && /^(system|extension|server|foreign|language)$/.test(words[1] ?? ''))
+      return `ALTER ${(words[1] ?? '').toUpperCase()} changes what the server loads or where it connects`;
+    if (first === 'set' && /^(global|persist|persist_only)$/.test(words[1] ?? '')) return 'SET GLOBAL changes the server, not the session';
+    if ((first === 'change' && /^(master|replication)$/.test(words[1] ?? '')) || (first === 'start' && /^(slave|replica)$/.test(words[1] ?? '')))
+      return 'replication connects the server to another one';
+  }
+  return null;
+}
+
+const PSQL_OPTIONS: DbOptionSpec = {
+  value: ['command', 'dbname', 'file', 'field-separator', 'host', 'log-file', 'output', 'port', 'pset', 'record-separator', 'table-attr', 'username', 'variable'],
+  flag: [
+    'no-align', 'echo-all', 'echo-errors', 'echo-queries', 'echo-hidden', 'quiet', 'single-step', 'single-line', 'tuples-only',
+    'expanded', 'html', 'csv', 'list', 'no-password', 'password', 'no-psqlrc', 'no-readline', 'single-transaction', 'version', 'help',
+    'field-separator-zero', 'record-separator-zero',
+  ],
+  shortValue: 'cdfFhLopPRTUv',
+  shortFlag: 'aAbeElnqsStVwWxXz01H?',
+  abbreviate: true,
+  alias: {
+    c: 'command', d: 'dbname', f: 'file', F: 'field-separator', h: 'host', L: 'log-file', o: 'output', p: 'port', P: 'pset',
+    R: 'record-separator', T: 'table-attr', U: 'username', v: 'variable',
+  },
+};
+
+/** A file or a program named by an output option or a meta-command: `|cmd` is a program, anything else is a file the
+ *  client writes (or reads), which the path rules judge. */
+function fileOrProgram(out: DbEscape, raw: string, what: string, mode: 'write' | 'read'): void {
+  const t = raw.trim().replace(/^(['"])(.*)\1$/s, '$2');
+  if (t === '' || t === '-') return;
+  if (t.startsWith('|')) out.opaque.push(`${what} pipes to a program`);
+  else if (t.startsWith(':') || /[$`]/.test(t)) out.opaque.push(`${what} names a file built at run time`);
+  else (mode === 'write' ? out.writes : out.reads).push(t);
+}
+
+/** psql's own commands: the read-only ones by their whole name, a file target by the path it resolves to, and
+ *  everything else - an editor, an include, an environment write, a shell - opaque. A backquote in ANY argument runs a
+ *  shell command, so no meta-command with one is ordinary. */
+function psqlMeta(out: DbEscape, name: string, args: string): void {
+  if (args.includes('`')) return void out.opaque.push(`\\${name} runs a shell command from a backquote in its arguments`);
+  if (/^d[A-Za-z]{0,5}\+?$/.test(name) || /^(l|z|zS|sf|sv|conninfo)\+?$/.test(name)) {
+    if (!/^[\w."*?$%()+,\s-]*$/.test(args)) out.opaque.push(`the arguments of \\${name} name more than a pattern`);
+    return;
+  }
+  if (/^(x|timing|t|a|H|echo|qecho|set|unset|encoding|q|\?|h|c|connect|;|gdesc|gset)$/.test(name)) return;
+  if (name === 'g' || name === 'gx') {
+    const target = args.replace(/^\([^)]*\)\s*/, '');
+    if (target !== '') fileOrProgram(out, target.split(/\s+/)[0]!, `\\${name}`, 'write');
+    return;
+  }
+  if (name === 'o' || name === 'w' || name === 's') {
+    if (args !== '') fileOrProgram(out, args, `\\${name}`, 'write');
+    else if (name === 'w') out.opaque.push('\\w without a target');
+    return;
+  }
+  if (name === 'lo_export') return fileOrProgram(out, args.split(/\s+/).slice(1).join(' '), '\\lo_export', 'write');
+  if (name === 'lo_import') return fileOrProgram(out, args.split(/\s+/)[0] ?? '', '\\lo_import', 'read');
+  if (name === 'copy') {
+    if (/\bprogram\b/i.test(args)) return void out.opaque.push('\\copy runs a program');
+    if (/\b(to|from)\s+(stdin|stdout|pstdin|pstdout)\b/i.test(args)) return;
+    const hits = [...args.matchAll(/\b(to|from)\s+('(?:[^']|'')*'|"[^"]*"|\S+)/gi)];
+    const last = hits[hits.length - 1];
+    if (!last) return void out.opaque.push('\\copy names no file this reader can place');
+    return fileOrProgram(out, last[2]!, '\\copy', last[1]!.toLowerCase() === 'to' ? 'write' : 'read');
+  }
+  out.opaque.push(`the psql command \\${name} runs a program, includes a script or writes outside the database, or is not on the read-only list`);
+}
+
+function psqlScript(out: DbEscape, text: string): void {
+  const scan = sqlScan(text, 'pg');
+  if ('refused' in scan) return void out.opaque.push(`the SQL carries ${scan.refused}`);
+  for (const m of scan.metas) psqlMeta(out, m.name, m.args);
+  const why = isReadStatement(text) ? null : sqlReachProblem(scan.code);
+  if (why !== null) out.opaque.push(why);
+}
+
+function psqlEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const parsed = parseDbArgs(args, PSQL_OPTIONS);
+  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows`);
+  const statement = (w: DbWord): void => {
+    out.statements.push(w.text);
+    if (w.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
+    else psqlScript(out, w.text);
+  };
+  for (const o of parsed.options) {
+    if (o.value === null) continue;
+    if (o.name === 'command') statement(o.value);
+    else if (o.name === 'file') out.opaque.push('-f names a script the client runs');
+    else if (o.name === 'output' || o.name === 'log-file') {
+      if (o.value.expands) out.opaque.push(`--${o.name} names a file or program built at run time`);
+      else fileOrProgram(out, o.value.text, `--${o.name}`, 'write');
+    }
+  }
+  // the positional operands are a database and a user; one that is a script is standard input handed over as a word
+  const conninfo = /^\s*(\w+\s*=\s*('[^']*'|\S+)\s*)+$/;
+  for (const w of parsed.positional)
+    if (/[\s;\\]/.test(w.text) && !conninfo.test(w.text) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(w.text)) statement(w);
+  return out;
+}
+
 /** The words of a segment as the reader wants them: redirections taken out, and each word's expansion mark kept. When
  *  the segment as written does not hold the client (a wrapper was unwrapped into a synthesized form), the normalized
  *  text is read instead, and a `$` or a backtick in it is an expansion. */
@@ -8693,10 +8926,11 @@ function dbWordsOf(
 /** The reader. `client` is the head the caller classified; `words` are the segment's words as the shell delivers them. */
 function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   const at = words.findIndex((w) => w.text.replace(/^.*\//, '') === client);
-  if (at < 0) return { opaque: [], writes: [], statements: [] };
+  if (at < 0) return { opaque: [], writes: [], reads: [], statements: [] };
   const args = words.slice(at + 1);
   if (client === 'sqlite3') return sqliteEscape(args);
-  return { opaque: [], writes: [], statements: [] };
+  if (client === 'psql') return psqlEscape(args);
+  return { opaque: [], writes: [], reads: [], statements: [] };
 }
 
 /** redis' INFO, PING, DBSIZE and TTL read server state rather than data - and only when every option on the line is
@@ -8761,7 +8995,12 @@ function resolveDbTarget(
     !fromFile &&
     tokens.some((t, i) => (t === '-l' || t === '--list') && !(i > 0 && PSQL_VALUE_SHORT.test(tokens[i - 1] ?? '')));
   const redisRead = /^(redis-cli|valkey-cli)$/.test(head) && redisReadOnly(tokens);
-  const executes = !isProbeInvocation(line) && !readOnlyStatement && !listsOnly && !redisRead;
+  // A READ THAT CARRIES AN ESCAPE IS NOT A READ. The exception above is a claim about the whole invocation: a plain
+  // SELECT whose output is piped to a program, or whose session starts from a script, acts - and against a production
+  // host `psql -h prod -c 'select 1' -o '|cmd'` was the allowed read plus an unread program (independent audit, item 5).
+  const client = head.replace(/^.*\//, '');
+  const escapes = dbClientEscape(client, dbWordsOf(client, tokenizeMarked(line), line)).opaque.length > 0;
+  const executes = escapes || (!isProbeInvocation(line) && !readOnlyStatement && !listsOnly && !redisRead);
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };
   const signals: Array<{ cls: TargetClass; target: string }> = [];
@@ -9526,12 +9765,13 @@ function classifyShellPaths(
         opaqueUnread: true,
       });
   if (dbEscape !== null)
-    for (const dest of dbEscape.writes) {
-      const expanded = expandHome(dest, cwd);
-      if (expanded === null || /[$`]/.test(expanded)) continue;
-      const w = classifyPath(table, ctx, 'Write', canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)));
-      if (w.verdict !== 'ALLOW') hits.push({ ...w, via: `the client writes ${dest} (${w.via})`, segment: seg });
-    }
+    for (const [mode, dests] of [['Write', dbEscape.writes], ['Read', dbEscape.reads]] as const)
+      for (const dest of dests) {
+        const expanded = expandHome(dest, cwd);
+        if (expanded === null || /[$`]/.test(expanded)) continue;
+        const w = classifyPath(table, ctx, mode, canonicalPath(isAbsolute(expanded) ? expanded : resolve(cwd, expanded)));
+        if (w.verdict !== 'ALLOW') hits.push({ ...w, via: `the client ${mode === 'Write' ? 'writes' : 'reads'} ${dest} (${w.via})`, segment: seg });
+      }
   if (DB_CLIENT_HEADS.has(head) && (DB_EXECUTES_UNREAD.test(seg) || /\s<\s*\S/.test(' ' + unquotedSeg) || redisReadsScript))
     hits.push({
       capability: 'command.script-opaque',
