@@ -1,7 +1,7 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
-import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigGet } from '../util/git.ts';
@@ -3236,16 +3236,67 @@ function isAbsoluteCap(table: CompiledAuthorityTable, id: string): boolean {
   return table.capabilities[id]?.absolute === true;
 }
 
-/** Canonical absolute path: symlinks resolved on the deepest existing ancestor so a not-yet-created file compares correctly. */
+/** How many links one path resolution may follow before it is read as a loop (Linux stops at 40). */
+const MAX_LINK_HOPS = 40;
+
+/**
+ * Canonical absolute path: symlinks resolved on the deepest existing ancestor so a not-yet-created file compares
+ * correctly.
+ *
+ * A LINK WHOSE TARGET DOES NOT EXIST YET IS STILL A LINK. `realpath` fails on `lnk -> ~/.ssh/zz-new` exactly as it
+ * fails on a file that was never created, and the fallback below then judged the link's own name — `<workspace>/lnk`,
+ * an ordinary repository path — while `open(O_CREAT)` follows the link and creates `~/.ssh/zz-new`. So `Write`,
+ * `apply_patch` and a shell redirection through such a link were `fs.repo.write` ALLOW for a credential store (audit
+ * 2026-10-01, C3). A link shipped inside a cloned repository is enough; nothing has to make it in-session. The
+ * name is therefore followed the way the kernel follows it: read the link, resolve what it names (itself possibly
+ * missing, possibly another link) and judge the nearest existing ancestor of the destination.
+ */
 export function canonicalPath(p: string): string {
-  const abs = resolve(p);
+  return canonicalWalk(resolve(p), { left: MAX_LINK_HOPS });
+}
+
+/** `budget` is shared by the whole resolution, as the kernel's own limit is: a farm of links cannot make it exponential. */
+function canonicalWalk(abs: string, budget: { left: number }): string {
   try {
     return realpathSync(abs);
   } catch {
     const parent = dirname(abs);
     if (parent === abs) return abs;
-    return join(canonicalPath(parent), abs.slice(parent.length + 1));
+    // `basename`, not a slice past the parent's length: for a missing top-level name (`/zz`) the parent is `/`, one
+    // character long, and the slice dropped the name
+    const here = join(canonicalWalk(parent, budget), basename(abs));
+    let target: string;
+    try {
+      target = readlinkSync(here);
+    } catch {
+      return here; // not a link (or nothing there at all): the name is the answer
+    }
+    // a loop, or a chain longer than the kernel would follow, cannot be opened at all; its own name is as good an answer
+    if (budget.left-- <= 0) return here;
+    return walkComponents(isAbsolute(target) ? sep : dirname(here), target, budget);
   }
+}
+
+/**
+ * Walks `path` one component at a time from `from`, the way the kernel resolves it: a symlink is followed where it
+ * stands (existing or not), and `..` is the parent of the DIRECTORY REACHED, not of the text before it. The text
+ * form `resolve()` computes is only right when no component is a link, and `d/../x` with `d -> /elsewhere/deep`
+ * names `/elsewhere/x`, not `x` beside `d`.
+ */
+function walkComponents(from: string, path: string, budget: { left: number }): string {
+  let cur = from;
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue;
+    // `cur` is always canonical here, so the parent of the directory REACHED is just its dirname
+    cur = part === '..' ? dirname(cur) : canonicalWalk(join(cur, part), budget);
+  }
+  return cur;
+}
+
+/** Where a path that may contain `..` lands once every link it passes through is followed (see walkComponents). */
+export function physicalPath(p: string, cwd: string): string {
+  const budget = { left: MAX_LINK_HOPS };
+  return isAbsolute(p) ? walkComponents(sep, p, budget) : walkComponents(canonicalPath(cwd), p, budget);
 }
 
 function insideRoots(absPath: string, ctx: EvaluationContext): boolean {
