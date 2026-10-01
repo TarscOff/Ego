@@ -1310,6 +1310,161 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     ],
     files: { '.git/config': '[core]\n\thooksPath = githooks\n', 'githooks/pre-commit': '#!/bin/sh\n', 'scripts/pre-commit': '#!/bin/sh\n' },
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE OF THE SHELL-STRUCTURE FINDINGS (independent audit of 2026-10-01). Each class is the CAUSE an earlier fix
+   * had closed at one spelling, written so that every neighbour of that spelling is a case of it.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'k8s',
+    // the LAST dry-run flag decides: a bare `--dry-run` takes no value, so the flag after it is a flag - and it can undo it
+    id: 'a production act whose dry-run flag is undone by the flag after it, however that one is spelled',
+    floor: 'DENY',
+    cases: [
+      'kubectl --context production apply -f x.yaml --dry-run --dry-run=none',
+      'kubectl --context production delete pod x --dry-run --dry-run=none',
+      'kubectl --context production apply -f x.yaml --dry-run --dry-run=false',
+      'kubectl --context production apply -f x.yaml --dry-run=server --dry-run=none',
+      'kubectl --context production apply -f x.yaml --dry-run=client "--dry-run=none"',
+      "kubectl --context production scale deploy/api --replicas=0 --dry-run=client --dry-run='none'",
+      'helm --kube-context production upgrade r ./chart --dry-run --dry-run=none',
+      'helm --kube-context production uninstall r --dry-run=client --dry-run=false',
+      'oc --context production delete pod x --dry-run --dry-run=none',
+    ],
+    files: { 'x.yaml': 'kind: Deployment\n' },
+  },
+  {
+    family: 'command',
+    // a function shadows the real program only while a definition that ran in the PARENT shell stands
+    id: 'a function definition that binds nothing in the parent shell: a pipeline stage, a group in a pipeline, a background job, a short-circuit, a substitution',
+    floor: 'DENY',
+    // each starts with a plain command, so that a wrapper (`sudo`, `env`, `time`…) has one to wrap: nothing can wrap a definition
+    cases: [
+      'true; git() { echo hi; } | cat; git push origin main',
+      'true; kubectl() { :; } | cat; kubectl --context production delete pod x',
+      'true; echo x | git() { true; }; git push origin main',
+      'true; { git() { true; }; } | cat; git push origin main',
+      'true; echo x | { git() { true; }; }; git push origin main',
+      'true; { echo a; git() { true; }; } & git push origin main',
+      'true; git() { true; } & git push origin main',
+      'true; false && { echo a; git() { true; }; }; git push origin main',
+      'true; true || git() { true; }; git push origin main',
+      'true; echo $(git() { true; }); git push origin main',
+      'true; git() { echo hi; } | cat\ngit push origin main',
+    ],
+  },
+  {
+    family: 'command',
+    // ...and it stops shadowing the moment anything the shell runs removes it
+    id: 'a function binding removed by a callee, a sourced file, eval, a trap or a hook function before the real program is called',
+    floor: 'DENY',
+    cases: [
+      'true; f() { unset -f git; }; git() { true; }; f; git push origin main',
+      'true; git() { true; }; f() { g; }; g() { unset -f git; }; f; git push origin main',
+      'true; git() { true; }; f() { builtin unset -f git; }; f; git push origin main',
+      'true; git() { true; }; source ./u.sh; git push origin main',
+      'true; git() { true; }; . ./u.sh; git push origin main',
+      'true; git() { true; }; source ./missing.sh; git push origin main',
+      'true; git() { true; }; f() { source ./u.sh; }; f; git push origin main',
+      "true; git() { true; }; eval 'unset -f git'; git push origin main",
+      "true; git() { true; }; trap 'unset -f git' DEBUG; git push origin main",
+      'true; TRAPDEBUG() { unset -f git; }; git() { true; }; git push origin main',
+      'true; git() { true; }; unfunction git; git push origin main',
+      'true; git() { true; }; unset -f $NAME; git push origin main',
+      "true; git() { true; }; alias git='command git'; git push origin main",
+      'true; kubectl() { :; }; f() { unset -f kubectl; }; f; kubectl --context production delete pod x',
+    ],
+    files: { 'u.sh': 'unset -f git\n' },
+  },
+  {
+    family: 'fs',
+    // the same reader decides whether `cd` is a function: a definition that is not there leaves the builtin to move the shell
+    id: 'a directory change that is the builtin because the function that shadowed it never bound, followed by a write the new directory governs',
+    floor: 'DENY',
+    cases: [
+      'true; cd() { true; } | cat; cd control-plane; tee permissions/matchers.md',
+      'true; echo x | cd() { true; }; cd control-plane; tee permissions/matchers.md',
+      'true; { cd() { true; }; } | cat; cd control-plane; tee permissions/matchers.md',
+      'true; f() { unset -f cd; }; cd() { true; }; f; cd control-plane; tee permissions/matchers.md',
+      "true; cd() { true; }; eval 'unset -f cd'; cd control-plane; tee permissions/matchers.md",
+      'true; false && cd() { true; }; cd control-plane; tee permissions/matchers.md',
+      'true; { cd control-plane; tee permissions/matchers.md; } | cat',
+      'true; cd control-plane && tee permissions/matchers.md &',
+    ],
+    files: { 'control-plane/permissions/matchers.md': 'x\n' },
+  },
+  {
+    family: 'git',
+    // nothing after `--` is an option, so a word that looks like the dry-run flag there is a path beside the governed one
+    id: 'a governed file removed or moved with a dry-run-looking word after `--`',
+    floor: 'DENY',
+    cases: [
+      'git rm -f --ignore-unmatch -- -n control-plane/permissions/absolute-denies.md',
+      'git rm -rf -- -n control-plane',
+      'git rm -f -- -n -- control-plane/permissions/absolute-denies.md',
+      'git rm -- --dry-run control-plane/permissions/absolute-denies.md',
+      'git mv -- -n control-plane/permissions/absolute-denies.md elsewhere.md',
+      'git rm -n --no-dry-run control-plane/permissions/absolute-denies.md',
+      'rsync -a -- -n src/ .harness/generated/',
+      'rsync -a --dry-run --no-dry-run src/ .harness/generated/',
+    ],
+    files: { 'control-plane/permissions/absolute-denies.md': 'x\n', 'src/a.txt': 'x\n' },
+  },
+  {
+    family: 'git',
+    // a matcher can only ask whether a dry-run flag is PRESENT; the normalized text says which one decides
+    id: 'a push whose dry-run flag is undone by a later one, is the value of a push option, or is the name of a remote',
+    floor: 'DENY',
+    cases: [
+      'git push -n --no-dry-run origin main',
+      'git push --force --dry-run --no-dry-run origin main',
+      'git push --dry-run=false origin main',
+      'git send-pack -n --no-dry-run origin main',
+      'git push -o -n origin main',
+      'git push --push-option -n origin main',
+      'git push -- -n main',
+    ],
+  },
+  {
+    family: 'production',
+    id: 'a cloud or deploy act whose dry-run flag is undone by a later one',
+    floor: 'DENY',
+    cases: [
+      'aws ec2 terminate-instances --instance-ids i-1 --profile production --dry-run --no-dry-run',
+      'aws ec2 terminate-instances --instance-ids i-1 --dry-run --no-dry-run',
+      'argocd app sync prod --dry-run=false',
+      'argocd app sync prod --dry-run --dry-run=false',
+    ],
+  },
+  {
+    family: 'fs',
+    // `{}` is every path the predicates select, and a predicate that names the hooks directory selects files in it
+    id: 'a mutating find -exec or -delete over a place its predicate names',
+    floor: 'DENY',
+    cases: [
+      'find . -path "*/.git/hooks/*" -exec chmod +x {} \\;',
+      'find . -path "*/.git/hooks/*" -exec chmod 777 {} +',
+      'find . -path "*/.git/hooks/*" -execdir touch {} \\;',
+      'find . -path "*/.git/hooks/*" -exec cp /tmp/evil {} \\;',
+      'find . -path "*/.git/hooks/*" -delete',
+      'find . -path "./control-plane/*" -exec chmod 644 {} \\;',
+      'find . -wholename "*/.harness/*" -exec chown root {} \\;',
+      'find . .git/hooks -name x -exec chmod +x {} \\;',
+    ],
+  },
+  {
+    family: 'fs',
+    // ...and one that does not name it cannot be shown to avoid it
+    id: 'a mutating find -exec over a search that can reach a governed place',
+    floor: 'ASK',
+    cases: [
+      'find . -name pre-commit -exec chmod +x {} \\;',
+      'find . -type f -exec touch {} +',
+      'find . -exec chmod +x {} \\;',
+      'find . -name pre-commit -exec mv {} /tmp/x \\;',
+      'find . -name pre-commit -exec cp src/a.ts {} \\;',
+      'fd pre-commit -x chmod +x',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -1392,7 +1547,9 @@ export const TRANSFORMS: readonly Transform[] = [
   { name: 'timeout', apply: (c) => `timeout 60 ${c}`, safe: noLeadingAssignment },
   { name: 'nice', apply: (c) => `nice -n 5 ${c}`, safe: noLeadingAssignment },
   { name: 'stdbuf', apply: (c) => `stdbuf -o0 ${c}`, safe: noLeadingAssignment },
-  { name: 'xargs', apply: (c) => `echo x | xargs -I{} ${c}`, safe: noLeadingAssignment },
+  // `xargs -I{}` replaces EVERY `{}` in its arguments, find's own match among them: `find … -exec chmod +x {}` becomes
+  // `chmod +x x`, which is a different command and not a variant of the one the class names
+  { name: 'xargs', apply: (c) => `echo x | xargs -I{} ${c}`, safe: (c) => noLeadingAssignment(c) && !c.includes('{}') },
   // shell structure
   { name: 'after &&', apply: (c) => `true && ${c}` },
   { name: 'after ||', apply: (c) => `false || ${c}` },
