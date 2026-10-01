@@ -8931,8 +8931,82 @@ function isDryRun(seg: string): boolean {
   // changes. Accepting any value swallowed it, so `kubectl --context production apply --dry-run=none` and
   // `helm --kube-context production uninstall app --dry-run=none` reached ALLOW — the exception meant to let an
   // operator LOOK became the spelling that hid the act (self-attack on exit review 9).
-  const words = commandWords(tokenizeMarked(seg)).map((x) => x.text);
-  return dryRunOf(words, K8S_DRY_RUN) === 'dry';
+  const words = commandWords(tokenizeMarked(seg));
+  const { state, at } = dryRunDecision(words.map((x) => x.text), K8S_DRY_RUN);
+  return state === 'dry' && !flagFilledInAfter(words, at);
+}
+
+/** options of kubectl and helm KNOWN to take a value, beyond the global ones in K8S_VALUE_OPTS: the word after one is
+ *  that value, whatever the shell fills in, and never a flag */
+const K8S_DRY_RUN_VALUED =
+  /^(--grace-period|--timeout|--field-manager|--image|--replicas|--type|--patch|--patch-file|-p|--subresource|--container|-c|--description|--history-max|--wait-timeout|--max|--min|--cpu-percent|--labels|-L|--sort-by|--chunk-size|--template|--revision|--overrides|--port|--target-port|--name|--env|--limits|--requests|--annotations|--set-json|--set-literal|--cert-file|--key-file|--ca-file)$/;
+/** the bare words (neither options nor their values) a kubectl or helm verb takes after itself, or null for any number.
+ *  A verb that names its object by a file takes none, and `helm upgrade RELEASE CHART` has taken all it takes by its
+ *  second: what stands after those can only be a flag. Every other verb names its objects (`delete TYPE NAME...`,
+ *  `label TYPE NAME KEY=VALUE...`, `uninstall RELEASE...`), and there a bare word cannot be told from a name. */
+function k8sPositionalLimit(head: string, verb: string, words: readonly string[]): number | null {
+  if (head === 'helm') return ({ install: 2, upgrade: 2, rollback: 2, test: 1, push: 2 } as Record<string, number>)[verb] ?? null;
+  // `apply view-last-applied TYPE/NAME` and its siblings are the one use of `apply` that takes names
+  if (verb === 'apply') return words.some((t) => /^(view|edit|set)-last-applied$/.test(t)) ? null : 0;
+  if (verb === 'replace') return 0;
+  const byFile = words.some((t) => /^(-[fk]|--filename|--kustomize)(=|$)|^-[fk]\S/.test(t));
+  if (byFile && /^(create|delete|patch|edit|scale|autoscale|expose)$/.test(verb)) return 0;
+  if (byFile && verb === 'rollout') return 1; // the subcommand
+  return null;
+}
+
+/** A WORD THE SHELL FILLS IN AFTER THE LAST DRY-RUN FLAG IS NOT A DRY RUN THAT WAS PROVED. The tool reads the line after
+ *  expansion, `$FLAG` may be `--dry-run=none`, and the last flag wins: `kubectl apply -f x.yaml --dry-run=client $FLAG`
+ *  was read as the dry run its last readable flag asks for. The line is then judged as the act (the ask on an unclassified
+ *  target, the absolute refusal on a production one).
+ *
+ *  WHICH WORDS ARE A FLAG IS KUBECTL'S AND HELM'S GRAMMAR, not the property of being dynamic - `delete --dry-run=client
+ *  pod $NAME` is the ordinary preview of a delete, and refusing it would be refusing to look. A word is NOT where a flag
+ *  can stand when it is the value of an option that takes one (`-n $NS`, `--grace-period $GP`, `-f $FILE`, a glued
+ *  `--namespace=$NS`), when its literal start is not a dash (`app=$APP`, `pod/$NAME`), or when it falls in a name slot of
+ *  the verb (`delete pod $NAME`, `uninstall $RELEASE`, `upgrade $RELEASE $CHART`). It IS where a flag can stand when the
+ *  verb has no slot left for it (`apply -f x.yaml $FLAG`, `helm upgrade rel chart --dry-run $FLAG`), when the option's own
+ *  name is filled in (`--$OPT`), and when nothing the tool takes as a value precedes it. A verb that names any number of
+ *  objects cannot tell a name from a flag by position, so there the word is read as a name; that is the residual. Words
+ *  after `--` are operands. */
+function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolean }>, at: number): boolean {
+  const text = words.map((w) => w.text);
+  // the line is the segment AS WRITTEN: an assignment, `env`, `timeout 30` or a path may stand in front of the tool
+  const headAt = text.findIndex((t) => /(^|\/)(kubectl|oc|helm)$/.test(t));
+  if (headAt < 0) return false;
+  const head = text[headAt]!.replace(/^.*\//, '');
+  const end = text.indexOf('--') >= 0 ? text.indexOf('--') : text.length;
+  const known = head === 'helm' ? HELM_VERBS : KUBECTL_VERBS;
+  const valued = (t: string): boolean => !t.includes('=') && (K8S_VALUE_OPTS.test(t) || K8S_DRY_RUN_VALUED.test(t));
+  let verbAt = -1;
+  for (let i = headAt + 1; i < end; i++) {
+    const t = text[i]!;
+    if (t.startsWith('-')) {
+      if (valued(t)) i++;
+      continue;
+    }
+    if (known.has(t)) {
+      verbAt = i;
+      break;
+    }
+  }
+  if (verbAt < 0) return false;
+  const limit = k8sPositionalLimit(head, text[verbAt]!, text);
+  let bare = 0;
+  for (let i = verbAt + 1; i < end; i++) {
+    const t = text[i]!;
+    if (t.startsWith('-') && t !== '-') {
+      // the NAME of an option the shell fills in can be any flag at all; its glued value (`--namespace=$NS`) cannot
+      if (i > at && /[$`]/.test(t.split('=')[0]!)) return true;
+      if (valued(t)) i++;
+      continue;
+    }
+    // a word that starts with a literal character other than a dash is not a flag whatever follows it
+    const filledIn = words[i]!.expands === true && /^[$`]/.test(t);
+    if (i > at && filledIn && limit !== null && bare >= limit) return true;
+    bare++;
+  }
+  return false;
 }
 /** capabilities that assert a LOCAL target without ever resolving one; each is re-judged against the real target */
 const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {

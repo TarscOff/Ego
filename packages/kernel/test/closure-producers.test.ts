@@ -547,7 +547,9 @@ test('git merge and git cherry-pick ask under every profile that asks for a comm
 
 test('the compiler refuses a control plane in which a stricter profile is looser than a weaker one', () => {
   // HIGH_ASSURANCE forgets what STRICT narrows
-  const forgetting = withProfile('high-assurance.md', (t) => t.replace(/  - capability: git\.local\.merge\n    verdict: ASK\n/, ''));
+  const drop = (capability: string) => (t: string): string =>
+    t.replace(new RegExp(`  - capability: ${capability.replaceAll('.', '\\.')}\\n    verdict: ASK\\n`), '');
+  const forgetting = withProfile('high-assurance.md', drop('git.local.merge'));
   assert.throws(
     () => compileAuthority(forgetting),
     (e: unknown) =>
@@ -561,9 +563,7 @@ test('the compiler refuses a control plane in which a stricter profile is looser
     (e: unknown) => e instanceof ControlPlaneValidationError && e.problems.some((p) => /git\.local\.commit/.test(p) && /STRICT/.test(p) && /STANDARD/.test(p)),
   );
   // every violation is listed, not the first
-  const both = withProfile('high-assurance.md', (t) =>
-    t.replace(/  - capability: git\.local\.merge\n    verdict: ASK\n/, '').replace(/  - capability: git\.local\.cherry-pick\n    verdict: ASK\n/, ''),
-  );
+  const both = withProfile('high-assurance.md', (t) => drop('git.local.cherry-pick')(drop('git.local.merge')(t)));
   assert.throws(
     () => compileAuthority(both),
     (e: unknown) =>
@@ -573,6 +573,135 @@ test('the compiler refuses a control plane in which a stricter profile is looser
   );
   // a control plane that obeys the order still compiles
   assert.doesNotThrow(() => compileAuthority(withProfile('high-assurance.md', (t) => t)));
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * 5. A WORD THE SHELL FILLS IN AFTER THE LAST DRY-RUN FLAG
+ *
+ * A dry run is the last dry-run flag the tool sees. `kubectl apply -f x.yaml --dry-run=client $FLAG` ends in a word
+ * nobody can read, and `$FLAG` may well be `--dry-run=none`: the exception that lets an operator LOOK at a production
+ * cluster was ALLOW over a word that could turn the look into the act. For a target that is not a declared local one
+ * the dry run is then not proved, and the call is judged as the act - the owner-approvable ask on an unclassified
+ * target, the absolute refusal on a production one.
+ *
+ * Which dynamic words count is decided by the grammar of kubectl and helm, not by their being dynamic: a word the tool
+ * would take as the value of an option, or as a resource or release name, is not where a flag stands -
+ * `kubectl delete --dry-run=client pod $NAME` is the ordinary way to preview a delete. A verb that takes no names
+ * (`apply`, `replace`, `create -f`, `delete -f`) or has taken all it takes (`helm upgrade RELEASE CHART`) leaves a bare
+ * word after them nowhere to be but a flag. A verb that takes any number of names cannot tell a name from a flag by
+ * position, and there the word is read as a name.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('a dry run that a trailing word of the shell could undo is not a dry run against a production cluster', () => {
+  const x = { 'x.yaml': 'a: 1' };
+  const production: string[] = [
+    'kubectl --context production apply -f x.yaml --dry-run=client $FLAG',
+    'kubectl --context production apply -f x.yaml --dry-run=client "$FLAG"',
+    'kubectl --context production apply -f x.yaml --dry-run=client "$@"',
+    'kubectl --context production apply -f x.yaml --dry-run=client $ARGS',
+    'kubectl --context production apply -f x.yaml --dry-run=client ${ARGS}',
+    'kubectl --context production apply -f x.yaml --dry-run=client $(cat flags)',
+    'kubectl --context production apply -f x.yaml --dry-run=client --$OPT',
+    'kubectl --context production apply -f x.yaml --dry-run=client $FLAG --other',
+    'kubectl --context production apply -f x.yaml --dry-run=server -o yaml $FLAG',
+    'kubectl --context production apply --dry-run=client -f x.yaml $FLAG',
+    'kubectl --context production apply -f x.yaml --server-side --dry-run=client $FLAG',
+    'kubectl --context production replace -f x.yaml --dry-run=client $FLAG',
+    'kubectl --context production create -f x.yaml --dry-run=client $FLAG',
+    'kubectl --context production delete -f x.yaml --dry-run=client $FLAG',
+    'kubectl --context production -n app apply -f x.yaml --dry-run=client $FLAG',
+    'kubectl --kubeconfig prod.yaml apply -f x.yaml --dry-run=client $FLAG',
+    'helm --kube-context production upgrade rel chart --dry-run $FLAG',
+    'helm --kube-context production upgrade rel chart --dry-run "$@"',
+    'helm --kube-context production install rel chart --dry-run $FLAG',
+    'helm --kube-context production upgrade --install rel chart --dry-run $FLAG',
+    'helm --kube-context production upgrade rel chart -f values.yaml --dry-run $FLAG',
+    'helm --kube-context production rollback rel 3 --dry-run $FLAG',
+    'helm --kube-context production upgrade rel chart --dry-run=server $FLAG',
+    // the line as written may carry a wrapper, an assignment or a path in front of the tool
+    'FOO=1 helm --kube-context production upgrade rel chart --dry-run $FLAG',
+    'env FOO=1 helm --kube-context production upgrade rel chart --dry-run $FLAG',
+    'timeout 30 helm --kube-context production upgrade rel chart --dry-run $FLAG',
+    'command kubectl --context production apply -f x.yaml --dry-run=client $FLAG',
+    '/usr/local/bin/kubectl --context production apply -f x.yaml --dry-run=client $FLAG',
+    "bash -c 'kubectl --context production apply -f x.yaml --dry-run=client $FLAG'",
+    'kubectl --context production apply -f x.yaml --dry-run=client $FLAG | tee out.txt',
+    'for f in a b; do kubectl --context production apply -f $f.yaml --dry-run=client $F; done',
+  ];
+  const wrong: string[] = [];
+  for (const command of production) {
+    const got = v(command, x);
+    if (got !== 'DENY') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+  // an unclassified target is the owner-approvable ask
+  const ambient = ['kubectl apply -f x.yaml --dry-run=client $FLAG', 'helm upgrade rel chart --dry-run $FLAG'];
+  for (const command of ambient) assert.equal(v(command, x), 'ASK', command);
+  const r = evaluate(table, ctx(workspace(x)), { tool: 'Bash', input: { command: ambient[0]! } });
+  assert.ok(r.hits.some((h) => h.capability === 'k8s.target.unclassified'), 'it is judged as the act on an unclassified target');
+});
+
+test('a variable that names a resource, a release or the value of an option is not a flag', () => {
+  const x = { 'x.yaml': 'a: 1' };
+  const ordinary: string[] = [
+    'kubectl --context production delete --dry-run=client pod $NAME',
+    'kubectl --context production delete --dry-run=client pod "$NAME"',
+    'kubectl --context production delete --dry-run=client pod x $MORE',
+    'kubectl --context production delete --dry-run=client $RESOURCE',
+    'kubectl --context production delete pod $NAME --dry-run=client',
+    'kubectl --context production delete pod x --dry-run=client -n $NS',
+    'kubectl --context production delete pod x --dry-run=client --namespace $NS',
+    'kubectl --context production delete pod x --dry-run=client --namespace=$NS',
+    'kubectl --context production delete pod --dry-run=client -l app=$APP',
+    'kubectl --context production delete pod --dry-run=client --selector $SEL',
+    'kubectl --context production delete pod x --dry-run=client --grace-period $GP',
+    'kubectl --context production delete pod x --dry-run=client --grace-period=$GP',
+    'kubectl --context production apply -f x.yaml --dry-run=client --field-manager $MGR',
+    'kubectl --context production apply --dry-run=client -f $FILE',
+    'kubectl --context production apply --dry-run=client --filename=$FILE',
+    'kubectl --context production label --dry-run=client pod x app=$APP',
+    'kubectl --context production scale --dry-run=client deploy x --replicas=$N',
+    'kubectl --context production scale --dry-run=client deploy x --replicas $N',
+    'kubectl --context production rollout restart --dry-run=client deploy $NAME',
+    'helm --kube-context production uninstall --dry-run $REL',
+    'helm --kube-context production uninstall --dry-run $REL --namespace $NS',
+    'helm --kube-context production upgrade --dry-run rel $CHART',
+    'helm --kube-context production upgrade rel chart --dry-run --namespace $NS',
+    'helm --kube-context production upgrade rel chart --dry-run -f $VALUES',
+    'helm --kube-context production upgrade rel chart --dry-run --set image.tag=$TAG',
+    'helm --kube-context production upgrade rel chart --dry-run --version $V',
+    'helm --kube-context production upgrade rel chart --dry-run --timeout $T',
+    'helm --kube-context production install --dry-run $REL $CHART',
+    // a word BEFORE the last dry-run flag is not after it: the later flag decides
+    'kubectl --context production apply -f x.yaml $FLAG --dry-run=client',
+    'helm --kube-context production upgrade rel $CHART --dry-run',
+    // nothing dynamic at all
+    'kubectl --context production apply -f x.yaml --dry-run=client',
+    'kubectl --context production apply -f x.yaml --dry-run=client -o yaml',
+    'helm --kube-context production upgrade rel chart --dry-run',
+    // a local cluster is not the question: the act is ordinary there
+    'kubectl --context minikube apply -f x.yaml --dry-run=client $FLAG',
+    'kubectl --context kind-dev delete -f x.yaml --dry-run=client $FLAG',
+    'helm --kube-context minikube upgrade rel chart --dry-run $FLAG',
+  ];
+  const wrong: string[] = [];
+  for (const command of ordinary) {
+    const got = v(command, x);
+    if (got !== 'ALLOW') wrong.push(`${command} -> ${got}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('a dynamic word after the last dry-run flag does not make a read, a probe or the act itself anything else', () => {
+  const x = { 'x.yaml': 'a: 1' };
+  // the act without a dry run is what it was
+  assert.equal(v('kubectl --context production apply -f x.yaml $FLAG', x), 'DENY');
+  assert.equal(v('kubectl --context production apply -f x.yaml --dry-run=none $FLAG', x), 'DENY');
+  assert.equal(v('kubectl --context production apply -f x.yaml --dry-run=client --dry-run=none', x), 'DENY');
+  assert.equal(v('kubectl --context production apply -f x.yaml --dry-run=client --no-dry-run', x), 'DENY');
+  // a read with a trailing word is a read
+  assert.equal(v('kubectl --context production get pods $EXTRA', x), 'ALLOW');
+  assert.equal(v('kubectl --context production get pods --dry-run=client $EXTRA', x), 'ALLOW');
 });
 
 test('the profile documents say what the narrowing lists do', () => {
