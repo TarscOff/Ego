@@ -202,9 +202,41 @@ export interface LocalTargets {
   k8sLocalContexts: string[];
   /** hostnames that are the local machine (localhost, 127.0.0.1, ::1, *.localhost, …) */
   dbLocalHosts: string[];
-  /** tokens that mark a target as production wherever they appear in its name */
+  /** tokens that mark a target as production wherever they appear in its name. The kernel's own, plus the ones a
+   *  project or an organization ADDED: a layer can make this list longer and never shorter. */
   productionMarkers: string[];
   file: string;
+  /** What the organization's and the project's local-targets files DECLARED local, after the registry's own rules
+   *  (see `control-plane/local-targets.ts`). The three kernel lists above answer "what is this machine"; these
+   *  answer "what has a human of this team said is a development target", one question per tool family, so a
+   *  database host a team calls local is not thereby a Docker engine, a cloud endpoint or a network destination.
+   *  Sorted, canonical, and part of the table hash. */
+  declared: DeclaredLocalTarget[];
+  /** Declarations a layer made and the registry did not take, each with the reason. Diagnostics, never a verdict:
+   *  `ego doctor` and `ego init` print them, so a refusal is visible rather than a silent no-op. */
+  ignored: IgnoredLocalTarget[];
+}
+
+/** The tool families a declared target is local FOR. */
+export type LocalTargetKind = 'kube' | 'db' | 'container';
+/** Who declared it. The kernel's authored default is not a layer: it is `LocalTargets` itself. */
+export type LocalTargetLayer = 'organization' | 'project';
+
+export interface DeclaredLocalTarget {
+  kind: LocalTargetKind;
+  /** a name or a glob, as written (matching is case-insensitive) */
+  name: string;
+  layer: LocalTargetLayer;
+  /** the layer file, relative to the project root */
+  file: string;
+}
+
+export interface IgnoredLocalTarget {
+  kind: LocalTargetKind | 'production-marker' | 'file';
+  name: string;
+  layer: LocalTargetLayer;
+  file: string;
+  reason: string;
 }
 
 /** The class a concrete target resolves to. UNCLASSIFIED is a first-class answer, never a silent "local". */

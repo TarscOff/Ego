@@ -9,6 +9,12 @@ import { parseMarkdown, optionalString } from '../util/markdown.ts';
 import { isFile, readJsonIfExists, readText, writeJsonAtomic } from '../util/fs.ts';
 import { sha256Hex, sha256Canonical } from '../util/hash.ts';
 import { ControlPlaneValidationError, VERDICT_RANK } from '../control-plane/types.ts';
+import {
+  clampLocalTargets,
+  diffLocalTargets,
+  loadLocalTargetsLayer,
+  type LocalTargetsLayerDoc,
+} from '../control-plane/local-targets.ts';
 import type { YamlValue } from '../util/yaml.ts';
 
 export interface PolicyCache {
@@ -36,6 +42,11 @@ export const LAYER_FILES = {
   organizationBounded: join('policies', 'organization', 'bounded-commands.md'),
   overlay: join('.harness', 'permissions.md'),
   overlayMatchers: join('.harness', 'overlay', 'matchers.md'),
+  /** The organization's and the project's additions to the local-development target registry (see
+   *  `control-plane/local-targets.ts`). Declaring a target LOCAL turns a refusal into an allowed operation, so both
+   *  files are a widening and travel the road every widening travels: pending until a human runs `ego init`. */
+  organizationLocalTargets: join('policies', 'organization', 'local-targets.md'),
+  projectLocalTargets: join('.harness', 'local-targets.md'),
 } as const;
 
 /** The organization's additions to the bounded-command vocabulary: heads it declares introduce no further
@@ -48,7 +59,8 @@ export function loadOverlayBounded(file: string): string[] {
     throw new ControlPlaneValidationError([`${file}: schema must be ego.bounded-commands/1`]);
   const raw = doc.frontmatter['bounded'];
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw new ControlPlaneValidationError([`${file}: frontmatter "bounded" must be a list`]);
+  if (!Array.isArray(raw))
+    throw new ControlPlaneValidationError([`${file}: frontmatter "bounded" must be a list`]);
   return raw.map((v) => String(v));
 }
 
@@ -106,7 +118,20 @@ export function compileProjectPolicy(
   const organizationBounded = loadOverlayBounded(rec(LAYER_FILES.organizationBounded));
   const overlay = loadOverlayCapabilities(rec(LAYER_FILES.overlay), 'overlay');
   const overlayMatchers = loadOverlayMatchers(rec(LAYER_FILES.overlayMatchers));
-  const table = compileAuthority(cp, { organization, overlay, overlayMatchers, organizationBounded, projectRoot });
+  rec(LAYER_FILES.organizationLocalTargets);
+  rec(LAYER_FILES.projectLocalTargets);
+  const localTargetLayers = [
+    loadLocalTargetsLayer(projectRoot, LAYER_FILES.organizationLocalTargets, 'organization'),
+    loadLocalTargetsLayer(projectRoot, LAYER_FILES.projectLocalTargets, 'project'),
+  ].filter((l): l is LocalTargetsLayerDoc => l !== null);
+  const table = compileAuthority(cp, {
+    organization,
+    overlay,
+    overlayMatchers,
+    organizationBounded,
+    localTargetLayers,
+    projectRoot,
+  });
   return {
     schema: 'ego.policy-cache/1',
     runtimeSha256: self.runtimeSha256,
@@ -197,7 +222,12 @@ export function tableWidenings(baseline: CompiledAuthorityTable, next: CompiledA
   // tree — the one thing the organization layer exists to prevent.
   const baseBounded = new Set(baseline.boundedCommands?.bounded ?? []);
   for (const e of next.boundedCommands?.bounded ?? [])
-    if (!baseBounded.has(e)) out.push(`bounded vocabulary: "${e}" declared to introduce no executable closure`);
+    if (!baseBounded.has(e))
+      out.push(`bounded vocabulary: "${e}" declared to introduce no executable closure`);
+  // Declaring a target local, or un-marking a production name, changes no capability verdict and still turns a
+  // refusal into an allowed operation. It is judged by the same reader the authority diff uses.
+  for (const c of diffLocalTargets(baseline.localTargets, next.localTargets))
+    if (c.widening) out.push(`local targets: ${c.detail}`);
   return out.sort();
 }
 
@@ -225,6 +255,8 @@ export function clampToBaseline(
         if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) cells[cap] = b;
       }
     }
+  // an unaccepted local-target declaration is dropped, and so is the removal of a production marker
+  t.localTargets = clampLocalTargets(t.localTargets, baseline.localTargets);
   const { tableHash: _old, ...body } = t;
   return { ...body, tableHash: sha256Canonical(body) } as CompiledAuthorityTable;
 }

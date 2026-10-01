@@ -683,6 +683,9 @@ function parseLocalTargets(file: string, problems: string[]): LocalTargets {
     dbLocalHosts: list('db_local_hosts'),
     productionMarkers: list('production_markers'),
     file,
+    // what the project and the organization declare is merged in by the compiler (`mergeLocalTargets`), not here
+    declared: [],
+    ignored: [],
   };
 }
 
@@ -780,7 +783,7 @@ export function loadControlPlane(root: string): ControlPlane {
   const targetsFile = req('workspace/local-targets.md');
   const localTargets = targetsFile
     ? parseLocalTargets(targetsFile, problems)
-    : { k8sLocalContexts: [], dbLocalHosts: [], productionMarkers: [], file: '' };
+    : { k8sLocalContexts: [], dbLocalHosts: [], productionMarkers: [], file: '', declared: [], ignored: [] };
 
   // cross-document validation
   const allIds = new Map<string, string>();
