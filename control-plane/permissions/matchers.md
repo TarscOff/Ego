@@ -737,11 +737,12 @@ matchers:
   - capability: db.local.migrate
     tool: Bash
     command: '^(npx\s+)?(typeorm|prisma\s+migrate|alembic|flyway|liquibase|knex\s+migrate|sequelize\s+db:migrate|dbmate)\b'
-  # mongosh's --eval is a Node.js context with `require`: it is `node -e`, and reaches child_process, the filesystem and the
-  # network whatever database it is aimed at (exit review 11)
-  - capability: command.interpreter-inline
-    tool: Bash
-    command: '^(mongosh|mongo)\b[^|;&]*--eval[= ]\S*(require\s*\(|child_process|process\.|Mongo\s*\(|fs\.|os\.)'
+  # mongosh's --eval is a Node.js context: it is `node -e`, and reaches child_process, the filesystem and the network
+  # whatever database it is aimed at (exit review 11). A matcher that looks for the word `require` is a blocklist over a
+  # language with aliases, so there is NO matcher for it here: the inline script is read by a grammar in the evaluator
+  # (mongoScriptProblem), ordinary only when it is one recognised database statement with literal arguments, and every
+  # other script is opaque. The segment stays `db.local.query` so the target resolver still judges WHERE it points - an
+  # opaque script aimed at a production server is refused, not merely asked about.
   - capability: db.local.query
     tool: Bash
     # `mysqladmin` drops databases, `clickhouse client` is the two-word spelling of `clickhouse-client`, and the

@@ -8334,6 +8334,8 @@ interface DbOptionSpec {
   shortValue: string;
   /** short letters that take none */
   shortFlag: string;
+  /** short letters whose value may only be GLUED (`mysql -psecret`); alone, the letter takes nothing */
+  shortGlued?: string;
   /** Go/sqlite style: `-name` is the long option `name` */
   singleDash?: boolean;
   /** GNU style: any unambiguous prefix of a long option is that option */
@@ -8406,7 +8408,11 @@ function parseDbArgs(args: readonly DbWord[], spec: DbOptionSpec): DbArgs {
     for (let k = 1; k < t.length && !consumed; k++) {
       const c = t[k]!;
       const name = spec.alias?.[c] ?? c;
-      if (spec.shortValue.includes(c)) {
+      if (spec.shortGlued?.includes(c)) {
+        const rest = t.slice(k + 1);
+        out.options.push({ name, value: rest === '' ? null : { text: rest, quoted: w.quoted, expands: w.expands } });
+        consumed = true;
+      } else if (spec.shortValue.includes(c)) {
         const rest = t.slice(k + 1);
         if (rest !== '') out.options.push({ name, value: { text: rest.replace(/^=/, ''), quoted: w.quoted, expands: w.expands } });
         else if (args[i + 1] !== undefined) out.options.push({ name, value: args[++i]! });
@@ -8910,6 +8916,297 @@ function psqlEscape(args: readonly DbWord[]): DbEscape {
   return out;
 }
 
+const MYSQL_OPTIONS: DbOptionSpec = {
+  value: [
+    'host', 'user', 'port', 'socket', 'database', 'execute', 'protocol', 'default-character-set', 'character-sets-dir',
+    'connect-timeout', 'max-allowed-packet', 'net-buffer-length', 'select-limit', 'max-join-size', 'bind-address', 'prompt',
+    'ssl-mode', 'ssl-ca', 'ssl-capath', 'ssl-cert', 'ssl-cipher', 'ssl-key', 'ssl-crl', 'ssl-crlpath', 'tls-version',
+    'tls-ciphersuites', 'server-public-key-path', 'histignore', 'login-path', 'compression-algorithms', 'zstd-compression-level',
+    // the two that carry something to RUN or to WRITE: a statement before the first one, and a log file
+    'init-command', 'tee',
+  ],
+  flag: [
+    'batch', 'skip-column-names', 'column-names', 'raw', 'silent', 'table', 'vertical', 'html', 'xml', 'auto-vertical-output',
+    'force', 'verbose', 'quiet', 'compress', 'unbuffered', 'line-numbers', 'skip-line-numbers', 'comments', 'skip-comments',
+    'reconnect', 'skip-reconnect', 'named-commands', 'no-auto-rehash', 'auto-rehash', 'binary-mode', 'binary-as-hex',
+    'secure-auth', 'show-warnings', 'sigint-ignore', 'no-beep', 'wait', 'one-database', 'safe-updates', 'i-am-a-dummy', 'ssl',
+    'skip-ssl', 'ssl-verify-server-cert', 'get-server-public-key', 'enable-cleartext-plugin', 'version', 'help', 'no-defaults',
+    'print-defaults', 'connect-expired-password', 'ignore-spaces', 'password',
+  ],
+  shortValue: 'DehPSu',
+  shortFlag: 'AbBcCEfGgHiLnNoqrstTUvVwWXa?I',
+  shortGlued: 'p',
+  abbreviate: true,
+  alias: { D: 'database', e: 'execute', h: 'host', P: 'port', S: 'socket', u: 'user' },
+};
+
+/** mysql reads its own commands from the statement text too - in `-e` and from a pipe - as a command word at the start
+ *  of a statement or of a line, or as a backslash command anywhere outside a string. `pager` and `system` run a program,
+ *  `source` runs a script, `edit` runs an editor, `delimiter` moves the end of every statement after it, and `connect`
+ *  changes the server; `tee` writes a file, which the path rules judge. */
+function mysqlScript(out: DbEscape, text: string): void {
+  const scan = sqlScan(text, 'mysql');
+  if ('refused' in scan) return void out.opaque.push(`the SQL carries ${scan.refused}`);
+  for (const m of scan.metas) {
+    if (/^[gGcush?Rp#CwWqnt]$/.test(m.name)) continue;
+    if (m.name === 'T') fileOrProgram(out, m.args, '\\T', 'write');
+    else out.opaque.push(`the mysql command \\${m.name} runs a program, reads a script, edits, or changes the connection`);
+  }
+  for (const chunk of scan.code.split(/[;\n]/)) {
+    const words = chunk.trim().split(/\s+/);
+    const first = (words[0] ?? '').toLowerCase();
+    if (first === 'tee') fileOrProgram(out, words.slice(1).join(' '), 'tee', 'write');
+    else if (/^(pager|edit|system|source|delimiter|connect|query_attributes)$/.test(first))
+      out.opaque.push(`the mysql command ${first} runs a program, reads a script, edits, or changes the connection`);
+  }
+  const why = isReadStatement(text) ? null : sqlReachProblem(scan.code);
+  if (why !== null) out.opaque.push(why);
+}
+
+function mysqlEscape(client: string, args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  // the shell runs JavaScript or Python unless told it is SQL, and its option set is not the client's: not read here
+  if (client === 'mysqlsh') {
+    out.opaque.push('mysqlsh runs JavaScript, Python or SQL scripts, and a script is not read');
+    return out;
+  }
+  const parsed = parseDbArgs(args, MYSQL_OPTIONS);
+  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows to be inert`);
+  const statement = (w: DbWord): void => {
+    out.statements.push(w.text);
+    if (w.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
+    else mysqlScript(out, w.text);
+  };
+  for (const o of parsed.options) {
+    if (o.value === null) continue;
+    if (o.name === 'execute' || o.name === 'init-command') statement(o.value);
+    else if (o.name === 'tee') {
+      if (o.value.expands) out.opaque.push('--tee names a file built at run time');
+      else fileOrProgram(out, o.value.text, '--tee', 'write');
+    }
+  }
+  // the operand is a database name; one that is a script is standard input handed over as a word
+  for (const w of parsed.positional) if (/[\s;\\]/.test(w.text)) statement(w);
+  return out;
+}
+
+// --- mongosh / mongo -------------------------------------------------------------------------------------------
+// `--eval` is JavaScript. A rule that looks for the word `require` (exit review 11) is a blocklist over a language that
+// has aliases, computed property names and `Function`, so the inline script is read the other way round: it is ordinary
+// only when it is a statement of a shape this reader recognises from end to end, with arguments made of literals.
+// Anything else - an identifier it does not know, a callback, a template string - is not read and asks.
+
+/** database helpers that report and change nothing */
+const MONGO_DB_HELPERS = new Set(
+  'getCollectionNames getCollectionInfos stats version hostInfo serverStatus isMaster hello getName listCommands serverBuildInfo currentOp getProfilingStatus getLogComponents'.split(' '),
+);
+const MONGO_COLLECTION_METHODS = new Set(
+  (
+    // reads
+    'find findOne count countDocuments estimatedDocumentCount distinct aggregate getIndexes stats totalSize dataSize storageSize totalIndexSize exists ' +
+    // ordinary writes into the collection itself
+    'insertOne insertMany updateOne updateMany replaceOne deleteOne deleteMany findOneAndUpdate findOneAndReplace findOneAndDelete bulkWrite createIndex createIndexes dropIndex dropIndexes drop remove save update insert'
+  ).split(' '),
+);
+const MONGO_CURSOR_MODIFIERS = new Set(
+  'limit skip sort pretty toArray count size explain hasNext next hint maxTimeMS batchSize collation comment min max returnKey allowDiskUse readConcern readPref itcount isClosed tryNext close objsLeftInBatch'.split(' '),
+);
+const MONGO_CONSTRUCTORS = new Set(
+  'ObjectId ISODate Date NumberLong NumberInt NumberDecimal UUID Timestamp BinData MinKey MaxKey Decimal128 Int32 Double Long'.split(' '),
+);
+/** operators that run JavaScript on the server, or write into another collection */
+const MONGO_FORBIDDEN_OPERATOR = /\$(where|function|accumulator|out|merge)\b/;
+
+class MongoReject extends Error {}
+
+/** Why an inline script is not a recognised database statement, or null when it is. */
+function mongoScriptProblem(src: string): string | null {
+  let i = 0;
+  const n = src.length;
+  const fail = (why: string): never => {
+    throw new MongoReject(why);
+  };
+  const skip = (newlines: boolean): void => {
+    while (i < n && (src[i] === ' ' || src[i] === '\t' || src[i] === '\r' || (newlines && src[i] === '\n'))) i++;
+  };
+  const ident = (): string => /^[A-Za-z_$][\w$]*/.exec(src.slice(i))?.[0] ?? '';
+  const stringLiteral = (): void => {
+    const q = src[i]!;
+    let j = i + 1;
+    while (j < n && src[j] !== q) j += src[j] === '\\' ? 2 : 1;
+    if (j >= n) fail('a string that is never closed');
+    if (MONGO_FORBIDDEN_OPERATOR.test(src.slice(i, j))) fail('an operator that runs server-side JavaScript or writes into another collection');
+    i = j + 1;
+  };
+  const value = (): void => {
+    skip(true);
+    const c = src[i] ?? '';
+    if (c === '{') {
+      i++;
+      for (;;) {
+        skip(true);
+        if (src[i] === '}') return void i++;
+        if (src[i] === '"' || src[i] === "'") stringLiteral();
+        else {
+          const key = ident() || /^\d+/.exec(src.slice(i))?.[0] || '';
+          if (key === '') fail('an object key that is not a name, a number or a string');
+          if (MONGO_FORBIDDEN_OPERATOR.test(key)) fail('an operator that runs server-side JavaScript or writes into another collection');
+          i += key.length;
+        }
+        skip(true);
+        if (src[i++] !== ':') fail('an object property without a value');
+        value();
+        skip(true);
+        if (src[i] === ',') i++;
+        else if (src[i] !== '}') fail('an object that is not closed');
+      }
+    }
+    if (c === '[') {
+      i++;
+      for (;;) {
+        skip(true);
+        if (src[i] === ']') return void i++;
+        value();
+        skip(true);
+        if (src[i] === ',') i++;
+        else if (src[i] !== ']') fail('an array that is not closed');
+      }
+    }
+    if (c === '"' || c === "'") return stringLiteral();
+    const num = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(src.slice(i));
+    if (num) return void (i += num[0].length);
+    if (c === '/') {
+      let j = i + 1;
+      let inClass = false;
+      while (j < n && (src[j] !== '/' || inClass)) {
+        if (src[j] === '\n') fail('a regular expression that is never closed');
+        if (src[j] === '\\') j++;
+        else if (src[j] === '[') inClass = true;
+        else if (src[j] === ']') inClass = false;
+        j++;
+      }
+      if (j >= n) fail('a regular expression that is never closed');
+      i = j + 1;
+      while (/[a-z]/.test(src[i] ?? '')) i++;
+      return;
+    }
+    let word = ident();
+    if (word === 'new') {
+      i += 3;
+      skip(false);
+      word = ident();
+      if (!MONGO_CONSTRUCTORS.has(word)) fail(`new ${word}`);
+    }
+    if (/^(true|false|null|undefined|NaN|Infinity)$/.test(word)) return void (i += word.length);
+    if (!MONGO_CONSTRUCTORS.has(word)) fail(word === '' ? `the character ${c}` : `the identifier ${word} in an argument`);
+    i += word.length;
+    skip(false);
+    args();
+  };
+  const args = (): void => {
+    if (src[i++] !== '(') fail('a call that is not closed');
+    for (;;) {
+      skip(true);
+      if (src[i] === ')') return void i++;
+      value();
+      skip(true);
+      if (src[i] === ',') i++;
+      else if (src[i] !== ')') fail('a call that is not closed');
+    }
+  };
+  /** `db` followed by a chain of property reads and calls, walked as a small state machine */
+  const chain = (): void => {
+    if (ident() !== 'db') fail('a statement that does not start at db');
+    i += 2;
+    let state: 'db' | 'coll' | 'cursor' | 'done' = 'db';
+    for (;;) {
+      skip(false);
+      if (src[i] !== '.') break;
+      i++;
+      const name = ident();
+      if (name === '') fail('a property that is not a name');
+      i += name.length;
+      skip(false);
+      const called = src[i] === '(';
+      if (called) args();
+      if (state === 'db') {
+        if (called && (name === 'getSiblingDB' || name === 'getCollection')) state = name === 'getCollection' ? 'coll' : 'db';
+        else if (called && MONGO_DB_HELPERS.has(name)) state = 'done';
+        else if (!called && !MONGO_DB_HELPERS.has(name)) state = 'coll';
+        else fail(`db.${name}`);
+      } else if (state === 'coll') {
+        if (!called || !MONGO_COLLECTION_METHODS.has(name)) fail(`the collection method ${name}`);
+        state = 'cursor';
+      } else if (state === 'cursor') {
+        if (!called || !MONGO_CURSOR_MODIFIERS.has(name)) fail(`the cursor method ${name}`);
+      } else fail(`.${name} after a helper`);
+    }
+    if (state !== 'done' && state !== 'cursor') fail('a chain that does not end in a call');
+  };
+  try {
+    for (;;) {
+      skip(true);
+      if (i >= n) break;
+      const rest = src.slice(i);
+      const show = /^show\s+(?:dbs|databases|collections|tables|users|roles|profile|logs?)(?:[ \t]+[\w.-]+)?(?=[ \t]*(?:;|\n|$))/.exec(rest);
+      const use = /^use[ \t]+[\w.-]+(?=[ \t]*(?:;|\n|$))/.exec(rest);
+      if (show) i += show[0].length;
+      else if (use) i += use[0].length;
+      else if (/^(?:printjson|print)\s*\(/.test(rest)) {
+        i += /^(?:printjson|print)\s*/.exec(rest)![0].length + 1;
+        skip(true);
+        chain();
+        skip(true);
+        if (src[i++] !== ')') fail('a print call that is not closed');
+      } else chain();
+      skip(false);
+      if (i >= n) break;
+      if (src[i] === ';' || src[i] === '\n') i++;
+      else fail('text after the expression');
+    }
+    return null;
+  } catch (e) {
+    if (e instanceof MongoReject) return `the script is not a recognised database statement (${e.message})`;
+    throw e;
+  }
+}
+
+const MONGO_OPTIONS: DbOptionSpec = {
+  value: [
+    'eval', 'host', 'port', 'username', 'password', 'authenticationDatabase', 'authenticationMechanism', 'apiVersion',
+    'tlsCAFile', 'tlsCertificateKeyFile', 'tlsCertificateKeyFilePassword', 'tlsCRLFile', 'tlsDisabledProtocols',
+    'tlsCipherSuites', 'sslCAFile', 'sslPEMKeyFile', 'sslPEMKeyPassword', 'sslCRLFile', 'gssapiServiceName', 'gssapiHostName',
+  ],
+  flag: [
+    'quiet', 'nodb', 'norc', 'json', 'tls', 'ssl', 'version', 'help', 'tlsAllowInvalidCertificates', 'tlsAllowInvalidHostnames',
+    'tlsUseSystemCA', 'sslAllowInvalidCertificates', 'sslAllowInvalidHostnames', 'retryWrites', 'apiStrict',
+    'apiDeprecationErrors', 'disableImplicitSessions', 'verbose',
+  ],
+  shortValue: 'up',
+  shortFlag: 'h',
+  alias: { u: 'username', p: 'password' },
+};
+
+function mongoEscape(args: readonly DbWord[]): DbEscape {
+  const out: DbEscape = { opaque: [], writes: [], reads: [], statements: [] };
+  const parsed = parseDbArgs(args, MONGO_OPTIONS);
+  for (const u of parsed.unknown) out.opaque.push(`the option ${u} is not one this reader knows to be inert`);
+  const script = (w: DbWord): void => {
+    out.statements.push(w.text);
+    if (w.expands) return void out.opaque.push('the script is built at run time, so the text the shell runs is not the text on the command line');
+    const why = mongoScriptProblem(w.text);
+    if (why !== null) out.opaque.push(why);
+  };
+  for (const o of parsed.options) if (o.name === 'eval' && o.value !== null) script(o.value);
+  for (const w of parsed.positional) {
+    // a file operand is a script; a connection string or a database name is not; text with a call in it is standard
+    // input handed over as one word
+    if (/\.(js|mjs|cjs)$/i.test(w.text)) out.opaque.push(`${w.text} is a script file the shell runs`);
+    else if (/[\s;()]/.test(w.text)) script(w);
+  }
+  return out;
+}
+
 /** The words of a segment as the reader wants them: redirections taken out, and each word's expansion mark kept. When
  *  the segment as written does not hold the client (a wrapper was unwrapped into a synthesized form), the normalized
  *  text is read instead, and a `$` or a backtick in it is an expansion. */
@@ -8930,6 +9227,8 @@ function dbClientEscape(client: string, words: readonly DbWord[]): DbEscape {
   const args = words.slice(at + 1);
   if (client === 'sqlite3') return sqliteEscape(args);
   if (client === 'psql') return psqlEscape(args);
+  if (client === 'mysql' || client === 'mariadb' || client === 'mysqlsh') return mysqlEscape(client, args);
+  if (client === 'mongosh' || client === 'mongo') return mongoEscape(args);
   return { opaque: [], writes: [], reads: [], statements: [] };
 }
 
@@ -8999,7 +9298,8 @@ function resolveDbTarget(
   // SELECT whose output is piped to a program, or whose session starts from a script, acts - and against a production
   // host `psql -h prod -c 'select 1' -o '|cmd'` was the allowed read plus an unread program (independent audit, item 5).
   const client = head.replace(/^.*\//, '');
-  const escapes = dbClientEscape(client, dbWordsOf(client, tokenizeMarked(line), line)).opaque.length > 0;
+  const escapes =
+    !isProbeInvocation(line) && dbClientEscape(client, dbWordsOf(client, tokenizeMarked(line), line)).opaque.length > 0;
   const executes = escapes || (!isProbeInvocation(line) && !readOnlyStatement && !listsOnly && !redisRead);
   // sqlite3 operates on a file: the path rules already govern it
   if (head === 'sqlite3') return { cls: 'LOCAL', target: tokens[1] ?? '(memory)', executes };

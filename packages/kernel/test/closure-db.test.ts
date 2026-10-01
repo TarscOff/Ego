@@ -92,6 +92,105 @@ test('sqlite3: the database file operand is a file the client WRITES, judged lik
   assert.equal(verdict(`sqlite3 -readonly .git/hooks/pre-commit "select 1"`, dir), 'ALLOW');
 });
 
+test('mongosh and mongo: an inline script is ordinary only when it is a single expression of a known database shape', () => {
+  const dir = workspace();
+  notAllowed(
+    [
+      // review-11 #131: an alias of `require` defeated the old rule, which looked for the literal word
+      `mongosh --eval 'const r = require; r("child_process").execSync("cmd")'`,
+      `mongosh --eval 'require("child_process").execSync("cmd")'`,
+      `mongosh --eval 'globalThis["req" + "uire"]("fs")'`,
+      `mongosh --eval 'Function("return 1")()'`,
+      `mongo --eval 'run("cmd")'`,
+      // server-side JavaScript hidden in an otherwise ordinary query, and a write into another collection
+      `mongosh --eval 'db.users.find({$where: "sleep(1000)"})'`,
+      `mongosh --eval 'db.users.aggregate([{$match: {a: 1}}, {$out: "copy"}])'`,
+      `mongosh --eval 'db.users.aggregate([{$addFields: {x: {$function: {body: "function(){}", args: [], lang: "js"}}}}])'`,
+      // a callback is code
+      `mongosh --eval 'db.users.find().forEach(function (d) { print(d) })'`,
+      `mongosh --eval 'db.users.find().map(d => d)'`,
+      // a database command is not a shape this reader knows
+      `mongosh --eval 'db.runCommand({shutdown: 1})'`,
+      `mongosh --eval 'load("script.js")'`,
+      `mongosh script.js`,
+      `mongosh --file script.js`,
+      `mongosh --eval "$SCRIPT"`,
+      `mongosh --some-new-option --eval 'db.stats()'`,
+    ],
+    dir,
+  );
+  assert.equal(verdict(`mongosh prod-mongo:27017 --eval 'require("fs")'`, dir), 'DENY');
+  allowed(
+    [
+      `mongosh --eval "db.users.find()"`,
+      `mongosh --eval 'db.stats()'`,
+      `mongosh --quiet --eval 'db.users.countDocuments({active: true})'`,
+      `mongosh app --eval "db.users.insertOne({name: 'a', at: new Date()})"`,
+      `mongosh --eval "show collections"`,
+      `mongosh mongodb://localhost:27017/app --eval "db.getCollectionNames()"`,
+      `mongosh --eval 'db.users.drop()'`,
+      `mongosh --eval 'db.users.find({_id: ObjectId("507f1f77bcf86cd799439011")}).sort({a: -1}).limit(5).toArray()'`,
+      `mongosh --eval 'printjson(db.users.aggregate([{$match: {a: {$gt: 1}}}, {$group: {_id: "$b", n: {$sum: 1}}}]).toArray())'`,
+      `mongosh --eval 'use app; db.users.find()'`,
+      `echo "db.users.find()" | mongosh`,
+    ],
+    dir,
+  );
+});
+
+test('mysql and mariadb: client commands, option files and plugin options are judged, not spelled', () => {
+  const dir = workspace();
+  notAllowed(
+    [
+      // the client's own commands, in the statement text and in their backslash form
+      `mysql -e 'pager cmd; select 1'`,
+      `mysql -e '\\P cmd'`,
+      `mysql -e 'system cmd'`,
+      `mysql -e '\\! cmd'`,
+      `mysql -e 'edit'`,
+      `mysql -e 'source script.sql'`,
+      `mysql -e 'delimiter //'`,
+      `mysql -e 'tee .git/hooks/pre-commit; select 1'`,
+      // options that hand the client a program, a library, a startup file or a statement to run first
+      `mysql --pager=cmd -e 'select 1'`,
+      `mysql --tee=.git/hooks/pre-commit -e 'select 1'`,
+      `mysql --plugin-dir=plugins --default-auth=x -e 'select 1'`,
+      `mysql --defaults-extra-file=extra.cnf -e 'select 1'`,
+      `mysql --init-command='system cmd' -e 'select 1'`,
+      // an abbreviation is the option it abbreviates
+      `mysql --pag=cmd -e 'select 1'`,
+      // the server reads or writes a file on this machine
+      `mysql -e "select load_file('/etc/hostname')"`,
+      `mysql -e "select 1 into outfile '/tmp/out'"`,
+      `mysql -e "load data infile '/tmp/in' into table t"`,
+      `mysql -e "set global general_log_file = '/tmp/log'"`,
+      `mysql -e "$STATEMENT"`,
+      `mariadb -e 'pager cmd; select 1'`,
+      `LIBMYSQL_PLUGIN_DIR=plugins mysql -e 'select 1'`,
+    ],
+    dir,
+  );
+  assert.equal(verdict(`mysql -h prod-db.acme.com -e 'select 1' --pager=cmd`, dir), 'DENY');
+  assert.equal(verdict(`mysql -h prod-db.acme.com -e 'select 1'`, dir), 'ALLOW');
+  allowed(
+    [
+      `mysql -e "show tables"`,
+      `mysql -u root -e "select 1"`,
+      `mysql -h 127.0.0.1 -P 3306 -uroot -psecret app -e "select 1"`,
+      `mysql -u root -p -e "select 1"`,
+      `mysql --batch --skip-column-names -e "select count(*) from t"`,
+      `mysql --default-character-set=utf8mb4 --ssl-mode=DISABLED -e "select 1"`,
+      `mysql -e "insert into t values (1)"`,
+      `mysql -e "drop table t"`,
+      `mysql -u root app -e "create table t (id int primary key, name varchar(10))"`,
+      `mysql -e "select * from t where id < 10 \\G"`,
+      `mariadb -e "select 1"`,
+      `mysql --version`,
+    ],
+    dir,
+  );
+});
+
 test('psql: output, meta-commands, startup files and statements that leave the database are judged, not spelled', () => {
   const dir = workspace();
   notAllowed(
