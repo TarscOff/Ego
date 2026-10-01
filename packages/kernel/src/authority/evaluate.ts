@@ -26,6 +26,19 @@ import type { CompiledAuthorityTable, CompiledMatcher } from './compile.ts';
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import { WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
+import {
+  canonicalGitTokens,
+  forcesRefReset,
+  isIdentityConfigKey,
+  isProgramConfigKey,
+  localRepositoryPath,
+  matcherVerb,
+  programKeyKind,
+  readGitInvocation,
+  restoredPathspecs,
+  transportOperands,
+  wholeTreePathspec,
+} from './git-invocation.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 import {
@@ -39,7 +52,7 @@ import {
 /** A PROCESS SPAWNED WHILE DECIDING IS PAID FOR IN THE SAME UNITS AS TEXT SCANNED (work-bound.ts): it costs milliseconds, not
  *  characters, so its price is flat. Every spawn the evaluator makes goes through these two. */
 const SPAWN_COST = 100_000;
-const STAGE_COST = 500;
+const STAGE_COST = 3000;
 const PATH_JUDGE_COST = 400;
 /** The longest single command (one stage of a pipeline or list, quoting included) that is read. The longest command in the test
  *  corpus is 190 characters and the longest line of any script in this repository is 122; this is two orders of magnitude over
@@ -1933,30 +1946,26 @@ function normalizeSegmentInner(segment: string): string[] {
     head = head.slice(head.lastIndexOf('/') + 1);
     rest = [head, ...rest.slice(1)];
   }
-  // git long options may be abbreviated: expand them before any matcher or flag test looks at them
+  // GIT IS READ BY ONE READER (git-invocation.ts): its long options may be abbreviated and its short ones clustered, so the options are
+  // written out in full before any matcher or flag test looks at them; the verb is found past git's global options; and the acts
+  // that the spelling of an option decides are surfaced as markers a matcher can name.
   if (head === 'git') {
-    rest = expandGitAbbreviations(rest);
-    // `-B` (checkout/switch) and `-M`/`-C` (branch) FORCE a ref to move, destroying commits, while `-b`/`-c`/`-m`
-    // merely create or rename. Matchers are compiled case-insensitively, so the distinction cannot be expressed
-    // there: it is decided here, case-sensitively, and surfaced as a marker the matcher can name (round 15).
-    // ...AND THE VERB IS FOUND PAST GIT'S GLOBAL OPTIONS. `git --no-pager branch -M feature keep` puts
-    // `--no-pager` at position 1, so the verb read as an option and the marker was never emitted — the force
-    // rename went unmatched while the identical command without the global option was caught (exit review 10).
-    // `-c KEY=VALUE`, `-C DIR`, `--git-dir=…` and their neighbours all sit here.
-    let verbAtIdx = 1;
-    while (verbAtIdx < rest.length && rest[verbAtIdx]!.startsWith('-')) {
-      const o = rest[verbAtIdx]!;
-      verbAtIdx += /^(-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--config-env)$/.test(o) ? 2 : 1;
-    }
-    const verb = rest[verbAtIdx] ?? '';
-    // checkout forces with -B, switch with -C, branch with -M (move) or -C (copy) — each the uppercase twin of a
-    // harmless lowercase create/rename
-    const forceLetters: Record<string, string> = { checkout: 'B', switch: 'C', branch: 'MC' };
-    const letters = forceLetters[verb];
-    const forced =
-      letters !== undefined &&
-      rest.some((t) => new RegExp(`^-[a-zA-Z]*[${letters}][a-zA-Z]*$`).test(t));
-    if (forced) rest = [...rest, `${MARK}force-ref-reset`];
+    const inv = readGitInvocation(rest);
+    rest = canonicalGitTokens(rest, inv);
+    // A HYPHENATED COMMAND IS NOT THE VERB IT BEGINS WITH: `git remote-ext`, `git checkout-index -f -a` and `git status-x` are other
+    // programs, and a pattern that ends a verb with `\b` matches in front of a hyphen
+    if (inv.verbIndex >= 0 && matcherVerb(inv.verb) !== inv.verb) rest[inv.verbIndex] = matcherVerb(inv.verb);
+    // `-B` (checkout), `-C` / `--force-create` (switch) and `-M` / `-C` (branch) FORCE a ref to move, destroying commits, while `-b` /
+    // `-c` / `-m` merely create or rename. Matchers are compiled case-insensitively, so the distinction cannot be expressed
+    // there: it is decided here, case-sensitively and by the option's canonical name, and surfaced as a marker the matcher can name
+    // (round 15; the long spelling of `switch -C` was the one nothing named, review 11 #202).
+    if (forcesRefReset(inv)) rest = [...rest, `${MARK}force-ref-reset`];
+    // A PATHSPEC AFTER A TREE-ISH OVERWRITES THE TREE WITH THAT COMMIT'S FILES: `checkout HEAD -- .` discards every uncommitted change
+    // exactly as `checkout .` does, and a rule written for the bare spelling ended in `\b`, which does not match after a `.` (review
+    // 11 #203). The pathspecs are read from the parsed line, and the whole tree is a fact about them.
+    const restored = restoredPathspecs(inv);
+    if (restored !== null && restored.length > 0)
+      rest = [...rest, restored.some(wholeTreePathspec) ? `${MARK}git-whole-tree` : `${MARK}git-path-restore`];
   }
   if (targetEnv.length && TARGET_ENV_HEADS.has(head)) rest = [...rest, ...targetEnv];
   const stripped = stripToolGlobalOptions(head, rest);
@@ -1969,27 +1978,6 @@ function normalizeSegmentInner(segment: string): string[] {
   // The normalizer's output IS the command as the inner shell sees it, so it is expanded here, once, for all of
   // them; a segment with no brace returns unchanged.
   return [...extra, ...normalizeTail(rest)].map((n) => expandBraces(n));
-}
-
-/** git accepts any UNAMBIGUOUS abbreviation of a long option, so `--no-verif`, `--forc`, `--amen` and `--de` all work.
- *  Every governance-relevant option is expanded to its canonical spelling before matching; accepting an abbreviation
- *  that git would reject as ambiguous is fail-closed, never fail-open. */
-const GIT_LONG_OPTS = [
-  '--no-verify', '--force', '--force-with-lease', '--delete', '--amend', '--upload-pack', '--receive-pack',
-  '--exec', '--template', '--discard-changes', '--prune', '--mirror', '--tags', '--all', '--hard', '--no-edit',
-  '--set-upstream', '--unset-upstream', '--move', '--copy', '--config-env', '--global', '--system', '--unset',
-];
-function expandGitAbbreviations(tokens: string[]): string[] {
-  return tokens.map((t) => {
-    const m = /^(--[a-z][a-z-]*)(=.*)?$/s.exec(t);
-    if (!m) return t;
-    const [, name, value = ''] = m;
-    if (GIT_LONG_OPTS.includes(name!) || GIT_COMPLETE_LONG.has(name!)) return t;
-    const hits = GIT_LONG_OPTS.filter((o) => o.startsWith(name!));
-    // `--de` prefixes both --delete and --discard-changes: expanding to the FIRST governed match keeps the deny,
-    // which is the safe direction. git itself would refuse the ambiguity, so nothing legitimate is lost.
-    return hits.length ? hits[0]! + value : t;
-  });
 }
 
 /** Rejoins argv tokens into a command string, re-quoting any token that carries whitespace or a shell operator, so a
@@ -2263,23 +2251,7 @@ function normalizeTail(rest: string[]): string[] {
   return [joinWords(rest)];
 }
 
-/** git / gh / glab global options that may precede the subcommand; the option's argument is consumed with it. */
-/** Long options that are COMPLETE as written, so abbreviation expansion must leave them alone. `--config` is
- *  clone's own option; expanding it to the unique longer match `--config-env` renamed a real flag (exit review 7). */
-const GIT_COMPLETE_LONG = new Set(['--config', '--output', '--file', '--template', '--depth', '--branch', '--origin']);
-const GIT_GLOBAL_WITH_ARG = new Set([
-  '-C',
-  '-c',
-  '--git-dir',
-  '--work-tree',
-  '--namespace',
-  '--exec-path',
-  '--super-prefix',
-  '--config-env',
-  '--config',
-  '--list-cmds',
-  '--attr-source',
-]);
+/** gh / glab global options that may precede the subcommand; the option's argument is consumed with it. (git's are read by git-invocation.ts.) */
 /** gh / glab flags that take a value (so the next token is not a verb) */
 const FORGE_VALUE_FLAGS = new Set([
   // NB: gh's `-i` is --include (a boolean) and must NOT be listed here; listing it made `gh api -i -X DELETE`
@@ -2340,22 +2312,6 @@ const FORGE_VALUE_FLAGS = new Set([
   '--description',
   '--fill-verbose',
 ]);
-const GIT_GLOBAL_FLAGS = new Set([
-  '-p',
-  '--paginate',
-  '-P',
-  '--no-pager',
-  '--no-replace-objects',
-  '--bare',
-  '--literal-pathspecs',
-  '--glob-pathspecs',
-  '--noglob-pathspecs',
-  '--icase-pathspecs',
-  '--no-optional-locks',
-  '--no-lazy-fetch',
-  '--no-advice',
-]);
-
 /**
  * Removes the global option flags of git, gh and glab so `git -C dir push` and `gh -R o/r pr merge` normalize to
  * `git push` and `gh pr merge`. A `-c core.hooksPath=…` (or any hooks-related config override) additionally surfaces
@@ -2365,77 +2321,37 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
   const extra: string[] = [];
   const aliases = new Map<string, string>();
   if (head === 'git') {
-    let i = 1;
-    while (i < tokens.length) {
-      const t = tokens[i]!;
-      if (GIT_GLOBAL_FLAGS.has(t)) {
-        i++;
-        continue;
-      }
-      const eq = t.indexOf('=');
-      const name = eq > 0 ? t.slice(0, eq) : t;
-      if (GIT_GLOBAL_WITH_ARG.has(name)) {
-        const value = eq > 0 ? t.slice(eq + 1) : (tokens[i + 1] ?? '');
-        if (
-          name === '--git-dir' ||
-          name === '--work-tree' ||
-          name === '--namespace' ||
-          name === '--exec-path'
-        )
-          extra.push(
-            `${MARK}env-inject ${name === '--git-dir' ? 'GIT_DIR' : name === '--work-tree' ? 'GIT_WORK_TREE' : name === '--namespace' ? 'GIT_NAMESPACE' : 'GIT_EXEC_PATH'}`,
-          );
-        // `git clone --config k=v` IS the same setting by clone's own spelling, and it sits after the verb. It was
-        // stripped as an unknown global option before any matcher could see it, so `git clone --config
-        // interactive.diffFilter=/tmp/pwn.sh URL` installed a program git runs on every later `add -p` in that
-        // repository, at ALLOW (exit review 7).
-        if (name === '-c' || name === '--config-env' || name === '--config') {
-          // an inline alias redefines a verb: `git -c alias.p=push p …` is `git push …`; an alias whose body is not a
-          // literal (config-env) is an execution override the kernel cannot see
-          // `-c user.name=` / `-c user.email=` ATTRIBUTE THE COMMIT TO WHOEVER IS NAMED — the same act as
-          // `GIT_AUTHOR_NAME=` / `GIT_COMMITTER_EMAIL=`, which reached ASK through the GIT_* env-inject rule. The
-          // command-line spelling is stripped here as a global option, so the marker is emitted from here too
-          // (exit review 10).
-          if (name === '-c' && /^user\.(name|email|signingkey)=/i.test(value)) extra.push(`${MARK}identity-override`);
-          const alias = /^alias\.([^=]+)=(.*)$/.exec(value);
-          if (alias) {
-            aliases.set(alias[1]!, name === '-c' ? alias[2]! : '');
-            extra.push(`git alias-override ${alias[1]}`);
-          }
-          if (
-            // the same SHAPE rule as CONFIG_PROGRAM_VERBS: a key that ends in one of git's program-valued words
-            // names a program git will run, and enumerating them left `trailer.<t>.command`, `gpg.program` and
-            // every other one off the list reaching ALLOW (exit review 6)
-            /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.[A-Za-z0-9_-]*(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook)=/i.test(
-              value,
-            )
-          )
-            // an EMPTY value is a value: `-c core.hooksPath=` switches every hook off, and `git config core.hooksPath` with
-            // nothing after it is a read - so the empty string is written as the empty string (exit review 10)
-            extra.push(`git config ${value.replace('=', ' ')}${/=$/.test(value) ? " ''" : ''}`);
-        }
-        i += eq > 0 ? 1 : 2;
-        continue;
-      }
-      break;
+    // THE GLOBAL OPTIONS AND THE CONFIGURATION THEY SET ARE READ BY THE ONE READER (git-invocation.ts). Three copies of "is this key a
+    // program" and two of "is this key an identity" used to sit here, in the clone branch, and in the text matchers, and each was
+    // right about the keys its author had in mind: `man.man.path`, `author.name` and `--config-env=user.name` were on none of them.
+    const inv = readGitInvocation(tokens);
+    for (const g of inv.globals) {
+      const variable = { '--git-dir': 'GIT_DIR', '--work-tree': 'GIT_WORK_TREE', '--namespace': 'GIT_NAMESPACE', '--exec-path': 'GIT_EXEC_PATH' }[g.name];
+      if (variable !== undefined) extra.push(`${MARK}env-inject ${variable}`);
     }
-    let restGit = tokens.slice(i);
-    // CLONE'S OWN `--config` SITS AFTER THE VERB, where the global-option scan above never looks — it stops at the
-    // first non-option token, which is the verb itself. So `git clone --config interactive.diffFilter=/tmp/pwn.sh
-    // URL` installed a program git runs on every later `add -p` in the new repository, at ALLOW (exit review 7).
-    if (restGit[0] === 'clone')
-      for (let k = 1; k < restGit.length; k++) {
-        const t = restGit[k]!;
-        const m = /^(--config|--config-env|-c)(?:=(.*))?$/.exec(t);
-        if (!m) continue;
-        const value = m[2] ?? restGit[k + 1] ?? '';
-        if (
-          /^(core\.hooksPath|core\.fsmonitor|core\.editor|core\.pager|core\.sshCommand|core\.gitProxy|core\.askPass|init\.templateDir|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|alias\.|credential\.|http\.|remote\.|url\.|include\.|includeIf\.|diff\.external|filter\.|receive\.|uploadpack\.|protocol\.|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.|gpg\.|ssh\.|fsmonitor\.)|\.[A-Za-z0-9_-]*(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter|hook)=/i.test(
-            value,
-          )
-        )
-          extra.push(`git config ${value.replace('=', ' ')}`);
+    for (const cfg of inv.configs) {
+      // `-c user.name=` / `author.name=` / `committer.email=` (or the same from an environment variable) ATTRIBUTE THE COMMIT TO WHOEVER
+      // IS NAMED - the same act as `GIT_AUTHOR_NAME=` / `GIT_COMMITTER_EMAIL=`, which reached ASK through the GIT_* env-inject rule.
+      // The command-line spelling is stripped here as a global option, so the marker is emitted from here too (exit review 10; the
+      // `author.*`, `committer.*` and `--config-env` spellings were the ones left out, review 11 #157, #201)
+      if (isIdentityConfigKey(cfg.key)) extra.push(`${MARK}identity-override`);
+      // an inline alias redefines a verb: `git -c alias.p=push p …` is `git push …`; an alias whose body is not a literal
+      // (config-env) is an execution override the kernel cannot see. (Clone's own `--config` writes the alias into the NEW
+      // repository, where it is not this line's verb.)
+      const alias = cfg.via === '--config' ? null : /^alias\.(.+)$/i.exec(cfg.key);
+      if (alias) {
+        aliases.set(alias[1]!, cfg.value === null ? '' : cfg.value);
+        extra.push(`git alias-override ${alias[1]}`);
       }
+      if (isProgramConfigKey(cfg.key)) {
+        // an EMPTY value is a value: `-c core.hooksPath=` switches every hook off, and `git config core.hooksPath` with nothing after
+        // it is a read - so the empty string is written as the empty string (exit review 10). A value read from the environment is
+        // written as the variable, which no reader can resolve and the matchers take for what it is: a value
+        const text = cfg.value === null ? '$' + (cfg.envVar ?? 'UNSET') : cfg.value === '' ? "''" : cfg.value;
+        extra.push(`git config ${cfg.key} ${text}`);
+      }
+    }
+    let restGit = inv.verbIndex < 0 ? [] : tokens.slice(inv.verbIndex);
     const verb = restGit[0];
     if (verb && aliases.has(verb)) {
       const body = aliases.get(verb)!;
@@ -7160,61 +7076,34 @@ const EVERY_VERB = (set: ReadonlySet<string>): boolean => set.size === 0;
  *  and the like. Local scope only \u2014 these are the keys an agent or a dependency can write into the checkout. */
 function gitLocalProgramValues(root: string, verb: string, failed?: { value: boolean }): string[] {
   const out: string[] = [];
-  // `--local` does NOT expand `include.path` in any spelling, so a filter reached through an include escaped the
-  // closure entirely. Reading the full config WITH includes and keeping only the entries whose ORIGIN file lies
-  // inside the repository gives both: the includes are expanded, and the operator's global settings stay out.
-  const dump = git(['config', '--list', '--includes', '--show-origin'], root);
+  // THE REPOSITORY'S OWN CONFIGURATION IS WHAT GIT SAYS IS LOCAL, NOT WHAT THIS CODE FOUND BY FOLLOWING `include.path`. `--local` does
+  // not expand an include in any spelling, and the reader that replaced it followed the includes itself, to a depth of four: a
+  // `core.fsmonitor` program in the sixth file of a chain of includes ran on every commit, and was dropped without a word because
+  // git follows ten and this followed four (review 11 #239). `--show-scope` marks every entry with the scope of the file that
+  // PULLED IT IN - an included file keeps the scope of the one that included it - so the entries the repository configures itself
+  // with, through however many includes, are the ones git reports as `local` or `worktree`. One reader of "what does this
+  // repository's configuration say": git. The operator's own settings are `global` and stay out.
+  const dump = git(['config', '--list', '--includes', '--show-origin', '--show-scope'], root);
   // A SUBPROCESS THAT COULD NOT ANSWER IS NOT A CONFIGURATION THAT SAYS NOTHING. `git()` flattens a spawn error, a
   // timeout and an over-large output into the same `{ ok: false, stdout: '' }` as a repository with no config at
   // all, and this returned "no programs" for both — so padding a shared config file past 16 MiB made a
   // `core.fsmonitor` program invisible (exit review 10). `status === null` is the spawn/timeout/ENOBUFS case;
-  // a non-zero status means git ran and refused, which also stops the git command itself.
-  if (dump.status === null && failed) failed.value = true;
+  // a non-zero status means git ran and refused (a git too old to know `--show-scope` included), and the includes are then unread.
+  if ((dump.status === null || dump.status !== 0) && failed) failed.value = true;
   if (!dump.ok || !dump.stdout) return out;
   const repo = canonicalPath(root);
-  // every file the repository's OWN config pulls in with `include.path` / `includeIf.<cond>.path`, transitively
-  const pulledIn = new Set<string>();
-  {
-    const seen = new Set<string>();
-    const follow = (file: string, depth: number): void => {
-      const abs = canonicalPath(file);
-      if (depth > 4 || seen.has(abs)) return;
-      seen.add(abs);
-      let text: string;
-      try {
-        text = readFileSync(abs, 'utf8');
-      } catch {
-        return;
-      }
-      for (const m of text.matchAll(/^\s*path\s*=\s*(.+)$/gim)) {
-        const raw = m[1]!.trim().replace(/^["']|["']$/g, '');
-        const target = raw.startsWith('~/')
-          ? join(homedir(), raw.slice(2))
-          : isAbsolute(raw)
-            ? raw
-            : join(abs.slice(0, abs.lastIndexOf(sep)), raw);
-        pulledIn.add(canonicalPath(target));
-        follow(target, depth + 1);
-      }
-    };
-    // the repository's own config is `<worktree>/.git/config`; a worktree or submodule keeps a `.git` FILE that
-    // points at the real directory, which `git rev-parse --git-dir` resolves
-    const gitDir = git(['rev-parse', '--absolute-git-dir'], root);
-    const dir = gitDir.ok && gitDir.stdout.trim() ? gitDir.stdout.trim() : join(repo, '.git');
-    follow(join(dir, 'config'), 0);
-  }
   for (const raw of dump.stdout.split(/\r?\n/)) {
-    // `file:<path>\t<key>=<value>`
-    const tab = raw.indexOf('\t');
-    if (tab < 0) continue;
-    const origin = raw.slice(0, tab).replace(/^file:/, '');
+    // `<scope>\t<origin>\t<key>=<value>`
+    const first = raw.indexOf('\t');
+    const second = first < 0 ? -1 : raw.indexOf('\t', first + 1);
+    if (second < 0) continue;
+    const configScope = raw.slice(0, first);
+    const origin = raw.slice(first + 1, second).replace(/^file:/, '');
+    // the file may also sit INSIDE the repository whatever scope it was read at
     const originAbs = canonicalPath(isAbsolute(origin) ? origin : join(root, origin));
-    // THE TEST IS WHO PULLS THE FILE IN, NOT WHERE IT SITS. Dropping every origin outside the repository excludes
-    // the operator's own `~/.gitconfig`, which is right — and it also excluded a file the REPOSITORY'S OWN
-    // `.git/config` names with `include.path`, which is the repository configuring itself through an indirection.
-    // A clean filter reached that way ran on `git add .` at ALLOW (exit review 7).
-    if (originAbs !== repo && !originAbs.startsWith(repo + sep) && !pulledIn.has(originAbs)) continue;
-    const line = raw.slice(tab + 1);
+    const inRepo = originAbs === repo || originAbs.startsWith(repo + sep);
+    if (configScope !== 'local' && configScope !== 'worktree' && !inRepo) continue;
+    const line = raw.slice(second + 1);
     const eq = line.indexOf('=');
     if (eq < 0) continue;
     const key = line.slice(0, eq);
@@ -12481,6 +12370,22 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       judgeInto(hits, table, ctx, 'Read', cwd, rel.replace(/^\.\//, ''), seg, (v) => `git reads ${rel} out of history (${v})`, old);
     }
   }
+  // A TRANSPORT VERB READS THE REPOSITORY IT IS POINTED AT, and when that is a local path it is a read of that path - however the
+  // path is spelled. `git clone /Users/me/other /tmp/x` asked, because the operand is a path the scan above recognises, while
+  // `git clone file:///Users/me/other /tmp/x` is the same directory behind a URL and was ALLOW (review 11 #103). The operand is
+  // read by the git reader (git-invocation.ts): `clone`, `fetch`, `pull` and `ls-remote` read their first operand, `--reference` and
+  // `--remote` name another; a `file://` URL is the path it denotes, `host:path` and `scheme://host/…` are remotes. The judgement is
+  // the one reader of paths (`judgeInto`), so a repository under `~/.ssh` is a credential read and one outside the workspace asks.
+  if (head === 'git') {
+    for (const operand of transportOperands(readGitInvocation(tokens))) {
+      const local = localRepositoryPath(operand);
+      if (local === null || local === '' || /[$`]/.test(local)) continue;
+      // a bare name is a directory under the working directory, which is where the command already is; only a word that is a path
+      // (or a URL for one) can name a place outside it
+      if (!/^file:/i.test(operand) && !isPathLike(local)) continue;
+      judgeInto(hits, table, ctx, 'Read', cwd, local, seg, (v) => `git reads the repository ${operand} (${v})`, old);
+    }
+  }
   // `--secret src=PATH` HANDS A FILE TO THE BUILD. BuildKit mounts it inside the image at build time, so the
   // file's bytes leave the workspace exactly as `cat` would send them anywhere else (exit review 9).
   for (const m of seg.matchAll(/--secret[= ]\s*\S*?(?:^|,)(?:src|source|file)=([^,\s]+)/g)) {
@@ -13798,9 +13703,6 @@ function sedSubstitutionWriteFiles(line: string): string[] {
  *  key was reported as opacity — an ASK — over text the kernel can read (exit review 9). Only the keys whose
  *  value git EXECUTES are read this way; a key whose value is a path, a boolean or a number is not a command.
  *  An unreadable or dynamic value keeps the opacity it already has. */
-const GIT_EXEC_CONFIG_KEY =
-  /^(core\.(hooksPath|fsmonitor|editor|pager|sshCommand|gitProxy|askPass|alternateRefsCommand)|sequence\.editor|merge\.[^.]+\.driver|diff\.[^.]+\.(textconv|command)|diff\.external|alias\.|filter\.|credential\.[^=]*helper|uploadpack\.[^=]*Hook|pager\.|difftool\.|mergetool\.|guitool\.|trailer\.[^.]+\.command|gpg\.[^.]*program|ssh\.variant)/i;
-
 function gitConfigCommands(seg: string): string[] {
   const t = tokenizeMarked(seg).map((x) => x.text);
   if (!/^git$/.test((t[commandHeadIndex(t)] ?? '').replace(/^.*\//, ''))) return [];
@@ -13817,7 +13719,9 @@ function gitConfigCommands(seg: string): string[] {
     const key = kv.slice(0, eq);
     const value = kv.slice(eq + 1);
     // a value that is a bare PATH, a boolean or a number names no command line to read
-    if (!GIT_EXEC_CONFIG_KEY.test(key) || !value.trim() || /^[\w./~-]+$/.test(value)) continue;
+    // (the keys are the reader's table, the one that says which keys name a program; here only the ones whose value is a command line or a program)
+    const kind = programKeyKind(key);
+    if ((kind !== 'command' && kind !== 'path') || !value.trim() || /^[\w./~-]+$/.test(value)) continue;
     out.push(value);
   }
   return out;

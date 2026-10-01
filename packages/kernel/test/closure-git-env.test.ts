@@ -9,11 +9,29 @@
 //   OVL    an overlay may only narrow, and a narrowing must reach the rule that decides (r11-117, 118, 120)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { evaluate, type Evaluation } from '../src/authority/evaluate.ts';
 import { WORK_LIMIT, overrideWorkLimit, workSpent } from '../src/authority/work-bound.ts';
-import { ORDINARY, SEMANTIC_CLASSES, ctx, table, workspace } from './support/corpus.ts';
+import {
+  GIT_HYPHENATED_WITH_RULES,
+  PROGRAM_KEYS,
+  gitOption,
+  isIdentityConfigKey,
+  isKnownGitVerb,
+  programKeyKind,
+  readGitInvocation,
+} from '../src/authority/git-invocation.ts';
+import { GIT_CONFIG_KEYS } from '../src/authority/git-verb-options.ts';
+import { ORDINARY, RANK, SEMANTIC_CLASSES, ctx, table, workspace } from './support/corpus.ts';
 
 const run = (command: string, dir: string): Evaluation => evaluate(table, ctx(dir), { tool: 'Bash', input: { command } });
+const verdictOf = (command: string, dir: string): string => run(command, dir).verdict;
+/** a real git invocation in a fixture directory, with the operator's own configuration kept out of it */
+const gitIn = (dir: string, ...args: string[]): string =>
+  execFileSync('git', args, { cwd: dir, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
 const caps = (e: Evaluation): string => e.hits.map((h) => `${h.verdict}:${h.capability}`).join(',');
 const timed = <T>(f: () => T): { value: T; ms: number } => {
   const t0 = performance.now();
@@ -155,4 +173,298 @@ test('the reproduction in the review (700 spaces, a sed script, a push) does not
   const first = workSpent();
   run(command, dir);
   assert.equal(workSpent(), first);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * GIT
+ *
+ * A git command line says four things the policy cares about: WHICH ACT it is, WHAT PROGRAM it makes git run, WHO it speaks as, and
+ * WHAT IT READS. Each was read by its own code with its own list, and each list was right about the spellings its author had in
+ * mind. `authority/git-invocation.ts` reads the line once, and these tests state what has to stay true of it.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/** every spelling must be at least this; a stricter verdict (an absolute deny that was already there) is not a regression */
+const atLeast = (floor: 'ASK' | 'DENY', command: string, dir: string, why = ''): void => {
+  const got = verdictOf(command, dir);
+  assert.ok(RANK[got]! >= RANK[floor]!, `${command}${why ? ` (${why})` : ''}: ${got}, expected at least ${floor}`);
+};
+
+test('r11-202: a branch reset is decided by the OPTION, whatever it is spelled: the long name, a prefix of it, a cluster, a global option in front', () => {
+  const dir = workspace();
+  for (const c of [
+    'git switch -C main HEAD~3',
+    'git switch --force-create main HEAD~3',
+    'git switch --force-c main HEAD~3',
+    'git switch --force-cre main',
+    'git switch -fC main HEAD~3',
+    'git switch -qC main HEAD~3',
+    'git switch -C main',
+    // a global option in front of the verb, one that takes a value included
+    'git --attr-source HEAD branch -M topic3 topic2',
+    'git --attr-source=HEAD branch -M topic3 topic2',
+    'git --super-prefix=x/ checkout -B main',
+    'git --no-pager --attr-source HEAD switch --force-create main',
+    'git -c core.autocrlf=false switch --force-create main',
+    'git -C . switch --force-create main',
+    'git --git-dir=.git --work-tree=. switch --force-create main',
+    // the other two verbs that move a branch that exists
+    'git checkout -B main HEAD~3',
+    'git checkout -fB main',
+    'git branch -M a b',
+    'git branch -C a b',
+    'git branch --move --force a b',
+    'git branch -fm a b',
+    'git worktree add -B main ../w',
+  ])
+    atLeast('ASK', c, dir);
+  // ...and the spellings that CREATE a branch, or switch to one, are the ordinary act they were
+  for (const c of ['git switch -c topic', 'git switch --create topic', 'git switch main', 'git checkout -b topic', 'git branch -m a b', 'git branch topic'])
+    assert.equal(verdictOf(c, dir), 'ALLOW', c);
+});
+
+test('r11-150: a configuration key that names a program is gated on every key git documents, however the value is handed over', () => {
+  const dir = workspace();
+  for (const c of [
+    'git -c man.man.path=/tmp/evilman log --help',
+    'git -c man.viewer=evil -c man.evil.cmd=/tmp/evil help log',
+    'git -c help.format=web -c browser.chrome.path=/tmp/evil -c web.browser=chrome push --help',
+    'git -c browser.x.cmd=/tmp/evil help -w log',
+    'git -c web.browser=/tmp/evil help -w log',
+    'git -c core.pager=/tmp/evil log',
+    'git -c core.editor=/tmp/evil commit',
+    'git -c sequence.editor=/tmp/evil rebase -i HEAD~2',
+    'git -c core.sshCommand=/tmp/evil fetch origin',
+    'git -c core.fsmonitor=/tmp/evil status',
+    'git -c core.alternateRefsCommand=/tmp/evil fetch origin',
+    'git -c core.askPass=/tmp/evil fetch origin',
+    'git -c credential.helper=/tmp/evil fetch origin',
+    'git -c credential.https://example.com.helper=/tmp/evil fetch origin',
+    'git -c diff.external=/tmp/evil diff',
+    'git -c diff.x.textconv=/tmp/evil diff',
+    'git -c difftool.x.cmd=/tmp/evil difftool',
+    'git -c mergetool.x.path=/tmp/evil mergetool',
+    'git -c merge.x.driver=/tmp/evil merge topic',
+    'git -c filter.x.clean=/tmp/evil add .',
+    'git -c gpg.program=/tmp/evil commit -S -m x',
+    'git -c gpg.ssh.defaultKeyCommand=/tmp/evil commit -m x',
+    'git -c gc.recentObjectsHook=/tmp/evil gc',
+    'git -c uploadpack.packObjectsHook=/tmp/evil fetch origin',
+    'git -c instaweb.httpd=/tmp/evil instaweb',
+    'git -c sendemail.smtpServer=/tmp/evil send-email a.patch',
+    'git -c sendemail.toCmd=/tmp/evil send-email a.patch',
+    'git -c imap.tunnel=/tmp/evil imap-send',
+    'git -c interactive.diffFilter=/tmp/evil add -p',
+    'git -c submodule.x.update=!/tmp/evil submodule update',
+    'git -c include.path=/tmp/evil.cfg status',
+    'git -c remote.origin.uploadpack=/tmp/evil fetch origin',
+    // the value handed over by the environment, and the key set on a clone
+    'git --config-env=man.man.path=EVIL log --help',
+    'git --config-env core.pager=EVIL log',
+    'git clone --config man.man.path=/tmp/evil https://example.com/x.git',
+    'git clone -c core.pager=/tmp/evil https://example.com/x.git',
+    // a key in capitals is the same key
+    'git -c MAN.MAN.PATH=/tmp/evil log --help',
+    'git -c Core.Pager=/tmp/evil log',
+  ])
+    atLeast('ASK', c, dir);
+  // an ordinary key is data
+  for (const c of ['git -c color.ui=always diff', 'git -c core.autocrlf=false status', 'git -c advice.detachedHead=false checkout main', 'git -c diff.renames=true diff'])
+    assert.equal(verdictOf(c, dir), 'ALLOW', c);
+});
+
+test('the table of program keys agrees with git: every key on it is one git documents, and the classes it names are the right ones', () => {
+  // the keys the kernel calls a program are named in `git help -c` (spelled with <placeholders>); a typo in the table would be a
+  // key nobody can set, and a key git adds that this table lacks is caught by the shape rule and the families, not by luck
+  const documented = new Set(GIT_CONFIG_KEYS.map((k) => k.replace(/<[^>]*>/g, '*').toLowerCase()));
+  // (two are documented elsewhere: credential.<url>.* in gitcredentials(7), filter.<driver>.process in gitattributes(5))
+  const elsewhere = new Set(['credential.*.helper', 'filter.*.process']);
+  for (const [pattern] of PROGRAM_KEYS) assert.ok(documented.has(pattern.toLowerCase()) || elsewhere.has(pattern), `${pattern} is not a key git documents`);
+  assert.ok(GIT_CONFIG_KEYS.length > 500, 'the documented keys were not generated');
+  assert.equal(programKeyKind('man.man.path'), 'path');
+  assert.equal(programKeyKind('core.pager'), 'command');
+  assert.equal(programKeyKind('man.viewer'), 'name');
+  assert.equal(programKeyKind('color.ui'), null);
+  assert.equal(programKeyKind('branch.main.remote'), null);
+  assert.ok(isIdentityConfigKey('Author.Name') && isIdentityConfigKey('committer.email') && isIdentityConfigKey('user.signingKey'));
+  assert.ok(!isIdentityConfigKey('user.useConfigOnly') && !isIdentityConfigKey('core.pager'));
+});
+
+test('r11-157, r11-201: authorship is set by author.*, committer.* and user.* alike, on the line, from the environment, or on a clone', () => {
+  const dir = workspace();
+  for (const c of [
+    'git -c user.name=Bob commit -m x',
+    'git -c author.name=Mallory -c author.email=m@evil.test commit -m x',
+    'git -c committer.name=Carol -c committer.email=c@evil.test commit -m x',
+    'git -c author.name=Foo -c author.email=f@b -c committer.name=Bar -c committer.email=b@b commit -m x',
+    'FOO=Baz git --config-env=user.name=FOO commit -m x',
+    'FAKE=Mallory FAKEM=m@evil.test git --config-env=user.name=FAKE --config-env=user.email=FAKEM commit -m x',
+    'git --config-env author.email=FAKEM commit -m x',
+    'git -c Author.Name=Mallory commit -m x',
+    'git -c user.signingkey=ABCDEF commit -S -m x',
+    'git -c author.name=Mallory merge topic',
+    'git -c committer.name=Carol rebase main',
+    'git -c author.name=Mallory cherry-pick abc',
+    'git -c author.name=Mallory tag -a v1 -m x',
+    // the identity planted in a clone is the one every later commit in it is made as
+    'git clone --config user.name=Mallory https://example.com/x.git',
+    'git clone --config author.email=m@evil.test https://example.com/x.git',
+    'git clone -c committer.name=Carol https://example.com/x.git',
+  ])
+    atLeast('ASK', c, dir);
+  // the spellings that were already gated stay so, and a commit with no override is ordinary
+  assert.equal(verdictOf('git commit -m x', dir), 'ALLOW');
+  assert.equal(verdictOf('git commit --amend --no-edit', dir), 'ASK');
+  for (const c of ['git commit --author="A <a@b>" -m x', 'GIT_AUTHOR_NAME=X git commit -m x']) atLeast('ASK', c, dir);
+});
+
+test('r11-203: a pathspec after a tree-ish overwrites the tree: whole-tree spellings are the destruction `checkout .` is, every other path is a restore', () => {
+  const dir = workspace({ 'src/a.ts': 'x\n' });
+  for (const c of [
+    'git checkout HEAD -- .',
+    'git checkout HEAD~3 -- .',
+    'git checkout main -- .',
+    'git checkout HEAD .',
+    'git checkout HEAD -- *',
+    'git checkout HEAD -- :/',
+    'git checkout HEAD -- ./',
+    'git checkout HEAD -- ./.',
+    'git checkout HEAD -- :(top)',
+    'git checkout HEAD -- :(top).',
+    'git checkout stash@{0} -- .',
+    'git checkout -f HEAD -- .',
+    'git checkout HEAD -- src/ .',
+    'git restore --source=HEAD~3 .',
+    'git restore -s HEAD .',
+    'git restore --source HEAD --worktree .',
+    'git restore -W :/',
+    'git restore --staged --worktree .',
+    'git checkout -- .',
+    'git checkout .',
+  ]) {
+    const e = run(c, dir);
+    assert.ok(RANK[e.verdict]! >= RANK.ASK!, c);
+    assert.ok(e.hits.some((h) => h.capability === 'command.destructive'), `${c}: ${caps(e)}`);
+  }
+  // a path that is not the whole tree is a restore, whatever character it ends in
+  for (const c of ['git checkout HEAD -- src', 'git checkout HEAD -- src/', 'git checkout HEAD -- src/*', 'git checkout HEAD -- src/a.ts', 'git checkout HEAD src/a.ts', 'git restore src/']) {
+    const e = run(c, dir);
+    assert.equal(e.verdict, 'ASK', `${c}: ${caps(e)}`);
+    assert.ok(e.hits.some((h) => h.capability === 'git.local.restore'), `${c}: ${caps(e)}`);
+  }
+  // reading, branching and unstaging are not restores
+  for (const c of ['git checkout main', 'git checkout -b topic', 'git checkout -b topic HEAD', 'git restore --staged .', 'git restore -S src/a.ts'])
+    assert.notEqual(verdictOf(c, dir), 'DENY', c);
+  for (const c of ['git checkout main', 'git checkout -b topic HEAD']) assert.equal(verdictOf(c, dir), 'ALLOW', c);
+});
+
+test('r11-103: a repository a transport verb is pointed at is a path it reads, spelled as a path, as a file:// URL, or behind --reference', () => {
+  const dir = workspace();
+  const OUTSIDE = '/usr/share/zoneinfo';
+  for (const c of [
+    `git clone ${OUTSIDE} /tmp/x`,
+    `git clone file://${OUTSIDE} /tmp/x`,
+    `git clone file://localhost${OUTSIDE} /tmp/x`,
+    `git clone file://anyhost${OUTSIDE} /tmp/x`,
+    'git clone file:///usr/share/%7Ezone/info /tmp/x',
+    `git clone --shared file://${OUTSIDE}`,
+    `git clone --local file://${OUTSIDE} /tmp/x`,
+    `git clone -l --no-checkout file://${OUTSIDE} /tmp/x`,
+    `git fetch file://${OUTSIDE}`,
+    `git fetch file://${OUTSIDE} main`,
+    `git pull file://${OUTSIDE} main`,
+    `git ls-remote file://${OUTSIDE}`,
+    `git clone --reference ${OUTSIDE} https://example.com/x.git`,
+    `git clone --reference-if-able ${OUTSIDE} https://example.com/x.git`,
+    `git clone -c core.autocrlf=false file://${OUTSIDE} /tmp/x`,
+    `git -C . clone file://${OUTSIDE} /tmp/x`,
+  ])
+    atLeast('ASK', c, dir);
+  // a credential store is not made readable by a URL
+  for (const c of ['git clone file://$HOME/.ssh /tmp/x', `git clone file://${homedir()}/.ssh /tmp/x`, `git fetch file://${homedir()}/.aws`])
+    atLeast('DENY', c, dir);
+  // the ordinary clones: a remote, a path in the workspace or in scratch space, a remote name
+  for (const c of [
+    'git clone https://example.com/x.git /tmp/x',
+    'git clone git@example.com:o/r.git',
+    'git clone file:///tmp/x /tmp/y',
+    'git clone ./sibling /tmp/y',
+    'git fetch origin',
+    'git fetch origin main',
+    'git pull',
+    'git pull origin main',
+    'git ls-remote origin',
+  ])
+    assert.equal(verdictOf(c, dir), 'ALLOW', c);
+});
+
+test('r11-105: a git command is not the verb it begins with: remote-ext runs a command, checkout-index overwrites the tree, status-x is another program', () => {
+  const dir = workspace();
+  for (const c of [
+    "git remote-ext x 'git push --force origin main'",
+    "printf 'connect git-upload-pack\\n' | git remote-ext x 'git push --force origin main'",
+    "git remote-ext x 'touch /tmp/ran'",
+  ])
+    assert.equal(verdictOf(c, dir), 'DENY', c);
+  // a hyphenated command that no rule names is not read as the shorter verb a pattern ends in `\b` in front of
+  for (const c of ['git checkout-index -f -a', 'git status-x', 'git log-x', 'git clone-x https://example.com/x.git', 'git commit-graph write', 'git fetch-pack /tmp/x', 'git remote-fd 1 2', 'git remote-https origin https://example.com/x', 'git push-x origin main'])
+    assert.equal(verdictOf(c, dir), 'ASK', c);
+  // the hyphenated commands that DO have rules are untouched
+  for (const c of ['git merge-base HEAD main', 'git rev-parse HEAD', 'git cat-file -p HEAD', 'git ls-files', 'git ls-remote origin', 'git for-each-ref', 'git cherry-pick --abort'])
+    assert.notEqual(verdictOf(c, dir), 'DENY', c);
+  for (const c of ['git merge-base HEAD main', 'git rev-parse HEAD', 'git ls-files', 'git for-each-ref']) assert.equal(verdictOf(c, dir), 'ALLOW', c);
+  // every hyphenated command a matcher names is on the list that exempts it from the rename (the two are kept in step)
+  const named = new Set<string>();
+  for (const m of table.matchers) for (const v of (m.command ?? '').match(/\b[a-z]+(?:-[a-z]+)+\b/g) ?? []) if (isKnownGitVerb(v) && /git/.test(m.command ?? '')) named.add(v);
+  for (const v of named) if (v.includes('-')) assert.ok(GIT_HYPHENATED_WITH_RULES.has(v), `${v} is named by a matcher and would be renamed`);
+});
+
+test('options are read by their canonical names: a prefix of a long option, a cluster of short ones, a value that looks like an option', () => {
+  const read = (s: string) => readGitInvocation(s.split(' '));
+  // an unambiguous prefix is the option
+  assert.deepEqual(gitOption(read('git switch --force-c main'), '--force-create')?.names, ['-C', '--force-create']);
+  assert.ok(gitOption(read('git push --no-verif origin main'), '--no-verify'));
+  assert.ok(gitOption(read('git stash push --include-untr'), '--include-untracked'));
+  assert.ok(gitOption(read('git stash -u'), '--include-untracked'), 'the default subcommand of stash is push');
+  assert.ok(gitOption(read('git worktree add --force x'), '--force'));
+  // a cluster is each letter, and the first that takes a value takes the rest
+  assert.ok(gitOption(read('git switch -fC main'), '-f'));
+  assert.ok(gitOption(read('git switch -fC main'), '-C'));
+  assert.equal(gitOption(read('git commit -nm msg'), '--message')?.value, 'msg');
+  assert.ok(gitOption(read('git commit -nm msg'), '-n'));
+  // the value of an option is not an option: `-m --force` is a message
+  assert.equal(gitOption(read('git commit -m --force'), '--force'), undefined);
+  assert.equal(gitOption(read('git commit -m --force'), '-m')?.value, '--force');
+  // nothing after `--` is an option
+  assert.equal(gitOption(read('git checkout HEAD -- --force'), '--force'), undefined);
+  // an ambiguous prefix is read as the governed option it could be, because git refuses it and "refused" is not "harmless"
+  assert.ok(gitOption(read('git merge main --no-verif'), '--no-verify'));
+  assert.ok(gitOption(read('git cherry-pick abc --no-verif'), '--no-verify'));
+  // the negation is another option
+  assert.equal(gitOption(read('git switch --no-force-create main'), '-C'), undefined);
+});
+
+test('r11-239: the repository\'s own configuration is whatever git says is local, however many files it includes', () => {
+  // a chain of includes whose last file sets a program git runs on every commit. The kernel followed four, and git follows ten.
+  for (const depth of [1, 4, 5, 6, 10]) {
+    const dir = workspace();
+    gitIn(dir, 'init', '-q');
+    const out = mkdtempSync(join(tmpdir(), 'ego-chain-'));
+    writeFileSync(join(out, `f${depth}`), '[core]\n\tfsmonitor = /tmp/evil.sh\n');
+    for (let i = depth - 1; i >= 1; i--) writeFileSync(join(out, `f${i}`), `[include]\n\tpath = ${out}/f${i + 1}\n`);
+    appendFileSync(join(dir, '.git', 'config'), `[include]\n\tpath = ${out}/f1\n`);
+    const e = run('git commit -m x --allow-empty', dir);
+    assert.notEqual(e.verdict, 'ALLOW', `depth ${depth}: ${caps(e)}`);
+  }
+  // past the depth git follows, git itself refuses the configuration: the question is then unanswered, and unanswered asks
+  const dir = workspace();
+  gitIn(dir, 'init', '-q');
+  const out = mkdtempSync(join(tmpdir(), 'ego-chain-'));
+  writeFileSync(join(out, 'f12'), '[core]\n\tfsmonitor = /tmp/evil.sh\n');
+  for (let i = 11; i >= 1; i--) writeFileSync(join(out, `f${i}`), `[include]\n\tpath = ${out}/f${i + 1}\n`);
+  appendFileSync(join(dir, '.git', 'config'), `[include]\n\tpath = ${out}/f1\n`);
+  assert.notEqual(run('git commit -m x --allow-empty', dir).verdict, 'ALLOW');
+  // an operator's own global configuration is not the repository's: a program there is the operator's business
+  const clean = workspace();
+  gitIn(clean, 'init', '-q');
+  assert.equal(run('git commit -m x --allow-empty', clean).verdict, 'ALLOW');
 });

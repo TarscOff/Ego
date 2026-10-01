@@ -546,8 +546,9 @@ test('a program operand is found whether its value is glued, separated or behind
   // `git clone --config k=v` is clone's own spelling of the global `-c k=v`, and it sits AFTER the verb where the
   // global-option stripper never looks
   assert.equal(run('git clone --config core.sshCommand=/tmp/e https://x/y.git', d).verdict, 'DENY');
-  // and ordinary compilation and cloning are untouched
-  for (const cmd of ['gcc -c a.c -o a.o', 'clang -O2 a.c', 'git clone https://x/y.git', 'git clone --config user.name=me https://x/y.git'])
+  // and ordinary compilation and cloning are untouched. (`--config user.name=me` is not an ordinary spelling: it plants the identity every
+  // later commit in the clone is attributed to, which is the override `-c user.name=` is gated for - closure-git-env.test.ts)
+  for (const cmd of ['gcc -c a.c -o a.o', 'clang -O2 a.c', 'git clone https://x/y.git', 'git clone --config core.autocrlf=false https://x/y.git'])
     assert.equal(run(cmd, d).verdict, 'ALLOW', cmd);
 });
 

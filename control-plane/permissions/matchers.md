@@ -72,6 +72,23 @@ matchers:
   - capability: git.identity.override
     tool: Bash
     command: '^\x00ego\x00identity-override\b'
+  # A PATHSPEC AFTER A TREE-ISH OVERWRITES THE TREE WITH THAT COMMIT'S FILES. `git checkout HEAD -- .` discards every uncommitted change
+  # as `git checkout .` does, and a rule that ends its pathspec in `\b` never matched a pathspec that ends in `.`, `*` or `/` (review
+  # 11 #203). The evaluator reads the pathspecs of a checkout or a restore from the parsed command line (authority/git-invocation.ts)
+  # and says what they are: the whole tree is the repository-wide destruction `checkout .` is, any other path is a restore.
+  # (the marker is appended by the NORMALIZER to a segment the splitter has already decided is one command, so an operator inside a
+  # pathspec must not hide it: `[\s\S]*` and not `[^|;&]*`, as for `force-ref-reset` below)
+  - capability: command.destructive
+    tool: Bash
+    command: '^git\s+(checkout|restore)\b[\s\S]*\s\x00ego\x00git-whole-tree(\s|$)'
+  - capability: git.local.restore
+    tool: Bash
+    command: '^git\s+(checkout|restore)\b[\s\S]*\s\x00ego\x00git-path-restore(\s|$)'
+  # `git remote-ext <remote> <command line>` RUNS THE COMMAND LINE: it is the transport helper behind `ext::`, and it is a git command
+  # of its own, so the `^git\s+remote\b` rules below read it as a listing (review 11 #105). The same act, the same capability.
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\s+remote-ext\b'
   - capability: command.env-inject
     tool: Bash
     command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|RUBYLIB|GEM_HOME|GEM_PATH|CLASSPATH|JAVA_HOME|NODE_PATH|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|GLIBC_TUNABLES|OBJC_INSERT_LIBRARIES|LUA_PATH|LUA_CPATH)'
