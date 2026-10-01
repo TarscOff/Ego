@@ -6,6 +6,10 @@
 // Write with no operand); the audit re-ran them and found the class still open one spelling away. So each group
 // below pins the class, at the evaluator AND through the real hook path (raw host JSON -> parse*Event ->
 // handleHook -> render*), and every group was written to fail on the tree it was found on.
+//
+//   A  a path is judged by what it resolves to (C3)      B  apply_patch headers (7)      C  only a fetch has a url (9)
+//   D  one operand per tool, optional operands (13)      E  tools nobody modelled (8)    F  Codex argv (13)
+//   G  MCP trust honesty (10)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -114,7 +118,7 @@ const patch = (...lines: string[]) => `*** Begin Patch\n${lines.join('\n')}\n***
 const BODY = ['@@', '-a', '+b'];
 
 /* ------------------------------------------------------------------------------------------------------------- *
- * 2. A PATH IS JUDGED BY WHAT IT RESOLVES TO (audit C3)
+ * A. A PATH IS JUDGED BY WHAT IT RESOLVES TO (audit C3)
  *
  * `realpath` fails on a link whose target does not exist yet exactly as it fails on a file that was never created, and
  * the fallback judged the link's own name — an ordinary repository path — while `open(O_CREAT)` follows the link and
@@ -362,7 +366,7 @@ test('a leading-space path is refused through the hook of both hosts', async () 
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
- * 1. apply_patch HEADERS ARE READ THE WAY THE HOST'S PARSER READS THEM (audit 7)
+ * B. apply_patch HEADERS ARE READ THE WAY THE HOST'S PARSER READS THEM (audit 7)
  *
  * The header test was a column-0 regular expression. Codex's own parser trims every line before it looks for a
  * header, so `  *** Add File: ~/.ssh/authorized_keys` — after a benign Add, after a Delete, directly after an
@@ -473,7 +477,7 @@ test('apply_patch, through the hook of BOTH hosts: an indented header is refused
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
- * 3. ONLY A FETCH HAS A URL (audit 9)
+ * C. ONLY A FETCH HAS A URL (audit 9)
  * ------------------------------------------------------------------------------------------------------------- */
 
 test('WebSearch is public egress whatever other keys it carries; only WebFetch consults a url', async () => {
@@ -510,7 +514,7 @@ test('WebSearch is public egress whatever other keys it carries; only WebFetch c
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
- * 4. AN OPTIONAL OPERAND IS NOT A LICENCE TO GUESS, AND A TOOL HAS ONE OPERAND (audit 13)
+ * D. AN OPTIONAL OPERAND IS NOT A LICENCE TO GUESS, AND A TOOL HAS ONE OPERAND (audit 13)
  * ------------------------------------------------------------------------------------------------------------- */
 
 test('Grep, Glob and LS: an operand that is present and not a string is a call nobody understands, not the working directory', () => {
@@ -640,7 +644,7 @@ test('operand pollution and shapes are refused through the hook of both hosts', 
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
- * 6. HOST TOOLS THAT CANNOT ACT ON ANYTHING (audit 8: the undocumented cost of the fix)
+ * E. HOST TOOLS THAT CANNOT ACT ON ANYTHING (audit 8: the undocumented cost of the fix)
  * ------------------------------------------------------------------------------------------------------------- */
 
 test('a tool nobody modelled asks; the few that cannot act on anything are listed by name, and only those', async () => {
@@ -705,7 +709,7 @@ test('a tool nobody modelled asks; the few that cannot act on anything are liste
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
- * 5. CODEX SENDS AN ARGV, NOT A STRING (audit 13)
+ * F. CODEX SENDS AN ARGV, NOT A STRING (audit 13)
  *
  * Every real Codex shell call carries `["bash","-lc","git push"]`, directly or inside a JSON text in `arguments`.
  * The dialect wrapped the whole JSON as the command, so each one was an unknown head: refused — safe, and
@@ -838,7 +842,7 @@ test('codex-cli hook: a flattened argv is judged as what it is', async () => {
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
- * 7. MCP TRUST HONESTY (audit 10)
+ * G. MCP TRUST HONESTY (audit 10)
  *
  * Nothing parses `.harness/mcp-trust.md`: every `mcp__` tool is `mcp.unknown` (DENY). That is the safe behaviour and it
  * stays. What was untrue is that four places still described a resolver. The first test pins the limitation, so it
