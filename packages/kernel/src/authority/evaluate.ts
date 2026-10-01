@@ -28,6 +28,18 @@ import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 import {
+  canonicalCommand,
+  carriedHostCommand,
+  carriesArgv,
+  collectBuildInputs,
+  commandBuildEffects,
+  effectMarkers,
+  effectStatement,
+  isEngineRead,
+  bindsEngine,
+  readContainerCommand,
+} from './containers.ts';
+import {
   containerLocalPatterns,
   dbClientLocalPatterns,
   declareHint,
@@ -1466,10 +1478,6 @@ const GLOBAL_OPTIONS: Record<string, { value: RegExp; bool: RegExp }> = {
     value: /^(--kube-context|--kubeconfig|-n|--namespace|--kube-apiserver|--kube-token|--kube-as-user|--kube-as-group|--kube-ca-file|--kube-tls-server-name|--registry-config|--repository-cache|--repository-config|--burst-limit)$/,
     bool: /^(--debug|--kube-insecure-skip-tls-verify)$/,
   },
-  docker: {
-    value: /^(--context|-c|--config|-H|--host|-l|--log-level|--tlscacert|--tlscert|--tlskey|--connection|--url|--identity)$/,
-    bool: /^(--debug|-D|--tls|--tlsverify)$/,
-  },
   git: {
     value: /^(-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)$/,
     bool: /^(--no-pager|-p|--paginate|-P|--bare|--no-replace-objects|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-optional-locks|--no-lazy-fetch)$/,
@@ -1484,8 +1492,8 @@ const GLOBAL_OPTIONS: Record<string, { value: RegExp; bool: RegExp }> = {
   },
 };
 GLOBAL_OPTIONS['oc'] = GLOBAL_OPTIONS['kubectl']!;
-GLOBAL_OPTIONS['podman'] = GLOBAL_OPTIONS['docker']!;
-GLOBAL_OPTIONS['nerdctl'] = GLOBAL_OPTIONS['docker']!;
+// (docker, podman and nerdctl are not here: their options, their verbs and their groups are the container reader's,
+//  containers.ts - two tables for one grammar is how the verb ended up in two places)
 
 /** The words that follow the command head, with redirections removed. `git push --help 2>&1` is a help request whose
  *  standard error goes somewhere, and `git push --force origin main > --help` is a push whose OUTPUT FILE is called
@@ -1602,6 +1610,18 @@ function helpProbeHead(segment: string): string | null {
           return null;
         }
       }
+      return head;
+    }
+    // THE CONTAINER TOOLS ASK THE ONE CONTAINER READER which verb this is and whether it hands its words to a program in
+    // a container. The question was answered here on the words that were NOT quoted, so a quoted verb (`docker --context
+    // production 'exec' box sh /app/reset.sh --help`) was no verb at all and the line was a probe; a quote is the shell's,
+    // and by the time docker runs the word is `exec` (exit review 11). Only the help flag has to be unquoted.
+    if (/^(docker|podman|nerdctl)$/.test(head)) {
+      const cc = readContainerCommand([head, ...rest.slice(0, -1).map((x) => x.text)]);
+      // a verb this reader cannot place, or one nobody modelled (a plugin gets `--help` as its own argument), is not proven a probe
+      if (cc === null || !cc.determinate || !cc.modelled) return null;
+      // `docker run IMG --help` runs `--help` in the container; `docker run --help` has nothing to carry it
+      if (carriesArgv(cc) && cc.operands.length > 0) return null;
       return head;
     }
     // the verb must be findable: an option this table cannot place in front of it leaves the position unknown
@@ -2438,18 +2458,35 @@ export function stripToolGlobalOptions(head: string, tokens: string[]): { rest: 
     }
     return { rest: [head, ...verbs, ...rest], extra };
   }
-  if (/^(docker|podman|nerdctl)$/.test(head)) {
+  if (/^(docker|podman|nerdctl|docker-compose|podman-compose|colima|lima)$/.test(head)) {
     // Docker's GLOBAL options sit between the program and the subcommand, and every docker matcher is anchored on
     // `docker <verb>`: a single `--log-level debug` or `--tls` displaced the verb, so `docker exec` — entering a
     // running container — reached ALLOW (exit review 4). The segment is left INTACT, because the engine is read
     // from that same leading run of options; a canonical spelling is added ALONGSIDE it so the verb is classified
     // as well as the engine, and the strongest of the two verdicts decides.
-    let i = 1;
-    while (i < tokens.length && tokens[i]!.startsWith('-')) {
-      if (DOCKER_GLOBAL_VALUE_OPTS.test(tokens[i]!)) i++;
-      i++;
+    // THE SPELLING COMES FROM THE ONE CONTAINER READER (containers.ts), which is also what the engine resolver, the
+    // build producer and the help-probe test ask. Skipping dash-words and the values of the options this file knew
+    // was a second opinion about where the verb sits, and it was wrong the moment an option stood after a group
+    // (`docker buildx -D build`), spelled a verb by its short name (`buildx b`) or was a boolean with a value
+    // (`compose down --volumes=true`).
+    const cc = readContainerCommand(tokens);
+    if (cc) {
+      // ...AND THE WORDS KEEP THEIR BOUNDARIES. The normalized segment is its words joined by a space, so `--set
+      // 'default.dockerfile-inline=FROM alpine\nRUN …'` and `--build-arg 'X=1 2'` reach every reader of that string as
+      // several words - the second of which was a build context. The canonical spelling is re-quoted, so the reader
+      // that resolves a build sees the command line as it was typed; it is also emitted whenever re-quoting alone
+      // changes the text.
+      const text = requote(canonicalCommand(cc, tokens) ?? tokens);
+      if (text !== joinWords(tokens)) extra.push(text);
+      // the effects a verb has that the line does not spell: a destroyed pod, a rewritten credential store, a push by a
+      // verb no pattern was written for - and the outputs, caches and secrets of a build, which a flag can say in a
+      // dozen forms. One statement each, in the plain words the matchers and the path rules already read.
+      extra.push(...effectMarkers(cc, MARK));
+      for (const e of commandBuildEffects(cc)) {
+        const s = effectStatement(e);
+        if (s !== null) extra.push(s);
+      }
     }
-    if (i > 1 && i < tokens.length) extra.push([head, ...tokens.slice(i)].join(' '));
   }
   return { rest: tokens, extra };
 }
@@ -5753,6 +5790,10 @@ export interface ProducerResult {
   resolution: ResolutionOutcome;
   /** true when the body is ONE shell (a script) rather than independent shells (make recipe lines, npm pre/post) */
   oneShell?: boolean;
+  /** Commands with the consequences ON THIS HOST of what the producer read, run in the CALLER's environment rather than
+   *  the body's: a `docker buildx bake` file whose target declares `output = ["type=registry"]` publishes, and one that
+   *  declares `type=local,dest=/etc` writes there, while its body - the Dockerfile's RUN lines - runs in the image. */
+  hostBody?: string[];
 }
 
 /* ---------------------------------------------- GNU make subset ---------------------------------------------- */
@@ -5848,10 +5889,6 @@ function isOrdinaryShellAssignment(name: string, value: string): boolean {
 /** Images whose ENTRYPOINT is a tool this kernel models, so the container's argv IS that tool's command line.
  *  Deliberately a short, named list: the argv of an arbitrary image is not a command line, and guessing would
  *  gate every `docker run myapp --port 8080`. */
-/** docker's MANAGEMENT GROUPS: `docker container run` is `docker run`, `docker image build` is `docker build`.
- *  Every verb has both spellings, so a rule anchored on `tokens[1]` sees only half of them. */
-const DOCKER_GROUPS = /^(container|image|manifest|compose|buildx|builder|volume|network|system|context|plugin|node|secret|config|swarm|stack|service|trust)$/;
-
 const CLI_IMAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/(^|\/)(amazon\/aws-cli|aws-cli\/aws-cli)$/i, 'aws'],
   [/(^|\/)hashicorp\/vault$/i, 'vault'],
@@ -5870,10 +5907,6 @@ function imageName(ref: string): string {
 /** docker/podman run options that consume the next token, so their value is not the image name. */
 const DOCKER_RUN_VALUE_OPTS =
   /^(-e|--env|--env-file|-v|--volume|--mount|-p|--publish|--name|-w|--workdir|-u|--user|--entrypoint|--network|--net|--add-host|--label|-l|--log-driver|--log-opt|--restart|--memory|-m|--cpus|--cpu-shares|--device|--dns|--hostname|-h|--platform|--pull|--health-cmd|--security-opt|--cap-add|--cap-drop|--tmpfs|--ulimit|--sysctl|--shm-size|--pid|--ipc|--uts|--userns|--cgroupns|--runtime|--attach|-a|--detach-keys|--stop-signal|--stop-timeout|--storage-opt|--volumes-from|--link|--expose|--gpus)$/;
-
-/** docker/buildx build options that consume the next token, so their value is not the build context. */
-const DOCKER_BUILD_VALUE_OPTS =
-  /^(-f|--file|-t|--tag|--build-arg|--label|--target|--platform|--cache-from|--cache-to|--output|-o|--secret|--ssh|--network|--add-host|--progress|--builder|--iidfile|--metadata-file|--attest|--provenance|--sbom|--allow|--ulimit|--shm-size|--cpu-shares|--memory|--isolation)$/;
 
 /** The lines of a Dockerfile that `docker build` EXECUTES: every `RUN`, and nothing else. `CMD` and `ENTRYPOINT`
  *  are metadata recorded in the image and run at `docker run`, not at build time — analysing them gated every
@@ -7361,216 +7394,100 @@ function resolveScriptCommand(
       reason: 'the working directory this resolution depends on could not be verified',
       resolution: 'CONTEXT_UNVERIFIED',
     };
-  // AN IMAGE THAT IS A CLI CARRIES THAT CLI'S COMMAND LINE. `docker run --rm -e AWS_… amazon/aws-cli iam
-  // delete-user --user-name bob` runs the real AWS CLI against the real endpoint and deletes a production IAM
-  // user; the bare `aws iam delete-user` is an absolute core deny that no human may approve, and wrapped in the
-  // vendor's own image it ran under a container capability (exit review 7). Only the images whose ENTRYPOINT IS
-  // the tool are read this way — the argv of an arbitrary image is not a command line this kernel can parse —
-  // and the tool's own name is put back in front of it so the target model sees what it always sees.
-  // THE MANAGEMENT GROUP IS OPTIONAL AND CHANGES NOTHING. `docker container run` IS `docker run` — the modern
-  // CLI spells every verb both ways — and anchoring on `tokens[1]` saw only the short form, so the vendor's own
-  // CLI image reached ALLOW again through the long one (exit review 9). The same shape as `docker image build`,
-  // which was already handled; this makes the rule general instead of per-verb.
-  const runAt = tokens.findIndex(
-    (t, i) => i > 0 && /^(run|create)$/.test(t) && (i === 1 || DOCKER_GROUPS.test(tokens[i - 1] ?? '')),
-  );
-  if (/^(docker|podman|nerdctl)$/.test(head) && runAt > 0) {
-    for (let i = runAt + 1; i < tokens.length; i++) {
-      const t = tokens[i]!;
-      if (t.startsWith('-')) {
-        if (DOCKER_RUN_VALUE_OPTS.test(t) && !t.includes('=')) i++;
+  // THE CONTAINER TOOLS ARE READ BY ONE READER (containers.ts): which verb the line carries, whether the kernel has
+  // decided anything about it, which engine it names, and which files it builds from. The same three questions used
+  // to be answered here by three searches for a word at a position (`run`, `bake`, `build` after `tokens[i - 1]`), and
+  // an option, a short name or a quote moved the word out of reach of every one of them (exit review 11).
+  const cc = /^(docker|podman|nerdctl|buildah|docker-compose|podman-compose|colima|lima)$/.test(head) ? readContainerCommand(tokens) : null;
+  if (cc !== null) {
+    // A VERB NOBODY MODELLED IS A QUESTION, NOT AN ALLOW. The catch-all `container.run` matcher answers for every word
+    // after `docker`; `docker pass get GH_TOKEN`, `docker debug app`, a plugin or a verb built at run time ran under
+    // it. The producer says what it does not know, and the human decides.
+    if (!cc.determinate || !cc.modelled) {
+      const what = `${cc.program} ${cc.path.join(' ')}`.trim();
+      return {
+        kind: 'none',
+        key: `container-unmodelled:${what}`,
+        body: null,
+        reason: cc.why ?? `${what} is not a verb this kernel models`,
+        resolution: 'UNKNOWN_PRODUCER',
+        unresolved: [{ what: 'body', where: what, why: cc.why ?? 'a verb this kernel has no decision about' }],
+      };
+    }
+    // AN IMAGE THAT IS A CLI CARRIES THAT CLI'S COMMAND LINE. `docker run --rm -e AWS_… amazon/aws-cli iam
+    // delete-user --user-name bob` runs the real AWS CLI against the real endpoint and deletes a production IAM
+    // user; the bare `aws iam delete-user` is an absolute core deny that no human may approve, and wrapped in the
+    // vendor's own image it ran under a container capability (exit review 7). Only the images whose ENTRYPOINT IS
+    // the tool are read this way — the argv of an arbitrary image is not a command line this kernel can parse —
+    // and the tool's own name is put back in front of it so the target model sees what it always sees.
+    // THE MANAGEMENT GROUP IS OPTIONAL AND CHANGES NOTHING. `docker container run` IS `docker run`, and so is `docker
+    // --debug run`: the reader places the verb whichever way it is spelled.
+    const lastWord = cc.path[cc.path.length - 1];
+    if (/^(docker|podman|nerdctl)$/.test(cc.program) && /^(run|create)$/.test(lastWord ?? '') && cc.path.length <= 2 && (cc.path.length === 1 || cc.path[0] === 'container')) {
+      const ws = cc.words;
+      for (let i = cc.argsAt; i < ws.length; i++) {
+        const t = ws[i]!;
+        if (t.startsWith('-')) {
+          if (DOCKER_RUN_VALUE_OPTS.test(t) && !t.includes('=')) i++;
+          continue;
+        }
+        const tool = CLI_IMAGES.find(([re]) => re.test(imageName(t)));
+        if (tool) {
+          const argv = ws.slice(i + 1);
+          return {
+            kind: 'shell-script',
+            key: `cli-image:${t}`,
+            body: argv.length ? [`${tool[1]} ${requote(argv)}`] : [],
+            reason: `the image ${t} IS the ${tool[1]} command line`,
+            resolution: 'RESOLVED_COMPLETE',
+          };
+        }
+        // ...and the scan does NOT stop at the first bare operand: an option this kernel does not know consumes
+        // its value, so `docker run --cgroup-parent foo amazon/aws-cli …` put `foo` where the image was expected
+        // (exit review 8). The image names are specific enough that scanning every operand is safe.
         continue;
       }
-      const tool = CLI_IMAGES.find(([re]) => re.test(imageName(t)));
-      if (tool) {
-        const argv = tokens.slice(i + 1);
-        return {
-          kind: 'shell-script',
-          key: `cli-image:${t}`,
-          body: argv.length ? [`${tool[1]} ${requote(argv)}`] : [],
-          reason: `the image ${t} IS the ${tool[1]} command line`,
-          resolution: 'RESOLVED_COMPLETE',
-        };
-      }
-      // ...and the scan does NOT stop at the first bare operand: an option this kernel does not know consumes
-      // its value, so `docker run --cgroup-parent foo amazon/aws-cli …` put `foo` where the image was expected
-      // (exit review 8). The image names are specific enough that scanning every operand is safe.
-      continue;
     }
-  }
-  // `docker buildx bake` BUILDS EVERY TARGET IN A BAKE FILE, and each target names its own Dockerfile. The file
-  // is HCL or JSON and it is right there in the workspace, so the Dockerfiles it names are read exactly as
-  // `docker build`'s is — `bake` was an unknown command and the `RUN git push origin main` in the Dockerfile it
-  // selects was never seen (exit review 9). A bake file this kernel cannot read is opacity, not absence.
-  const bakeAt = tokens.findIndex((t, i) => i > 0 && t === 'bake' && DOCKER_GROUPS.test(tokens[i - 1] ?? ''));
-  if (/^(docker|podman|nerdctl)$/.test(head) && bakeAt > 0 && tokens.some((t) => t === '--print' || t === '--print=true')) {
-    // `bake --print` PRINTS the resolved configuration as JSON and builds nothing (exit review 10)
-    return { kind: 'shell-script', key: 'bake:print', body: null, reason: 'bake --print renders the configuration and builds nothing', resolution: 'NOT_A_PRODUCER' };
-  }
-  if (/^(docker|podman|nerdctl)$/.test(head) && bakeAt > 0) {
-    const named = tokens
-      .map((t, i) => (t === '-f' || t === '--file' ? tokens[i + 1] : /^(?:--file=|-f)(.+)$/.exec(t)?.[1]))
-      .filter((f): f is string => typeof f === 'string' && f !== '');
-    const candidates = named.length
-      ? named
-      : ['docker-bake.hcl', 'docker-bake.json', 'docker-bake.override.hcl', 'docker-compose.yml'];
-    const texts: string[] = [];
-    const unread: string[] = [];
-    for (const f of candidates) {
-      const abs = openedPath(cwd, f);
-      const text = abs === null ? null : readInsideWorkspace(ctx, abs);
-      if (text !== null) texts.push(text);
-      else if (named.length || (abs !== null && fileExists(abs))) unread.push(f);
-    }
-    if (!texts.length)
-      return {
-        kind: 'shell-script',
-        key: `bake:${cwd}:${candidates.join(',')}`,
-        body: null,
-        reason: unread.length ? 'the bake file could not be read' : 'no bake file',
-        resolution: unread.length ? 'UNREADABLE' : 'ABSENT_VERIFIED',
-      };
-    // `dockerfile = "X"` (HCL) and `"dockerfile": "X"` (JSON) name the file; `context` says where it sits
-    const lines: string[] = [];
-    const gaps: Unresolved[] = [];
-    for (const text of texts) {
-      const ctxDir = /(?:^|\n)\s*"?context"?\s*[:=]\s*"([^"]+)"/.exec(text)?.[1] ?? '.';
-      const files = [...text.matchAll(/(?:^|\n)\s*"?dockerfile"?\s*[:=]\s*"([^"]+)"/g)].map((m) => m[1]!);
-      for (const f of files.length ? files : [`${ctxDir}/Dockerfile`]) {
-        const abs = openedPath(cwd, isAbsolute(f) ? f : `${ctxDir}/${f}`.replace(/^\.\//, ''));
-        const dt = abs === null ? null : readInsideWorkspace(ctx, abs);
-        if (dt === null) gaps.push({ what: 'body', where: f, why: 'a Dockerfile this bake file names could not be read' });
-        else lines.push(...dockerfileShellLines(dt));
-      }
-    }
-    return {
-      kind: 'shell-script',
-      key: `bake:${cwd}:${fingerprint(texts.join('\n'))}`,
-      body: lines,
-      reason: gaps.length ? `bake targets; NOT fully resolved: ${gaps[0]!.why}` : 'bake targets',
-      resolution: gaps.length ? 'PARTIAL' : 'RESOLVED_COMPLETE',
-      containerPaths: true,
-      ...(gaps.length ? { unresolved: gaps } : {}),
-    };
-  }
-  // A DOCKERFILE IS A PRODUCER. `docker build .` executes every `RUN` line in the build context's Dockerfile —
-  // as root, with the whole context copied in — and EGO resolved Makefiles, manifest scripts and shell scripts
-  // while treating this one as an opaque `container.build`. A Dockerfile whose `RUN` line POSTs `.env` to a
-  // remote host was ALLOW (exit review 7). It is read like any other producer: its shell lines are handed to the
-  // canonical analysis, and a Dockerfile that cannot be read is opacity rather than absence.
-  // `docker image build` is `docker build` through the management GROUP, and `docker buildx build` through the
-  // plugin: the verb is the LAST word of the pair, not `tokens[1]` (exit review 8).
-  const buildAt = tokens.findIndex(
-    (t, i) => i > 0 && t === 'build' && (i === 1 || /^(image|buildx|builder)$/.test(tokens[i - 1] ?? '')),
-  );
-  if (/^(docker|podman|nerdctl|buildah)$/.test(head) && buildAt > 0) {
-    // a glued short option keeps its `=`: `-f=Dockerfile.evil` names `Dockerfile.evil`, not `=Dockerfile.evil`
-    const named = optionValue(tokens, 'f', ['--file'])?.replace(/^=/, '') ?? null;
-    // `-f -` reads the Dockerfile from STANDARD INPUT. That is a stream — UNLESS the command line holds it, which
-    // a heredoc does: `docker build -f - . <<EOF\nFROM alpine\nRUN git push origin main\nEOF` writes the whole
-    // Dockerfile in plain sight, and calling it unreadable gave an absolute deny the approvable ASK of opacity
-    // (exit review 8). A `< file` redirect names a file the kernel may also be able to read.
-    if (named === '-') {
-      const piped =
+    // A BUILD IS A PRODUCER. `docker build .` executes every `RUN` line in the build context's Dockerfile — as root,
+    // with the whole context copied in — and EGO resolved Makefiles, manifest scripts and shell scripts while
+    // treating this one as an opaque `container.build`. A Dockerfile whose `RUN` line POSTs `.env` to a remote host
+    // was ALLOW (exit review 7). `docker buildx bake` and `docker compose build` build what a FILE names, and the
+    // files are read the same way: the bake and compose definitions, the Dockerfiles they point at, an inline
+    // Dockerfile, a `--set` override - and the outputs they declare, which are writes and pushes like any other.
+    // A source that cannot be read, or that this command line has just rewritten, is opacity rather than absence.
+    const built = collectBuildInputs(cc, {
+      cwd,
+      open: (dir, word) => openedPath(dir, word),
+      read: (abs) => readInsideWorkspace(ctx, abs),
+      exists: fileExists,
+      list: listDirectory,
+      stale: (word, abs) => stale(abs, ...pathCandidates(cwd, word).paths),
+      // A HEREDOC IS STANDARD INPUT THE KERNEL CAN READ: `docker build -f - . <<EOF\nFROM alpine\nRUN git push origin main\nEOF`
+      // writes the whole Dockerfile in plain sight (exit review 8). A `< file` redirect names a file the kernel may also read.
+      stdin: () =>
         env.stdinText ??
         (() => {
           const redir = /(?:^|\s)<\s*([^\s<>|&;]+)/.exec(env.rawSegment ?? norm)?.[1];
           if (redir === undefined || /[$`*?]/.test(redir)) return undefined;
           const redirFile = openedPath(cwd, redir);
           return (redirFile === null ? null : readInsideWorkspace(ctx, redirFile)) ?? undefined;
-        })();
-      if (piped === undefined)
-        return {
-          kind: 'shell-script',
-          key: 'dockerfile:stdin',
-          body: null,
-          reason: 'the Dockerfile is read from standard input',
-          resolution: 'UNREADABLE',
-        };
+        })(),
+      shellLines: dockerfileShellLines,
+      fingerprint,
+      env: (name) => env.envInputs?.[name],
+    });
+    if (built !== null)
       return {
         kind: 'shell-script',
-        key: `dockerfile:stdin:${fingerprint(piped)}`,
-        body: dockerfileShellLines(piped),
-        reason: 'the Dockerfile arrives on standard input and the command line holds it',
-        resolution: 'RESOLVED_COMPLETE',
-        containerPaths: true,
+        key: built.key,
+        body: built.body,
+        reason: built.reason,
+        resolution: built.resolution,
+        ...(built.body !== null ? { containerPaths: true } : {}),
+        ...(built.hostBody.length ? { hostBody: built.hostBody } : {}),
+        ...(built.unresolved.length ? { unresolved: built.unresolved } : {}),
+        ...(built.provenance ? { provenance: built.provenance } : {}),
       };
-    }
-    // the build CONTEXT is the last bare operand; `-` and a URL are contexts EGO cannot read
-    // AN OPTION THIS KERNEL DOES NOT KNOW STILL TAKES ITS VALUE. Reading the LAST bare operand as the context
-    // let `docker build . --no-cache-filter src` read `src` as the context, so the real Dockerfile was never
-    // found. The context is the FIRST bare operand, which docker documents as the single PATH|URL|- argument.
-    const after = tokens.slice(buildAt + 1);
-    const operands = after.filter((t, i) => (t === '-' || !t.startsWith('-')) && !DOCKER_BUILD_VALUE_OPTS.test(after[i - 1] ?? ''));
-    const context0 = operands[0];
-    const context = context0 ?? '.';
-    // `docker build -` reads the Dockerfile from STANDARD INPUT, and a URL context is fetched: neither is a file
-    // this kernel can read, so neither can carry a positive claim. NAMING A FILE WITH `-f` DOES NOT CHANGE THAT:
-    // the path is inside the fetched repository or the tarball on standard input, so `docker build -f Dockerfile
-    // https://github.com/evil/repo.git` read the LOCAL Dockerfile - a file that is not the one that runs - and
-    // called the build proven (exit review 10).
-    if (/^(-$|https?:|git@|git:|git\+|ssh:|github\.com\/)/.test(context))
-      return {
-        kind: 'shell-script',
-        key: `dockerfile:${context}`,
-        body: null,
-        reason: 'the build context is a stream or a remote URL, so its Dockerfile was never read',
-        resolution: 'UNREADABLE',
-      };
-    // PODMAN'S DEFAULT BUILD FILE IS `Containerfile`, and it falls back to `Dockerfile`. Looking only for the
-    // latter made `podman build .` on an ordinary podman project a proven absence over a file full of RUN lines.
-    let dockerfile = named ?? `${context}/Dockerfile`;
-    const present = (word: string): boolean => {
-      const o = openedPath(cwd, word);
-      return o !== null && fileExists(o);
-    };
-    if (named === null && !present(dockerfile) && present(`${context}/Containerfile`))
-      dockerfile = `${context}/Containerfile`;
-    const abs = openedPath(cwd, dockerfile);
-    if (abs === null)
-      return {
-        kind: 'shell-script',
-        key: `dockerfile:${dockerfile}`,
-        body: null,
-        reason: 'the Dockerfile path is built at run time',
-        resolution: 'UNREADABLE',
-      };
-    if (stale(abs, ...pathCandidates(cwd, dockerfile).paths))
-      return { kind: 'shell-script', key: `dockerfile:${abs}`, body: null, reason: 'the Dockerfile is rewritten earlier in the same command', resolution: 'STALE' };
-    const text = readInsideWorkspace(ctx, abs);
-    if (text === null) {
-      // NO DOCKERFILE IS AN ABSENCE THAT WAS OBSERVED, not an opacity. `docker build .` in a directory that holds
-      // no Dockerfile fails and executes nothing, and treating it as opaque would gate every `docker build` in a
-      // repository that keeps its Dockerfile elsewhere — the proportionality half of the same contract.
-      const dir = abs.slice(0, abs.lastIndexOf('/'));
-      const listed = listDirectory(dir);
-      if (!fileExists(abs) && listed !== null)
-        return {
-          kind: 'shell-script',
-          key: `dockerfile:${abs}`,
-          body: null,
-          reason: `no Dockerfile in ${dockerfile.replace(/\/Dockerfile$/, '') || '.'}`,
-          resolution: 'ABSENT_VERIFIED',
-        };
-      return {
-        kind: 'shell-script',
-        key: `dockerfile:${abs}`,
-        body: null,
-        reason: fileExists(abs)
-          ? 'the Dockerfile is outside the workspace'
-          : 'the build context directory could not be read',
-        resolution: 'UNREADABLE',
-      };
-    }
-    return {
-      kind: 'shell-script',
-      key: `dockerfile:${abs}`,
-      body: dockerfileShellLines(text),
-      containerPaths: true,
-      reason: `Dockerfile ${dockerfile}`,
-      resolution: 'RESOLVED_COMPLETE',
-      provenance: { source: abs, fingerprint: fingerprint(text) },
-    };
   }
   // shell scripts: ./x.sh, bash x.sh, sh x.sh, source x.sh, . x.sh, /abs/x.sh
   let scriptPath: string | null = null;
@@ -9460,17 +9377,18 @@ function classifyTargetName(
 // (`default`, `unix`, ...) are local for the container tools and not for Kubernetes (exit review 7).
 const k8sContexts = kubeLocalPatterns;
 
-/** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
-/** docker/podman global options that consume the next token, so their value is not the subcommand. */
-const DOCKER_GLOBAL_VALUE_OPTS =
-  /^(--log-level|-l|--config|--tlscacert|--tlscert|--tlskey|--context|-c|--host|-H|--url|--connection|--builder|--identity|--runtime|--namespace|--remote|--storage-driver)$/;
-
 /**
  * Which ENGINE a container command talks to. Only an EXPLICIT selection is classified: `-H`/`--host`,
  * `-c`/`--context`, podman `--url`/`--connection`, and `docker context use <name>`, which changes the engine every
  * later command will use. A command with no explicit selection keeps the accepted product decision — running a
  * container on the local default daemon is ALLOW — and the residual risk of an ambient context is recorded in
  * docs/architecture/phase-1-residuals.md rather than guessed at here.
+ *
+ * THE OPTIONS AND THE VERB COME FROM THE ONE CONTAINER READER (containers.ts). This function used to scan the words
+ * up to the first bare one and stop, which made the engine flag of `docker debug --host ssh://prod app` invisible
+ * (it stands after the verb, where docker accepts every global option) and let `docker buildx create ssh://prod`,
+ * `--driver=remote` and `docker builder create` bind a production builder without a word naming it. The reader knows
+ * where a container's own argv begins, so a `--context` inside `docker run IMG tool --context x` is not an engine.
  */
 function resolveContainerTarget(
   tokens: string[],
@@ -9489,26 +9407,14 @@ function resolveContainerTarget(
     else if (isOpaqueTarget(v)) signals.push({ cls: 'UNCLASSIFIED', target: `${kind} ${v}` });
     else signals.push({ cls: classifyTargetName(v, containerLocalPatterns(targets), targets), target: `${kind} ${v}` });
   };
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    // these are GLOBAL options: they come before the subcommand. Past it, `-c` is the container's own flag —
-    // `docker run --rm alpine sh -c "echo hi"` is ordinary work and was being DENIED as a remote engine. A
-    // global option that TAKES a value must have its value skipped, not treated as the subcommand, or
-    // `docker --log-level debug -H tcp://prod …` stopped the scan before the engine (exit review 2).
-    if (!t.startsWith('-')) {
-      if (i > 1 && DOCKER_GLOBAL_VALUE_OPTS.test(tokens[i - 1] ?? '')) continue;
-      break;
-    }
+  const cc = readContainerCommand(tokens);
+  for (const e of cc?.engines ?? []) {
     // THE CLIENT CONFIG DIRECTORY SELECTS THE ENGINE. `docker --config DIR` reads DIR/config.json for the current
     // context, and `podman --remote` switches to a connection named in a file: both were skipped as opaque option
     // noise, so a production daemon reached ALLOW (exit review 6). Neither file can be read from here, so the
     // target is UNCLASSIFIED — never local.
-    if (t === '--config' || t === '--remote' || t === '-r' || /^--config=/.test(t))
-      signals.push({ cls: 'UNCLASSIFIED', target: `client configuration ${t}` });
-    const eq = /^(?:--host=|--context=|--url=|--connection=|--builder=|-H|-c)(.+)$/.exec(t);
-    if ((t === '-H' || t === '--host' || t === '--url') && tokens[i + 1]) add(tokens[++i]!, 'engine');
-    else if ((t === '-c' || t === '--context' || t === '--connection') && tokens[i + 1]) add(tokens[++i]!, 'context');
-    else if (eq) add(eq[1]!, t.startsWith('-H') || t.startsWith('--host') || t.startsWith('--url') ? 'engine' : 'context');
+    if (e.kind === 'client configuration') signals.push({ cls: 'UNCLASSIFIED', target: `client configuration ${e.flag}` });
+    else if (e.value !== null) add(e.value, e.kind);
   }
   // the engine is selected by ENVIRONMENT too — `DOCKER_HOST` and `DOCKER_CONTEXT` are the same two flags by
   // another name, and docker's own help documents `--context` as overriding `DOCKER_HOST`
@@ -9526,85 +9432,19 @@ function resolveContainerTarget(
     const eq = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
     if (eq) engineEnv(eq[1]!, eq[2]!.replace(/^['"]|['"]$/g, ''));
   }
-  // `--builder` is unambiguous wherever it sits, and buildx puts it after the plugin subcommand, past the
-  // global-option scan above (exit review 2)
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    const eq = /^--builder=(.+)$/.exec(t);
-    if (t === '--builder' && tokens[i + 1]) add(tokens[++i]!, 'builder');
-    else if (eq) add(eq[1]!, 'builder');
-  }
-  // `docker context use <name>` re-points every later command at that engine
-  const useIdx = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'context');
-  if (useIdx > 0 && tokens[useIdx + 1]) add(tokens[useIdx + 1]!, 'context use');
-  // ...AND SO DO ITS THREE SIBLINGS, which were not modelled at all (exit review 7):
-  //   `podman system connection add|default NAME [URI]` writes containers.conf — the same name-to-engine binding
-  //     `docker context create` writes, and `add` makes the first connection the default;
-  //   `docker buildx create --driver remote <endpoint> --use` binds a remote BuildKit daemon and selects it, with
-  //     the endpoint as a POSITIONAL that the dedicated `--builder` scan cannot see;
-  //   `docker buildx use NAME` selects an already-bound builder.
-  // Every later build or run then goes there with no flag naming it, so nothing downstream can be re-targeted.
-  const sysConn = tokens.findIndex((t, i) => /^(add|default)$/.test(t) && tokens[i - 1] === 'connection');
-  if (sysConn > 0) for (const t of tokens.slice(sysConn + 1)) if (!t.startsWith('-')) add(t, 'podman connection');
-  const bxCreate = tokens.findIndex((t, i) => t === 'create' && tokens[i - 1] === 'buildx');
-  if (bxCreate > 0) {
-    const driver = tokens.findIndex((t, i) => t === '--driver' && i > bxCreate);
-    if (driver > 0 && /^(remote|kubernetes)$/.test(tokens[driver + 1] ?? '')) {
-      const endpoint = tokens.slice(driver + 2).find((t) => !t.startsWith('-'));
-      add(endpoint ?? 'an unnamed remote endpoint', 'buildx driver');
-    }
-  }
-  const bxUse = tokens.findIndex((t, i) => t === 'use' && tokens[i - 1] === 'buildx');
-  if (bxUse > 0) {
-    const name = tokens.slice(bxUse + 1).find((t) => !t.startsWith('-'));
-    if (name) add(name, 'buildx use');
-  }
   if (!signals.length) return { cls: 'LOCAL', target: 'local daemon', mutating: false };
-  // A READ against another engine is not a mutation of it: `docker -H … ps` lists, it does not deploy. But a
-  // MANAGEMENT GROUP is not a verb — `image` and `context` name a whole family whose members mutate, so treating
-  // the group as a read let `docker --context production image rm|prune|load` reach ALLOW against a production
-  // engine (exit review 4). When the first positional is a group, the verb is the pair.
-  // `inspect` and `logs` PRINT the container's configuration and output — its environment variables, its mounts
-  // and whatever it logged, which is where credentials live. Against a non-local engine that is an act on it,
-  // exactly as `kubectl get secrets` is against a cluster (exit review 8).
-  const reads = new Set(['ps', 'images', 'version', 'info', 'top', 'port', 'stats', 'events', 'history', 'diff', 'search']);
-  const groupReads = new Set([
-    // TWO PARALLEL TABLES THAT DISAGREED. Exit review 8 removed `inspect` and `logs` from the one-word `reads`
-    // set — reading a production container's logs or its full configuration is an act against that host — and
-    // left the `<group> <verb>` twins here, so `docker --context production container logs app` was ALLOW while
-    // `docker --context production logs app` was not (exit review 10). The same defect as the env-inject list
-    // having two copies: one statement, expressed twice, drifting apart.
-    ...['image ls', 'image history', 'image save', 'image tree'],
-    // `compose version` and `compose ls` print the plugin's version and the project list: no container is touched
-    ...['compose version', 'compose ls'],
-    ...['container ls', 'container port', 'container stats', 'container top', 'container diff'],
-    // `inspect` and `logs` are NOT here for ANY group (exit review 10, self-attack): a service spec, a config payload, a
-    // secret's metadata, a volume's options and a compose project's output are the same credentials-and-mounts the
-    // one-word `inspect`/`logs` print, and listing only the ones someone remembered left their twins ALLOW
-    ...['volume ls', 'network ls', 'system info', 'system df', 'system events'],
-    ...['context ls', 'context inspect', 'context show', 'builder ls', 'buildx ls'],
-    ...['node ls', 'service ls', 'service ps'],
-    ...['stack ls', 'stack ps', 'stack services', 'secret ls', 'config ls'],
-    ...['plugin ls', 'compose ls', 'compose ps', 'compose images', 'compose top'],
-  ]);
-  const groups = new Set(['image', 'container', 'volume', 'network', 'system', 'context', 'builder', 'buildx', 'node', 'service', 'stack', 'secret', 'config', 'plugin', 'trust', 'swarm', 'compose', 'manifest', 'checkpoint']);
-  // A SIGNAL'S TARGET IS A VALUE, NOT A SUFFIX. The filter dropped every positional that the target string
-  // merely ENDS WITH, so `docker --context staging-run run -d …` lost its own verb — `context staging-run`
-  // ends with `run` — and a container started on a non-local engine reached ALLOW (exit review 7).
-  const signalValues = new Set(signals.map((g) => g.target.slice(g.target.indexOf(' ') + 1)));
-  const positional = tokens.slice(1).filter((t) => !t.startsWith('-') && !signalValues.has(t));
-  const first = positional[0];
-  const verb = first !== undefined && groups.has(first) && positional[1] !== undefined ? `${first} ${positional[1]}` : first;
-  const isUse =
-    tokens.some((t, i) => t === 'use' && tokens[i - 1] === 'context') ||
-    bxUse > 0 ||
-    bxCreate > 0 ||
-    sysConn > 0;
-  const mutating = isUse || verb === undefined || !(reads.has(verb) || groupReads.has(verb));
+  // A READ against another engine is not a mutation of it: `docker -H … ps` lists, it does not deploy. Whether a verb
+  // is one of those is the reader's table: a MANAGEMENT GROUP is not a verb (`image` and `context` name a family whose
+  // members mutate), an alias is its verb, and a verb nobody modelled - `debug`, `pass`, a plugin - is not a read,
+  // because the kernel cannot show that it is. `inspect` and `logs` PRINT the container's configuration and output -
+  // its environment variables, its mounts and whatever it logged, which is where credentials live. Against a
+  // non-local engine that is an act on it, exactly as `kubectl get secrets` is against a cluster (exit review 8).
+  const mutating = cc === null || bindsEngine(cc) || !isEngineRead(cc);
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { ...worst, mutating };
 }
 
+/** Resolves the Kubernetes target of a normalized segment and whether the verb mutates it. */
 function resolveK8sTarget(
   tokens: string[],
   targets: LocalTargets,
@@ -12068,26 +11908,29 @@ function classifyNormalized(
       ? { ...(effect.bodyEnv ?? state.env), containerPaths: true }
       : (effect.bodyEnv ?? state.env);
   // the producer's body re-enters THE SAME pipeline, with its own execution context — never a weaker sub-layer
-  const inner = analyzeSegments(
-    table,
-    ctx,
-    compiled,
-    effect.body,
-    { depth: state.depth + 1, seen, env: bodyEnv },
-    // a script is ONE shell; make recipe lines and npm pre/post are independent shells — unless .ONESHELL hands
-    // the whole recipe to one shell, which the producer reports through `oneShell`
-    !(effect.oneShell ?? effect.kind === 'shell-script'),
-  ).map((h) => ({ ...h, effectOf: h.effectOf ?? effect.reason }));
+  const feed = (lines: string[], bodyEnvironment: ExecutionEnvironment, isolated: boolean): CapabilityHit[] =>
+    analyzeSegments(table, ctx, compiled, lines, { depth: state.depth + 1, seen, env: bodyEnvironment }, isolated).map((h) => ({
+      ...h,
+      effectOf: h.effectOf ?? effect.reason,
+    }));
+  // a script is ONE shell; make recipe lines and npm pre/post are independent shells — unless .ONESHELL hands
+  // the whole recipe to one shell, which the producer reports through `oneShell`
+  const inner = feed(effect.body, bodyEnv, !(effect.oneShell ?? effect.kind === 'shell-script'));
+  // WHAT THE FILES THE PRODUCER READ DECLARE FOR THIS HOST is judged where it happens, in the caller's environment and
+  // not the image's: a bake target whose `output` is `type=registry` publishes, one whose `output` is
+  // `type=local,dest=/etc` writes there, and a secret's `src` is a file read into the build. The same act on the
+  // command line is judged by the matchers and the path rules; a file that says it must not be a way around them.
+  const hostInner = effect.hostBody?.length ? feed(effect.hostBody, state.env, true) : [];
   if (declared) {
     // INVARIANT 1: the same action gets the same classification at any depth. An inner opacity hit is therefore
     // KEPT, whichever producer built it — `opaqueHit()`, a matcher (`command.interpreter-script`), the `$`-head
     // branch or the no-matcher fallback (`command.unknown`). A declared class no longer absorbs opacity at all,
     // and `remainder` carries the part of the execution closure that was NOT resolved, so a PARTIAL body can no
     // longer be read as the complete set of what will run.
-    return [...hits, ...inner, ...remainder];
+    return [...hits, ...inner, ...hostInner, ...remainder];
   }
   // undeclared script fully analysed: its effect replaces the unknown verdict
-  const resolved = [...inner, ...remainder];
+  const resolved = [...inner, ...hostInner, ...remainder];
   return resolved.length ? resolved : [opaqueHit(table, ctx, norm, `${effect.reason}: empty`)];
 }
 
@@ -13813,6 +13656,15 @@ function execCarriedCommand(seg: string): string | null {
   const t = tokenize(seg);
   const head = t[0] ?? '';
   if (!/^(kubectl|oc|docker|podman|nerdctl)$/.test(head)) return null;
+  // THE CONTAINER TOOLS ASK THE READER which verb carries a command after `--`: `exec`, `attach`, `compose exec` - and
+  // any verb nobody modelled, because a plugin that takes `--` runs what follows with whatever it hands it
+  // (`docker pass run -- psql -h prod-db …` runs psql with the secrets in its environment). A word `exec` anywhere on the
+  // line was the test before, which a quoted verb, a global option or an operand of that name each got wrong.
+  if (/^(docker|podman|nerdctl)$/.test(head)) {
+    const cc = readContainerCommand(t);
+    const carried = cc === null ? null : carriedHostCommand(cc);
+    return carried === null ? null : requote(carried);
+  }
   if (!t.some((x) => /^(exec|attach|debug)$/.test(x))) return null;
   const dd = t.indexOf('--');
   // RE-QUOTED, because the carried command is handed back as TEXT and `join(' ')` is not the inverse of
