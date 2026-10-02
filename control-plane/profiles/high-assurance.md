@@ -43,6 +43,9 @@ narrow:
     verdict: ASK
   - capability: command.local-mutation
     verdict: ASK
+  # ...and the same refusal as STRICT: narrow is not inherited, so what STRICT narrows is listed again
+  - capability: fs.env-file.write
+    verdict: DENY
   - capability: command.network-tool
     verdict: DENY
   # a request that SENDS is a network tool's work too: splitting the fetch from the send must not open a door that

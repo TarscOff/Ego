@@ -41,6 +41,9 @@ narrow:
     verdict: ASK
   - capability: command.local-mutation
     verdict: ASK
+  # `.env` is asked about in STANDARD (the first-run copy of its template) and stays refused where assurance is the point
+  - capability: fs.env-file.write
+    verdict: DENY
 ---
 # STRICT
 

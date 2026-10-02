@@ -21,6 +21,9 @@ export interface Binding {
   /** the literal value when one is written; null when it is bound at run time to something this kernel cannot read */
   value: string | null;
   how: 'assignment' | 'declaration' | 'read' | 'printf' | 'mapfile' | 'getopts' | 'loop' | 'let' | 'default-expansion' | 'env';
+  /** a declaration that puts the name in the environment of the commands that follow: `export`, `declare -x`, `typeset -x`. `local` and
+   *  `readonly` bind a name of this shell and nothing more, and neither does a `declare` without `-x` */
+  exported?: boolean;
 }
 
 /**
@@ -67,11 +70,13 @@ export function bindingsOf(words: readonly string[], raw: string): { persistent:
   if (DECLARATIONS.has(head)) {
     // `export -f NAME` and `declare -F` talk about functions, not variables
     const functionsOnly = rest.some((w) => /^-[A-Za-z]*[fF][A-Za-z]*$/.test(w));
+    // (the flag that exports: `export` always does, `declare`/`typeset` with `-x`; a `+x` takes it away again)
+    const exported = head === 'export' || (/^(declare|typeset)$/.test(head) && rest.some((w) => /^-[A-Za-z]*x/.test(w)) && !rest.some((w) => /^\+[A-Za-z]*x/.test(w)));
     if (!functionsOnly)
       for (const w of rest) {
         if (/^[-+]/.test(w)) continue;
         const a = assignmentWord(w);
-        if (a !== null) persistent.push({ name: a.name, value: a.append ? null : a.value, how: 'declaration' });
+        if (a !== null) persistent.push({ name: a.name, value: a.append ? null : a.value, how: 'declaration', exported });
       }
   } else if (head === 'printf') {
     // `printf -v NAME FORMAT ARGS…` writes the formatted text into NAME

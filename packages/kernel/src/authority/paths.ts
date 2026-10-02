@@ -45,7 +45,7 @@ export const MAX_LINK_HOPS = 40;
 let cache: Map<string, string> | null = null;
 /** the directories a wildcard was expanded over, listed once per evaluation: the same directory is asked about again by every word that
  *  names it, and by every reading of every word (as written and trimmed, lexical and physical, in each directory the shell may be in) */
-let listings: Map<string, Array<{ name: string; directory: boolean }> | null> | null = null;
+let listings: Map<string, Array<{ name: string; directory: boolean; link: boolean }> | null> | null = null;
 
 export function withPathCache<T>(body: () => T): T {
   if (cache !== null) return body(); // nested: the outer evaluation owns it
@@ -562,7 +562,13 @@ export interface GlobMatches {
   readonly bounded: boolean;
   /** the word has a part nobody can know (`$VAR`, a substitution): nothing was expanded */
   readonly dynamic: boolean;
+  /** the directories that hold the names that matched, ALL of them - also the ones `keep` dropped (see `keep`) */
+  readonly parents: ReadonlySet<string>;
 }
+
+/** What a name that matched a wildcard is, as the directory listing says it: a directory, a symbolic link (whatever it points at),
+ *  or a plain entry. A name that did not come from a listing (the literal segment after a wildcard) has no kind. */
+export type GlobKind = 'directory' | 'link' | 'plain';
 
 const POSIX_CLASSES: Readonly<Record<string, string>> = {
   alpha: 'a-zA-Z', digit: '0-9', alnum: 'a-zA-Z0-9', upper: 'A-Z', lower: 'a-z', space: '\\s', punct: '!-\\/:-@\\[-`{-~', xdigit: '0-9a-fA-F', word: 'a-zA-Z0-9_',
@@ -641,10 +647,13 @@ export function globMatches(
     ignoreCase?: boolean;
     /** the shell reads extended patterns (`^x`, `x~y`, `x#`, `<1-9>`): a word that uses one is not enumerated here */
     extended?: boolean;
-    keep?: (path: string) => boolean;
+    /** whether the caller will judge this name. `kind` is what the directory listing said it is, when it did: a name the caller
+     *  drops is not "bounded", it is not asked about - and a caller that drops the plain entries judges the DIRECTORIES they
+     *  are in instead (`parents`), once each */
+    keep?: (path: string, kind: GlobKind | undefined) => boolean;
   },
 ): GlobMatches {
-  const none: GlobMatches = { paths: [], directories: new Set(), bounded: false, dynamic: true };
+  const none: GlobMatches = { paths: [], directories: new Set(), bounded: false, dynamic: true, parents: new Set() };
   const dirs = directoriesOf(cwds);
   let text = word;
   let dotfiles = options.dotfiles;
@@ -659,11 +668,14 @@ export function globMatches(
   const budget = { entries: GLOB_ENTRY_BUDGET, bounded: false };
   const found = new Set<string>();
   const directories = new Set<string>();
+  const kinds = new Map<string, GlobKind>();
   const style = { ignoreCase: options.ignoreCase === true, extended: options.extended === true };
-  for (const t of texts) for (const base of isAbsolute(t) ? [sep] : dirs) expandGlobText(base, t, dotfiles, style, budget, found, directories);
+  for (const t of texts) for (const base of isAbsolute(t) ? [sep] : dirs) expandGlobText(base, t, dotfiles, style, budget, found, directories, kinds);
   const keep = options.keep;
-  const paths = keep === undefined ? [...found] : [...found].filter(keep);
-  return { paths: paths.slice(0, GLOB_RESULT_BUDGET), directories, bounded: budget.bounded || paths.length > GLOB_RESULT_BUDGET, dynamic: false };
+  const paths = keep === undefined ? [...found] : [...found].filter((f) => keep(f, kinds.get(f)));
+  const parents = new Set<string>();
+  for (const f of found) parents.add(dirname(f));
+  return { paths: paths.slice(0, GLOB_RESULT_BUDGET), directories, bounded: budget.bounded || paths.length > GLOB_RESULT_BUDGET, dynamic: false, parents };
 }
 
 function expandGlobText(
@@ -674,11 +686,12 @@ function expandGlobText(
   budget: { entries: number; bounded: boolean },
   found: Set<string>,
   directories: Set<string>,
+  kinds: Map<string, GlobKind>,
 ): void {
   const segments = text.split('/').filter((s) => s !== '' && s !== '.');
   let frontier: string[] = [root];
   /** the entries of a directory, or none when it cannot be read; each one read is paid for */
-  const entriesOf = (dir: string): Array<{ name: string; directory: boolean }> | null => {
+  const entriesOf = (dir: string): Array<{ name: string; directory: boolean; link: boolean }> | null => {
     let list = listings?.get(dir);
     if (list === undefined) {
       let read;
@@ -689,7 +702,7 @@ function expandGlobText(
       }
       // (paid for outside the `try`, once, when the disk is asked)
       if (read !== null) chargeListing(read.length);
-      list = read === null ? null : read.map((e) => ({ name: e.name, directory: e.isDirectory() }));
+      list = read === null ? null : read.map((e) => ({ name: e.name, directory: e.isDirectory(), link: e.isSymbolicLink() }));
       listings?.set(dir, list);
     } else if (list !== null) {
       // a listing already read is not read again, but every word that matches against it still looks at every entry
@@ -722,6 +735,7 @@ function expandGlobText(
           if (last) {
             next.add(here);
             if (e.directory) directories.add(here);
+            kinds.set(here, e.directory ? 'directory' : e.link ? 'link' : 'plain');
           }
           if (!e.directory || GLOB_SKIPPED_DIRS.has(e.name) || (!dotfiles && e.name.startsWith('.'))) continue;
           if (!last) next.add(here);
@@ -747,6 +761,7 @@ function expandGlobText(
         if (!re.test(e.name)) continue;
         const here = join(p, e.name);
         if (e.directory) directories.add(here);
+        kinds.set(here, e.directory ? 'directory' : e.link ? 'link' : 'plain');
         next.push(here);
       }
     }

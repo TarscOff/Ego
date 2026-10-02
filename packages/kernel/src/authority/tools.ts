@@ -315,6 +315,60 @@ const WGET_ROLES: Record<string, Role> = {
   'private-key': 'read',
   config: 'read',
 };
+// ---- curl: every file it writes besides the body (closure audit wave 5, U-18) ---------------------------------------------------------
+// curl has a dozen options that name a file it WRITES, and the reader of record was a list of the ones its author had met
+// (`--dump-header`, `--cookie-jar`, `--trace`, `--stderr`, `--etag-save`, `--hsts`): `--libcurl FILE`, `--alt-svc FILE`, `--ssl-sessions FILE`
+// and `-w '%output{FILE}'` wrote a git hook at ASK, while the six listed ones into the same path were absolute. The table below is
+// curl's own `--help all` (8.7.1, every option and whether it takes a value, plus the ones later releases added), read by the one
+// parser; the roles say which values are files written. A `-w` format carries its destination INSIDE the value (`%output{FILE}`,
+// `%output{>>FILE}`), which toolEffects reads for this table.
+const CURL_GRAMMAR = gnu(
+  (
+      '--abstract-unix-socket:v --alt-svc:v --anyauth -a|--append --aws-sigv4:v --basic --ca-native --cacert:v --capath:v -E|--cert:v --cert-status ' +
+      '--cert-type:v --ciphers:v --compressed --compressed-ssh -K|--config:v --connect-timeout:v --connect-to:v -C|--continue-at:v -b|--cookie:v ' +
+      '-c|--cookie-jar:v --create-dirs --create-file-mode:v --crlf --crlfile:v --curves:v -d|--data:v --data-ascii:v --data-binary:v --data-raw:v ' +
+      '--data-urlencode:v --delegation:v --digest -q|--disable --disable-eprt --disable-epsv --disallow-username-in-url --dns-interface:v ' +
+      '--dns-ipv4-addr:v --dns-ipv6-addr:v --dns-servers:v --doh-cert-status --doh-insecure --doh-url:v -D|--dump-header:v --egd-file:v --engine:v ' +
+      '--etag-compare:v --etag-save:v --expect100-timeout:v -f|--fail --fail-early --fail-with-body --false-start -F|--form:v --form-escape ' +
+      '--form-string:v --ftp-account:v --ftp-alternative-to-user:v --ftp-create-dirs --ftp-method:v --ftp-pasv -P|--ftp-port:v --ftp-pret ' +
+      '--ftp-skip-pasv-ip --ftp-ssl-ccc --ftp-ssl-ccc-mode:v --ftp-ssl-control -G|--get -g|--globoff --happy-eyeballs-timeout-ms:v --haproxy-clientip:v ' +
+      '--haproxy-protocol -I|--head -H|--header:v -h|--help:v --hostpubmd5:v --hostpubsha256:v --hsts:v --http0.9 -0|--http1.0 --http1.1 --http2 ' +
+      '--http2-prior-knowledge --http3 --http3-only --ignore-content-length -i|--include -k|--insecure --interface:v --ipfs-gateway:v -4|--ipv4 -6|--ipv6 ' +
+      '--json:v -j|--junk-session-cookies --keepalive-time:v --key:v --key-type:v --krb:v --libcurl:v --limit-rate:v -l|--list-only --local-port:v ' +
+      '-L|--location --location-trusted --login-options:v --mail-auth:v --mail-from:v --mail-rcpt:v --mail-rcpt-allowfails -M|--manual --max-filesize:v ' +
+      '--max-redirs:v -m|--max-time:v --metalink --negotiate -n|--netrc --netrc-file:v --netrc-optional -:|--next --no-alpn -N|--no-buffer --no-clobber ' +
+      '--no-keepalive --no-npn --no-progress-meter --no-sessionid --noproxy:v --ntlm --ntlm-wb --oauth2-bearer:v -o|--output:v --output-dir:v ' +
+      '-Z|--parallel --parallel-immediate --parallel-max:v --pass:v --path-as-is --pinnedpubkey:v --post301 --post302 --post303 --preproxy:v ' +
+      '-#|--progress-bar --proto:v --proto-default:v --proto-redir:v -x|--proxy:v --proxy-anyauth --proxy-basic --proxy-ca-native --proxy-cacert:v ' +
+      '--proxy-capath:v --proxy-cert:v --proxy-cert-type:v --proxy-ciphers:v --proxy-crlfile:v --proxy-digest --proxy-header:v --proxy-http2 ' +
+      '--proxy-insecure --proxy-key:v --proxy-key-type:v --proxy-negotiate --proxy-ntlm --proxy-pass:v --proxy-pinnedpubkey:v --proxy-service-name:v ' +
+      '--proxy-ssl-allow-beast --proxy-ssl-auto-client-cert --proxy-tls13-ciphers:v --proxy-tlsauthtype:v --proxy-tlspassword:v --proxy-tlsuser:v ' +
+      '--proxy-tlsv1 -U|--proxy-user:v --proxy1.0:v -p|--proxytunnel --pubkey:v -Q|--quote:v --random-file:v -r|--range:v --rate:v --raw -e|--referer:v ' +
+      '-J|--remote-header-name -O|--remote-name --remote-name-all -R|--remote-time --remove-on-error -X|--request:v --request-target:v --resolve:v ' +
+      '--retry:v --retry-all-errors --retry-connrefused --retry-delay:v --retry-max-time:v --sasl-authzid:v --sasl-ir --service-name:v -S|--show-error ' +
+      '-s|--silent --socks4:v --socks4a:v --socks5:v --socks5-basic --socks5-gssapi --socks5-gssapi-nec --socks5-gssapi-service:v --socks5-hostname:v ' +
+      '-Y|--speed-limit:v -y|--speed-time:v --ssl --ssl-allow-beast --ssl-auto-client-cert --ssl-no-revoke --ssl-reqd --ssl-revoke-best-effort -2|--sslv2 ' +
+      '-3|--sslv3 --stderr:v --styled-output --suppress-connect-headers --tcp-fastopen --tcp-nodelay -t|--telnet-option:v --tftp-blksize:v ' +
+      '--tftp-no-options -z|--time-cond:v --tls-max:v --tls13-ciphers:v --tlsauthtype:v --tlspassword:v --tlsuser:v -1|--tlsv1 --tlsv1.0 --tlsv1.1 ' +
+      '--tlsv1.2 --tlsv1.3 --tr-encoding --trace:v --trace-ascii:v --trace-config:v --trace-ids --trace-time --unix-socket:v -T|--upload-file:v --url:v ' +
+      '--url-query:v -B|--use-ascii -u|--user:v -A|--user-agent:v --variable:v -v|--verbose -V|--version -w|--write-out:v --xattr ' +
+    '--ssl-sessions:v --ech:v --dump-ca-embed --out-null --follow --knownhosts:v --skip-existing --ip-tos:v --vlan-priority:v --tls-earlydata --upload-flags:v'
+  ).split(/\s+/),
+);
+const CURL_ROLES: Record<string, Role> = {
+  output: 'write',
+  'output-dir': 'writeDir',
+  'dump-header': 'write',
+  'cookie-jar': 'write',
+  trace: 'write',
+  'trace-ascii': 'write',
+  stderr: 'write',
+  'etag-save': 'write',
+  hsts: 'write',
+  'alt-svc': 'write',
+  libcurl: 'write',
+  'ssl-sessions': 'write',
+};
 const RSYNC_GRAMMAR = gnu([
   '--log-file:v', '--backup-dir:v', '--write-batch:v', '--only-write-batch:v', '--read-batch:v', '-T|--temp-dir:v', '--partial-dir:v', '--link-dest:v',
   '--compare-dest:v', '--copy-dest:v', '-e|--rsh:v', '--rsync-path:v', '--files-from:v', '--exclude-from:v', '--include-from:v', '--password-file:v',
@@ -393,6 +447,7 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
   go: { grammar: GO_GRAMMAR, roles: GO_ROLES },
   cc: { grammar: CC_GRAMMAR, roles: CC_ROLES },
   wget: { grammar: WGET_GRAMMAR, roles: WGET_ROLES },
+  curl: { grammar: CURL_GRAMMAR, roles: CURL_ROLES, complete: true },
   rsync: { grammar: RSYNC_GRAMMAR, roles: RSYNC_ROLES },
   cargo: { grammar: CARGO_GRAMMAR, roles: CARGO_ROLES },
   eslint: { grammar: ESLINT_GRAMMAR, roles: ESLINT_ROLES },
@@ -424,6 +479,7 @@ export function toolTableFor(head: string, argv: readonly string[]): { key: stri
   if (base === 'awk' || base === 'gawk') return { key: 'awk', table: TOOL_TABLES['awk']!, from: 1 };
   if (base === 'eslint' || base === 'prettier' || base === 'pylint' || base === 'rsync') return { key: base, table: TOOL_TABLES[base]!, from: 1 };
   if (base === 'wget' || base === 'wget2') return { key: 'wget', table: TOOL_TABLES['wget']!, from: 1 };
+  if (base === 'curl') return { key: 'curl', table: TOOL_TABLES['curl']!, from: 1 };
   if (base === 'cargo') {
     // `cargo +nightly build`: a toolchain selector comes first
     const at = argv[1]?.startsWith('+') ? 2 : 1;
@@ -469,12 +525,20 @@ export function toolEffects(head: string, argv: readonly string[]): ToolEffects 
       break;
     }
   }
+  // curl's `-w` format carries a destination inside its value: `%output{FILE}` writes FILE and `%output{>>FILE}` appends to it. A format
+  // taken from a file (`-w @fmt`) is read by the evaluator, which can open files; this reads the ones written on the command line
+  if (found.key === 'curl') for (const f of curlWriteOut(parsed)) for (const m of f.matchAll(/%output\{(?:>>)?([^}]*)\}/g)) out.writes.push(m[1]!);
   // `git config --file F --get KEY` (and --list, --get-all...) READS F; only a setting, an unsetting or an edit writes it
   if (found.key === 'git config' && gitConfigAsks(parsed)) {
     out.reads.push(...out.writes);
     out.writes = [];
   }
   return out;
+}
+
+/** The `-w` / `--write-out` formats of a curl command line, in whichever spelling the parser read them. */
+export function curlWriteOut(parsed: Parsed): string[] {
+  return parsed.options.filter((o) => o.value !== null && [o.name, ...(o.candidates ?? [])].includes('write-out')).map((o) => o.value!);
 }
 
 /** WHETHER A `git config` INVOCATION ASKS FOR A VALUE OR A LISTING AND SETS NOTHING: a get or a list option, or one bare key with
