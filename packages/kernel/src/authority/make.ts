@@ -72,7 +72,7 @@ export function cutMakeComment(line: string): string {
       let n = 1;
       while (line[i + n] === '\\') n++;
       if (line[i + n] === '#') {
-        if (n % 2 === 0) return line.slice(0, i + n);
+        if (n % 2 === 0) return line.slice(0, i) + '\\'.repeat(n >> 1); // (the run halves, and what follows is a comment)
         i += n;
         continue;
       }

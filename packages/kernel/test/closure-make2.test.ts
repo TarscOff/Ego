@@ -183,7 +183,7 @@ test('MK-03. continuation, comment and hash are one function each', () => {
   assert.deepEqual(makeLogicalLines('a\\\nb\nc\\\\\nd'), ['a\\\nb', 'c\\\\', 'd']);
   assert.equal(cutMakeComment('a # b'), 'a ');
   assert.equal(cutMakeComment('a \\# b'), 'a \\# b');
-  assert.equal(cutMakeComment('a \\\\# b'), 'a \\\\');
+  assert.equal(cutMakeComment('a \\\\# b'), 'a \\');
   assert.equal(cutMakeComment('a \\\\\\# b # c'), 'a \\\\\\# b ');
   assert.deepEqual(readMakeNames('$(OBJS:.c=.o): %.o: %.c', true), { names: ['$(OBJS:.c=.o)'], colon: 13, assignment: false });
 });

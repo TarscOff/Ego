@@ -545,9 +545,9 @@ export class MakeReader {
         const ex = this.immediate(raw);
         const add = [...new Set(ex.branches.map(encodeMakeParts))];
         texts = [];
-        for (const o of old) for (const x of add) texts.push(o === '' ? x : x === '' ? o : `${o} ${x}`);
+        for (const o of old) for (const x of add) texts.push(`${o} ${x}`);
         simple = true;
-      } else texts = old.map((o) => (o === '' ? raw : raw === '' ? o : `${o} ${raw}`));
+      } else texts = old.map((o) => `${o} ${raw}`); // (always a blank between the two: checked against `make -p`)
     } else texts = [raw];
     texts = texts.slice(0, 8);
     if (texts.length === 0) texts = [''];

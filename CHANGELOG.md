@@ -431,6 +431,10 @@ discipline of decision Q84 (authority changes are never patch releases).
     `ifdef` ran only the value that was last in the file); `$(shell $(UNDEFINED))` asks; `export` alone, `.EXPORT_ALL_VARIABLES:`,
     `export A B` and every command-line variable are in the environment of the recipes (`make PGHOST=prod-db migrate`); the first rule of a
     file is not a pattern rule; a rule line's `\#` is a `#`.
+  - `MAKEFLAGS += CMD=...`, `MAKEFLAGS := ...`, `GNUMAKEFLAGS += ...` and `MAKEOVERRIDES += ...` in a makefile define CMD in the make that `$(MAKE)`
+    starts (where it beats the sub-makefile's `CMD ?= ...`; `MAKEOVERRIDES` with the precedence of the command line - checked against GNU make
+    3.81): they are command-line variables of everything below, and `$(MAKEFLAGS)` as a recipe prints it carries the command-line variables.
+    An archive member (`make 'lib.a(foo.o)'`) is built by `$(AR) $(ARFLAGS)`, a program a variable names.
   - The reported 654-byte makefile took 42 s to answer (the hook has 30 s, and a hook that has not answered has not refused). Every
     expansion step is charged to the work counter, a variable is expanded once per expansion, and the size, the number of alternatives, the
     nesting and the depth are capped: a reached bound is a gap (ASK), and that makefile is answered in about 25 ms. An `include` line follows
