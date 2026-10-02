@@ -43,6 +43,9 @@ production_markers:
   - 'production'
   - 'prd'
   - 'live'
+  # a pre-production environment is shared and mirrors production's data and integrations; `pre-prod` is already the word
+  # `prod`, and the one-word spelling is the same environment (wave 5, AUTH-1)
+  - 'preprod'
 ---
 # Local development targets
 
@@ -84,7 +87,14 @@ The four classifications:
 
 - **LOCAL** — matches a local-context or local-host entry for that family of tools. Ordinary local development: no
   human approval.
-- **PRODUCTION** — the target name carries a `production_markers` token. The absolute production denies apply.
+- **PRODUCTION** — a `production_markers` entry is a WORD of the target name. The absolute production denies apply. ONE
+  reader (`hasProductionMarker`) answers this for every family of tools: a name is cut at every character that is not a
+  letter or a digit, between a letter and a digit, and where the case changes, so `prod`, `prd-1`, `prd1`, `prod01`,
+  `live2`, `eu-prod`, `eksProd` and `aks-prd1-weu` are production, and `products`, `product-catalog`, `reproduce`,
+  `liveness` and `delivery` are not (they contain the letters, not the word). A marker that is several words (a layer's
+  `sandbox-eu`) is those words in a row. It is asked of the fields that NAME A TARGET - a context, a cluster, a user, an API
+  server, a namespace, a kubeconfig path, a database host, a container engine or connection - and of nothing else: a release,
+  an image, a resource name or a statement says what is done, not where.
 - **EXTERNAL** — a resolved target that is neither. A named remote cluster or database host is a shared system:
   mutating it is denied by `k8s.nonlocal.mutate` / `db.nonlocal.mutate`, and the refusal names the command a human can
   use to declare it a development target.

@@ -2707,6 +2707,31 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'yarn info @acme/x --@acme:registry=https://evil.example',
     ],
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * WAVE 5 (2026-10-02), the cluster, container and production-name readers. The cause of each class is in
+   * closure-clusters2.test.ts; the floors here carry it through every transformation and every producer.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'production',
+    // "IS THIS NAME PRODUCTION" HAS ONE READER (AUTH-1). `kind-prd1` is local by the `kind-*` the kernel declares and production
+    // by the word `prd` in it; a number after the marker, or a CamelCase boundary, made it neither for the readers that wanted a
+    // separator, so a numbered production environment under a declared-local prefix was ALLOW in every family.
+    id: 'a production environment whose name carries a number, or a case boundary, under a name the kernel declares local',
+    floor: 'DENY',
+    cases: [
+      'kubectl --context kind-prd1 apply -f x.yaml',
+      'kubectl --context kind-prod01 delete deploy x',
+      'kubectl --context k3d-live2 delete deploy x',
+      'kubectl --context kind-dev -n prd2 delete deploy x',
+      'kubectl --context kind-eksProd delete deploy x',
+      'helm --kube-context kind-prod1 upgrade app ./chart',
+      'helm --kube-context kind-dev uninstall app -n live1',
+      'psql -h prod1.localhost -c "drop table t"',
+      'psql -h db.prd2.localhost -c "drop table t"',
+      'docker --context kind-prd1 run alpine true',
+      'DOCKER_CONTEXT=kind-prod01 docker run alpine true',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -3089,6 +3114,15 @@ export const PRODUCERS: readonly Producer[] = [
  * ------------------------------------------------------------------------------------------------------------- */
 
 export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
+  // WAVE 5 (clusters, containers, production names): a namespace, a release or a context that merely CONTAINS the letters of a production
+  // marker is not production, a read of a pod called `secrets-api` is not a credential read, and a Dockerfile of the ordinary kind builds
+  clusters2: [
+    'kubectl --context minikube -n products rollout restart deploy/api',
+    'kubectl --context kind-dev -n product-service delete pod x',
+    'kubectl --context kind-product-catalog get pods',
+    'kubectl --context kind-dev get pod secrets-api-7d9',
+    'helm --kube-context kind-dev upgrade app ./chart -n products',
+  ],
   // WAVE 3 (git, environment): the statements the readers of those two dimensions must leave alone. A binding of a name that re-points nothing is
   // ordinary whatever builtin binds it; a git option spelled the ordinary way is an option, not an act; a hyphenated git command that has a
   // rule of its own keeps it

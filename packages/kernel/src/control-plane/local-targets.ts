@@ -87,12 +87,39 @@ export const dbClientLocalPatterns = (t: LocalTargets): string[] => [
   ...declaredNames(t, 'db'),
 ];
 
-/** Whether a name carries a production marker as a TOKEN: `kind-prod` and `prod-db.acme.com` do, `product-catalog`
- *  and `reproduce` do not. Used by the evaluator to classify a target and by the registry to refuse a declaration;
- *  one function, so the two cannot disagree about what production is. */
+/** The WORDS of a name, which is what a production marker is a marker OF. A name is cut at every character that is not a
+ *  letter or a digit (`aks-prd-weu`, `db.prod.eu`, `prod_eu`), between a letter and a digit (`prd1`, `prod01`, `live2`,
+ *  `eu1prod`: a numbered environment is still that environment) and where the case changes (`eksProd`, `ProdEU`,
+ *  `PRODCluster`). It is cut by what the name IS, not by a list of the words it may hold, so `products`, `productivity`,
+ *  `produce`, `reproduction`, `liveness` and `delivery` stay whole and say nothing about production. */
+export function nameWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([A-Za-z])([0-9])/g, '$1 $2')
+    .replace(/([0-9])([A-Za-z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/** Whether a name carries a production marker as a WORD of it (see `nameWords`): `kind-prod`, `aks-prd1-weu`,
+ *  `prod-db.acme.com` and `db.live2.eu` do, `product-catalog` and `reproduce` do not. A marker that is itself several
+ *  words (a layer's `sandbox-eu`) is those words in a row. THE ONE READER of "is this name production": the evaluator asks
+ *  it to classify a Kubernetes context, a database host and a container engine, and the registry asks it to refuse a
+ *  declaration, so no resolver has a test of its own to disagree with. It is asked of the fields that NAME A TARGET (a
+ *  context, a cluster, a server, a host, an engine, a connection) and of nothing else: a release, an image or a
+ *  statement says what is done, not where. */
 export function hasProductionMarker(name: string, markers: string[]): boolean {
-  const n = name.toLowerCase();
-  return markers.some((m) => new RegExp(`(^|[^a-z0-9])${m.toLowerCase()}([^a-z0-9]|$)`).test(n));
+  const words = nameWords(name);
+  if (words.length === 0) return false;
+  return markers.some((m) => {
+    const marker = nameWords(m);
+    if (marker.length === 0 || marker.length > words.length) return false;
+    for (let at = 0; at + marker.length <= words.length; at++)
+      if (marker.every((w, k) => words[at + k] === w)) return true;
+    return false;
+  });
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *

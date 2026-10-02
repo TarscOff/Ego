@@ -8,6 +8,7 @@ import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.
 import { argvToCommandLine } from '../util/shell-quote.ts';
 import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
+import { HELM_PRODUCTION, TARGET_KINDS, productionCapabilityFor } from './target-kinds.ts';
 import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
 import { SHELL_GRAMMAR, expandLongOptions, gitConfigAsks, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
 import {
@@ -9889,36 +9890,7 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
   'production.secrets.mutate': 'cloud',
 };
 
-/**
- * WHAT EACH KIND OF TARGET RESOLVES TO. For a Kubernetes tool, a database client or a container engine the resolver
- * answers one of four classes (LOCAL, PRODUCTION, EXTERNAL, UNCLASSIFIED); this table says which capability each
- * non-local class lands on, and which list of `local-targets.md` declares a local one. It is read twice and by nothing
- * else: `retargetLocalCapability` picks the capability from it, and `targetRuleFor` prints the rule from it — so the
- * rule `ego explain capability` shows a person is the rule the evaluator applies, not a description that can drift.
- */
-const TARGET_KINDS = {
-  k8s: {
-    noun: 'kube context or namespace',
-    declaredIn: ['k8s_local_contexts'],
-    production: 'production.k8s.mutate',
-    external: 'k8s.nonlocal.mutate',
-    unclassified: 'k8s.target.unclassified',
-  },
-  db: {
-    noun: 'database host',
-    declaredIn: ['db_local_hosts'],
-    production: 'production.database.mutate',
-    external: 'db.nonlocal.mutate',
-    unclassified: 'db.target.unclassified',
-  },
-  container: {
-    noun: 'container engine context or host',
-    declaredIn: ['k8s_local_contexts', 'db_local_hosts'],
-    production: 'production.deploy',
-    external: 'container.nonlocal.run',
-    unclassified: 'container.target.unclassified',
-  },
-} as const;
+// (WHAT EACH KIND OF TARGET RESOLVES TO is `TARGET_KINDS`, in target-kinds.ts: the compiler reads it too)
 /** the one place the cloud CLIs de-escalate: a provider endpoint that is a declared local host (an emulator) */
 const CLOUD_LOCAL_CAPABILITY = 'cloud.local.mutate';
 
@@ -9931,6 +9903,7 @@ export function targetDependentCapabilities(table: CompiledAuthorityTable): stri
     ids.add(k.external);
     ids.add(k.unclassified);
   }
+  ids.add(HELM_PRODUCTION);
   return [...ids].filter((id) => id in table.capabilities).sort();
 }
 
@@ -9945,7 +9918,7 @@ export function targetGroups(
       .filter(([, k]) => k === kind)
       .map(([id]) => id);
   for (const [kind, k] of Object.entries(TARGET_KINDS)) {
-    const ids = [...resolved(kind), k.production, k.external, k.unclassified].filter((id) => id in table.capabilities);
+    const ids = [...resolved(kind), k.production, ...(kind === 'k8s' ? [HELM_PRODUCTION] : []), k.external, k.unclassified].filter((id) => id in table.capabilities);
     const rule = ids.map((id) => (resolved(kind).includes(id) ? targetRuleFor(table, id) : undefined)).find(Boolean);
     if (rule) groups.push({ kind, capabilities: ids.sort(), rule });
   }
@@ -9976,7 +9949,7 @@ export function targetRuleFor(table: CompiledAuthorityTable, capability: string)
     const lists = k.declaredIn.join(' or ');
     if (kindOf === kind)
       return `judged by where it points, not by the tool (${kind}): a ${k.noun} declared in ${declared} (${lists}) keeps this capability; a production marker (${markers}) in the target is ${label(k.production)}; a named target that is not declared is ${label(k.external)}; a target that cannot be resolved (ambient context, a variable) is ${label(k.unclassified)}`;
-    if (capability === k.production)
+    if (capability === k.production || (kind === 'k8s' && capability === HELM_PRODUCTION))
       return `the result of target classification (${kind}): a production marker (${markers}) in the ${k.noun}, wherever the tool is run from`;
     if (capability === k.external)
       return `the result of target classification (${kind}): the ${k.noun} is named but is not declared local in ${declared} (${lists}), so it is EXTERNAL`;
@@ -12241,7 +12214,7 @@ function retargetLocalCapability(
   const outcomes = TARGET_KINDS[kind];
   const capability =
     resolved.cls === 'PRODUCTION'
-      ? outcomes.production
+      ? productionCapabilityFor(kind, commandHead(norm))
       : resolved.cls === 'EXTERNAL'
         ? outcomes.external
         : outcomes.unclassified;

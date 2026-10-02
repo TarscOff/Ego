@@ -776,10 +776,13 @@ function secretRead(p: Parsed, host: K8sHost): string | null {
   const listForm = candidates[0]?.w.text.includes('/') ?? false;
   const shifted = candidates.some(({ i }) => p.roles[i] === 'maybe');
   for (const [k, { w }] of candidates.entries()) {
+    // ONLY THE TYPE POSITION HOLDS A TYPE. `get pod secrets` reads the pod called `secrets` and `get secrets` reads the Secrets:
+    // the NAMES after the type are names, whatever they spell (wave 5, K8-03: a pod called `secrets-api` is not a credential read)
+    if (!(k === 0 || listForm || shifted)) continue;
     const types = w.text.split(',').map((el) => el.split('/')[0]!);
     if (types.some((t) => SECRET_TYPE.test(t))) return `${what} ${w.text} prints a Secret`;
     // the TYPE of `pod/$NAME` is `pod`: a word that fills in only the name leaves the type written
-    if ((k === 0 || listForm || shifted) && types.some((t) => /[$`]/.test(t)))
+    if (types.some((t) => /[$`]/.test(t)))
       return `the resource type of ${what} is a word a shell fills in, and it may name Secrets`;
   }
   // the raw API: a path that names secrets, or one a shell fills in
