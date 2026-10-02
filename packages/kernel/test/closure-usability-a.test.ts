@@ -331,6 +331,26 @@ test('U-01: the files a tool reads are still files, whatever data stands beside 
     dir,
   );
   gated(["sed -n '1w .claude/settings.json' README.md", "sed 'r ~/.ssh/id_rsa' f.txt"], dir, true);
+  // ...and the file a script opens is read from the command as WRITTEN wherever a carrier holds it: the carried text is flattened, and the
+  // script's own words are no longer judged as paths
+  const carriers: Array<(c: string) => string> = [
+    (c) => `find . -maxdepth 0 -exec ${c} \\;`,
+    (c) => `find . -maxdepth 0 -execdir ${c} \\;`,
+    (c) => `watch -n 5 '${c}'`,
+    (c) => `bash -c "${c}"`,
+    (c) => `sh -c '${c.replace(/'/g, `'\\''`)}'`,
+    (c) => `env ${c}`,
+    (c) => `time ${c}`,
+    (c) => `timeout 5 ${c}`,
+    (c) => `nice -n 5 ${c}`,
+    (c) => `xargs -I{} ${c}`,
+  ];
+  for (const carry of carriers) {
+    gated([carry("sed 'r /etc/hosts' f.txt"), carry("sed -n 'R /etc/hosts' f.txt"), carry("sed -e 'r /etc/hosts' f.txt")], dir);
+    gated([carry("sed 'r ~/.ssh/id_rsa' f.txt")], dir);
+  }
+  gated(["watch -n 5 'tr a b < /etc/hosts'", `bash -c "tr a b < /etc/hosts"`, "sh -c 'cat < /etc/hosts'", "watch 'cat < ~/.ssh/id_rsa'"], dir);
+  gated(["watch 'cat < ~/.ssh/id_rsa'", `bash -c "cat < ~/.ssh/id_rsa"`, "find . -maxdepth 0 -exec sed 'w /etc/hosts' f.txt \\;"], dir, true);
   // ...and so does a find whose pattern SELECTS the files an -exec clause reads
   gated(["find . -regex '.*env' -exec cat {} +", "find . -name '.e*' -exec cat {} +", "find . -path '*/.env' -exec cat {} +"], workspace({ '.env': 'K=1' }));
   // the same TEXT as a pattern and as a file is two words: the second is a file

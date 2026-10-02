@@ -15714,9 +15714,13 @@ function analyzeSegmentsInto(
         awkShellCommands(b, ctx, env.cwd).length > 0 ||
         sedShellCommands(b, ctx, env.cwd).length > 0 ||
         sedWrittenFiles(b, ctx, env.cwd).length > 0 ||
+        // (a file the script READS into its output is as much a thing only the segment as written can show - its words are no longer judged
+        // as paths, being another language's text - and so is a file an input redirection opens)
+        sedReadFiles(b, ctx, env.cwd).length > 0 ||
         gitPagerCommands(b).length > 0 ||
         gitConfigCommands(b).length > 0 ||
         redirectionTargets(b).length > 0 ||
+        redirectionSources(b).length > 0 ||
         runDirectory(b, env.cwd) !== null ||
         commitBypassFlag(b) ||
         carrierPartialOf(b) !== null ||
