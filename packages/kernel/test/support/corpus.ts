@@ -3373,7 +3373,115 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'cp README.md ..', // a named write into a parent directory touches no protected path
     'aws s3 cp s3://my-fixtures/data.json ./data.json', // a download changes nothing in the cloud
   ],
+  // WAVE 6 (make): the invocations that must stay ALLOW whatever reader reads the makefile. This workspace has none, so these are the command
+  // lines alone - goals, options and variable definitions of every spelling make accepts; the makefiles they run are ORDINARY_MAKEFILES below
+  make: [
+    'make',
+    'make build',
+    'make -j4 test',
+    'make -s build',
+    'make -n build',
+    'make -f Makefile build',
+    'make V=1 build',
+    'make VERBOSE:=1 build',
+    'make "NAME = value" build',
+    'make -k -- build',
+    'make --version',
+  ],
 };
+
+/**
+ * MAKEFILES AS THE WORLD WRITES THEM, WITH THE COMMANDS THAT RUN THEM (closure audit wave 6, TG-01). ORDINARY runs in a repository that has
+ * a package.json and nothing else, so a producer - the thing that reads the makefile, the Dockerfile, the compose file - saw no file there and
+ * the exact set of gated commands could not notice one that a real makefile gates. These carry the content: each is an idiom of C, Go, Node and
+ * documentation repositories, every command it runs is classified ALLOW on its own, and the whole must be ALLOW. An entry that asks is a
+ * producer over-gate, not an accepted behaviour.
+ */
+export const ORDINARY_MAKEFILES: ReadonlyArray<{ readonly id: string; readonly files: Readonly<Record<string, string>>; readonly commands: readonly string[] }> = [
+  {
+    id: 'a C project: variables with defaults, wildcard and patsubst, a pattern rule, generated dependency files, clean',
+    files: {
+      Makefile:
+        'CC ?= gcc\nCFLAGS += -Wall -O2\nSRCS := $(wildcard *.c)\nOBJS := $(patsubst %.c,%.o,$(SRCS))\nDEPS := $(OBJS:.o=.d)\n\nall: app\n\napp: $(OBJS)\n\t$(CC) $(CFLAGS) -o $@ $^\n\n%.o: %.c\n\t$(CC) $(CFLAGS) -MMD -c $< -o $@\n\n-include $(DEPS)\n\nclean:\n\t$(RM) $(OBJS) $(DEPS) app\n\n.PHONY: all clean\n',
+      'a.c': 'int main(void) { return 0; }\n',
+      'b.c': 'int b;\n',
+    },
+    commands: ['make', 'make all', 'make clean', 'make -j4', 'make app'],
+  },
+  {
+    id: 'a C project that leaves the compiling to make: objects named, no rule for them',
+    files: { Makefile: 'OBJS = a.o b.o\nall: app\napp: $(OBJS)\n\tcc -o $@ $^\n', 'a.c': 'int a;\n', 'b.c': 'int b;\n' },
+    commands: ['make', 'make app'],
+  },
+  {
+    id: 'a static pattern rule over a list of objects, and an old-style suffix rule',
+    files: {
+      Makefile: 'SRC = a.c b.c\nOBJ = $(SRC:.c=.o)\nall: $(OBJ)\n$(OBJ): %.o: %.c\n\tcc -c $< -o $@\n',
+      'a.c': 'x',
+      'b.c': 'y',
+      'old.mk': '.SUFFIXES: .c .o\n.c.o:\n\tcc -c $<\nall: a.o\n',
+    },
+    commands: ['make all', 'make -f old.mk'],
+  },
+  {
+    id: 'a self-documenting makefile: a help target that greps $(MAKEFILE_LIST)',
+    files: {
+      Makefile:
+        ".DEFAULT_GOAL := help\n.PHONY: help build\nhelp: ## Show this help\n\t@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = \":.*?## \"}; {printf \"%-20s %s\\n\", $$1, $$2}'\nbuild: ## Build\n\t@echo building\n",
+    },
+    commands: ['make', 'make help', 'make build'],
+  },
+  {
+    id: 'variables make sets itself: CURDIR, MAKE, MAKECMDGOALS, MAKELEVEL, MAKE_VERSION, the user\'s HOME and PWD, and the built-in RM and CC',
+    files: {
+      Makefile:
+        'build:\n\tdocker run --rm -v $(CURDIR):/app node:22 npm test\n\techo $(MAKECMDGOALS) $(MAKELEVEL) $(MAKE_VERSION) $(HOME) $(PWD)\n\t$(RM) -r dist\n\t$(CC) -o app a.c\n\t$(MAKE) --no-print-directory sub\nsub:\n\techo sub\n',
+      'a.c': 'int main(void) { return 0; }\n',
+    },
+    commands: ['make build', 'make sub'],
+  },
+  {
+    id: 'a recursive make: $(MAKE) -C, ${MAKE}, a sub-make with a goal, in a dry run',
+    files: {
+      Makefile: 'all:\n\t$(MAKE) -C sub all\n\t${MAKE} -C sub test\n.PHONY: all\n',
+      'sub/Makefile': 'all:\n\techo ok\ntest:\n\techo t\n',
+    },
+    commands: ['make', 'make all', 'make -n all'],
+  },
+  {
+    id: 'a makefile that includes a file of defaults with ?= and a guard',
+    files: {
+      Makefile: 'include config.mk\nbuild:\n\techo $(NAME) $(VERSION) $(PORT)\n',
+      'config.mk': 'NAME ?= app\nVERSION ?= 1.0\nifndef PORT\nPORT = 8080\nendif\n',
+    },
+    commands: ['make', 'make build', 'make NAME=other build'],
+  },
+  {
+    id: 'a canned recipe: define and $(call)',
+    files: { Makefile: 'define BUILD\n@echo building $(1)\ncc -o $(1) $(1).c\nendef\nall:\n\t$(call BUILD,app)\n', 'app.c': 'int main(void) { return 0; }\n' },
+    commands: ['make', 'make all'],
+  },
+  {
+    id: 'a strict shell: SHELL, .SHELLFLAGS and .ONESHELL',
+    files: { Makefile: 'SHELL := /bin/bash\n.SHELLFLAGS := -eu -o pipefail -c\n.ONESHELL:\nbuild:\n\techo a\n\techo b\n' },
+    commands: ['make', 'make build'],
+  },
+  {
+    id: 'a version taken from the repository and used in a quoted string; a continued recipe',
+    files: { Makefile: 'VERSION := $(shell git describe --tags --always)\nbuild:\n\techo "building $(VERSION)"\n\techo a \\\n\t  b \\\n\t  c\n' },
+    commands: ['make', 'make build'],
+  },
+  {
+    id: 'directories as order-only prerequisites, and a shell loop over a list',
+    files: { Makefile: 'BIN := bin\nSUBDIRS := a b\n$(BIN):\n\tmkdir -p $@\nbuild: | $(BIN)\n\techo hi > $(BIN)/x\n\tfor d in $(SUBDIRS); do echo $$d; done\n' },
+    commands: ['make build', 'make -j2 build'],
+  },
+  {
+    id: 'a recipe that spells a variable the way a program does: automatic variables, $$ and a conditional on the platform',
+    files: { Makefile: 'ifeq ($(shell uname -s),Linux)\nPLATFORM = linux\nelse\nPLATFORM = other\nendif\nall: a.txt b.txt\n\tcat $^ > all.txt\n\techo $$HOME $(PLATFORM) $@ $<\n%.txt: %.in\n\tcp $< $@\n', 'a.in': 'a', 'b.in': 'b' },
+    commands: ['make', 'make all'],
+  },
+];
 
 /** The ordinary commands that DO gate, each with the reason it is not a defect. Anything else gating is one. */
 export const EXPECTED_GATES: Readonly<Record<string, string>> = {
