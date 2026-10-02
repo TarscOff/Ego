@@ -2,7 +2,7 @@
 // installed (K4, M10): this dialect emits the neutral JSON shape and fails closed on anything it cannot parse.
 import { join } from 'node:path';
 import type { HookEvent, HookDecision, HookEventName } from '../../kernel/src/hooks/events.ts';
-import { decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
+import { decisionContext, decisionMessage, decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
 import { writeAtomic } from '../../kernel/src/util/fs.ts';
 import { argvToCommandLine, shellQuote } from '../../kernel/src/util/shell-quote.ts';
 
@@ -196,8 +196,10 @@ export function renderCodexOutput(d: HookDecision): { stdout: string; exitCode: 
     out['reason'] = decisionReason(d);
     exitCode = 2;
   }
-  if (d.context) out['additionalContext'] = d.context;
-  if (d.userMessage) out['systemMessage'] = d.userMessage;
+  const context = decisionContext(d);
+  const message = decisionMessage(d);
+  if (context) out['additionalContext'] = context;
+  if (message) out['systemMessage'] = message;
   return { stdout: JSON.stringify(out), exitCode };
 }
 

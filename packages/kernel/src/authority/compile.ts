@@ -3,6 +3,7 @@
 // `authority_changes` (decision Q84). Deterministic and reproducible: no timestamps, sorted keys.
 import { basename } from 'node:path';
 import { sha256Canonical } from '../util/hash.ts';
+import { shownText } from '../util/shown-text.ts';
 import { overlayPathGlobs } from './overlay-paths.ts';
 import {
   mergeLocalTargets,
@@ -65,8 +66,11 @@ export interface CompiledCapability {
 export interface CompiledMatcher {
   capability: string;
   tool: string;
+  /** @untrusted a regular expression an overlay file wrote: any text */
   command?: string;
+  /** @untrusted a glob an overlay file wrote */
   path?: string;
+  /** @untrusted a regular expression an overlay file wrote */
   url?: string;
   /** contributes a hit but never wins the segment's semantic class */
   additive?: boolean;
@@ -127,6 +131,7 @@ export interface CompiledAuthorityTable {
   /** the authored bounded / discovering command vocabulary (UNCLAIMED-HEAD CLOSURE). ARRAYS, not Sets: the
    *  compiled table is cached as JSON and a Set does not survive the round trip. */
   boundedCommands: {
+    /** @untrusted the organization's file adds to it */
     bounded: string[];
     installsDependencies: string[];
     discoversContent: string[];
@@ -328,7 +333,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     const v = effective[om.capability];
     if (v && v !== 'ALLOW' && modeAllows.has(om.capability)) {
       problems.push(
-        `overlay matcher may not map "${om.command ?? om.path ?? om.url}" to "${om.capability}": a mode can release that capability to ALLOW, so the mapping would widen; overlay matchers only narrow`,
+        `overlay matcher may not map ${shownText(om.command ?? om.path ?? om.url, 160)} to "${om.capability}": a mode can release that capability to ALLOW, so the mapping would widen; overlay matchers only narrow`,
       );
       continue;
     }
@@ -338,7 +343,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     }
     if (v === 'ALLOW') {
       problems.push(
-        `overlay matcher may not map "${om.command ?? om.path ?? om.url}" to ALLOW capability "${om.capability}"; overlay matchers only narrow`,
+        `overlay matcher may not map ${shownText(om.command ?? om.path ?? om.url, 160)} to ALLOW capability "${om.capability}"; overlay matchers only narrow`,
       );
       continue;
     }
@@ -349,17 +354,17 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     // a word and protected nothing (exit review 11, #121). `any` is every tool that reads the field.
     const where = om.command ?? om.path ?? om.url;
     if (om.command !== undefined && om.tool !== 'Bash' && om.tool !== 'any') {
-      problems.push(`overlay matcher "${where}" has a command pattern and tool "${om.tool}", which never classifies a command: use tool Bash (or any)`);
+      problems.push(`overlay matcher ${shownText(where, 160)} has a command pattern and tool "${om.tool}", which never classifies a command: use tool Bash (or any)`);
       continue;
     }
     if (om.path !== undefined && om.tool !== 'Read' && om.tool !== 'Write' && om.tool !== 'Edit' && om.tool !== 'any') {
       problems.push(
-        `overlay matcher "${where}" has a path pattern and tool "${om.tool}", which is never asked about a path: use tool Read to protect reading it, Write to protect writing it (the shell and the edit tools both ask), or any`,
+        `overlay matcher ${shownText(where, 160)} has a path pattern and tool "${om.tool}", which is never asked about a path: use tool Read to protect reading it, Write to protect writing it (the shell and the edit tools both ask), or any`,
       );
       continue;
     }
     if (om.url !== undefined && om.tool !== 'WebFetch' && om.tool !== 'any') {
-      problems.push(`overlay matcher "${where}" has a url pattern and tool "${om.tool}", which never fetches: use tool WebFetch (or any)`);
+      problems.push(`overlay matcher ${shownText(where, 160)} has a url pattern and tool "${om.tool}", which never fetches: use tool WebFetch (or any)`);
       continue;
     }
     // AN OVERLAY ONLY NARROWS, SO IT NEVER REPLACES THE CORE'S ANSWER: a command pattern is ADDITIVE - it contributes its hit beside the

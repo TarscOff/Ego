@@ -63,6 +63,22 @@ The code is derived from the decision by one function (`packages/kernel/src/auth
 that produced it. Which capabilities fall in which tier is shown, derived from the compiled table, by `ego capabilities`;
 a change in what a reconfiguration widens is shown, with every widening marked, by `ego authority diff <old> <new>`.
 
+Three properties of the authority path are enforced by tests that read the code, not only by tests of examples (closure audit
+2026-10-02):
+
+- **A widening is accepted on the machine of the person who read it.** The compiled cache (`.harness/generated/policy.json`) records
+  which layer widenings a human accepted. It is sealed with an HMAC whose key lives in `EGO_HOME` (`policy-seal.key`, mode 0600, made
+  by `ego init`), so a cache that a teammate's commit or a copied directory brings in is read as absent: it is recompiled, and every
+  widening in the layer files is pending until `ego init` is run there. An acceptance is also bound to the bytes shown: the layer files
+  and the widening lines the person was asked about, re-verified at the moment of writing.
+- **Foreign text is quoted before EGO speaks it.** Text that came from a layer file, a repository file, a command line or a tool input
+  reaches a person or a model only through `shownText` (`util/shown-text.ts`): one line, escaped, bounded, with nothing a terminal or
+  a model reads as other than a glyph. The sources are declared `@untrusted` in the code, and a structural test fails when a message
+  is built from one without the function.
+- **Every reader of unbounded input pays for it.** A decision ends with a verdict inside the work bound on any input (an ASK that says
+  it was too large to classify when the bound is reached), and a seeded generator per reader family (`test/support/pathological.ts`)
+  is the list of readers: a new reader adds a family.
+
 ## The rule that holds the model together
 
 The classifier will always have a frontier. What matters is what happens at that frontier, and the rule is:

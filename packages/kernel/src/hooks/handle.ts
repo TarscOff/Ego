@@ -12,6 +12,7 @@ import {
 } from '../authority/reasons.ts';
 import type { ExecutionBudgets } from '../control-plane/types.ts';
 import { ensurePolicyCache, type PolicyCache } from '../policy/cache.ts';
+import { sealFor } from '../policy/seal.ts';
 import {
   openRuntimeRoot,
   readSession,
@@ -32,6 +33,7 @@ import { egoHome } from '../launcher/home.ts';
 import { isFile } from '../util/fs.ts';
 import { realpathSync } from 'node:fs';
 import { sha256Hex } from '../util/hash.ts';
+import { flatText } from '../util/shown-text.ts';
 import type { HookEvent, HookDecision } from './events.ts';
 import { frameForContext, provenance } from '../context/trust.ts';
 import { resolveLauncher } from '../util/path-resolve.ts';
@@ -149,7 +151,8 @@ function countersOf(s: SessionRecord): BudgetCounters {
 export function handleHook(ev: HookEvent, rt: HookRuntime): HookDecision {
   const cpRoot = rt.controlPlaneRoot ?? controlPlaneDir();
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
-  const { cache } = ensurePolicyCache(cpRoot, rt.projectRoot, self);
+  // (a cache this machine did not write is not read - AUTH-5: the seal is checked in the one reader, with the key of THIS home)
+  const { cache } = ensurePolicyCache(cpRoot, rt.projectRoot, self, { seal: sealFor(rt.env ?? process.env) });
   const root = openRuntimeRoot(rt.projectRoot, self, rt.now());
   // THE DECISION IS MADE BEFORE THE LOCK IS TAKEN (RB-2). Deciding a line costs processes and files - milliseconds for `ls`, seconds for
   // a line of git commands - and it was done while holding the session's lock, so twenty parallel tool calls of one session (a
@@ -468,14 +471,15 @@ function handleLocked(
       const decision: HookDecision = {
         event: ev.event,
         action,
-        reason: `EGO: ${evaluation.reason}`,
+        // (the evaluator's reason carries the text of the command it is about: on one line, with nothing in it a host reads as other than a glyph)
+        reason: `EGO: ${flatText(evaluation.reason)}`,
         exitCode: 0,
         details: { hits: evaluation.hits, ...(evaluation.code ? { code: evaluation.code } : {}) },
       };
       if (evaluation.code) decision.code = evaluation.code;
       if (action === 'deny') {
         const cap = evaluation.decisive?.capability ?? 'unknown';
-        decision.userMessage = `EGO refused ${tool.name}: ${evaluation.code ?? 'DENY'}, ${cap} is DENY. \`ego explain capability ${cap}\` explains why.`;
+        decision.userMessage = `EGO refused ${flatText(tool.name, 80)}: ${evaluation.code ?? 'DENY'}, ${cap} is DENY. \`ego explain capability ${cap}\` explains why.`;
       }
       // TASK_APPROVAL (issue #16 section 8): an ASK on an operation that leaves this machine tells the human WHAT they
       // are approving - action, target, branch or cluster or database, a bounded summary, why, how reversible - instead

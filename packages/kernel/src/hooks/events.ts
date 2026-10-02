@@ -2,6 +2,7 @@
 // output; the kernel never sees host-specific shapes.
 import type { HostId } from '../hosts/matrix.ts';
 import type { ReasonCode } from '../authority/reasons.ts';
+import { terminalSafe } from '../util/shown-text.ts';
 
 export const HOOK_EVENTS = [
   'SessionStart',
@@ -26,7 +27,13 @@ export interface HookEvent {
   transcriptPath?: string;
   permissionMode?: string;
   hostPid?: number;
-  tool?: { name: string; input: Record<string, unknown>; response?: unknown; useId?: string };
+  tool?: {
+    /** @untrusted the host's payload: a tool name is whatever the caller of the hook says it is */
+    name: string;
+    input: Record<string, unknown>;
+    response?: unknown;
+    useId?: string;
+  };
   prompt?: string;
   /** SessionStart: startup | resume | clear | compact */
   source?: string;
@@ -65,6 +72,17 @@ export function isHookEventName(v: string): v is HookEventName {
  */
 export function decisionReason(d: Pick<HookDecision, 'reason' | 'code'>): string {
   const reason = d.reason ?? '';
-  if (!d.code || reason.includes(d.code)) return reason;
-  return reason ? `${d.code}: ${reason}` : d.code;
+  if (!d.code || reason.includes(d.code)) return terminalSafe(reason);
+  return terminalSafe(reason ? `${d.code}: ${reason}` : d.code);
 }
+
+/**
+ * THE BOUNDARY OF THE CHANNEL (closure audit 2026-10-02, AUTH-6). Every text a host shows - the reason of a decision, the context the model
+ * reads, the message the person reads - leaves the kernel through one of these three readers, and each turns every control character,
+ * escape-sequence introducer and invisible formatting character into a visible escape (`terminalSafe`) whatever the text's origin: a
+ * command line, a layer file, a repository name. The dialects call them and nothing else; a test reads the dialects for a raw `d.context`.
+ */
+export const decisionContext = (d: Pick<HookDecision, 'context'>): string | undefined =>
+  d.context === undefined ? undefined : terminalSafe(d.context);
+export const decisionMessage = (d: Pick<HookDecision, 'userMessage'>): string | undefined =>
+  d.userMessage === undefined ? undefined : terminalSafe(d.userMessage);

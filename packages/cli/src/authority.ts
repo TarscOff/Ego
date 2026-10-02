@@ -16,6 +16,7 @@ import {
 } from '../../kernel/src/authority/compile.ts';
 import { LOCK_TIER_LABEL } from '../../kernel/src/authority/vocabulary.ts';
 import { compileProjectPolicy, ensurePolicyCache, readAsCurrentTable } from '../../kernel/src/policy/cache.ts';
+import { sealFor } from '../../kernel/src/policy/seal.ts';
 import { loadControlPlane } from '../../kernel/src/control-plane/load.ts';
 import { controlPlaneDir, selfIdentity, selfVersion } from '../../kernel/src/launcher/self.ts';
 
@@ -42,13 +43,13 @@ function tableFromJson(label: string, text: string): CompiledAuthorityTable {
   return t;
 }
 
-function loadOperand(spec: string, project: ProjectContext): CompiledAuthorityTable {
+function loadOperand(spec: string, project: ProjectContext, env: NodeJS.ProcessEnv): CompiledAuthorityTable {
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
   switch (spec) {
     case 'core':
       return compileAuthority(loadControlPlane(controlPlaneDir()), { projectRoot: project.root });
     case 'current':
-      return ensurePolicyCache(controlPlaneDir(), project.root, self).cache.table;
+      return ensurePolicyCache(controlPlaneDir(), project.root, self, { seal: sealFor(env) }).cache.table;
     case 'proposed':
       return compileProjectPolicy(controlPlaneDir(), project.root, self).table;
   }
@@ -113,8 +114,8 @@ export function authorityCommand(
   let prev: CompiledAuthorityTable;
   let next: CompiledAuthorityTable;
   try {
-    prev = loadOperand(oldSpec, project);
-    next = loadOperand(newSpec, project);
+    prev = loadOperand(oldSpec, project, io.env);
+    next = loadOperand(newSpec, project, io.env);
   } catch (e) {
     if (!(e instanceof OperandError)) throw e;
     io.err(`${e.message}\n${USAGE}`);

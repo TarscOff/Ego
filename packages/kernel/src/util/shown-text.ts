@@ -68,16 +68,9 @@ const isSpace = (ch: string): boolean => ch.codePointAt(0) === 0x85 || /\s/u.tes
 const escapeOne = (cp: number): string =>
   cp <= 0xff ? `\\x${cp.toString(16).padStart(2, '0')}` : `\\u{${cp.toString(16)}}`;
 
-/**
- * TEXT THAT IS NOT EGO'S, AS DATA INSIDE A SENTENCE EGO WRITES: `"…"`, one line, escaped, bounded.
- *
- *   - any run of whitespace (a newline included) is ONE space, so the text cannot start a line of its own;
- *   - a backslash and a quote are escaped, so the text cannot close the quotes it sits in and the escapes below are unambiguous;
- *   - every control character, escape-sequence introducer, bidirectional override and invisible formatting character is its
- *     visible escape (`\x1b`, `\u{202e}`): an ANSI or OSC sequence is inert text, because the ESC that makes it one is gone;
- *   - past `max` characters it is cut and says how much was left out, so it cannot bury what follows it.
- */
-export function shownText(untrusted: unknown, max: number = SHOWN_MAX): string {
+/** One reading of foreign text on ONE line: whitespace runs are one space, non-glyphs are their visible escape, past `max` characters it is cut.
+ *  `quote` additionally escapes the backslash and the quote (the caller wraps the result in quotes). */
+function flatten(untrusted: unknown, max: number, quote: boolean): { text: string; left: number } {
   const source = typeof untrusted === 'string' ? untrusted : String(untrusted);
   let out = '';
   let used = 0;
@@ -89,7 +82,8 @@ export function shownText(untrusted: unknown, max: number = SHOWN_MAX): string {
       continue;
     }
     const cp = ch.codePointAt(0)!;
-    const piece = (space ? ' ' : '') + (ch === '\\' ? '\\\\' : ch === '"' ? '\\"' : isNonGlyph(cp) ? escapeOne(cp) : ch);
+    const glyph = quote && ch === '\\' ? '\\\\' : quote && ch === '"' ? '\\"' : isNonGlyph(cp) ? escapeOne(cp) : ch;
+    const piece = (space ? ' ' : '') + glyph;
     space = false;
     if (left > 0 || used + piece.length > max) {
       left += 1;
@@ -98,7 +92,42 @@ export function shownText(untrusted: unknown, max: number = SHOWN_MAX): string {
     out += piece;
     used += piece.length;
   }
-  return `"${out}"${left > 0 ? ` (+${left} more character${left === 1 ? '' : 's'})` : ''}`;
+  return { text: out, left };
+}
+
+const more = (left: number): string => (left > 0 ? ` (+${left} more character${left === 1 ? '' : 's'})` : '');
+
+/**
+ * TEXT THAT IS NOT EGO'S, AS DATA INSIDE A SENTENCE EGO WRITES: `"…"`, one line, escaped, bounded.
+ *
+ *   - any run of whitespace (a newline included) is ONE space, so the text cannot start a line of its own;
+ *   - a backslash and a quote are escaped, so the text cannot close the quotes it sits in and the escapes below are unambiguous;
+ *   - every control character, escape-sequence introducer, bidirectional override and invisible formatting character is its
+ *     visible escape (`\x1b`, `\u{202e}`): an ANSI or OSC sequence is inert text, because the ESC that makes it one is gone;
+ *   - past `max` characters it is cut and says how much was left out, so it cannot bury what follows it.
+ */
+export function shownText(untrusted: unknown, max: number = SHOWN_MAX): string {
+  const { text, left } = flatten(untrusted, max, true);
+  return `"${text}"${more(left)}`;
+}
+
+/**
+ * THE SAME READING WITHOUT THE QUOTES, for a field that already says what it holds (`target: …`, `effect: …` of an approval prompt, the
+ * reason of a refusal): on one line, escaped, bounded - and never longer than `max`, which defaults to no bound.
+ */
+export function flatText(untrusted: unknown, max: number = Number.POSITIVE_INFINITY): string {
+  const { text, left } = flatten(untrusted, max, false);
+  return `${text}${more(left)}`;
+}
+
+/**
+ * A NAME OF A BOUNDED GRAMMAR IS PRINTED AS IT IS; ANYTHING ELSE IS QUOTED DATA. The local-target registry takes names of letters, digits and
+ * `_ . : @ / * -`; a name it refused because it is not one (it holds a quote, a space, an escape, a paragraph) is shown through `shownText`.
+ * ONE function, so `ego init` and `ego doctor` cannot print the same refused name two ways.
+ */
+export function shownToken(name: unknown, max = 80): string {
+  const text = typeof name === 'string' ? name : String(name);
+  return text.length >= 1 && text.length <= max && /^[A-Za-z0-9_.:@/*-]+$/.test(text) ? text : shownText(text, max);
 }
 
 /** The first `limit` of a list of foreign strings, each `shownText`, then how many were left out. */

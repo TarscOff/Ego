@@ -3,11 +3,13 @@ import { join } from 'node:path';
 import { PinError, readPin } from '../launcher/pin.ts';
 import { selfIdentity, selfVersion, controlPlaneDir } from '../launcher/self.ts';
 import { formatFreshness, policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { sealFor } from '../policy/seal.ts';
 import { POLICY_INVALID_RULE, POLICY_STALE_RULE, renderFailure } from '../authority/reasons.ts';
 import { readGeneratedManifest } from './init.ts';
 import { gitHookStatus } from './githooks.ts';
 import { isFile, readTextIfExists } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
+import { flatText } from '../util/shown-text.ts';
 import { approxTokens } from '../context/root-instructions.ts';
 
 export interface CheckItem {
@@ -21,7 +23,7 @@ export interface CheckReport {
   items: CheckItem[];
 }
 
-export function runCheck(projectRoot: string): CheckReport {
+export function runCheck(projectRoot: string, env: NodeJS.ProcessEnv = process.env): CheckReport {
   const items: CheckItem[] = [];
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
   let pinOk = true;
@@ -32,13 +34,14 @@ export function runCheck(projectRoot: string): CheckReport {
       ok: true,
       detail: `${pin.version} (${pin.integrity.slice(0, 12)}), profile ${pin.profile}`,
     });
-    const fresh = policyCacheFreshness(controlPlaneDir(), projectRoot, self);
+    const seal = sealFor(env);
+    const fresh = policyCacheFreshness(controlPlaneDir(), projectRoot, self, seal);
     items.push({
       name: 'policy cache',
       ok: fresh.fresh,
       detail: formatFreshness(fresh),
     });
-    const cache = readPolicyCache(projectRoot);
+    const cache = readPolicyCache(projectRoot, seal);
     const budget = cache?.table.profiles[pin.profile]?.budgetTokens ?? 2000;
     const root = readTextIfExists(join(projectRoot, 'AGENTS.md'));
     const tokens = root ? approxTokens(root) : 0;
@@ -62,7 +65,7 @@ export function runCheck(projectRoot: string): CheckReport {
   items.push({
     name: 'git hooks',
     ok: hooks.ok,
-    detail: hooks.ok ? `installed in ${hooks.dir}` : hooks.problems.join('; '),
+    detail: hooks.ok ? `installed in ${flatText(hooks.dir)}` : hooks.problems.join('; '),
   });
   const manifest = readGeneratedManifest(projectRoot);
   if (!manifest)

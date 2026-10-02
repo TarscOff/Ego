@@ -16,6 +16,7 @@ import { isAbsolute } from 'node:path';
 import { parseRemote } from '../project/detect.ts';
 import { gitConfigGet } from '../util/git.ts';
 import { decodeUriComponentOrRaw } from '../util/uri.ts';
+import { flatText } from '../util/shown-text.ts';
 import type { CompiledAuthorityTable } from './compile.ts';
 import type { CapabilityHit, EvaluationContext, ToolRequest } from './evaluate.ts';
 
@@ -118,7 +119,10 @@ function inputSummary(request: ToolRequest): string {
 }
 
 const bounded = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-const oneLine = (s: string): string => s.replace(/[\r\n\t]+/g, ' ').replace(/[^\x20-\x7e]/g, '?');
+// (the shared reading of foreign text, util/shown-text.ts: one line, every control character and invisible character a visible escape.
+// It used to turn every non-ASCII character into a question mark, which lost the accented name of a repository and kept nothing a reader
+// could tell from a forged one.)
+const oneLine = (s: string): string => flatText(s);
 
 /** Masks what a person must not see re-printed in a prompt: userinfo in a URL and the value of a secret-looking option.
  *  The ledger summary is already redacted by the redaction engine; this is the second wall for a caller that passes the
@@ -177,7 +181,7 @@ function repositoryOf(url: string | null): string | null {
     bitbucket: 'Bitbucket',
   }[r.provider as string];
   if (!r.path && !r.host) return null;
-  return `${forge ? `${forge} ` : ''}${r.path ? `repository ${r.path}` : 'remote'}${r.host && !forge ? ` on ${r.host}` : ''}`;
+  return `${forge ? `${forge} ` : ''}${r.path ? `repository ${flatText(r.path, 120)}` : 'remote'}${r.host && !forge ? ` on ${flatText(r.host, 80)}` : ''}`;
 }
 
 const GIT_OPTS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path']);

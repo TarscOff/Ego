@@ -1,7 +1,7 @@
 // Compiled policy cache for a project: `.harness/generated/policy.json`. Compiled from the runtime's control plane
 // plus the project's layers (organization policy, product overlay, overlay matchers). Hooks read the cache; `check`
 // verifies its freshness by recompiling and comparing hashes. Generated: never edited by hand.
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { loadControlPlane, loadOverlayCapabilities } from '../control-plane/load.ts';
 import type { ControlPlane } from '../control-plane/types.ts';
 import {
@@ -29,9 +29,13 @@ import {
   type LocalTargetsLayerDoc,
 } from '../control-plane/local-targets.ts';
 import type { YamlValue } from '../util/yaml.ts';
+import { shownText } from '../util/shown-text.ts';
+import { sealOf, sealVerifies, type SealKey } from './seal.ts';
 
 export interface PolicyCache {
   schema: 'ego.policy-cache/1';
+  /** HMAC of this record under the key in EGO_HOME (`policy/seal.ts`): the proof that THIS machine wrote it. Absent in a record no key sealed. */
+  seal?: string;
   /** layer hashes whose widenings a human accepted (init from a human terminal) */
   acceptedLayerSources?: Record<string, string>;
   /** widenings found in the current layer files and not applied until a human accepts them */
@@ -71,7 +75,17 @@ export const LAYER_FILES = {
 /** The organization's additions to the bounded-command vocabulary: heads it declares introduce no further
  *  executable closure. Only `bounded` may be extended — an organization may take responsibility for a tool, it
  *  may not make the kernel treat more things as discovering by deleting entries it does not control. */
-export function loadOverlayBounded(file: string): string[] {
+/**
+ * WHAT A BOUNDED-COMMAND ENTRY MAY BE: a command name (`pytest`, `node_modules/.bin/eslint`) optionally followed by the words that decide its
+ * shape (`go test`, `cmake --version`). A POSITIVE GRAMMAR: the characters a name and an argument can carry, no quoting, no operator, no
+ * substitution, no whitespace but the space between words, at most 80 characters. The entry is compared against a command's words and printed
+ * to a person and to the model in the pending-widening lines, and it came from a teammate's commit; one that is not this is not a command
+ * name, is not taken, and is reported once (AUTH-6).
+ */
+const BOUNDED_ENTRY = /^[A-Za-z0-9_.+@:/-]+(?: [A-Za-z0-9_.+@:/=,-]+)*$/;
+const BOUNDED_ENTRY_MAX = 80;
+
+export function loadOverlayBounded(file: string, notices?: string[]): string[] {
   if (!isFile(file)) return [];
   const doc = parseMarkdown(file, readText(file));
   if (optionalString(doc, 'schema') !== 'ego.bounded-commands/1')
@@ -79,7 +93,16 @@ export function loadOverlayBounded(file: string): string[] {
   const raw = doc.frontmatter['bounded'];
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw new ControlPlaneValidationError([`${file}: frontmatter "bounded" must be a list`]);
-  return raw.map((v) => String(v));
+  const taken: string[] = [];
+  for (const v of raw) {
+    const entry = String(v);
+    if (entry.length <= BOUNDED_ENTRY_MAX && BOUNDED_ENTRY.test(entry)) taken.push(entry);
+    else
+      notices?.push(
+        `ignored by the bounded-command vocabulary: ${shownText(entry, 60)} from ${shownText(basename(file), 60)} is not a command name (letters, digits and . _ + @ : / -, then words of the same, at most ${BOUNDED_ENTRY_MAX} characters)`,
+      );
+  }
+  return taken;
 }
 
 export function loadOverlayMatchers(file: string): CompiledMatcher[] {
@@ -165,7 +188,7 @@ function compileProjectPolicyOnce(
   };
   const notices = [...cp.notices];
   const organization = loadOverlayCapabilities(rec(LAYER_FILES.organization), 'organization', notices);
-  const organizationBounded = loadOverlayBounded(rec(LAYER_FILES.organizationBounded));
+  const organizationBounded = loadOverlayBounded(rec(LAYER_FILES.organizationBounded), notices);
   const overlay = loadOverlayCapabilities(rec(LAYER_FILES.overlay), 'overlay', notices);
   const overlayMatchers = loadOverlayMatchers(rec(LAYER_FILES.overlayMatchers));
   rec(LAYER_FILES.organizationLocalTargets);
@@ -193,9 +216,15 @@ function compileProjectPolicyOnce(
   };
 }
 
-export function writePolicyCache(projectRoot: string, cache: PolicyCache): string {
+/**
+ * Writes the cache, sealed. `seal` is the key (`sealFor(env)`); `undefined` writes the record as it is (the unit tests of the compiler have no
+ * home); `null` - a seal is required and this machine has no key - writes NOTHING: a record no reader could verify would only be read as absent.
+ */
+export function writePolicyCache(projectRoot: string, cache: PolicyCache, seal?: SealKey | null): string {
   const path = join(projectRoot, POLICY_CACHE_RELATIVE);
-  writeJsonAtomic(path, cache);
+  if (seal === null) return path;
+  const { seal: _old, legacyNaming: _derived, ...body } = cache;
+  writeJsonAtomic(path, seal === undefined ? body : { ...body, seal: sealOf(body as Record<string, unknown>, seal) });
   return path;
 }
 
@@ -240,8 +269,11 @@ export function readAsCurrentTable(candidate: unknown, lenient = false): Compile
  * the error named) exit 2 (AUTH-2). The in-band write paths to the cache are pre-denied (`ego.runtime.tamper`), out-of-band
  * forgery is detected by `check` (K1).
  */
-export function readPolicyCache(projectRoot: string): PolicyCache | null {
+export function readPolicyCache(projectRoot: string, seal?: SealKey | null): PolicyCache | null {
   const c = readJsonIfReadable<PolicyCache>(join(projectRoot, POLICY_CACHE_RELATIVE));
+  // A CACHE THIS MACHINE DID NOT WRITE IS NOT READ (AUTH-5): with a key, the record must verify under it; with none, nothing can
+  if (seal === null && c) return null;
+  if (seal && c && typeof c === 'object' && !sealVerifies(c as unknown as Record<string, unknown>, seal)) return null;
   if (
     !c ||
     typeof c !== 'object' ||
@@ -287,9 +319,19 @@ export function policyCacheFreshness(
   controlPlaneRoot: string,
   projectRoot: string,
   self: { runtimeSha256: string; version: string },
+  seal?: SealKey | null,
 ): FreshnessReport {
-  const cached = readPolicyCache(projectRoot);
-  if (!cached) return { fresh: false, reasons: ['policy cache is missing'], code: 'POLICY_STALE' };
+  const cached = readPolicyCache(projectRoot, seal);
+  if (!cached)
+    return {
+      fresh: false,
+      reasons: [
+        seal !== undefined && readPolicyCache(projectRoot) !== null
+          ? 'policy cache was not written by this machine (its seal does not verify under the key in EGO_HOME); it is regenerated by the next hook or by `ego init`, and nothing it says was accepted is believed'
+          : 'policy cache is missing',
+      ],
+      code: 'POLICY_STALE',
+    };
   const reasons: string[] = [];
   if (cached.legacyNaming)
     reasons.push(
@@ -453,9 +495,9 @@ export function ensurePolicyCache(
   controlPlaneRoot: string,
   projectRoot: string,
   self: { runtimeSha256: string; version: string },
-  opts: { acceptWidening?: WideningAcceptance } = {},
+  opts: { acceptWidening?: WideningAcceptance; seal?: SealKey | null } = {},
 ): { cache: PolicyCache; regenerated: boolean; acceptanceRefused?: string } {
-  const cached = readPolicyCache(projectRoot);
+  const cached = readPolicyCache(projectRoot, opts.seal);
   const currentSources = currentLayerSources(projectRoot);
   const accept = opts.acceptWidening ?? false;
   const acceptNow = accept !== false;
@@ -487,13 +529,13 @@ export function ensurePolicyCache(
   }
   if (acceptHere || sameSources(cached?.acceptedLayerSources, fresh.layerSources)) {
     fresh.acceptedLayerSources = { ...fresh.layerSources };
-    writePolicyCache(projectRoot, fresh);
+    writePolicyCache(projectRoot, fresh, opts.seal);
     return { cache: fresh, regenerated: true };
   }
   const widenings = tableWidenings(baseline, fresh.table);
   if (widenings.length === 0) {
     fresh.acceptedLayerSources = { ...fresh.layerSources };
-    writePolicyCache(projectRoot, fresh);
+    writePolicyCache(projectRoot, fresh, opts.seal);
     return { cache: fresh, regenerated: true };
   }
   const clamped: PolicyCache = {
@@ -502,6 +544,6 @@ export function ensurePolicyCache(
     acceptedLayerSources: cached?.acceptedLayerSources ?? {},
     pendingWidening: { layerSources: { ...fresh.layerSources }, widenings },
   };
-  writePolicyCache(projectRoot, clamped);
+  writePolicyCache(projectRoot, clamped, opts.seal);
   return { cache: clamped, regenerated: true, ...(refused ? { acceptanceRefused: refused } : {}) };
 }

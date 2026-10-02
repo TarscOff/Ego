@@ -12,6 +12,7 @@ import {
 import { egoHome, isRuntimeCached, readIndex, effectiveTrust, isSignedTrust } from '../launcher/home.ts';
 import { loadTrustStore, revokedKeyIds } from '../launcher/trust.ts';
 import { formatFreshness, policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { sealFor } from '../policy/seal.ts';
 import { POLICY_STALE_RULE, renderFailure } from '../authority/reasons.ts';
 import {
   describeCapabilities,
@@ -26,6 +27,7 @@ import { gitConfigScope } from '../util/git.ts';
 import { isFile, readJsonIfExists, readTextIfExists } from '../util/fs.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { sha256Hex } from '../util/hash.ts';
+import { flatText, shownToken } from '../util/shown-text.ts';
 import { resolveLauncher } from '../util/path-resolve.ts';
 import { HOST_MATRIX, HOST_IDS, type HostId } from '../hosts/matrix.ts';
 import { loadControlPlane } from '../control-plane/load.ts';
@@ -258,14 +260,15 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
 
   // generated freshness and policy
   const cpRoot = controlPlaneDir();
-  const fresh = policyCacheFreshness(cpRoot, root, { runtimeSha256: self.runtimeSha256, version });
+  const seal = sealFor(opts.env);
+  const fresh = policyCacheFreshness(cpRoot, root, { runtimeSha256: self.runtimeSha256, version }, seal);
   add(
     'policy',
     'compiled policy cache',
     fresh.fresh ? 'SATISFIED' : 'NOT SATISFIED',
     formatFreshness(fresh),
   );
-  const cache = readPolicyCache(root);
+  const cache = readPolicyCache(root, seal);
   if (cache?.pendingWidening)
     add(
       'policy',
@@ -335,7 +338,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
         lt.ignored
           .map(
             (i) =>
-              `${i.kind === 'file' ? 'file' : `${i.kind}:${i.name}`} from the ${i.layer} (${i.file}): ${i.reason}`,
+              `${i.kind === 'file' ? 'file' : `${i.kind}:${shownToken(i.name)}`} from the ${i.layer} (${i.file}): ${i.reason}`,
           )
           .join('; '),
         false,
@@ -435,9 +438,9 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     'git hooks',
     insideRepo && hooks.ok ? 'SATISFIED' : 'NOT SATISFIED',
     !insideRepo
-      ? `core.hooksPath comes from the global git configuration and resolves outside this repository (${hooks.dir}); EGO never writes there. Set a repository-local hooks path and run \`ego init\``
+      ? `core.hooksPath comes from the global git configuration and resolves outside this repository (${flatText(hooks.dir)}); EGO never writes there. Set a repository-local hooks path and run \`ego init\``
       : hooks.ok
-        ? `${hooks.dir.startsWith(root) ? hooks.dir.slice(root.length + 1) : hooks.dir}/pre-commit, pre-push (bypassable with --no-verify: backstop is \`ego verify --range\` on a protected branch, phase 6)`
+        ? `${flatText(hooks.dir.startsWith(root) ? hooks.dir.slice(root.length + 1) : hooks.dir)}/pre-commit, pre-push (bypassable with --no-verify: backstop is \`ego verify --range\` on a protected branch, phase 6)`
         : `${hooks.problems.join('; ')} (run \`ego init\`)`,
     true,
   );
@@ -484,7 +487,7 @@ export function runDoctor(opts: DoctorOptions): DoctorReport {
     'forge',
     'provider',
     'INFO',
-    `${det.forge}${det.remotes[0]?.path ? ` (${det.remotes[0].path})` : ''}`,
+    `${det.forge}${det.remotes[0]?.path ? ` (${flatText(det.remotes[0].path, 120)})` : ''}`,
     false,
   );
   add(

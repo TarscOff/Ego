@@ -6,6 +6,7 @@ import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.t
 import { packageRoot } from '../launcher/self.ts';
 import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
+import { flatText } from '../util/shown-text.ts';
 import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, privilegeCarriesReadCommand, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
 import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
@@ -454,6 +455,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
   const nestSubshell = (from: number): void => {
     const id = ++SUBSHELL_SEQ;
     const depth = subshellIds.length;
+    chargeWork((segments.length - from) * (depth + 4)); // (every stage of the element is copied with a longer path)
     for (let k = from; k < segments.length; k++) {
       const sg = segments[k]!;
       const path = sg.subshellPath ?? [];
@@ -462,6 +464,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
     }
   };
   const endElement = (how: 'pipe' | 'and-or' | 'list' | 'background'): void => {
+    chargeWork(segments.length - elementStart);
     for (let k = elementStart; k < segments.length; k++) {
       const sg = segments[k]!;
       if (how === 'pipe') sg.feedsPipe = true;
@@ -477,6 +480,14 @@ export function splitShellPipeline(command: string): ShellStage[] {
   };
   /** the ids of the subshells the scanner is inside right now, outermost first */
   const subshellIds: number[] = [];
+  /** EVERY STAGE A NESTED BODY HANDS UP IS COPIED, with a subshell path one longer: a substitution nested n deep copies its O(n) stages at
+   *  each of n levels with paths O(n) long, and none of it was paid for - three kilobytes of `$($($(…` took two and a half seconds at the
+   *  bound, nine times the price of a flat line of the same units (closure audit 2026-10-02, general property I). */
+  const chargeNested = (inner: readonly { subshellPath?: readonly number[] }[]): void => {
+    let units = 0;
+    for (const sg of inner) units += 4 + subshellIds.length + (sg.subshellPath?.length ?? 0);
+    chargeWork(units);
+  };
   /** the operator seen since the last stage was pushed; the next stage carries it */
   let lastSep: '&&' | '||' | ';' | '\n' | '&' | '|' | undefined;
   let sawProcessSubstitution = false;
@@ -912,6 +923,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         {
           // one shell for the whole substitution body: a `cd` in it reaches the later stages of the body and nothing else
           const id = ++SUBSHELL_SEQ;
+          chargeNested(innerSegments);
           for (const s of innerSegments)
             segments.push({ ...s, inSubshell: true, subshellPath: [...subshellIds, id, ...(s.subshellPath ?? [])] });
         }
@@ -955,6 +967,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
           const backticked = splitShellPipeline(command.slice(i + 1, end).replace(/\\([`$\\])/g, '$1'));
           {
             const id = ++SUBSHELL_SEQ;
+            chargeNested(backticked);
             for (const s of backticked)
               segments.push({ ...s, inSubshell: true, subshellPath: [...subshellIds, id, ...(s.subshellPath ?? [])] });
           }
@@ -4288,6 +4301,14 @@ function configuredHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: s
   const files = new Set<string>();
   for (const root of ctx.repoRoots) {
     const values: string[] = [];
+    // (the size is paid for BEFORE the read, and outside the `try`: a bound that is reached must not be swallowed as an unreadable config)
+    let configSize = -1;
+    try {
+      configSize = statSync(join(root, '.git', 'config')).size;
+    } catch {
+      /* no config */
+    }
+    if (configSize >= 0) chargeWork(READ_FILE_COST + configSize);
     try {
       const text = readFileSync(join(root, '.git', 'config'), 'utf8');
       let section = '';
@@ -4467,7 +4488,7 @@ function classifyResolved(
       const hit: CapabilityHit = {
         capability: m.capability,
         verdict: verdictFor(table, ctx, m.capability),
-        via: `matcher path ${m.path}`,
+        via: `matcher path ${flatText(m.path, 200)}`,
         absolute: isAbsoluteCap(table, m.capability),
       };
       if (m.layer === 'overlay') overlayHits.push(hit);
@@ -4806,9 +4827,17 @@ function defaultReadFile(abs: string): string | null {
   }
 }
 
+/** a file read while deciding: the open, the read and the parse of what it holds (closure audit 2026-10-02, general property I: the one reader of a workspace file
+ *  charged nothing, so a command naming two thousand different sixty-kilobyte scripts read a hundred and twenty megabytes for free) */
+const READ_FILE_COST = 200;
+
 function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null {
   if (!inWorkspace(ctx, abs)) return null;
-  return (ctx.readFile ?? defaultReadFile)(abs);
+  // the open is paid for before it is made, the bytes as soon as they are known (the default reader reads at most MAX_SCRIPT_BYTES of a file)
+  chargeWork(READ_FILE_COST);
+  const text = (ctx.readFile ?? defaultReadFile)(abs);
+  if (text !== null) chargeWork(text.length);
+  return text;
 }
 
 /** The text of the file a WORD names, for a reader that opens it itself: the PHYSICAL file (see `openedPath`), read where the
@@ -4944,6 +4973,7 @@ export function listIndexedPaths(indexFile: string): IndexedPaths {
     const st = statSync(indexFile);
     if (!st.isFile()) return { problem: 'the git index is not a file' };
     if (st.size > NESTED_INDEX_BYTES) return { problem: 'the git index is larger than this resolver reads' };
+    chargeWork(READ_FILE_COST + st.size);
     buf = readFileSync(indexFile);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
@@ -5055,6 +5085,7 @@ function readIgnoreLayer(file: string, base: string): IgnoreLayer | null {
     const st = statSync(file);
     if (!st.isFile()) return null;
     if (st.size > 512 * 1024) return { base, anywhere: new Set(), anchored: new Set(), negated: true };
+    chargeWork(READ_FILE_COST + st.size);
     text = readFileSync(file, 'utf8');
   } catch {
     return null;
@@ -12807,7 +12838,7 @@ function classifyNormalized(
           const hit: CapabilityHit = {
             capability: m.capability,
             verdict: verdictFor(table, ctx, m.capability),
-            via: `matcher /${m.command}/`,
+            via: `matcher /${flatText(m.command, 400)}/`,
             segment: norm,
             absolute: isAbsoluteCap(table, m.capability),
           };
@@ -12824,7 +12855,7 @@ function classifyNormalized(
           {
             capability: m.capability,
             verdict: verdictFor(table, ctx, m.capability),
-            via: `matcher /${m.command}/`,
+            via: `matcher /${flatText(m.command, 400)}/`,
             segment: norm,
             absolute: isAbsoluteCap(table, m.capability),
           },
@@ -13108,6 +13139,9 @@ function pathValueOf(raw: string): string {
   if (raw.startsWith('-')) return eq > 0 ? raw.slice(eq + 1) : '';
   return /^(of|if|dest|src|file)=/.test(raw) ? raw.slice(eq + 1) : raw;
 }
+
+/** the place under a registered root that an overlay path rule guards: a key compared against the roots a search reaches, never printed */
+const guardedPath = (root: string, prefix: string): string => `${root}/${prefix}`;
 
 /** Path-like tokens of a segment, read by the shared resolver in the tracked cwd (one entry per reading of each token);
  *  tokens with unresolved variables are reported as dynamic. */
@@ -14126,13 +14160,13 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       for (const m of overlayReads) {
         const prefix = m.path!.split(/[*?[{]/)[0]!.replace(/\/$/, '');
         if (prefix === '') continue;
-        const guarded = roots.map((r) => foldName(`${r}/${prefix}`));
+        const guarded = roots.map((r) => foldName(guardedPath(r, prefix)));
         const reached = searchRoots.find((r) => guarded.some((g) => g === foldName(r) || g.startsWith(foldName(r).replace(/\/$/, '') + '/')));
         if (reached !== undefined) {
           hits.push({
             capability: m.capability,
             verdict: verdictFor(table, ctx, m.capability),
-            via: `recursive read of ${reached.slice(reached.lastIndexOf('/') + 1) || '/'} reaches ${m.path}`,
+            via: `recursive read of ${reached.slice(reached.lastIndexOf('/') + 1) || '/'} reaches ${flatText(m.path, 200)}`,
             segment: seg,
             absolute: isAbsoluteCap(table, m.capability),
           });
@@ -16017,7 +16051,7 @@ export function classifyUrl(
       const hit: CapabilityHit = {
         capability: m.capability,
         verdict: verdictFor(table, ctx, m.capability),
-        via: `matcher url /${m.url}/`,
+        via: `matcher url /${flatText(m.url, 400)}/`,
         absolute: isAbsoluteCap(table, m.capability),
       };
       if (m.layer === 'overlay') overlayHits.push(hit);

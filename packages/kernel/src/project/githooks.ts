@@ -8,6 +8,8 @@ import { packageRoot } from '../launcher/self.ts';
 import { git, gitConfigScope } from '../util/git.ts';
 import { loadControlPlane } from '../control-plane/load.ts';
 import { readPolicyCache } from '../policy/cache.ts';
+import { sealFor } from '../policy/seal.ts';
+import { flatText } from '../util/shown-text.ts';
 import { readPin } from '../launcher/pin.ts';
 import { explainOutcome, renderReason } from '../authority/reasons.ts';
 import { redact, allDetectors, isSensitiveFileName } from '../redaction/redact.ts';
@@ -24,6 +26,7 @@ export function resolveHooksPath(projectRoot: string, hooksPath: string): string
 }
 
 /** The directory git actually runs hooks from (linked worktrees share the common hooks dir). */
+/** @untrusted the directory the repository's own configuration says git runs hooks from */
 export function gitHooksDir(projectRoot: string, hooksPath: string | null): string {
   if (hooksPath) return resolveHooksPath(projectRoot, hooksPath);
   const r = git(['rev-parse', '--path-format=absolute', '--git-path', 'hooks'], projectRoot);
@@ -131,7 +134,7 @@ export function installGitHooks(projectRoot: string, hooksPath: string | null): 
     !insideProject(projectRoot, gitDir)
   ) {
     // a machine-wide core.hooksPath (global or system git config) is never written: it would govern every repository
-    const refused = `git hooks NOT installed: core.hooksPath=${hooksPath} comes from the global git configuration and resolves outside this repository (${gitDir}); set a repository-local hooks path (\`git config core.hooksPath .githooks\`) and run \`ego init\` again`;
+    const refused = `git hooks NOT installed: core.hooksPath=${flatText(hooksPath)} comes from the global git configuration and resolves outside this repository (${flatText(gitDir)}); set a repository-local hooks path (\`git config core.hooksPath .githooks\`) and run \`ego init\` again`;
     notes.push(refused);
     return { installed, notes, refused };
   }
@@ -154,17 +157,24 @@ export function installGitHooks(projectRoot: string, hooksPath: string | null): 
   }
   if (husky && !isFile(join(gitDir, 'h')))
     notes.push(
-      `git hooks: husky runner ${gitDir}/h is missing (run \`npx husky\` or \`npm install\`); until then git runs no hooks`,
+      `git hooks: husky runner ${flatText(gitDir)}/h is missing (run \`npx husky\` or \`npm install\`); until then git runs no hooks`,
     );
   if (hooksPath)
     notes.push(
-      `git hooks: installed in ${dir.startsWith(projectRoot) ? dir.slice(projectRoot.length + 1) : dir} (core.hooksPath=${hooksPath}${husky ? ', husky layout' : ''})`,
+      `git hooks: installed in ${flatText(dir.startsWith(projectRoot) ? dir.slice(projectRoot.length + 1) : dir)} (core.hooksPath=${flatText(hooksPath)}${husky ? ', husky layout' : ''})`,
     );
   return { installed, notes, refused: null };
 }
 
 /** What doctor and check need to know about the installed git hooks. */
-export function gitHookStatus(projectRoot: string): { ok: boolean; dir: string; problems: string[] } {
+export interface GitHookStatus {
+  ok: boolean;
+  /** @untrusted where the repository's own configuration says git runs hooks from */
+  dir: string;
+  problems: string[];
+}
+
+export function gitHookStatus(projectRoot: string): GitHookStatus {
   const gitDir = gitHooksDir(projectRoot, null);
   const husky = huskyUserDir(gitDir);
   const dir = husky ?? gitDir;
@@ -172,7 +182,7 @@ export function gitHookStatus(projectRoot: string): { ok: boolean; dir: string; 
   if (!isFile(join(projectRoot, '.harness', 'hooks', 'git-hook.sh')))
     problems.push('.harness/hooks/git-hook.sh missing');
   if (husky && !isFile(join(gitDir, 'h')))
-    problems.push(`husky runner ${gitDir}/h missing (git runs no hooks)`);
+    problems.push(`husky runner ${flatText(gitDir)}/h missing (git runs no hooks)`);
   for (const name of GIT_HOOK_NAMES) {
     const path = join(dir, name);
     const text = readTextIfExists(path);
@@ -229,12 +239,12 @@ const LOCKFILE_EXCLUDES = [
 /** The pre-push hook's answer for an agent shell, and the sentence it refuses with. The sentence carries the same code,
  *  rule source and configurability as the PreToolUse refusal for the same capability because it comes from the same
  *  mapping (`explainOutcome`), not from a second description of the tier. */
-function pushDecision(projectRoot: string): { verdict: string; refusal: string } {
+function pushDecision(projectRoot: string, env: NodeJS.ProcessEnv): { verdict: string; refusal: string } {
   const base =
     'pushes from agent sessions are governed by EGO (git.remote.push is DENY unless the organization policy widens it); a human pushes from their own terminal';
   try {
     const pin = readPin(projectRoot);
-    const cache = readPolicyCache(projectRoot);
+    const cache = readPolicyCache(projectRoot, sealFor(env));
     const mode = cache?.table.defaultMode ?? '';
     const verdict =
       cache?.table.profiles[pin.profile]?.modes[mode]?.['git.remote.push'] ??
@@ -332,7 +342,7 @@ export function runGitHook(
   if (name === 'pre-push') {
     if (isAgentShell(env)) {
       // Q98: an organization may widen git.remote.push; then the PreToolUse decision (ASK answered by a human, or ALLOW) governs
-      const push = pushDecision(projectRoot);
+      const push = pushDecision(projectRoot, env);
       if (push.verdict === 'DENY') {
         messages.push(`refused: ${push.refusal}`);
         return { ok: false, messages };
