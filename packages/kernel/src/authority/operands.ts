@@ -22,6 +22,7 @@
 // evaluate.ts decide that), and whether a command is a probe or a dry run (helpProbeHead).
 
 import { payloadOpener, payloadSpans, peelCarriers } from './carriers.ts';
+import { programRoles } from './program-words.ts';
 
 /** What a word holds of the shell's redirection characters, by how it was WRITTEN: `none`; `real`, a `<` or `>` outside every quote -
  *  the shell's operator; `literal`, only characters a quote, a backslash or an ANSI-C string turned into text (`"=>"`, `\\>x`,
@@ -30,8 +31,11 @@ import { payloadOpener, payloadSpans, peelCarriers } from './carriers.ts';
 export type OperatorShape = 'none' | 'real' | 'literal' | 'mixed';
 
 /** What a word is to the command it belongs to. Only `data` is ever masked; `operand` and `value` are named so that the
- *  scan for governed programs in argument position can tell a file name from an option value that may be a program. */
-export type WordRole = 'head' | 'option' | 'value' | 'data' | 'operand' | 'unread';
+ *  scan for governed programs in argument position can tell a file name from an option value that may be a program.
+ *  `program` is text in the language of the tool - a sed or awk script, the code after `python3 -c`, a filter, a pattern a tool
+ *  matches names with, a separator - which the MATCHERS still see (they are the readers of what a program may do) and the
+ *  readers of shell words do not: it is no path, no wildcard, no option and no redirection (program-words.ts). */
+export type WordRole = 'head' | 'option' | 'value' | 'data' | 'program' | 'operand' | 'unread';
 
 interface OptionGrammar {
   /** short letters whose value is DATA (`grep -e PATTERN`) */
@@ -177,7 +181,7 @@ export function runsNoOperand(head: string): boolean {
   return name !== null && NO_EXEC_READERS.has(name);
 }
 
-interface Scan {
+export interface Scan {
   roles: WordRole[];
   /** a data word that is glued to its option (`-efoo`, `--regexp=foo`): the offset where the data starts */
   glued: Map<number, number>;
@@ -221,8 +225,10 @@ function redirectionWords(line: readonly string[], from: number, shape?: readonl
 }
 
 /** Walks the options of one command under the grammar of its tool. Returns null as soon as it meets an option it does
- *  not know: from there on the line is not read. */
-function scan(line: readonly string[], from: number, g: OptionGrammar, shape?: readonly OperatorShape[]): Scan | null {
+ *  not know: from there on the line is not read - unless `lenient`, which reads such an option as a flag that takes nothing: the
+ *  reading the path scan has always had of a search tool's pattern (the first word that is not an option), where the worst a wrong
+ *  guess does is leave a word in view of the readers that would have read it anyway. The text matchers are never read leniently. */
+function scan(line: readonly string[], from: number, g: OptionGrammar, shape?: readonly OperatorShape[], lenient = false): Scan | null {
   const roles: WordRole[] = line.map((_, i) => (i < from ? 'head' : 'operand'));
   const glued = new Map<number, number>();
   const noPattern = (g.noPatternLong ?? []).some((n) => line.slice(from).includes(`--${n}`));
@@ -266,7 +272,7 @@ function scan(line: readonly string[], from: number, g: OptionGrammar, shape?: r
         }
         continue;
       }
-      if (g.flagLong.includes(name)) continue;
+      if (g.flagLong.includes(name) || lenient) continue;
       return null;
     }
     for (let k = 1; k < w.length; k++) {
@@ -288,6 +294,7 @@ function scan(line: readonly string[], from: number, g: OptionGrammar, shape?: r
       }
       if (g.flagShort.includes(c)) continue;
       if (g.digitContext === true && /[0-9]/.test(c)) continue;
+      if (lenient) break;
       return null;
     }
   }
@@ -385,15 +392,17 @@ function scanMessage(line: readonly string[], from: number, flags: string): Scan
 
 /** The role of every word of one command, or null when the head is not a tool this file has a grammar for, or the line
  *  has an option that grammar does not list. `at` is where the head stands in `line` (a wrapper or an assignment may be in
- *  front of it); every word in front of it has the role `head`. */
-export function wordRoles(line: readonly string[], at = 0, shape?: readonly OperatorShape[]): Scan | null {
+ *  front of it); every word in front of it has the role `head`. `lenient` is the path scan's reading of a SEARCH tool (see `scan`). */
+export function wordRoles(line: readonly string[], at = 0, shape?: readonly OperatorShape[], lenient = false): Scan | null {
   const raw = line[at];
   if (raw === undefined) return null;
   const head = trustedName(raw);
   if (head === null) return null;
-  if (GREP_HEADS.has(head)) return scan(line, at + 1, GREP, shape);
-  if (head === 'rg' || head === 'ripgrep') return scan(line, at + 1, RIPGREP, shape);
-  if (head === 'pgrep') return scan(line, at + 1, PGREP, shape);
+  if (GREP_HEADS.has(head)) return scan(line, at + 1, GREP, shape, lenient);
+  if (head === 'rg' || head === 'ripgrep') return scan(line, at + 1, RIPGREP, shape, lenient);
+  if (head === 'pgrep') return scan(line, at + 1, PGREP, shape, lenient);
+  // ag and ack take the same options in the same places; their tables are long, and nothing is claimed from a line they cannot read
+  if (lenient && (head === 'ag' || head === 'ack')) return scan(line, at + 1, GREP, shape, true);
   if (PRINTERS.has(head)) {
     // `echo -n -e text`: the leading options are echo's; everything from the first word that is not one is printed
     const redirected = redirectionWords(line, at + 1, shape);
@@ -408,15 +417,18 @@ export function wordRoles(line: readonly string[], at = 0, shape?: readonly Oper
     const v = gitVerbAt(line, at);
     if (v < 0) return null;
     const verb = line[v]!;
-    if (verb === 'grep') return scan(line, v + 1, GIT_GREP, shape);
+    if (verb === 'grep') return scan(line, v + 1, GIT_GREP, shape, lenient);
     // (a line whose words may be redirections is not read for a message or a pickaxe either: see redirectionWords)
     const pickaxe = GIT_PICKAXE_VERBS.has(verb);
     const flags = GIT_MESSAGE_VERBS[verb];
     if ((pickaxe || flags !== undefined) && redirectionWords(line, v + 1, shape) === null) return null;
     if (pickaxe) return scanPickaxe(line, v + 1);
     if (flags !== undefined) return scanMessage(line, v + 1, flags);
+    return null;
   }
-  return null;
+  // THE TOOLS WHOSE WORDS ARE ANOTHER LANGUAGE'S TEXT (program-words.ts): a script, a filter, a pattern, a separator, a request body
+  const redirected = redirectionWords(line, at + 1, shape);
+  return redirected === null ? null : programRoles(head, line, at, redirected);
 }
 
 /** GNU parallel's options that take the NEXT word. `parallel` is not a carrier of the table (carriers.ts), so the words of its own
@@ -433,45 +445,92 @@ function parallelCommandAt(line: readonly string[], at: number): number {
   return -1;
 }
 
-/** The words of `line` with every DATA word replaced by `placeholder`, looking through the carriers that hand a command on
- *  (`sudo`, `env`, `xargs`, `find -exec`, `fd -x`, `parallel`). WHERE THE COMMAND STARTS is the carrier reader's answer
- *  (carriers.ts: the options each carrier really has) and so is where a `-exec` clause begins and ends (payloadSpans); this file
- *  used to walk `sudo`'s and `xargs`'s options with lists of its own. A carrier whose carried command cannot be located (an
- *  option the table does not know), or that hands it on as a string, leaves the line unread. A word glued to its option keeps the
- *  option: `--grep=hook` becomes `--grep=<placeholder>`. A line the grammar cannot read is returned as it came. */
-export function maskDataWords(line: readonly string[], placeholder: string, shape?: readonly OperatorShape[]): string[] {
-  const out = [...line];
-  const peeled = peelCarriers(out, 0);
+/** THE ROLE OF EVERY WORD OF A LINE, looking through the carriers that hand a command on (`sudo`, `env`, `xargs`, `find -exec`, `fd -x`,
+ *  `parallel`): the ONE recursion, which the text matchers (`maskDataWords`) and the readers of shell words (`nonShellWords`) both
+ *  ask. WHERE THE COMMAND STARTS is the carrier reader's answer (carriers.ts: the options each carrier really has) and so is where a
+ *  `-exec` clause begins and ends (payloadSpans); this file used to walk `sudo`'s and `xargs`'s options with lists of its own. A
+ *  carrier whose carried command cannot be located (an option the table does not know), or that hands it on as a string, leaves the
+ *  line unread: every word is `unread`. */
+export function scanLine(line: readonly string[], shape?: readonly OperatorShape[], lenient = false): Scan {
+  const out: Scan = { roles: line.map((): WordRole => 'unread'), glued: new Map() };
+  const peeled = peelCarriers(line, 0);
   if (peeled.partial !== null || peeled.strings.length > 0 || peeled.shellString !== null || peeled.lookup) return out;
   const at = peeled.at;
-  if (at >= out.length) return out;
-  const head = trustedName(out[at]!);
+  if (at >= line.length) return out;
+  const head = trustedName(line[at]!);
+  const into = (sub: Scan, offset: number): void => {
+    sub.roles.forEach((r, k) => {
+      if (r !== 'unread') out.roles[offset + k] = r;
+    });
+    for (const [k, v] of sub.glued) out.glued.set(offset + k, v);
+  };
   if (head !== null && payloadOpener(head) !== null) {
-    for (const [from, to] of payloadSpans(out, at)) {
-      const masked = maskDataWords(out.slice(from, to), placeholder, shape?.slice(from, to));
-      for (let k = 0; k < masked.length; k++) out[from + k] = masked[k]!;
-    }
+    // the carrier's own words first (find's name patterns), then each clause: the clause's words are the carried command's
+    const own = wordRoles(line, at, shape, lenient);
+    if (own !== null) into(own, 0);
+    for (const [from, to] of payloadSpans(line, at)) into(scanLine(line.slice(from, to), shape?.slice(from, to), lenient), from);
     return out;
   }
   if (head === 'parallel') {
-    const c = parallelCommandAt(out, at);
-    if (c < 0) return out;
-    const masked = maskDataWords(out.slice(c), placeholder, shape?.slice(c));
-    for (let k = 0; k < masked.length; k++) out[c + k] = masked[k]!;
+    const c = parallelCommandAt(line, at);
+    if (c >= 0) into(scanLine(line.slice(c), shape?.slice(c), lenient), c);
     return out;
   }
-  return maskOne(out, placeholder, at, shape);
+  const own = wordRoles(line, at, shape, lenient);
+  if (own !== null) into(own, 0);
+  return out;
 }
 
-function maskOne(line: readonly string[], placeholder: string, at = 0, shape?: readonly OperatorShape[]): string[] {
-  const s = wordRoles(line, at, shape);
-  if (s === null) return [...line];
+/** The words of `line` with every DATA word replaced by `placeholder`: what the text matchers read (a search pattern, a commit message
+ *  and a printed string are neither the act nor the place it is done). A word glued to its option keeps the option: `--grep=hook`
+ *  becomes `--grep=<placeholder>`. A line the grammar cannot read is returned as it came. Program text is NOT masked: a matcher is the
+ *  reader of what an awk script or `python3 -c` code may do. */
+export function maskDataWords(line: readonly string[], placeholder: string, shape?: readonly OperatorShape[]): string[] {
+  const s = scanLine(line, shape);
   return line.map((w, i) => {
     // (an UNQUOTED word with a redirection operator in it is a redirection, wherever the grammar put it: see redirectionWords)
     if (s.roles[i] !== 'data' || (shape !== undefined && shape[i] === 'real')) return w;
     const cut = s.glued.get(i);
     return cut === undefined ? placeholder : w.slice(0, cut) + placeholder;
   });
+}
+
+/** THE WORDS OF A LINE THAT ARE NOT SHELL TEXT, by the texts the readers of shell words compare against: the whole word (the segment as
+ *  written keeps a quoted word in one piece) and its blank-separated pieces (normalization drops the quoting, and the word reaches the
+ *  path scan as several). A text is listed only when EVERY occurrence of it in the line is a non-shell word, so that `grep
+ *  /etc/passwd /etc/passwd` - the same text as a pattern and as a file - still has a file in it. This is the reading of the path scan:
+ *  a search tool's pattern is found leniently (`scan`), so that an option nobody listed does not turn the pattern into a path. */
+export interface NonShellWords {
+  wholes: ReadonlySet<string>;
+  pieces: ReadonlySet<string>;
+}
+export function nonShellWords(
+  line: readonly string[],
+  shape?: readonly OperatorShape[],
+  /** how the normalized segment comes apart again: the words are joined with blanks and TOKENIZED a second time, so a word that holds
+   *  blanks or quotes (`x = "/**"`) reaches the scan as the pieces that second tokenization makes of it, not as the word */
+  pieces: (word: string) => string[] = (word) => word.split(/\s+/),
+): NonShellWords {
+  const s = scanLine(line, shape, true);
+  const textWholes = new Set<string>();
+  const textPieces = new Set<string>();
+  const shellWholes = new Set<string>();
+  const shellPieces = new Set<string>();
+  line.forEach((w, i) => {
+    const role = s.roles[i];
+    // a HERESTRING is a string fed to the command, whatever the command is: it names no file and no option
+    const herestring = i > 0 && /^\d*<<<$/.test(line[i - 1]!) && (shape === undefined || shape[i - 1] === 'real');
+    const isText = (role === 'data' || role === 'program' || herestring) && !(shape !== undefined && shape[i] === 'real');
+    const cut = s.glued.get(i);
+    for (const v of isText && cut !== undefined ? [w.slice(cut), w] : [w]) {
+      (isText ? textWholes : shellWholes).add(v);
+      for (const piece of pieces(v)) if (piece !== '') (isText ? textPieces : shellPieces).add(piece);
+    }
+  });
+  return {
+    wholes: new Set([...textWholes].filter((w) => !shellWholes.has(w))),
+    pieces: new Set([...textPieces].filter((w) => !shellPieces.has(w))),
+  };
 }
 
 /** Where the values of the `find` predicates that take a NAME or a PATTERN stand: `find . -name claude` looks for files,

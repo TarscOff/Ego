@@ -77,6 +77,10 @@ export interface ParsedOption {
   sign: '-' | '+';
   /** where in argv the option's word is */
   at: number;
+  /** the word that holds the value: the option's own word when it is attached (`-ofile`, `--output=file`), the NEXT word when
+   *  the value stands apart (`-o file`), null when there is none. A reader that marks the value (a program, a pattern) needs the
+   *  word and not the text: the same text may stand beside it as an operand. */
+  valueAt: number | null;
   /** the word as written */
   raw: string;
 }
@@ -153,13 +157,14 @@ export function parseOptions(g: Grammar, argv: readonly string[], from = 0): Par
   const unknown: Array<{ raw: string; at: number }> = [];
   let dashDashAt = -1;
   let end = argv.length;
-  const add = (def: OptionDef | string, value: string | null, sign: '-' | '+', at: number, candidates?: readonly string[]): void => {
+  const add = (def: OptionDef | string, value: string | null, sign: '-' | '+', at: number, candidates?: readonly string[], valueAt?: number): void => {
     options.push({
       name: typeof def === 'string' ? def : def.name,
       arity: typeof def === 'string' ? 'none' : def.arity,
       value,
       sign,
       at,
+      valueAt: value === null ? null : (valueAt ?? at),
       raw: argv[at]!,
       ...(candidates && candidates.length > 1 ? { candidates } : {}),
     });
@@ -208,7 +213,7 @@ export function parseOptions(g: Grammar, argv: readonly string[], from = 0): Par
         // the strongest reading of an ambiguous abbreviation: a candidate that takes a value reads the value
         const def = defs.find((d) => d.arity !== 'none') ?? defs[0]!;
         const v = readValue(def, eq < 0 ? null : w.slice(eq + 1), argv, i);
-        add(def, v.text, '-', i, defs.map((d) => d.name));
+        add(def, v.text, '-', i, defs.map((d) => d.name), v.used ? i + 1 : undefined);
         if (v.used) i++;
         continue;
       }
@@ -230,7 +235,7 @@ export function parseOptions(g: Grammar, argv: readonly string[], from = 0): Par
         continue;
       }
       const v = readValue(def, eq < 0 ? null : body.slice(eq + 1), argv, i);
-      add(def, v.text, '-', i);
+      add(def, v.text, '-', i, undefined, v.used ? i + 1 : undefined);
       if (v.used) i++;
       continue;
     }
@@ -252,7 +257,7 @@ export function parseOptions(g: Grammar, argv: readonly string[], from = 0): Par
       // `-o=file` is the file `=file` to a compiler and the file `file` to a Go tool: the value is kept as written, and a
       // consumer that does not know which reading is the real one judges both (see `valueReadings`)
       const v = readValue(def, attached === '' ? null : attached, argv, i);
-      add(def, v.text, '-', i);
+      add(def, v.text, '-', i, undefined, v.used ? i + 1 : undefined);
       if (v.used) i++;
       continue;
     }
@@ -290,7 +295,7 @@ export function parseOptions(g: Grammar, argv: readonly string[], from = 0): Par
         add(def, null, sign, i);
         unknown.push({ raw: w, at: i });
       } else {
-        add(def, next, sign, i);
+        add(def, next, sign, i, undefined, i + 1);
         i++;
       }
       break;

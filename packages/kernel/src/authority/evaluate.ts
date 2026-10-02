@@ -14,10 +14,13 @@ import {
   PARALLEL_VALUE_OPTS,
   findPredicateValues,
   maskDataWords,
+  nonShellWords,
   runsNoOperand,
+  scanLine,
   wordRoles,
   type OperatorShape,
 } from './operands.ts';
+import { languageOf, readsLanguageFromStdin, sedExecutes } from './program-words.ts';
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
   canonicalPath,
@@ -335,6 +338,49 @@ const SUBSHELL_CWD_RESTORE = `${MARK}subshell-cwd-restore`;
 /** marks a heredoc whose delimiter never arrived: the rest of the command was consumed as its body, so what this
  *  splitter returned is NOT the set of commands that will run */
 const HEREDOC_UNTERMINATED = `${MARK}heredoc-unterminated`;
+/** PROGRAM TEXT: the standard input of an interpreter that is not a shell, kept as ONE quoted word behind this marker. `python3 - <<'PY'`
+ *  reads Python, and a body split into shell segments made every line a pseudo-command - `/**` the wildcard that matches the whole
+ *  disk, `// a -o b` an output flag, `expect(` the nested-terminal launcher (U-01..U-03). The stage that carries it is judged by the
+ *  matchers that read TEXT (a protected store named in a program is named in `python3 -c` too) and by nothing that reads shell words. */
+const PROGRAM_TEXT = `${MARK}program-text`;
+/** a program's text as the stage that carries it */
+const programTextStage = (text: string): string => `${PROGRAM_TEXT} ${requote([text])}`;
+/** The capabilities whose rules name a PLACE on this machine's disk: a credential store, a git hook, git's own directory, EGO's state. */
+const HOST_PLACE_CAPABILITY = /^(?:fs\.(?:credential-store|hook-config|git-internals)\.|ego\.(?:runtime|trust)\.)/;
+/** the text a program-text stage carries, or null when the stage is not one */
+function programTextOf(stage: string): string | null {
+  if (!stage.startsWith(`${PROGRAM_TEXT} `)) return null;
+  return tokenize(stage.slice(PROGRAM_TEXT.length + 1))[0] ?? '';
+}
+/** THE MATCHERS THAT READ TEXT, asked of a program's text. A matcher anchored at a command word describes a COMMAND and cannot match
+ *  the text behind the marker; the ones that are not anchored describe a THING NAMED - a credential store, a hook, the trust
+ *  store, a program started with `-c` - wherever the text names it, and those are the rules that fail an inline program closed
+ *  when its body names a protected store (`python3 -c "open('~/.ssh/id_rsa')"`). The same program on standard input is the same
+ *  program, so the same rules read it. Nothing else does: it holds no path, no wildcard, no option and no launcher. */
+function programTextHits(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  compiled: Array<{ m: CompiledMatcher; re: RegExp }>,
+  text: string,
+  via: string,
+): CapabilityHit[] {
+  const subject = `${PROGRAM_TEXT} ${text}`;
+  const testCost = 2 + (subject.length >> 3);
+  const out: CapabilityHit[] = [];
+  for (const { m, re } of compiled) {
+    if (m.tool !== 'Bash' || m.command === undefined || m.command.startsWith('^')) continue;
+    chargeWork(testCost);
+    if (!re.test(subject)) continue;
+    out.push({
+      capability: m.capability,
+      verdict: verdictFor(table, ctx, m.capability),
+      via: `matcher /${m.command}/ (${via})`,
+      segment: text.slice(0, 120),
+      absolute: isAbsoluteCap(table, m.capability),
+    });
+  }
+  return out;
+}
 /** marks a function definition whose header the splitter consumed: it binds a name and executes nothing */
 const FUNCTION_DEF_PREFIX = `${MARK}define-function`;
 /** Closes a function BODY. The splitter inlines the body as ordinary sibling segments — which is right, because
@@ -659,11 +705,17 @@ export function splitShellPipeline(command: string): ShellStage[] {
             // Modelling only (3) made `bash <<EOF … git push … EOF` ask instead of denying (exit review 4).
             // the opener's ROLE is read in canonical form: a keyword, a case pattern or a subshell in front of it
             // made `then bash <<EOF` and `a) bash <<EOF` look like commands named `then` and `a)` (exit review 5)
-            if (opener && readsScriptFromStdin(emitterTail(opener.text)))
-              for (const sg of splitShellPipeline(body)) segments.push(sg);
-            else if (!hd.quoted)
-              for (const innerCmd of substitutionsIn(body))
-                for (const sg of splitShellPipeline(innerCmd)) segments.push(sg);
+            // ...AND A SCRIPT IS IN THE LANGUAGE OF THE COMMAND THAT READS IT. `python3 - <<'PY'` reads Python, whose text is not shell
+            // words: the body is ONE program-text stage, judged by the matchers that read text, and what the shell does with it - expand
+            // `$( )` when the delimiter is unquoted - is still done, so those commands are segments of their own (U-01..U-03)
+            const reads = opener ? stdinScriptKind(emitterTail(opener.text)) : null;
+            if (reads === 'shell') for (const sg of splitShellPipeline(body)) segments.push(sg);
+            else {
+              if (reads === 'language') segments.push({ text: programTextStage(body), pipedFromPrevious: false });
+              if (!hd.quoted)
+                for (const innerCmd of substitutionsIn(body))
+                  for (const sg of splitShellPipeline(innerCmd)) segments.push(sg);
+            }
             if (opener) {
               // the body is also this stage's STANDARD OUTPUT, which a following `| sh` would run
               opener.heredocBody = (opener.heredocBody ?? '') + body;
@@ -1238,8 +1290,11 @@ function substitutionsIn(text: string): string[] {
   return out;
 }
 
-/** Heads that take their SCRIPT from standard input when nothing else names one. */
-const STDIN_SCRIPT_HEAD_RE = /^((?:ba|z|da|k|a)?sh|fish|python|python2|python3|ruby|perl|node|nodejs|php|Rscript)$/;
+/** The shells: what they read from standard input is shell text. */
+const SHELL_HEAD_RE = /^((?:ba|z|da|k|a)?sh|fish)$/;
+/** Heads that take their SCRIPT from standard input when nothing else names one: the shells, and the interpreters of another
+ *  language (program-words.ts - ONE table of them, versions included). */
+const readsScriptHead = (head: string): boolean => SHELL_HEAD_RE.test(head) || readsLanguageFromStdin(head);
 /** Stages that copy standard input to standard output unchanged. `tee` also writes files — those are classified
  *  on the segment itself; what matters here is that what comes OUT is what went IN. `head`/`tail` truncate and are
  *  deliberately absent: the literal that survives them is not the literal that went in. */
@@ -1247,7 +1302,7 @@ const PASS_THROUGH_RE = /^(?:cat|tee(?:\s+(?:-[aip]+|[^-\s]\S*))*)\s*$/;
 /** Heads that RUN a file they are given: the interpreters, plus `source` and `.`, which run it in the CURRENT
  *  shell. `. <(echo CMD)` is the same execution edge as `bash <(echo CMD)` and was missed because the gate listed
  *  only the interpreters (exit review 6). */
-const RUNS_A_FILE_RE = /^((?:ba|z|da|k|a)?sh|fish|python|python2|python3|ruby|perl|node|nodejs|php|Rscript|source|\.)$/;
+const runsAFile = (head: string): boolean => SHELL_HEAD_RE.test(head) || languageOf(head) !== null || /^(?:source|\.)$/.test(head);
 /** the file names that mean "standard input" */
 const STDIN_FILE_RE = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/;
 /** heads whose operand is a script run in the CURRENT shell */
@@ -1271,7 +1326,7 @@ export function readsScriptFromStdin(segment: string): boolean {
   // re-target the session with a `\c` before it does anything else (exit review 8).
   if (DB_CLIENT_HEADS.has(head))
     return !tokens.slice(1).some((t) => /^(-c|--command|-e|--execute|--eval|-f|--file|--query)/.test(t));
-  if (!STDIN_SCRIPT_HEAD_RE.test(head)) return false;
+  if (!readsScriptHead(head)) return false;
   const shellFamily = /^(?:ba|z|da|k|a)?sh$/.test(head);
   const rest = tokens.slice(1);
   // A SYNTAX CHECK READS THE SCRIPT AND RUNS NOTHING: `echo 'rm -rf /' | bash -n` is how an author verifies a script, and reading
@@ -1312,6 +1367,16 @@ export function readsScriptFromStdin(segment: string): boolean {
     return false; // a positional operand: THAT is the script
   }
   return true;
+}
+
+/** WHAT LANGUAGE THE STANDARD INPUT OF A COMMAND IS, when it is a program: `shell` for a shell (and for the clients and builtins that
+ *  read a script, which are read as they always were), `language` for an interpreter of another one (`python3 -`, `node <<'EOF'`),
+ *  null when it reads none. The text a language is fed is that language's, not shell words - the shell only decides whether it
+ *  EXPANDS it first (an unquoted delimiter). */
+function stdinScriptKind(segment: string): 'shell' | 'language' | null {
+  if (!readsScriptFromStdin(segment)) return null;
+  const raw = tokenize(segment)[0] ?? '';
+  return readsLanguageFromStdin(raw.slice(raw.lastIndexOf('/') + 1)) ? 'language' : 'shell';
 }
 
 /** The exact text a command writes to standard output, or null when EGO cannot know it. Only a literal counts:
@@ -1825,12 +1890,17 @@ function normalizeSegmentInner(segment: string): string[] {
   // `gawk -E FILE` TAKES ITS PROGRAM FROM A FILE. Every matcher is compiled case-insensitively, so a rule there
   // cannot tell `-E` from the extremely ordinary `-e`; this reader sees the case and can (exit review 8).
   {
-    const t0 = tokenize(s);
+    // (the command is found where it STARTS: a wrapper in front of it - `env awk -f x`, `timeout 5 sed ...` - is not the head, and the
+    // matchers this replaces read the normalized text, where the wrapper was already gone)
+    const t0 = lead0.map((x) => x.text).slice(chain0.at);
     const h0 = (t0[0] ?? '').replace(/^.*\//, '');
     // (the options are read the way awk's getopt reads them: `-Efile` and `-nEfile` are `-E file`, so they are found by the one reader
     // of awk's file options and not by a test for the word `-E` - review 11 #205)
     // (and any of them is a program in a FILE, which has always asked - the matcher for the spaced `-f` says so - whichever way it is spelled)
     if (/^(awk|gawk|mawk|nawk)$/.test(h0) && awkFileOptions(t0).length > 0) extra.push(`${MARK}awk-program-file`);
+    // WHETHER A SED PROGRAM RUNS A COMMAND is the answer of the scanner that reads a sed script the way sed does (program-words.ts), asked
+    // of the script sed's option parser finds - not of a regex over the line, which found the letter `e` in a file called `service.ts`
+    if (/^(sed|gsed)$/.test(h0) && sedExecutes(t0, 0)) extra.push(`${MARK}sed-executes`);
   }
   // A REDIRECTION TO `/dev/tcp` OR `/dev/udp` IS A NETWORK CONNECTION, and it needs no network binary. Both
   // directions matter: `> /dev/tcp/h/p` sends whatever the command produces, and `< /dev/tcp/h/p` makes the
@@ -1916,7 +1986,13 @@ function normalizeSegmentInner(segment: string): string[] {
   // `command` as a transparent wrapper classified the idiom every script uses to test whether a tool exists as
   // RUNNING that tool, so `command -v node` asked (exit review 4). ...and behind a wrapper too: `timeout 5 command -v
   // node` is the same lookup, and it was classified as RUNNING node (exit review 7)
-  if (peeled.lookup) return [...extra, requote(tokens.slice(steps[steps.length - 1]!.at))];
+  // ...AND ITS REDIRECTIONS STAY REDIRECTIONS: `command -v docker >/dev/null 2>&1` is the idiom every script uses, and re-quoting its words
+  // wrote `'>/dev/null' '2>&1'` - two literal arguments - so the one rule that names the idiom (`command -v NAME`, then only a discard or
+  // a descriptor copy) never matched it, and 'is docker installed?' asked (U-05). An operator is not a word to quote.
+  if (peeled.lookup) {
+    const from = steps[steps.length - 1]!.at;
+    return [...extra, shapes === undefined ? requote(tokens.slice(from)) : markedWords.slice(from).map((w) => (w.shape === 'real' ? w.text : requote([w.text]))).join(' ')];
+  }
   // assignments passed through `env` (and `sudo`, `time`) are judged exactly like leading assignments - INCLUDING the ones
   // that select the target, which this branch used to drop (round 15) - and through `env --` too: a value that cannot name a
   // program does not change what runs
@@ -2602,7 +2678,9 @@ function scanRedirections(segment: string, keepContinuations = false): Redirecti
       }
       const w = t.slice(st, Math.min(k, t.length));
       if (t[i - 1] !== '<') spans.push([i, Math.min(k, t.length)]);
-      if (w) {
+      // (the word after the second and third `<` of `<<` and `<<<` is a DELIMITER or a STRING, not a file: `python3 <<< 'x = "/**"'`
+      // read the string as a wildcard source to open - the operand is consumed and names nothing)
+      if (w && t[i - 1] !== '<') {
         const src = unquoteShellWord(w);
         // `cat < /dev/tcp/HOST/PORT` makes the remote side the command's INPUT: judged by the network, not as a file
         if (isNetworkDevice(src)) sockets.push(src);
@@ -5730,8 +5808,9 @@ function scriptSegments(text: string): string[] | null {
   const out: string[] = [];
   let heredoc: string | null = null;
   let heredocQuoted = false;
-  let heredocOpener = '';
   let heredocBody = '';
+  /** what each command of the opener line reads from standard input (see stdinScriptKind) */
+  let heredocReads: Array<'shell' | 'language' | null> = [];
   // A BACKSLASH-NEWLINE IS ERASED BEFORE THE SHELL SEES THE COMMAND. Splitting on the raw newline first cut
   // `git \` + newline + `push origin main` into two unclassifiable fragments, so an absolute core deny reached
   // ASK from inside a script while the same continuation typed directly was denied (exit review 4).
@@ -5745,13 +5824,17 @@ function scriptSegments(text: string): string[] | null {
       // its program from stdin, the substitutions when the delimiter was unquoted, nothing when it was quoted
       // a script is read LINE BY LINE here, so the splitter's `case` state does not persist across lines and a
       // branch's `a)` is still glued to the opener; it is structure either way, and stripped before the role test
-      const openerCommand = (sg: string): string => emitterTail(sg.replace(/^\(?\s*[^\s()|;&]+\s*\)\s+(?=\S)/, ''));
-      if (splitShellSegments(heredocOpener).some((sg) => readsScriptFromStdin(openerCommand(sg)))) {
+      if (heredocReads.includes('shell')) {
         const nested = scriptSegments(heredocBody);
         if (nested === null) return null; // the carried script is opaque, so this one is too
         out.push(...nested);
-      }
-      else if (!heredocQuoted) out.push(...substitutionsIn(heredocBody));
+      } else if (heredocReads.includes('language')) {
+        // A PROGRAM IN ANOTHER LANGUAGE KEEPS ITS HERE-DOCUMENT: the opener went out with its `<<` intact (below), and the body and the
+        // delimiter follow it, so the splitter that reads this text reads it as it reads a typed command - one stage of program
+        // text, and the substitutions the shell expands when the delimiter is unquoted (U-01..U-03). The marker of that stage cannot
+        // travel as a line: everything that reaches the analyzer from outside has its markers mangled
+        out.push(...heredocBody.split('\n').slice(0, -1), heredoc);
+      } else if (!heredocQuoted) out.push(...substitutionsIn(heredocBody));
       heredoc = null;
       heredocBody = '';
       continue;
@@ -5760,7 +5843,8 @@ function scriptSegments(text: string): string[] | null {
     if (!line || line.startsWith('#!')) continue;
     heredoc = heredocDelimiter(line);
     if (heredoc !== null) {
-      heredocOpener = line;
+      const openerCommand = (sg: string): string => emitterTail(sg.replace(/^\(?\s*[^\s()|;&]+\s*\)\s+(?=\S)/, ''));
+      heredocReads = splitShellSegments(line).map((sg) => stdinScriptKind(openerCommand(sg)));
       heredocQuoted = new RegExp(`<<-?\\s*(?:'${reEscape(heredoc)}'|"${reEscape(heredoc)}"|\\\\${reEscape(heredoc)})(?!\\w)`).test(line);
     }
     // an `eval` or a command built from a variable cannot be resolved: report UNKNOWN rather than guess
@@ -5773,7 +5857,11 @@ function scriptSegments(text: string): string[] | null {
     // THE BODY HAS ALREADY BEEN REMOVED HERE, so the opener's `<<DELIM` must go with it. Leaving it in handed the
     // canonical splitter a heredoc whose delimiter can never arrive, and it consumed every remaining line of the
     // script as that body — a script with any heredoc hid everything below it, at ALLOW (exit review 4).
-    out.push(heredoc === null ? line : line.replace(/<<-?\s*(?:'[^']*'|"[^"]*"|\\?[A-Za-z_][A-Za-z0-9_]*)/g, '').trim());
+    out.push(
+      heredoc === null || (heredocReads.includes('language') && !heredocReads.includes('shell'))
+        ? line
+        : line.replace(/<<-?\s*(?:'[^']*'|"[^"]*"|\\?[A-Za-z_][A-Za-z0-9_]*)/g, '').trim(),
+    );
   }
   // A HEREDOC THAT NEVER CLOSES MEANS THE SCRIPT WAS MISREAD: everything after it was skipped as data, so the set
   // of commands resolved here is not the set that will run. Report opacity rather than a short list.
@@ -9442,7 +9530,7 @@ const PROGRAM_OPERAND_LONG =
   // real tool, `-fplugin=` and `-specs=` load code into the compiler, `go build -toolexec` wraps every tool
   // invocation, `javac -processor` runs an annotation processor, and `sort --compress-program` runs a program
   // under a capability literally named command.read-only (decision challenge, findings 5, 25, 26, 30).
-  '|--post-renderer|--exec-path|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-B|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
+  '|--post-renderer|--exec-path|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
   // rsync's `-e ssh` names a remote SHELL. The lookahead matched those letters ANYWHERE in the value, so a
   // database statement beginning `show …` contained `sh` and `mysql -e 'show tables'` — a read of the local
   // socket — was classified as naming an unbounded program (exit review 7). The value must BE the program.
@@ -9450,8 +9538,11 @@ const PROGRAM_OPERAND_LONG =
   // container and was read as naming a remote shell (exit review 7)
   '|-e(?=\\s+(?![A-Za-z_][A-Za-z0-9_]*=)(?:\\S*/)?(ssh|sh|bash|zsh|dash|python3?|perl|ruby|node)(\\s|$))';
 const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
-/** the short forms whose value is GLUED to the letter: `gcc -B/tmp/evil`, `clang -Xclangfoo`, `-loadplugin` */
-const PROGRAM_OPERAND_GLUED_RE = /\s(-B|-Xclang|-Xplugin|-load|-fplugin|-specs|-wrapper|-agentlib|-agentpath|-javaagent)[:=]?\S/;
+/** the short forms whose value is GLUED to the letter: `clang -Xclangfoo`, `-loadplugin`. (`-B` is not here, nor above: it is the compiler
+ *  driver's program prefix - `gcc -B/tmp/evil` - and the driver's table says so (tools.ts, CC_GRAMMAR); for every other tool it is something
+ *  else: before-context for grep, rg, ag, ack and git grep, a block size for du, df and ls, ignore-blank-lines for diff, break-rewrites for
+ *  git diff. A regex that did not know the tool read all of them as a program to run - 1,090 of the agents' commands, U-09.) */
+const PROGRAM_OPERAND_GLUED_RE = /\s(-Xclang|-Xplugin|-load|-fplugin|-specs|-wrapper|-agentlib|-agentpath|-javaagent)[:=]?\S/;
 /** the archive tools where a short `-I` names a compression PROGRAM (for make it is an include directory) */
 const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
 /** A RESPONSE FILE IS A COMMAND LINE. `clang @opts.rsp`, `gcc @flags`, `javac @args`, `swiftc @f`, `link @f` and
@@ -12778,6 +12869,10 @@ function classifyNormalized(
     let decided: CapabilityHit | null = null;
     for (const { m, re } of compiled) {
       if (decided !== null && m.layer !== 'overlay') continue;
+      // A PLACE NAMED INSIDE AN IMAGE IS THE IMAGE'S: `RUN mkdir -p /home/app/.ssh` and `RUN ssh-keyscan github.com >> /root/.ssh/known_hosts`
+      // name a credential directory of the image being built, and the rules that read text for a credential store, a hook or EGO's
+      // own state cannot tell it from the host's. A body that runs in a container is judged by every other rule (U-04)
+      if (state.env.containerPaths === true && HOST_PLACE_CAPABILITY.test(m.capability)) continue;
       chargeWork(testCost);
       if (!re.test(subject)) continue;
       // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
@@ -13007,9 +13102,6 @@ function classifyNormalized(
   return resolved.length ? resolved : [opaqueHit(table, ctx, norm, `${effect.reason}: empty`)];
 }
 
-/** Search tools take a PATTERN as their first operand. It is data, not the tool's own flags and paths. */
-const PATTERN_FIRST_HEADS = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'ripgrep']);
-
 /** Heads whose operands are read (or listed recursively); their path arguments are classified like Read tool calls. */
 const RECURSIVE_HEADS = new Set([
   'find',
@@ -13095,7 +13187,7 @@ function pathValueOf(raw: string): string {
 
 /** Path-like tokens of a segment, read by the shared resolver in the tracked cwd (one entry per reading of each token);
  *  tokens with unresolved variables are reported as dynamic. */
-function pathTokens(segment: string, cwd: string, old?: readonly string[]): PathEntry[] {
+function pathTokens(segment: string, cwd: string, old?: readonly string[], skip: ReadonlySet<string> = new Set()): PathEntry[] {
   const out: PathEntry[] = [];
   const home = canonicalPath(homedir()).split(sep).join('/');
   // (read once: asked inside the `some` below it was one canonicalisation and one split-and-join of the whole working directory
@@ -13103,19 +13195,15 @@ function pathTokens(segment: string, cwd: string, old?: readonly string[]): Path
   const cwdPosix = canonicalPath(cwd).split(sep).join('/');
   const cwdIsSensitive = cwdPosix === home || CREDENTIAL_DIRS.some((d) => cwdPosix.startsWith(`${home}/${d}`));
   const allTokens = tokenize(segment);
-  const head0 = (allTokens[0] ?? '').replace(/^.*\//, '');
-  // A SEARCH PATTERN IS DATA. `grep 'rm -rf /' notes.md` searches for that text; reading the pattern as the
-  // tool's own flags and paths denied an ordinary code search as a recursive read of `/` (exit review 5). Only
-  // the FIRST non-option operand is the pattern, and only when no `-e`/`-f` names it instead.
-  const patternIndex =
-    PATTERN_FIRST_HEADS.has(head0) &&
-    !allTokens.some((t) => /^-[a-zA-Z]*[ef]$/.test(t) || /^--(regexp|file)=/.test(t))
-      ? allTokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
-      : -1;
+  // A SEARCH PATTERN IS DATA, and so is every word that is another language's text (a sed script, a separator, the code after `-c`):
+  // `grep 'rm -rf /' notes.md` searches for that text, and reading it as the tool's own flags and paths denied an ordinary code search
+  // as a recursive read of `/` (exit review 5). WHICH words those are is the role reader's answer (operands.ts), given to this scan as
+  // the texts of the words of the segment AS WRITTEN that are not shell words - one reader for the pattern of a search, the script of
+  // sed, the filter of jq, and every other word of the kind (U-01, U-06, U-07).
   for (const [idx, raw] of allTokens.entries()) {
-    if (idx === 0 || idx === patternIndex) continue;
+    if (idx === 0 || skip.has(raw)) continue;
     const tok = pathValueOf(raw);
-    if (!tok || tok === '{}') continue;
+    if (!tok || tok === '{}' || skip.has(tok)) continue;
     // A BARE NAME IS A PATH OPERAND WHEN THERE IS A FILE OF THAT NAME where the command runs. `cat service-account.json` and `cd secrets
     // && cat db.txt` read a file in the working directory, and the scan took only words that LOOK like paths - a slash, a dot, a
     // tilde - so a rule that protected a file by its name (an overlay's `service-account.json`) was never asked (review 11 #117). The
@@ -13190,12 +13278,16 @@ function patternEntersHome(abs: string, reach: string, home: string): boolean {
 /** Commands whose operands are STRINGS, not paths: they compute a name and never touch the filesystem. */
 const STRING_OPERAND_HEADS = new Set(['dirname', 'basename', 'echo', 'printf', 'expr', 'seq']);
 
+/** The pieces a word reaches the scans of shell words as: the normalized segment joins its words with blanks, the scan takes the
+ *  redirections out of it (an unquoted `<` or `>` in the middle of a word cuts the word there) and tokenizes what is left. A word
+ *  whose pieces are asked for is tested against THAT, not against the word as it was written. */
+const asScanned = (word: string): string[] => tokenize(withoutRedirections(word));
+
 function classifyShellPaths(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
   seg: string,
   cwd: string,
-  patternWords: string[] = [],
   /** the body runs inside a container image, so its PATHS are the image's — but what the analyzer cannot READ
    *  is unreadable wherever it runs, so that opacity survives */
   containerPaths = false,
@@ -13232,7 +13324,12 @@ function classifyShellPaths(
   const statementWords = new Set(
     (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
   );
-  const paths = pathTokens(bare, cwd, old).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw));
+  // THE WORDS OF THE SEGMENT AS WRITTEN THAT ARE NOT SHELL TEXT - a search pattern, a message, the script of sed, the code after `-c`, a
+  // filter, a separator, a request body - found by the one role reader (operands.ts / program-words.ts), and set aside by every scan
+  // of shell words below: the path scan, the wildcard scans, the destination scans. Their texts are compared with the words of the
+  // normalized segment, which has lost the quoting, and a text counts only if EVERY occurrence of it is such a word.
+  const nonShell = nonShellWords(rawWords.map((t) => t.text), rawWords.map((t) => t.shape), asScanned);
+  const paths = pathTokens(bare, cwd, old, nonShell.pieces).filter((p) => !statementWords.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
   // approvable question, never a silent yes.
@@ -14051,7 +14148,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     paths.push(...pathEntries(cwd, dest, old));
   if (dest === 'ALL') {
     for (const t of tokens.slice(1)) {
-      if (t.startsWith('-') || paths.some((p) => p.raw === t) || /^[sy]\/|^\d+$/.test(t)) continue;
+      if (t.startsWith('-') || paths.some((p) => p.raw === t) || /^[sy]\/|^\d+$/.test(t) || nonShell.pieces.has(t)) continue;
       // the WHOLE word, glob and all: a protected pattern is matched against the text the shell will expand, and a
       // word built at run time is reported by the "writes to a path built at run time" hit above, not twice
       paths.push(...pathEntries(cwd, t, old, true).filter((e) => e.abs !== null || e.why !== undefined));
@@ -14071,13 +14168,11 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // its ancestors reaches the credential stores
   if (recursive) {
     // the search PATTERN is data, not a root: `grep 'rm -rf /' notes.md` searches for that text (exit review 5)
-    const patternAt =
-      PATTERN_FIRST_HEADS.has(head) && !tokens.some((t) => /^-[a-zA-Z]*[ef]$/.test(t) || /^--(regexp|file)=/.test(t))
-        ? tokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
-        : -1;
     const searched: string[] = [];
     for (const [ti, t] of tokens.entries()) {
-      if (ti === 0 || ti === patternAt || patternWords.includes(t)) continue;
+      // (the normalized segment shows a data word as the marker that stands in for it - a search pattern is not a root, and neither is
+      // the place it was)
+      if (ti === 0 || t.startsWith(MARK) || nonShell.pieces.has(t)) continue;
       if (t.startsWith('-')) continue;
       const roots = pathEntries(cwd, t, old);
       if (roots.some((e) => e.glob || (e.abs === null && e.why === undefined))) continue;
@@ -14170,9 +14265,15 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // ...and the words of a command a CARRIER hands to a shell (`sh -c 'cp x "sp l/f"'`, `trap`, a herestring) are the carried
   // text's own: the carrier's quoting hid them one level up, exactly as normalization does
   const carriedTexts = new Set<string>();
+  // (and the words of such a body that are not shell text are found in the body's own words: the same role reader, one level down)
+  const carriedNonShell = new Set<string>();
   let nestTooDeep = false;
   const wordsAsWritten = (text: string, depth = 0): string[] => {
     const words = tokenize(text);
+    if (depth > 0) {
+      const marked = tokenizeMarked(text);
+      for (const w of nonShellWords(marked.map((t) => t.text), marked.map((t) => t.shape), asScanned).wholes) carriedNonShell.add(w);
+    }
     if (depth >= CARRIER_NEST) {
       // a carrier below the cap was not read: the words it holds are unproved, not absent
       if (carriedShellBodies(text).length > 0) nestTooDeep = true;
@@ -14198,7 +14299,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     for (const word of wordsAsWritten(rawSeg)) {
       if (carriedTexts.has(word)) continue; // a command line handed to a shell, not a name
       const value = pathValueOf(word);
-      if (!value || !/[ \t\n]/.test(hostTrim(value)) || patternWords.includes(value)) continue;
+      if (!value || !/[ \t\n]/.test(hostTrim(value)) || nonShell.wholes.has(value) || carriedNonShell.has(value)) continue;
       // a word with a glob or a substitution in it is text more often than a name (`select * from t`), and its pieces
       // already answer for it as globs and dynamic words do
       if (/[*?[{$`]/.test(value)) continue;
@@ -14241,7 +14342,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // `dotglob`/`GLOB_DOTS` on, or a zsh `(D)` qualifier, it matches `.env` as surely as `.e*` does
   for (const t of tokens.slice(1)) {
     const v = pathValueOf(t);
-    if (v && /[*?[]/.test(v) && !isPathLike(v) && (shellGlob.dotfiles || ZSH_DOT_QUALIFIER_RE.test(v)) && !patternWords.includes(v)) judgeGlob(v);
+    if (v && /[*?[]/.test(v) && !isPathLike(v) && (shellGlob.dotfiles || ZSH_DOT_QUALIFIER_RE.test(v)) && !nonShell.pieces.has(v)) judgeGlob(v);
   }
   if (paths.length === 0) return hits;
   for (const p of paths) {
@@ -14671,7 +14772,9 @@ function carrierCommandValues(seg: string): string[] {
   };
   // A WORD THAT IS DATA TO ITS COMMAND IS NOT A COMMAND STRING, whatever option stands in front of it: `git log -S "=>" --oneline` searches
   // for an arrow (the pickaxe's `-S` is not env's), and `grep -c "a; b" f` counts. One reader says which words those are (operands.ts)
-  const dataAt = maskDataWords(words, DATA_WORD, m.map((x) => x.shape)).map((w, k) => w !== words[k]);
+  // - and the code after `python3 -c` is not a command string either: it is Python (U-01)
+  const roleScan = scanLine(words, m.map((x) => x.shape));
+  const dataAt = roleScan.roles.map((r, k) => (r === 'data' || r === 'program') && m[k]!.shape !== 'real');
   for (let i = 0; i < m.length; i++) {
     const t = m[i]!.text;
     if (dataAt[i] === true || dataAt[i + 1] === true) continue;
@@ -14704,7 +14807,8 @@ function carriedShellBodies(seg: string): string[] {
   const head = (t[0] ?? '').replace(/^.*\//, '');
   if (head === 'trap' && t[1] !== undefined && !t[1].startsWith('-')) out.push(t[1]);
   const here = t.indexOf('<<<');
-  if (here >= 0 && t[here + 1] !== undefined) out.push(t[here + 1]!);
+  // (the herestring of an interpreter of another language is that language's text, not a shell body: programTextHits reads it)
+  if (here >= 0 && t[here + 1] !== undefined && languageOf(t[commandHeadIndex(t)] ?? '') === null) out.push(t[here + 1]!);
   // A CARRIER THAT RUNS A STRING OR A PAYLOAD IS A CARRIER LIKE `sh -c`. `watch 'git commit -nm x'` is `sh -c 'git commit -nm x'`,
   // and `find . -exec sed -n 'w FILE' f \;` runs that sed: the normalizer reaches both on its own, but every reader that
   // works on the line AS WRITTEN (the sed `w` scan, the commit hook-bypass argv, `git -C`) saw only `watch` and `find`
@@ -15037,7 +15141,7 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
 /** The command line `kubectl exec pod -- CMD …` and its neighbours carry after the separator. Against a LOCAL
  *  cluster the verb kept its ALLOW while that command was never analysed at all (exit review 3), so it is fed
  *  back into the canonical pipeline as its own segment. */
-function execCarriedCommand(seg: string): string | null {
+function execCarriedCommand(seg: string): { text: string; container: boolean } | null {
   const t = tokenize(seg);
   const head = t[0] ?? '';
   if (!/^(kubectl|oc|docker|podman|nerdctl)$/.test(head)) return null;
@@ -15045,17 +15149,38 @@ function execCarriedCommand(seg: string): string | null {
   // any verb nobody modelled, because a plugin that takes `--` runs what follows with whatever it hands it
   // (`docker pass run -- psql -h prod-db …` runs psql with the secrets in its environment). A word `exec` anywhere on the
   // line was the test before, which a quoted verb, a global option or an operand of that name each got wrong.
+  // `container` says WHERE the command runs: inside the container for a verb the reader models, on this machine for a plugin's.
   if (/^(docker|podman|nerdctl)$/.test(head)) {
     const cc = readContainerCommand(t);
     const carried = cc === null ? null : carriedHostCommand(cc);
-    return carried === null ? null : requote(carried);
+    return carried === null ? null : { text: requote(carried), container: cc !== null && cc.modelled };
   }
   if (!t.some((x) => /^(exec|attach|debug)$/.test(x))) return null;
   const dd = t.indexOf('--');
   // RE-QUOTED, because the carried command is handed back as TEXT and `join(' ')` is not the inverse of
   // `tokenize`: an awk program or a `-c` body carried after the separator is one word, and joining the tokens
   // erased the quoting that said so (exit review 7, cross-product).
-  return dd >= 0 && dd + 1 < t.length ? requote(t.slice(dd + 1)) : null;
+  return dd >= 0 && dd + 1 < t.length ? { text: requote(t.slice(dd + 1)), container: true } : null;
+}
+
+/** THE SHELL BODIES THAT RUN INSIDE A CONTAINER: the `sh -c BODY` that stands where a container's own argv begins (`docker run IMG sh -c
+ *  BODY`, `docker exec C sh -c BODY`, `docker compose run S sh -c BODY`, `kubectl exec P -- sh -c BODY`). The commands of such a body
+ *  are judged as commands like any other, and its PATHS are the container's (U-04). */
+function containerShellBodies(seg: string): Set<string> {
+  const out = new Set<string>();
+  const t = tokenize(seg);
+  const at = commandHeadIndex(t);
+  const head = (t[at] ?? '').replace(/^.*\//, '');
+  let argv: string[] | null = null;
+  if (/^(docker|podman|nerdctl)$/.test(head)) {
+    const cc = readContainerCommand(t.slice(at));
+    if (cc !== null && cc.modelled && cc.carriedAt >= 0) argv = cc.words.slice(cc.carriedAt);
+  } else if (/^(kubectl|oc)$/.test(head)) {
+    const dd = t.indexOf('--', at);
+    if (dd >= 0 && t.slice(at, dd).some((x) => /^(exec|attach|debug|run)$/.test(x))) argv = t.slice(dd + 1);
+  }
+  if (argv !== null) for (const b of carriedShellBodies(requote(argv))) out.add(b);
+  return out;
 }
 
 /** THE canonical semantic-analysis pipeline.
@@ -15274,6 +15399,13 @@ function analyzeSegmentsInto(
         segment: stage.text.slice(0, 120),
       });
       written.add('\0any');
+      continue;
+    }
+    // THE STANDARD INPUT OF AN INTERPRETER OF ANOTHER LANGUAGE is that language's text (PROGRAM_TEXT): read by the matchers that read
+    // text, and by no reader of shell words - there are no words in it
+    const programText = programTextOf(stage.text);
+    if (programText !== null) {
+      for (const h of programTextHits(table, ctx, compiled, programText, 'the program this interpreter reads from standard input')) hits.push(h);
       continue;
     }
     for (const j of racing[stageIndex] ?? [])
@@ -15502,10 +15634,11 @@ function analyzeSegmentsInto(
     // THE COMMAND AFTER `--` IS FOUND IN THE SEGMENT AND IN EVERY NORMALIZATION OF IT: behind `sudo`, `env`, `timeout` or
     // `sh -c` the head of the segment is the wrapper, and `docker pass run -- psql -h prod-db …` was analysed only when
     // nothing stood in front of `docker`.
-    for (const carried of new Set(
-      [seg, ...normalizeSegment(seg)].map(execCarriedCommand).filter((c): c is string => c !== null),
-    ))
-      for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env }, true))
+    const carriedByExec = new Map<string, boolean>();
+    for (const c of [seg, ...normalizeSegment(seg)].map(execCarriedCommand))
+      if (c !== null) carriedByExec.set(c.text, (carriedByExec.get(c.text) ?? true) && c.container);
+    for (const [carried, container] of carriedByExec)
+      for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env: container ? { ...env, containerPaths: true } : env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
     // A CARRIER WHOSE OWN OPTION THIS KERNEL CANNOT PLACE HAS NO KNOWN COMMAND. `timeout --future-flag 5 sed ...` reads one
     // way if the flag takes a value and another if it does not, so the position of the carried command is unknown and
@@ -15529,6 +15662,7 @@ function analyzeSegmentsInto(
     for (const body of gitConfigCommands(seg))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by git from its configuration)`.trim() });
+    const insideContainer = containerShellBodies(seg);
     for (const rawBody of carriedShellBodies(seg)) {
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
@@ -15568,7 +15702,7 @@ function analyzeSegmentsInto(
         // (a nest deeper than the walk goes is re-entered whole - more analysis, never less - rather than assumed to end)
         carriedShellBodies(b).some((x) => depth >= 4 || needsReentry(expandBraces(x), depth + 1));
       if (needsReentry(body))
-        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
+        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env: insideContainer.has(rawBody) ? { ...env, containerPaths: true } : env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
     }
     // A PIPE INTO AN INTERPRETER IS AN EXECUTION EDGE. `echo 'rm -rf /' | bash` runs the first stage's output as
@@ -15581,7 +15715,7 @@ function analyzeSegmentsInto(
     const procSubScript =
       stage.fromProcessSubstitution === true &&
       /\$SUBST/.test(seg) &&
-      RUNS_A_FILE_RE.test((tokenize(seg)[0] ?? '').replace(/^.*\//, ''))
+      runsAFile((tokenize(seg)[0] ?? '').replace(/^.*\//, ''))
         ? upstream
         : null;
     const stdinSource = stdinFrom ?? procSubScript;
@@ -15608,6 +15742,9 @@ function analyzeSegmentsInto(
       if (literal !== null && DB_CLIENT_HEADS.has(commandHead(seg)))
         for (const h of analyzeSegments(table, ctx, compiled, [`${seg} ${requote([literal])}`], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (the script this client reads from standard input)`.trim() });
+      // ...AND AN INTERPRETER OF ANOTHER LANGUAGE READS ITS OWN: `echo 'x = "/**"' | python3` is Python, not a shell command line
+      else if (literal !== null && languageOf(commandHead(seg)) !== null)
+        for (const h of programTextHits(table, ctx, compiled, literal, 'the program this interpreter reads through a pipe')) hits.push(h);
       else if (literal !== null)
         for (const h of analyzeSegments(table, ctx, compiled, [literal], { ...state, env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried through a pipe)`.trim() });
@@ -15615,6 +15752,13 @@ function analyzeSegmentsInto(
         hits.push(
           opaqueHit(table, ctx, seg, `runs the standard output of \`${stdinFromResolved}\`, which this kernel did not read`),
         );
+    }
+    // A HERESTRING IS STANDARD INPUT TOO: `python3 <<< 'x = "/**"'` reads Python (the shells' herestrings are shell bodies, above)
+    {
+      const words = tokenize(seg);
+      const at = words.indexOf('<<<');
+      if (at >= 0 && words[at + 1] !== undefined && languageOf(words[commandHeadIndex(words)] ?? '') !== null)
+        for (const h of programTextHits(table, ctx, compiled, words[at + 1]!, 'the program this interpreter reads from a herestring')) hits.push(h);
     }
     // A CALL TO A FUNCTION DEFINED HERE runs the body that was already handed over at the definition, so the call
     // itself adds nothing — but its REDIRECTIONS and path operands are still its own, which is why the head is
@@ -15698,17 +15842,9 @@ function analyzeSegmentsInto(
       // path arguments of the normalized command (after wrappers and global flags are stripped)
       // A SEARCH PATTERN IS DATA. Normalization de-quotes, so `grep 'rm -rf /' notes.md` reaches the path scan as
       // three tokens and `/` was read as a search ROOT — an ordinary code search denied as a recursive read of the
-      // filesystem (exit review 5). The pattern's words are taken from the RAW segment, where it is still one word.
-      const rawMarked = tokenizeMarked(seg);
-      // the head is where the COMMAND starts: `LC_ALL=C grep 'rm -rf /' notes.md` has an assignment at token 0, and
-      // reading that as the head made the search pattern a path (exit review 10)
-      const rawHeadAt = commandHeadIndex(rawMarked.map((t) => t.text));
-      const rawHead = (rawMarked[rawHeadAt]?.text ?? '').replace(/^.*\//, '');
-      const patternWords =
-        PATTERN_FIRST_HEADS.has(rawHead) &&
-        !rawMarked.some((t) => /^-[a-zA-Z]*[ef]$/.test(t.text) || /^--(regexp|file)=/.test(t.text))
-          ? (rawMarked.find((t, i) => i > rawHeadAt && !t.text.startsWith('-'))?.text ?? '').split(/\s+/).filter(Boolean)
-          : [];
+      // filesystem (exit review 5). The words of the segment AS WRITTEN that are not shell text - this pattern, and every word of the
+      // kind - are found by the one role reader inside classifyShellPaths, where the segment as written is `seg` below (the head is
+      // where the COMMAND starts: `LC_ALL=C grep 'rm -rf /' notes.md` has an assignment at the front, exit review 10).
       // A CONTAINER'S PATHS ARE THE IMAGE'S. A Dockerfile RUN line writes inside the image, not on the host, so
       // its path operands are not judged against the workspace; its COMMANDS still are, and so is anything the
       // analyzer could not READ, which is unreadable wherever it runs (exit review 8).
@@ -15726,7 +15862,6 @@ function analyzeSegmentsInto(
           ctx,
           norm,
           dir,
-          patternWords,
           env.containerPaths === true,
           written,
           seg,
@@ -15800,6 +15935,12 @@ function analyzeSegmentsInto(
         });
         continue;
       }
+      // A REDIRECTION INSIDE A CONTAINER NAMES THE CONTAINER'S PATH. A Dockerfile `RUN echo ... > /etc/nginx/conf.d/default.conf` and
+      // `docker exec app sh -c 'echo x > /app/out.txt'` write inside an image or a container; judged against the host's workspace they
+      // were outside it, and an absolute refusal fell on the most ordinary line of a Dockerfile (U-04). What the analyzer cannot NAME
+      // (above) is unnameable wherever it runs, and what a bind mount hands over is the mount's own business: its SOURCE is a path
+      // on the command line, judged as the host path it is.
+      if (env.containerPaths === true) continue;
       for (const q of cand.paths) recordWrite(q); // A4: a later unit resolving THIS file is now stale
       for (const h of judgeCandidates(table, ctx, 'Write', cand))
         hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
@@ -15818,6 +15959,7 @@ function analyzeSegmentsInto(
         });
         continue;
       }
+      if (env.containerPaths === true) continue; // (the container's path, as above)
       for (const r of judgeCandidates(table, ctx, 'Read', cand))
         if (r.via.startsWith('matcher path') || r.capability.startsWith('fs.credential') || r.capability === 'fs.outside-workspace.read' || r.capability === 'command.unknown')
           hits.push({ ...r, via: `input redirection < ${src} (${r.via})`, segment: seg });

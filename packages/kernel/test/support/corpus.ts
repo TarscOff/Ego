@@ -3117,6 +3117,39 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'cargo version',
     'npm view react version',
   ],
+  // THE WORDS OF A COMMAND THAT ARE ANOTHER LANGUAGE'S TEXT (U-01..U-09, closure-usability-a.test.ts): a search pattern, a sed or awk script,
+  // a separator, a filter, the program an interpreter is handed. Measured on what the agents really ran, these were 1 command in 4 - and
+  // the dominant edit idiom of all, `python3 - <<'PY'`, went from a question to a refusal nobody can approve
+  usability: [
+    'grep -rn "// TODO" src',
+    'rg -n "// eslint-disable-next-line" src',
+    "grep -n -B2 -A12 'const root = ' src/index.ts",
+    'rg -B2 foo src',
+    'git grep -n -B2 foo',
+    'diff -B a.txt b.txt',
+    'du -BM .',
+    "sed -n '1,5p' src/service.ts",
+    "sed -n '1,20p' src/schema.ts",
+    "awk '{print $1}' src/server.go",
+    "awk -F / '{print $2}' file.txt",
+    'cut -d / -f 2 file.txt',
+    'tr / _ < file.txt',
+    'sort -t / -k 2 file.txt',
+    "sed -E 's/([0-9]+)/<\\1>/g' file.txt",
+    "find . -regex '.*\\.\\(ts\\|js\\)'",
+    "jq -r '.. | .path? // empty' package.json",
+    "gh pr view 8 --json number,state --jq '\"#\\(.number) [\\(.state)]\"'",
+    'prettier --check "(src|examples)/**/*.{ts,tsx}"',
+    'command -v docker >/dev/null 2>&1',
+    'if ! command -v jq >/dev/null 2>&1; then echo "jq missing"; fi',
+    'test "/**" = x',
+    'git commit -m "/api rename"',
+    "node -e 'console.log(\"// TODO\")'",
+    // an interpreter's program is an opaque program (EXPECTED_GATES says so): a question, never a refusal
+    'python3 - <<\'PY\'\nx = """\n/**\n * doc\n */\n"""\nPY',
+    "node - <<'EOF'\nconst a = 1;\nexpect(a).toBe(1);\nEOF",
+    "python3 -c 'x = \"/**\"; print(x)'",
+  ],
   git: [
     'git status',
     'git diff',
@@ -3400,4 +3433,10 @@ export const EXPECTED_GATES: Readonly<Record<string, string>> = {
   // longer a production MUTATION — the destination is local — but it is still an ingest, and the ingest gate is
   // the right one. ACCEPTED_PRODUCT_BEHAVIOR.
   'aws s3 cp s3://my-fixtures/data.json ./data.json': 'a remote fetch brings unseen content into the workspace',
+  // A PROGRAM IN ANOTHER LANGUAGE IS A PROGRAM THE KERNEL HAS NOT READ. Editing a file through `python3 - <<'PY'` is a human decision and the
+  // same decision whatever the program says - and it is a QUESTION: what the program holds (a JSDoc comment, an `expect(`, a string with `//`)
+  // is no wildcard, no launcher and no output flag (closure-usability-a.test.ts holds the proof that it never refuses).
+  'python3 - <<\'PY\'\nx = """\n/**\n * doc\n */\n"""\nPY': 'an interpreter runs a program the kernel has not read',
+  "node - <<'EOF'\nconst a = 1;\nexpect(a).toBe(1);\nEOF": 'an interpreter runs a program the kernel has not read',
+  "python3 -c 'x = \"/**\"; print(x)'": 'an interpreter runs a program the kernel has not read',
 };

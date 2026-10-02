@@ -147,7 +147,7 @@ export const SHELL_GRAMMAR: Grammar = gnu(
 // ---- awk -------------------------------------------------------------------------------------------------------------------------
 // gawk's long options are matched by any unique prefix: `--incl=inplace` rewrites its input file, `--fi prog.awk` takes its program from
 // a file, `--prof=FILE` writes a profile. The options with an OPTIONAL value (`-p[FILE]`, `-d[FILE]`, `-o[FILE]`, `-D[FILE]`) take it glued only.
-const AWK_GRAMMAR = gnu([
+export const AWK_GRAMMAR = gnu([
   '-F|--field-separator:v', '-f|--file|--source-file:v', '-v|--assign:v', '-b|--characters-as-bytes', '-c|--traditional', '-C|--copyright', '-d|--dump-variables:o',
   '-D|--debug:o', '-e|--source:v', '-E|--exec:v', '-g|--gen-pot', '-h|--help', '-i|--include:v', '-l|--load:v', '-L|--lint:o', '-M|--bignum',
   '-n|--non-decimal-data', '-N|--use-lc-numeric', '-o|--pretty-print:o', '-O|--optimize', '-p|--profile:o', '-P|--posix', '-r|--re-interval',
@@ -281,7 +281,7 @@ const PYLINT_GRAMMAR = gnu([
 ]);
 const PYLINT_ROLES: Record<string, Role> = { rcfile: 'config', 'init-hook': 'code', 'load-plugins': 'pythonModule', output: 'write' };
 // `python -m MOD` imports MOD from the working directory FIRST, so a file called MOD.py there is the program that runs
-const PYTHON_GRAMMAR = gnu(
+export const PYTHON_GRAMMAR = gnu(
   ['-B', '-b', '-d', '-E', '-i', '-I', '-O', '-P', '-q', '-s', '-S', '-u', '-v', '-V|--version', '-x', '-h|-?|--help', '-W:v', '-X:v', '--check-hash-based-pycs:v', '-c:c', '-m:c'],
   { stopAtOperand: true },
 );
