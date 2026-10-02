@@ -239,6 +239,7 @@ export interface DeclaredLocalTarget {
 
 export interface IgnoredLocalTarget {
   kind: LocalTargetKind | 'production-marker' | 'file';
+  /** @untrusted the name a layer file declared and the registry refused: it is anything a teammate's commit can hold */
   name: string;
   layer: LocalTargetLayer;
   file: string;

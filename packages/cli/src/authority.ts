@@ -15,9 +15,9 @@ import {
   type CompiledAuthorityTable,
 } from '../../kernel/src/authority/compile.ts';
 import { LOCK_TIER_LABEL } from '../../kernel/src/authority/vocabulary.ts';
-import { compileProjectPolicy, ensurePolicyCache } from '../../kernel/src/policy/cache.ts';
+import { compileProjectPolicy, ensurePolicyCache, readAsCurrentTable } from '../../kernel/src/policy/cache.ts';
+import { sealFor } from '../../kernel/src/policy/seal.ts';
 import { loadControlPlane } from '../../kernel/src/control-plane/load.ts';
-import { upgradeLegacyTable } from '../../kernel/src/control-plane/legacy-names.ts';
 import { controlPlaneDir, selfIdentity, selfVersion } from '../../kernel/src/launcher/self.ts';
 
 const USAGE =
@@ -34,28 +34,22 @@ function tableFromJson(label: string, text: string): CompiledAuthorityTable {
     throw new OperandError(`${label}: not an authority table (it is not JSON)`);
   }
   const candidate = (raw as { table?: unknown } | null)?.table ?? raw;
-  const t = upgradeLegacyTable(candidate) as Partial<CompiledAuthorityTable> | null;
-  if (
-    !t ||
-    typeof t !== 'object' ||
-    t.schema !== 'ego.authority-table/1' ||
-    typeof t.effective !== 'object' ||
-    typeof t.profiles !== 'object' ||
-    typeof t.capabilities !== 'object'
-  )
+  // (one reader gives a table from an earlier release the shape this release reads - the cache reader's)
+  const t = readAsCurrentTable(candidate, true);
+  if (!t || t.schema !== 'ego.authority-table/1')
     throw new OperandError(
       `${label}: not an authority table (expected schema ego.authority-table/1, or a policy cache holding one)`,
     );
-  return t as CompiledAuthorityTable;
+  return t;
 }
 
-function loadOperand(spec: string, project: ProjectContext): CompiledAuthorityTable {
+function loadOperand(spec: string, project: ProjectContext, env: NodeJS.ProcessEnv): CompiledAuthorityTable {
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
   switch (spec) {
     case 'core':
       return compileAuthority(loadControlPlane(controlPlaneDir()), { projectRoot: project.root });
     case 'current':
-      return ensurePolicyCache(controlPlaneDir(), project.root, self).cache.table;
+      return ensurePolicyCache(controlPlaneDir(), project.root, self, { seal: sealFor(env) }).cache.table;
     case 'proposed':
       return compileProjectPolicy(controlPlaneDir(), project.root, self).table;
   }
@@ -120,8 +114,8 @@ export function authorityCommand(
   let prev: CompiledAuthorityTable;
   let next: CompiledAuthorityTable;
   try {
-    prev = loadOperand(oldSpec, project);
-    next = loadOperand(newSpec, project);
+    prev = loadOperand(oldSpec, project, io.env);
+    next = loadOperand(newSpec, project, io.env);
   } catch (e) {
     if (!(e instanceof OperandError)) throw e;
     io.err(`${e.message}\n${USAGE}`);

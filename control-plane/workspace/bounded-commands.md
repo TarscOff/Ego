@@ -292,7 +292,17 @@ bounded:
   - 'helm'
   # database and cluster clients. Their closure is the statements or manifests their arguments name; WHERE they
   # point is governed separately by the Q98 target classification, which is the settled decision for them.
+  # EGO's own binary, under both names: its subcommands are EGO's code, classified by the matchers that name them (ego.gate.bypass, ego.pin.change,
+  # ego.skills.install, ego.policy.accept); a subcommand no matcher names is command.unknown. A claimed head that was not bounded carried a second
+  # ASK for an "unmodelled closure" that no phrase lifts, so "upgrade ego" was answered "granted" and changed nothing (AUTH-7).
+  - 'ego'
+  - 'harness'
   - 'psql'
+  # the PostgreSQL client that drops a database: it connects and sends one statement, as psql does (AUTH-7: `dropdb app` was a db.local.drop that
+  # carried a second ASK for an "unmodelled closure", so the phrase "drop the local database" lifted `psql` and not `dropdb`). Only the one the
+  # grant row is for: `createdb`, `createuser` and `dropuser` are claimed by the database-client matcher too, and bounding them would turn the
+  # closure ASK that is their only gate into the ALLOW a statement against a local database is - a decision for the database task, not this one
+  - 'dropdb'
   - 'mysql'
   - 'mysqldump'
   - 'pg_dump'

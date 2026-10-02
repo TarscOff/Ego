@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { launch, type DelegationInfo } from './launcher.ts';
 import type { CliIo } from './io.ts';
 import { POLICY_INVALID_RULE, renderFailure } from '../../kernel/src/authority/reasons.ts';
+import { terminalSafe } from '../../kernel/src/util/shown-text.ts';
 
 export interface MainOptions {
   cwd?: string;
@@ -29,12 +30,17 @@ export function describeFailure(err: Error): string {
 }
 
 export async function main(argv: string[], opts: MainOptions = {}): Promise<number> {
+  // THE BOUNDARY (AUTH-6): whoever supplies the writer, what is written has had every control character, escape sequence and invisible
+  // character turned into a visible escape. A command prints paths, names and patterns that came from a repository, a layer file or a
+  // command line; none of them is allowed to move the cursor, retitle the window or rewrite the line a person is about to answer.
+  const rawOut = opts.out ?? ((s: string) => process.stdout.write(s + '\n'));
+  const rawErr = opts.err ?? ((s: string) => process.stderr.write(s + '\n'));
   const io: CliIo = {
     cwd: opts.cwd ?? process.cwd(),
     env: opts.env ?? process.env,
     stdin: opts.stdin ?? '',
-    out: opts.out ?? ((s) => process.stdout.write(s + '\n')),
-    err: opts.err ?? ((s) => process.stderr.write(s + '\n')),
+    out: (s) => rawOut(terminalSafe(s)),
+    err: (s) => rawErr(terminalSafe(s)),
     now: opts.now ?? (() => new Date().toISOString()),
   };
   try {

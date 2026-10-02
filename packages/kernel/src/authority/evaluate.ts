@@ -6,7 +6,9 @@ import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.t
 import { packageRoot } from '../launcher/self.ts';
 import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
-import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
+import { flatText } from '../util/shown-text.ts';
+import { decodeUriComponentOrRaw } from '../util/uri.ts';
+import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, privilegeCarriesReadCommand, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
 import { HELM_PRODUCTION, TARGET_KINDS, productionCapabilityFor } from './target-kinds.ts';
 import { copyOutDestinations } from './copy-writes.ts';
@@ -38,9 +40,12 @@ import {
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
   canonicalPath,
+  commandLength,
   descriptorAlias,
   chargeListing,
   isDirectory,
+  isMachineDirectory,
+  isolatedPathView,
   namesAnEntry,
   namesADashedEntry,
   gitDirOf,
@@ -78,7 +83,7 @@ import {
 } from './k8s.ts';
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
-import { WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
+import { DecisionMemo, WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
 import { localRead } from './local-reads.ts';
 import { directorySelector } from './pkg-selectors.ts';
 import { assignmentWord, bindingsOf, type Binding as ShellBinding } from './bindings.ts';
@@ -534,6 +539,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
   const nestSubshell = (from: number): void => {
     const id = ++SUBSHELL_SEQ;
     const depth = subshellIds.length;
+    chargeWork((segments.length - from) * (depth + 4)); // (every stage of the element is copied with a longer path)
     for (let k = from; k < segments.length; k++) {
       const sg = segments[k]!;
       const path = sg.subshellPath ?? [];
@@ -542,6 +548,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
     }
   };
   const endElement = (how: 'pipe' | 'and-or' | 'list' | 'background'): void => {
+    chargeWork(segments.length - elementStart);
     for (let k = elementStart; k < segments.length; k++) {
       const sg = segments[k]!;
       if (how === 'pipe') sg.feedsPipe = true;
@@ -557,6 +564,14 @@ export function splitShellPipeline(command: string): ShellStage[] {
   };
   /** the ids of the subshells the scanner is inside right now, outermost first */
   const subshellIds: number[] = [];
+  /** EVERY STAGE A NESTED BODY HANDS UP IS COPIED, with a subshell path one longer: a substitution nested n deep copies its O(n) stages at
+   *  each of n levels with paths O(n) long, and none of it was paid for - three kilobytes of `$($($(…` took two and a half seconds at the
+   *  bound, nine times the price of a flat line of the same units (closure audit 2026-10-02, general property I). */
+  const chargeNested = (inner: readonly { subshellPath?: readonly number[] }[]): void => {
+    let units = 0;
+    for (const sg of inner) units += 4 + subshellIds.length + (sg.subshellPath?.length ?? 0);
+    chargeWork(units);
+  };
   /** the operator seen since the last stage was pushed; the next stage carries it */
   let lastSep: '&&' | '||' | ';' | '\n' | '&' | '|' | undefined;
   let sawProcessSubstitution = false;
@@ -1037,6 +1052,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         {
           // one shell for the whole substitution body: a `cd` in it reaches the later stages of the body and nothing else
           const id = ++SUBSHELL_SEQ;
+          chargeNested(innerSegments);
           for (const s of innerSegments)
             segments.push({ ...s, inSubshell: true, subshellPath: [...subshellIds, id, ...(s.subshellPath ?? [])] });
         }
@@ -1081,6 +1097,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
           const backticked = splitShellPipeline(command.slice(i + 1, end).replace(/\\([`$\\])/g, '$1'));
           {
             const id = ++SUBSHELL_SEQ;
+            chargeNested(backticked);
             for (const s of backticked)
               segments.push({ ...s, inSubshell: true, subshellPath: [...subshellIds, id, ...(s.subshellPath ?? [])] });
           }
@@ -3664,7 +3681,7 @@ export function cwdTimeline(
     };
     // every stage carries a copy of the set of directories it may run in, and every later reader walks it: the set and the
     // length of its members are what this stage costs, so a command that keeps moving somewhere new pays for it
-    chargeWork(STAGE_COST + point.dirs.reduce((n, d) => n + d.length, 0));
+    chargeWork(STAGE_COST + point.dirs.reduce((n, d) => n + commandLength(d, [start]), 0));
     out.push(point);
 
     // a stage that FEEDS a pipe, runs in the background or sits in a subshell cannot reach the caller - and that is a
@@ -4257,7 +4274,8 @@ const copyValueOpts = (head: string): RegExp | undefined => VALUE_OPTS_BY_HEAD[h
 const GIT_HOOK_FILE_RE =
   /^(?:applypatch-msg|pre-applypatch|post-applypatch|pre-commit|pre-merge-commit|prepare-commit-msg|commit-msg|post-commit|pre-rebase|post-checkout|post-merge|pre-push|pre-receive|update|proc-receive|post-receive|post-update|reference-transaction|push-to-checkout|pre-auto-gc|post-rewrite|sendemail-validate|fsmonitor-watchman|p4-changelist|p4-prepare-changelist|p4-post-changelist|p4-pre-submit|post-index-change)$/;
 
-const hooksDirCache = new WeakMap<object, { dirs: string[]; files: string[] }>();
+// (a MEMO ACROSS DECISIONS that pays, once per decision, what computing the value cost: see DecisionMemo in work-bound.ts)
+const hooksDirCache = new DecisionMemo<object, { dirs: string[]; files: string[] }>(true);
 
 /** THE HOOKS DIRECTORIES THIS REPOSITORY CONFIGURES, apart from `.git/hooks`, and the files that decide where they
  *  are. EGO's shims live wherever `core.hooksPath` points, and a path rule can name only the conventional places
@@ -4267,12 +4285,18 @@ const hooksDirCache = new WeakMap<object, { dirs: string[]; files: string[] }>()
  *  live. Also protected: a file the config INCLUDES (it can set `core.hooksPath` itself) and the TARGET of a hook that
  *  is a symlink (writing the target rewrites the hook). */
 function configuredHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: string[] } {
-  const cached = hooksDirCache.get(ctx);
-  if (cached) return cached;
   const dirs = new Set<string>();
   const files = new Set<string>();
   for (const root of ctx.repoRoots) {
     const values: string[] = [];
+    // (the size is paid for BEFORE the read, and outside the `try`: a bound that is reached must not be swallowed as an unreadable config)
+    let configSize = -1;
+    try {
+      configSize = statSync(join(root, '.git', 'config')).size;
+    } catch {
+      /* no config */
+    }
+    if (configSize >= 0) chargeWork(READ_FILE_COST + configSize);
     try {
       const text = readFileSync(join(root, '.git', 'config'), 'utf8');
       let section = '';
@@ -4315,9 +4339,11 @@ function configuredHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: s
       }
     }
   }
-  const out = { dirs: [...dirs], files: [...files] };
-  hooksDirCache.set(ctx, out);
-  return out;
+  return { dirs: [...dirs], files: [...files] };
+}
+/** (what the evaluator asks: the answer is remembered for the context, and its first use in each decision pays what reading it cost) */
+function cachedHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: string[] } {
+  return hooksDirCache.get(ctx, () => isolatedPathView(() => configuredHooksDirs(ctx)));
 }
 
 /** The names a credential file is given. A wildcard cannot be classified as a path, so it is asked of these. */
@@ -4413,7 +4439,13 @@ export function classifyPath(
  *  (a link to it) named a credential store by a spelling the text rules do not know, and were an ASK for a read outside the workspace. The
  *  directory is asked about under the name it REALLY has, with the slash: [] when the path is not a directory. */
 function contentsProbe(abs: string): string[] {
-  if (!isDirectory(abs)) return [];
+  if (!isDirectory(abs)) {
+    // THE MACHINE'S OWN DIRECTORIES ARE PRICED AS THE DIRECTORIES THEY ARE, there or not: `ls ~` is the same amount of work on a machine with no
+    // HOME as on one with it (RB-7). The probe that was not made is paid for as if it had been; any other path that is not a directory
+    // is a file or nothing, and that is the disk's, as it always was.
+    if (isMachineDirectory(abs)) chargeWork(PATH_JUDGE_COST + commandLength(abs.endsWith('/') ? abs : `${abs}/`));
+    return [];
+  }
   const real = canonicalPath(abs);
   return [real.endsWith('/') ? real : `${real}/`];
 }
@@ -4535,7 +4567,7 @@ function classifyResolvedPath(
   abs: string,
 ): CapabilityHit {
   // a path is tested against every path rule of the table (a few hundred globs): that is the work, and it is paid first
-  chargeWork(PATH_JUDGE_COST + abs.length);
+  chargeWork(PATH_JUDGE_COST + commandLength(abs));
   if (tool !== 'Read' && ctx.egoHome && 'ego.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
@@ -4570,7 +4602,7 @@ function classifyResolvedPath(
       const hit: CapabilityHit = {
         capability: m.capability,
         verdict: verdictFor(table, ctx, m.capability),
-        via: `matcher path ${m.path}`,
+        via: `matcher path ${flatText(m.path, 200)}`,
         absolute: isAbsoluteCap(table, m.capability),
       };
       if (m.layer === 'overlay') overlayHits.push(hit);
@@ -4582,7 +4614,7 @@ function classifyResolvedPath(
   if (tool !== 'Read' && 'fs.hook-config.write' in table.capabilities) {
     const posix = canonicalPath(abs).split(sep).join('/');
     const folded = foldName(posix);
-    const hooks = configuredHooksDirs(ctx);
+    const hooks = cachedHooksDirs(ctx);
     const roots = ctx.repoRoots.map((r) => canonicalPath(r).split(sep).join('/'));
     const hit = (via: string): CapabilityHit => ({
       capability: 'fs.hook-config.write',
@@ -4919,9 +4951,17 @@ function defaultReadFile(abs: string): string | null {
   }
 }
 
+/** a file read while deciding: the open, the read and the parse of what it holds (closure audit 2026-10-02, general property I: the one reader of a workspace file
+ *  charged nothing, so a command naming two thousand different sixty-kilobyte scripts read a hundred and twenty megabytes for free) */
+const READ_FILE_COST = 200;
+
 function readInsideWorkspace(ctx: EvaluationContext, abs: string): string | null {
   if (!inWorkspace(ctx, abs)) return null;
-  return (ctx.readFile ?? defaultReadFile)(abs);
+  // the open is paid for before it is made, the bytes as soon as they are known (the default reader reads at most MAX_SCRIPT_BYTES of a file)
+  chargeWork(READ_FILE_COST);
+  const text = (ctx.readFile ?? defaultReadFile)(abs);
+  if (text !== null) chargeWork(text.length);
+  return text;
 }
 
 /** The text of the file a WORD names, for a reader that opens it itself: the PHYSICAL file (see `openedPath`), read where the
@@ -5057,6 +5097,7 @@ export function listIndexedPaths(indexFile: string): IndexedPaths {
     const st = statSync(indexFile);
     if (!st.isFile()) return { problem: 'the git index is not a file' };
     if (st.size > NESTED_INDEX_BYTES) return { problem: 'the git index is larger than this resolver reads' };
+    chargeWork(READ_FILE_COST + st.size);
     buf = readFileSync(indexFile);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
@@ -5154,6 +5195,7 @@ function readIgnoreLayer(file: string, base: string): IgnoreLayer | null {
     const st = statSync(file);
     if (!st.isFile()) return null;
     if (st.size > 512 * 1024) return { base, anywhere: new Set(), anchored: new Set(), negated: true };
+    chargeWork(READ_FILE_COST + st.size);
     text = readFileSync(file, 'utf8');
   } catch {
     return null;
@@ -8130,28 +8172,31 @@ function chainedHookFiles(dir: string, name: string): string[] {
   return out;
 }
 
-const gitCommonDirCache = new Map<string, string | null>();
+// THE MEMOS SAVE THE PROCESS, NOT THE BOUND: the first use of an entry in each decision pays the spawn it saved (DecisionMemo). A process
+// that has already met a directory is not a cheaper process to decide in - a cold and a warm one spent 100,000 units apart (RB-7).
+const gitCommonDirMemo = new DecisionMemo<string, string | null>();
 /** The MAIN worktree of a linked worktree: the parent of the shared git common dir. Memoised like the toplevel. */
 function gitCommonDir(dir: string): string | null {
   const key = canonicalPath(dir);
-  const hit = gitCommonDirCache.get(key);
-  if (hit !== undefined) return hit;
-  const r = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir);
-  const main = r.ok && r.stdout ? canonicalPath(dirname(r.stdout.trim())) : null;
-  gitCommonDirCache.set(key, main === key ? null : main);
-  return gitCommonDirCache.get(key) ?? null;
+  return gitCommonDirMemo.get(key, () =>
+    isolatedPathView(() => {
+      const r = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir);
+      const main = r.ok && r.stdout ? canonicalPath(dirname(r.stdout.trim())) : null;
+      return main === key ? null : main;
+    }),
+  );
 }
 
-const gitToplevelCache = new Map<string, string | null>();
+const gitToplevelMemo = new DecisionMemo<string, string | null>();
 /** `git rev-parse --show-toplevel` for a directory, memoised for the life of the process. */
 function gitToplevel(dir: string): string | null {
   const key = canonicalPath(dir);
-  const hit = gitToplevelCache.get(key);
-  if (hit !== undefined) return hit;
-  const r = git(['rev-parse', '--show-toplevel'], dir);
-  const top = r.ok && r.stdout ? canonicalPath(r.stdout.trim()) : null;
-  gitToplevelCache.set(key, top);
-  return top;
+  return gitToplevelMemo.get(key, () =>
+    isolatedPathView(() => {
+      const r = git(['rev-parse', '--show-toplevel'], dir);
+      return r.ok && r.stdout ? canonicalPath(r.stdout.trim()) : null;
+    }),
+  );
 }
 
 /** The repository `git` will actually act on: resolved from the effective directory the way git resolves it, and
@@ -9527,6 +9572,16 @@ function resolveScriptCommand(
   // head plus the arguments that decide its shape (`go test`, `cmake --version`), so a bounded invocation of a
   // discovering tool stays frictionless without weakening that tool's default.
   const bare = head.replace(/\.(exe|cmd|bat)$/i, '');
+  // A PRIVILEGE CARRIER'S CLOSURE IS THE COMMAND IT CARRIES, when that command is located and the carrier's own options run nothing of
+  // their own (AUTH-7): the command behind it is classified on its own, so `sudo` itself adds no unread program
+  if ((bare === 'sudo' || bare === 'doas') && privilegeCarriesReadCommand(tokens))
+    return {
+      kind: 'none',
+      key: `carrier:${bare}`,
+      body: null,
+      reason: `${bare} runs the command behind it, which is analysed on its own`,
+      resolution: 'NOT_A_PRODUCER',
+    };
   const normTokens = tokens.join(' ');
   const match = (list: readonly string[]): string | null => {
     let best: string | null = null;
@@ -12828,7 +12883,7 @@ function relaxLocation(table: CompiledAuthorityTable, ctx: EvaluationContext, hi
     }
     return found;
   };
-  const verdict = judgeLocation(name, decodeURIComponent(at[1]!), where);
+  const verdict = judgeLocation(name, decodeUriComponentOrRaw(at[1]!), where);
   if (verdict === 'refuse') return hit;
   const capability = verdict === 'ask' ? 'command.env-override' : 'command.read-only';
   return {
@@ -12877,7 +12932,7 @@ function classifyNormalized(
           const hit: CapabilityHit = {
             capability: m.capability,
             verdict: verdictFor(table, ctx, m.capability),
-            via: `matcher /${m.command}/`,
+            via: `matcher /${flatText(m.command, 400)}/`,
             segment: norm,
             absolute: isAbsoluteCap(table, m.capability),
           };
@@ -12894,7 +12949,7 @@ function classifyNormalized(
           {
             capability: m.capability,
             verdict: verdictFor(table, ctx, m.capability),
-            via: `matcher /${m.command}/`,
+            via: `matcher /${flatText(m.command, 400)}/`,
             segment: norm,
             absolute: isAbsoluteCap(table, m.capability),
           },
@@ -13219,6 +13274,9 @@ function namesAnEntryByWildcard(
   const set = globMatches(cwd, tok, old, shellGlob);
   return !set.dynamic && (set.paths.length > 0 || set.bounded);
 }
+
+/** the place under a registered root that an overlay path rule guards: a key compared against the roots a search reaches, never printed */
+const guardedPath = (root: string, prefix: string): string => `${root}/${prefix}`;
 
 /** Path-like tokens of a segment, read by the shared resolver in the tracked cwd (one entry per reading of each token);
  *  tokens with unresolved variables are reported as dynamic. */
@@ -14479,13 +14537,13 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       for (const m of overlayReads) {
         const prefix = m.path!.split(/[*?[{]/)[0]!.replace(/\/$/, '');
         if (prefix === '') continue;
-        const guarded = roots.map((r) => foldName(`${r}/${prefix}`));
+        const guarded = roots.map((r) => foldName(guardedPath(r, prefix)));
         const reached = searchRoots.find((r) => guarded.some((g) => g === foldName(r) || g.startsWith(foldName(r).replace(/\/$/, '') + '/')));
         if (reached !== undefined) {
           hits.push({
             capability: m.capability,
             verdict: verdictFor(table, ctx, m.capability),
-            via: `recursive read of ${reached.slice(reached.lastIndexOf('/') + 1) || '/'} reaches ${m.path}`,
+            via: `recursive read of ${reached.slice(reached.lastIndexOf('/') + 1) || '/'} reaches ${flatText(m.path, 200)}`,
             segment: seg,
             absolute: isAbsoluteCap(table, m.capability),
           });
@@ -15602,6 +15660,11 @@ function printsLike(text: string): string {
   return tail;
 }
 
+/** the characters that stand for HOME and for the working directory while the words of a producer are read (private-use code points: no word, quote,
+ *  escape or blank of a shell, and none that `literalStdout` looks at) */
+const HOME_STAND_IN = '';
+const PWD_STAND_IN = '';
+
 /** THE READERS THE DATAFLOW PLAN ASKS OF THE ANALYZER (dataflow.ts, PA-01), bound to the directory a stage runs in and to the writes the line
  *  has made so far: a file is content the line may rely on only if nothing earlier on the line writes it. */
 function flowReadersFor(ctx: EvaluationContext, cwd: string, written: ReadonlySet<string>): FlowReaders {
@@ -15618,8 +15681,13 @@ function flowReadersFor(ctx: EvaluationContext, cwd: string, written: ReadonlySe
     return tokenize(n);
   };
   return {
-    // (`$HOME` and `$PWD` are plain variables the producer's words may hold: the text the shell prints is the directory they name)
-    literal: (text, heredoc) => literalStdout(substituteKnownVars(printsLike(text), new Map([['HOME', homedir()], ['PWD', cwd]])), heredoc),
+    // (`$HOME` and `$PWD` are plain variables the producer's words may hold: the text the shell prints is the directory they name. They are read
+    // as one character each and put back as the directory in what is printed, so that the price of reading the producer is its text, and not how
+    // long the machine's directory is - RB-7)
+    literal: (text, heredoc) => {
+      const printed = literalStdout(substituteKnownVars(printsLike(text), new Map([['HOME', HOME_STAND_IN], ['PWD', PWD_STAND_IN]])), heredoc);
+      return printed === null ? null : printed.split(HOME_STAND_IN).join(homedir()).split(PWD_STAND_IN).join(cwd);
+    },
     fileContent: (text) => {
       const w = tokenize(emitterTail(printsLike(text)));
       if ((w[0] ?? '').replace(/^.*\//, '') !== 'cat' || w.length < 2) return null;
@@ -16702,7 +16770,7 @@ export function classifyUrl(
       const hit: CapabilityHit = {
         capability: m.capability,
         verdict: verdictFor(table, ctx, m.capability),
-        via: `matcher url /${m.url}/`,
+        via: `matcher url /${flatText(m.url, 400)}/`,
         absolute: isAbsoluteCap(table, m.capability),
       };
       if (m.layer === 'overlay') overlayHits.push(hit);
@@ -17071,6 +17139,8 @@ export function evaluate(table: CompiledAuthorityTable, ctx: EvaluationContext, 
         return { verdict: hit.verdict, hits: [hit], reason: renderReason(base, outcome), decisive: hit, code: outcome.code, rule: outcome.rule };
       }
     }),
+    // (what the host registered is not what the command named: the units a decision spends do not depend on where the checkout sits)
+    [ctx.cwd, ctx.egoHome, ...ctx.repoRoots],
   );
 }
 

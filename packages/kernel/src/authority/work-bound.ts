@@ -66,11 +66,13 @@ let limit = WORK_LIMIT;
 let active = false;
 let finished = 0;
 let override: number | null = null;
+let decisions = 0;
 
 /** Runs `body` under a fresh budget. Nested calls share the outer one: one decision, one budget. */
 export function withWorkBound<T>(body: () => T, units = override ?? WORK_LIMIT): T {
   if (active) return body();
   active = true;
+  decisions += 1;
   spent = 0;
   limit = units;
   try {
@@ -96,4 +98,46 @@ export function chargeWork(units: number): void {
   if (!active) return;
   spent += units;
   if (spent > limit) throw new WorkBoundExceeded(spent, limit);
+}
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * A MEMO SAVES TIME, NOT THE BOUND (closure audit 2026-10-02, RB-7)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/**
+ * A value remembered across decisions - the toplevel of a directory, the hooks directories of a context - because computing it costs a
+ * process or a read. The header of this module says the units a decision spends are the command's: "the same command costs the same on
+ * every machine". A memo that skipped the charge made them the process's: a warm process spent 100,000 units less than a cold one on
+ * the same command (the spawn it did not make), and a command within that margin of the limit was answered by one and refused by the
+ * other. So the FIRST use of an entry in each decision pays what computing it cost, exactly once; the uses after it in the same
+ * decision are free, as they always were.
+ */
+export class DecisionMemo<K extends object | string, V> {
+  private readonly entries: { get(k: K): MemoEntry<V> | undefined; set(k: K, e: MemoEntry<V>): unknown };
+  /** `weak`: the keys are objects, and the memo must not keep them alive */
+  constructor(weak = false) {
+    this.entries = (weak ? new WeakMap<WeakKey, MemoEntry<V>>() : new Map<K, MemoEntry<V>>()) as unknown as DecisionMemo<K, V>['entries'];
+  }
+  get(key: K, compute: () => V): V {
+    const hit = this.entries.get(key);
+    if (hit) {
+      if (hit.paidIn !== decisions) {
+        hit.paidIn = decisions;
+        chargeWork(hit.cost);
+      }
+      return hit.value;
+    }
+    const before = workSpent();
+    const value = compute();
+    this.entries.set(key, { value, cost: Math.max(0, workSpent() - before), paidIn: decisions });
+    return value;
+  }
+}
+
+interface MemoEntry<V> {
+  value: V;
+  /** what computing it cost, in work units */
+  cost: number;
+  /** the decision that last paid for it */
+  paidIn: number;
 }

@@ -41,6 +41,7 @@ import {
   policyCacheFreshness,
   POLICY_CACHE_RELATIVE,
 } from '../src/policy/cache.ts';
+import { sealFor } from '../src/policy/seal.ts';
 import { handleHook, type HookRuntime } from '../src/hooks/handle.ts';
 import type { HookDecision, HookEvent } from '../src/hooks/events.ts';
 import { writePin, readPin } from '../src/launcher/pin.ts';
@@ -1208,8 +1209,11 @@ test('B7 other refusals the hook takes are coded too: budgets, the retry stop, t
 
 test('B7b the pre-push hook refuses an agent shell with the same code, rule source and configurability', () => {
   const p = project();
-  ensurePolicyCache(CP, p.root, SELF());
-  const refused = runGitHook('pre-push', p.root, { CLAUDECODE: '1' }, '');
+  // (the cache is the one THIS machine wrote: sealed with the key in the project's EGO_HOME, which the git hook is given as well - AUTH-5)
+  const seal = sealFor(p.env);
+  const agent = { CLAUDECODE: '1', EGO_HOME: p.env['EGO_HOME']! };
+  ensurePolicyCache(CP, p.root, SELF(), { seal });
+  const refused = runGitHook('pre-push', p.root, agent, '');
   assert.equal(refused.ok, false);
   const text = refused.messages.join('\n');
   assert.match(text, /ADMIN_DENIED: pushes from agent sessions are governed by EGO/);
@@ -1221,8 +1225,8 @@ test('B7b the pre-push hook refuses an agent shell with the same code, rule sour
   assert.equal(hook.code, 'ADMIN_DENIED');
   // an organization that enables the push at ASK lets the shell reach the PreToolUse gate
   orgPolicy(p.root, 'Requires human approval', 'git.remote.push');
-  ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true });
-  assert.equal(runGitHook('pre-push', p.root, { CLAUDECODE: '1' }, '').ok, true);
+  ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true, seal });
+  assert.equal(runGitHook('pre-push', p.root, agent, '').ok, true);
 });
 
 test('B8 POLICY_INVALID: a policy that fails to compile refuses with the code, the file and what can fix it', async () => {
@@ -1476,7 +1480,8 @@ test('C4 the SessionStart text and the generated root instructions use the canon
 
 test('D1 `ego authority diff` prints the classified changes and marks every widening', async () => {
   const p = project();
-  ensurePolicyCache(CP, p.root, SELF());
+  const seal = sealFor(p.env);
+  ensurePolicyCache(CP, p.root, SELF(), { seal });
   orgPolicy(p.root, 'Requires human approval', 'forge.pr.create');
   // before a human accepts it the working-tree file is only a PROPOSAL: current is unchanged, proposed is wider
   const preview = await cli(p, ['authority', 'diff', 'current', 'proposed']);
@@ -1485,12 +1490,13 @@ test('D1 `ego authority diff` prints the classified changes and marks every wide
   assert.match(preview.out, /WIDENING/);
   assert.match(preview.out, /forge\.pr\.create/);
   assert.match(preview.out, /DENY -> ASK/);
-  assert.match(preview.out, /STANDARD 4\/4/, 'it says in which profile and in how many of its modes');
+  // (two of the four modes - BENCHMARK and PRODUCTION_ADVISORY - deny every administrable write even once an organization enables it: AUTH-9)
+  assert.match(preview.out, /STANDARD 2\/4/, 'it says in which profile and in how many of its modes');
   assert.match(preview.out, /1 widening/);
   const failing = await cli(p, ['authority', 'diff', 'current', 'proposed', '--fail-on-widening']);
   assert.equal(failing.code, 1, 'a CI step can refuse an unreviewed widening');
   // a human accepts it; core -> current now shows the same change, and the reverse is a narrowing with no WIDENING mark
-  ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true });
+  ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true, seal });
   const applied = await cli(p, ['authority', 'diff', 'core', 'current']);
   assert.match(applied.out, /WIDENING.*forge\.pr\.create/);
   const reverse = await cli(p, ['authority', 'diff', 'current', 'core']);

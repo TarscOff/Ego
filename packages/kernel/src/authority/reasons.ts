@@ -22,6 +22,7 @@ import { VERDICT_RANK, type Verdict } from '../control-plane/types.ts';
 import type { CompiledAuthorityTable } from './compile.ts';
 import {
   LOCK_TIER_LABEL,
+  PENDING_LAYER,
   capabilityCeiling,
   describeSource,
   isTargetUnclassified,
@@ -238,6 +239,13 @@ function configurability(
   const cap = table.capabilities[hit.capability];
   const ceiling = capabilityCeiling(table, hit.capability);
   const paths: string[] = [];
+  // an enablement that is written in a layer file and not yet accepted is the one thing that WOULD change this, and it is waiting for a person
+  if ((table.provenance[hit.capability] ?? []).some((t) => t.layer.startsWith(PENDING_LAYER)))
+    return {
+      changeable: true,
+      changeBy:
+        'a widening of it in the layer files is awaiting a human: run `ego init` from your own terminal, read what it shows and accept it (the policy in force is the last accepted one)',
+    };
   if (cap?.lock === 'admin-governed' && hit.verdict === 'DENY')
     paths.push(
       'the organization policy layer (policies/organization/permissions.md, accepted by a human with `ego init`) can enable it, and then every use is one human approval (TASK_APPROVAL; the ceiling is ASK)',

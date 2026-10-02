@@ -39,6 +39,9 @@ export function isTargetUnclassified(capability: string): boolean {
   );
 }
 
+/** The trace step the cache puts after a capability's provenance while a widening of it waits for a human: an annotation, not a decision. */
+export const PENDING_LAYER = 'pending (a widening in the layer files awaits';
+
 /** The layer that SET a verdict, and the file it was read from. */
 export interface VerdictSource {
   /** `core`, `absolute`, `admin-governed`, `organization (…)`, `overlay`, `profile P` or `mode M` */
@@ -81,16 +84,21 @@ export function verdictSource(
   mode: string,
   id: string,
 ): VerdictSource {
+  // the compiler wrote down who moved the cell: a profile's ASK that one mode turns into DENY is the profile's in every other mode
+  const origin = table.cellOrigins?.[profile]?.[mode]?.[id];
+  if (origin === 'mode') return { layer: `mode ${mode}`, file: null };
+  if (origin === 'profile') return { layer: `profile ${profile}`, file: null };
   const cell = cellVerdict(table, profile, mode, id);
   const layered = table.effective[id];
   const prof = table.profiles[profile];
-  if (layered !== undefined && cell !== layered && prof) {
+  // (a table written before the record existed is read the way it always was; one that has it and names no origin was moved by neither)
+  if (table.cellOrigins === undefined && layered !== undefined && cell !== layered && prof) {
     const cells = Object.values(prof.modes).map((m) => m[id]);
     return cells.every((v) => v === cell)
       ? { layer: `profile ${profile}`, file: null }
       : { layer: `mode ${mode}`, file: null };
   }
-  const last = (table.provenance[id] ?? []).filter((t) => !t.layer.startsWith('grant')).at(-1);
+  const last = (table.provenance[id] ?? []).filter((t) => !t.layer.startsWith('grant') && !t.layer.startsWith(PENDING_LAYER)).at(-1);
   return { layer: last?.layer ?? 'core', file: last?.file ?? null };
 }
 

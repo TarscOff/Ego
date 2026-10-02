@@ -566,3 +566,51 @@ discipline of decision Q84 (authority changes are never patch releases).
   and `sed -n '/a/,/b/p' f` asked); a wildcard that is only a piece of a string (`perl -pi -e 's/".*"/x/'`) asks, as it did before wildcard
   destinations were enumerated; a parenthesis is a glob group only with its partner in the same segment (`python -c 'print("a/*")'` is a
   program text); and an unenumerable segment (`@(a|b)`) bounds a wildcard only where there is a directory to match it in.
+- **The authority path is robust, and three properties are enforced by tests that read the code** (closure audit 2026-10-02, wave 5,
+  independent reviews "authority" and "robust": AUTH-2..12, AUTH-14, RB-2, RB-3, RB-6, RB-7; `closure-authority2.test.ts`). The policy cache is
+  derived state: a file that cannot be read (empty, truncated, a conflict marker, a directory) is absent and regenerated, and a cache written
+  by an earlier build is read by `ego doctor`, `ego check` and `ego authority diff` with the same tolerance (AUTH-2, AUTH-10). "Is this table
+  wider" has ONE description (`authority/table-diff.ts`, `AUTHORITY_TABLE_FIELDS`: every field of a compiled table is named in it, as authority,
+  derived or provenance, and a field the description does not name does not compile); the release gate, the pending-widening gate, `ego authority
+  diff` and the AUTHORITY DIFF `ego init` prints are one function over it, and the gate is its widening subset (AUTH-3). It now sees what the
+  hand-written predicates missed: a reordered matcher, a widened vocabulary, a relaxed profile requirement, a changed default mode. The table
+  hash no longer carries a path of the machine (AUTH-11). **A widening is accepted on the machine of the person who read it**: what a person
+  accepts is the layer files and the widening lines they were shown, re-verified when the acceptance is written (AUTH-4), and the cache is
+  sealed with an HMAC whose key lives in `EGO_HOME` (`policy-seal.key`, mode 0600, made by `ego init`), so a cache that a teammate's commit or
+  a copied directory brings in - internally perfect, recording an acceptance nobody gave on this machine - is read as absent (AUTH-5).
+  **Upgrade note: the first `ego init` on each machine after this release re-accepts the widenings in the layer files**, because the caches
+  written before it are not sealed; until then they are pending and the narrow policy applies. A tool call that runs `ego init` or `ego sync`
+  asks (new capability `ego.policy.accept`), as `ego upgrade` and `ego skills install` do (their grant rows lifted nothing real: the matchers
+  were missing or unanchored), `sudo -i`/`-s`/`-e`/`su`/`doas -s` ask, and `dropdb` is a bounded client like `psql` (AUTH-7). A refusal names the
+  rule that set the verdict, not a mode that has no override for the cell (`cellOrigins`; AUTH-8), and a mode may only narrow an ADMIN_GOVERNED
+  capability: BENCHMARK and PRODUCTION_ADVISORY keep refusing push, PR creation and API writes once an organization enables them (AUTH-9;
+  `ego authority diff` now reads `STANDARD 2/4`). An approval whose endpoint holds a malformed percent escape is presented as text, not thrown
+  (AUTH-12). Every capability has a producer or is listed as RESERVED with the reason, in a test (AUTH-14).
+  Robustness: the decision is made outside the session lock and the locked section keeps it when the grants and the mode are unchanged (RB-2:
+  forty parallel tool calls of one session, every counter exact); the duration budget counts activity, with an idle gap capped at thirty
+  minutes, the retry key is the whole step, and a failure is read from every field a host puts one in (RB-3); a Codex payload nests its argv,
+  environment and working directory under `action`, and is the same command however it is nested (RB-6); and the work units a decision spends
+  depend on the command and the declared configuration only - not on HOME, the temporary directory, the checkout depth or whether the process
+  has decided the command before (RB-7).
+  **Channel integrity** (AUTH-6, general property II): text from a layer file, a repository file, a command line or a tool input reaches a
+  person or a model only as quoted data - `shownText` (`util/shown-text.ts`): one line, `\` and `"` escaped, every control, bidirectional and
+  invisible character written as an escape, bounded at 120 characters with a count. The sources are declared `@untrusted` in the code; the
+  hook adapters and the CLI put every string through `terminalSafe`; a bounded-command entry that is not a command name is not taken, and
+  says so; and a structural test fails when code under `packages/*/src` builds a message from one of those sources without the function.
+  **Bounded work** (general property I): `test/support/pathological.ts` has one seeded generator per reader family (50 of them; five name the
+  readers of the operand flow and of the link-keeping copy, merged after the harness was written), and the test
+  asserts at growing sizes that a decision is a verdict, never a throw, paid for in proportion to its input, and an ASK that says "too large to
+  classify within the bound" when the bound is reached. It found two readers that paid nothing: the copies a nested `$(…)` makes (three
+  kilobytes took two and a half seconds at the bound) and every read of a workspace file (a command naming two thousand different 60 KB
+  scripts read 120 MB for nothing); both are charged, and so is the repository config. Visible changes: none for an ordinary command (the
+  verdicts of the ordinary corpus are unchanged, and its largest decision is still a small part of the bound).
+  **Ported onto the readers of waves 5 and 6** (the three places where the two lines of work answered one question twice are one reader each):
+  a Codex shell call is read by ONE function, flat or nested under `action`, with the fields of both - `shell` and `login`, the four spellings of
+  the working directory (the same fact under two names is one directory), `env` and `user` - and the environment is exported BEFORE the
+  directory change, so the whole line is judged in the directory it runs in; the vocabulary of the table is described list by list, typed over
+  every list (the image-setup list that the container closure added is read by the diff, the init diff and the pending-widening gate, and an
+  unaccepted addition to it is dropped by the clamp); and what a decision spends no longer depends on the machine in three more places that
+  the operand-flow and the contents probe added: the directory a producer's words name (HOME and the working directory are one character
+  while the producer is read, and HOME is written as `~` in the line the consumer is judged as), the contents probe of a directory the
+  machine keeps for itself (HOME or the temporary directory, there or not), and the canonical form of a path that has already been walked.
+  One more decode of a percent escape (the location a tool's own variable names) is the one that cannot throw.

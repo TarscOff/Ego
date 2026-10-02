@@ -17,6 +17,7 @@ import {
 } from '../../kernel/src/launcher/self.ts';
 import { egoHome } from '../../kernel/src/launcher/home.ts';
 import { ensurePolicyCache, readPolicyCache } from '../../kernel/src/policy/cache.ts';
+import { sealFor } from '../../kernel/src/policy/seal.ts';
 import { handleHook, refuseHookPayload } from '../../kernel/src/hooks/handle.ts';
 import { HookPayloadError, isHookEventName, type HookDecision } from '../../kernel/src/hooks/events.ts';
 import { parseClaudeCodeEvent, renderClaudeCodeOutput } from '../../adapter-claude-code/src/dialect.ts';
@@ -42,6 +43,7 @@ import {
   formatCapabilityRow,
 } from '../../kernel/src/authority/describe.ts';
 import { authorityCommand } from './authority.ts';
+import { flatText, terminalSafe } from '../../kernel/src/util/shown-text.ts';
 
 /** a deprecation note is one line, said once per process however many times the control plane is loaded */
 const noticesSaid = new Set<string>();
@@ -142,7 +144,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
     }
     case 'check': {
       if (!project) return notInitialized(io);
-      const r = runCheck(project.root);
+      const r = runCheck(project.root, io.env);
       io.out(formatCheck(r));
       return r.ok ? 0 : 1;
     }
@@ -229,10 +231,17 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
   return 0;
 }
 
+/** The question a person is asked before widenings that arrived in the layer files are accepted. The lines are EGO's (each carries the text of a
+ *  layer file only as quoted data, `authority/table-diff.ts`); the boundary escapes the rest. */
+export function wideningQuestion(widenings: readonly string[]): string {
+  return `${widenings.length} widening(s) are waiting in the layer files and would take effect now:\n${widenings.map((w) => `  - ${w}`).join('\n')}\nAccept?`;
+}
+
 /** A yes/no on the human's terminal. Only ever called when stdin AND stdout are TTYs; any failure to read is a no. */
 function ttyConfirm(question: string): boolean {
   try {
-    process.stdout.write(`${question} [y/N] `);
+    // (the boundary: the text of the question is not allowed to rewrite the line the answer is typed on)
+    process.stdout.write(`${terminalSafe(question)} [y/N] `);
     const buf = Buffer.alloc(64);
     const n = readSync(0, buf, 0, buf.length, null);
     return /^y(es)?$/i.test(buf.toString('utf8', 0, n).trim());
@@ -266,10 +275,7 @@ function init(io: CliIo, flags: Record<string, string | boolean>, argv: string[]
   const declined = flags['no-local-targets'];
   if (declined !== undefined && declined !== 'false') opts.noLocalTargets = true;
   if (process.stdin.isTTY && process.stdout.isTTY && io.env['EGO_NONINTERACTIVE'] !== '1')
-    opts.confirmWidening = (widenings) =>
-      ttyConfirm(
-        `${widenings.length} widening(s) are waiting in the layer files and would take effect now:\n${widenings.map((w) => `  - ${w}`).join('\n')}\nAccept?`,
-      );
+    opts.confirmWidening = (widenings) => ttyConfirm(wideningQuestion(widenings));
   const r = initProject(opts);
   const lines = [
     `EGO ${r.pinned === 'created' ? 'initialized' : 're-synchronized'} ${r.projectRoot}`,
@@ -281,7 +287,7 @@ function init(io: CliIo, flags: Record<string, string | boolean>, argv: string[]
       r.detection.siblings.length
         ? `, siblings ${r.detection.siblings
             .slice(0, 8)
-            .map((s) => s.name)
+            .map((s) => flatText(s.name, 60))
             .join(
               ', ',
             )}${r.detection.siblings.length > 8 ? ` (+${r.detection.siblings.length - 8} more)` : ''}`
@@ -332,7 +338,7 @@ function status(io: CliIo, project: ProjectContext | null): number {
 
 function tableFor(io: CliIo, project: ProjectContext) {
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
-  const { cache } = ensurePolicyCache(controlPlaneDir(), project.root, self);
+  const { cache } = ensurePolicyCache(controlPlaneDir(), project.root, self, { seal: sealFor(io.env) });
   sayNoticesOnce(io, cache.notices);
   return cache.table;
 }
@@ -403,7 +409,7 @@ function explain(
   const matchers = table.matchers.filter((m) => m.capability === id);
   if (matchers.length)
     lines.push(
-      `matchers: ${matchers.map((m) => `${m.tool} ${m.command ? `/${m.command}/` : (m.path ?? m.url)}`).join(' | ')}`,
+      `matchers: ${matchers.map((m) => `${m.tool} ${m.command ? `/${flatText(m.command, 400)}/` : flatText(m.path ?? m.url, 200)}`).join(' | ')}`,
     );
   const grants = table.grants.filter((g) => g.capability === id);
   if (grants.length)

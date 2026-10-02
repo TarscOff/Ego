@@ -16,6 +16,7 @@
 //
 // This module is the pure part: which text a substitution leaves, how produced words are split the way their consumer splits them, and
 // which producers and consumers are which. The analyzer (evaluate.ts) holds the stages and runs the judgement.
+import { homedir } from 'node:os';
 import { FILE_OPERAND_READERS } from './operands.ts';
 
 /** where each `$SUBST` the splitter left stands in `text`, outside single quotes, and whether it is inside double quotes */
@@ -40,9 +41,16 @@ export function substitutionSites(text: string): Array<{ at: number; quoted: boo
 }
 
 /** a produced word as text the shell reads back as that word: the characters that would end it, start a quote or a substitution are escaped;
- *  `*`, `?`, `[`, `~` and a plain `$NAME` are left, because the consumer's own readers expand them and an expansion can only add a reading */
+ *  `*`, `?`, `[`, `~` and a plain `$NAME` are left, because the consumer's own readers expand them and an expansion can only add a reading.
+ *
+ *  THE HOME DIRECTORY IS WRITTEN AS `~` AGAIN. The producer's words reach here with `~` and `$HOME` already replaced by the machine's directory (the
+ *  readers of a producer expand them), and the consumer is analysed as a command LINE of that text: the same line, spelled with the machine's
+ *  directory, costs as many units as the directory has characters, which made the price of `echo ~/.ssh/id_rsa | xargs cat` depend on where the
+ *  machine keeps HOME (RB-7). The consumer's readers expand `~` to the very same directory, so the path they judge is the one they judged. */
 export function producedWord(w: string): string {
-  return w.replace(/[\s'"\\;&|<>(){}`!#]/g, '\\$&').replace(/\$(?![A-Za-z_])/g, '\\$');
+  const home = homedir().replace(/\/+$/, '');
+  const word = home !== '' && (w === home || w.startsWith(`${home}/`)) ? `~${w.slice(home.length)}` : w;
+  return word.replace(/[\s'"\\;&|<>(){}`!#]/g, '\\$&').replace(/\$(?![A-Za-z_])/g, '\\$');
 }
 
 /** the text of a substitution as the shell leaves it: trailing newlines are removed; split into words when it stands unquoted */

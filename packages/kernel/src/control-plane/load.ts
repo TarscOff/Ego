@@ -1,6 +1,6 @@
 // Loads and validates the authored control plane. Every problem is collected and reported together; any problem
 // fails the load so a malformed file can never silently weaken enforcement (decision Q10).
-import { join, basename } from 'node:path';
+import { join, basename, relative } from 'node:path';
 import { readdirSync } from 'node:fs';
 import {
   parseMarkdown,
@@ -721,11 +721,14 @@ function parseBoundedCommands(file: string, problems: string[]): BoundedCommands
   };
 }
 
-export function loadControlPlane(root: string): ControlPlane {
+export function loadControlPlane(rootAsGiven: string): ControlPlane {
+  // THE SAME CONTROL PLANE GIVEN AS `/x/control-plane` AND AS `/x/control-plane/` IS THE SAME TABLE: a trailing separator cost the
+  // first character of every source-hash key and changed the table hash (AUTH-11)
+  const root = rootAsGiven.length > 1 ? rootAsGiven.replace(/[\\/]+$/, '') : rootAsGiven;
   const problems: string[] = [];
   const sourceHashes: Record<string, string> = {};
   const rec = (file: string) => {
-    sourceHashes[toPosix(file.slice(root.length + 1))] = sha256Hex(readText(file));
+    sourceHashes[toPosix(relative(root, file))] = sha256Hex(readText(file));
   };
   const req = (rel: string): string => {
     const f = join(root, rel);
@@ -828,8 +831,14 @@ export function loadControlPlane(root: string): ControlPlane {
         problems.push(`${m.file}: override references unknown capability "${o.capability}"`);
       if (absoluteIds.has(o.capability))
         problems.push(`${m.file}: mode may not override absolute deny "${o.capability}"`);
-      if (lockedIds.has(o.capability))
-        problems.push(`${m.file}: mode may not override ADMIN_GOVERNED capability "${o.capability}"`);
+      // A MODE MAY NARROW AN ADMIN_GOVERNED CAPABILITY AND MAY NEVER WIDEN IT. The loader refused a mode that named one at all, so BENCHMARK
+      // ("denies every forge write so a run can never leak into a real tracker") and PRODUCTION_ADVISORY ("nothing executes") could not
+      // say so about the capabilities an organization enables - the very writes they exist to stop - and `git push` and `gh pr create`
+      // asked in both (AUTH-9). The core verdict of the tier is DENY, so DENY is the only verdict that cannot widen it.
+      if (lockedIds.has(o.capability) && o.verdict !== 'DENY')
+        problems.push(
+          `${m.file}: mode may not widen ADMIN_GOVERNED capability "${o.capability}" (${o.verdict}); a mode may only DENY it`,
+        );
     }
   }
   for (const g of grants.grants) {

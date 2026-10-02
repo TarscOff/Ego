@@ -2,7 +2,13 @@
 // hook output. UX only: no policy, permission, task, decision or secret logic lives here.
 import { join } from 'node:path';
 import type { HookEvent, HookDecision, HookEventName } from '../../kernel/src/hooks/events.ts';
-import { checkPayloadEvent, decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
+import {
+  checkPayloadEvent,
+  decisionContext,
+  decisionMessage,
+  decisionReason,
+  isHookEventName,
+} from '../../kernel/src/hooks/events.ts';
 import { readJsonIfExists, writeAtomic, ensureDir } from '../../kernel/src/util/fs.ts';
 
 export const HOST_ID = 'claude-code' as const;
@@ -53,7 +59,9 @@ export function parseClaudeCodeEvent(
 /** Renders a neutral decision as Claude Code hook JSON (stdout) plus the exit code. */
 export function renderClaudeCodeOutput(d: HookDecision): { stdout: string; exitCode: number } {
   const out: Record<string, unknown> = {};
-  if (d.userMessage) out['systemMessage'] = d.userMessage;
+  const context = decisionContext(d);
+  const message = decisionMessage(d);
+  if (message) out['systemMessage'] = message;
   switch (d.event) {
     case 'PreToolUse': {
       const permissionDecision = d.action === 'allow' ? 'allow' : d.action === 'ask' ? 'ask' : 'deny';
@@ -68,21 +76,21 @@ export function renderClaudeCodeOutput(d: HookDecision): { stdout: string; exitC
       if (d.action === 'block' || d.action === 'deny') {
         out['decision'] = 'block';
         out['reason'] = decisionReason(d);
-      } else if (d.context)
-        out['hookSpecificOutput'] = { hookEventName: 'UserPromptSubmit', additionalContext: d.context };
+      } else if (context)
+        out['hookSpecificOutput'] = { hookEventName: 'UserPromptSubmit', additionalContext: context };
       break;
     }
     case 'SessionStart': {
-      if (d.context)
-        out['hookSpecificOutput'] = { hookEventName: 'SessionStart', additionalContext: d.context };
+      if (context)
+        out['hookSpecificOutput'] = { hookEventName: 'SessionStart', additionalContext: context };
       break;
     }
     case 'PostToolUse': {
       if (d.action === 'block' || d.action === 'deny') {
         out['decision'] = 'block';
         out['reason'] = decisionReason(d);
-      } else if (d.context)
-        out['hookSpecificOutput'] = { hookEventName: 'PostToolUse', additionalContext: d.context };
+      } else if (context)
+        out['hookSpecificOutput'] = { hookEventName: 'PostToolUse', additionalContext: context };
       break;
     }
     case 'Stop':
@@ -95,7 +103,7 @@ export function renderClaudeCodeOutput(d: HookDecision): { stdout: string; exitC
     }
     case 'SubagentStart':
     case 'SessionEnd': {
-      if (d.context) out['hookSpecificOutput'] = { hookEventName: d.event, additionalContext: d.context };
+      if (context) out['hookSpecificOutput'] = { hookEventName: d.event, additionalContext: context };
       break;
     }
   }

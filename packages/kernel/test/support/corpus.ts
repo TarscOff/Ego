@@ -298,6 +298,39 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     ],
   },
   {
+    family: 'db',
+    id: 'dropping a database with the PostgreSQL maintenance client',
+    floor: 'ASK',
+    cases: ['dropdb app', 'dropdb -h localhost app', 'dropdb --if-exists app'],
+  },
+  {
+    // CLOSURE AUDIT 2026-10-02, AUTH-7. `grants.md` has rows for "upgrade ego" and "install the skill" and the commands matched nothing, so the
+    // phrase was answered "granted" and the command stayed an unknown head. They are the harness changing ITSELF (the pinned runtime, the installed
+    // skills), spelled the ways the binary is named; each asks, and BENCHMARK denies them.
+    family: 'ego',
+    id: 'a change of the pinned runtime or of the installed skills, run from a tool call',
+    floor: 'ASK',
+    cases: [
+      'ego upgrade',
+      'ego rollback',
+      'harness upgrade',
+      'harness rollback',
+      './node_modules/.bin/ego upgrade',
+      'ego skills install some-skill',
+      'ego skills update',
+      'ego skills add some-skill',
+      'harness skills install some-skill',
+    ],
+  },
+  {
+    // AUTH-5/AUTH-7. `ego init` and `ego sync` (which runs init) accept whatever widenings the layer files hold when no agent shell is
+    // recognised: the person who is asked to approve them has to be told that is what they are.
+    family: 'ego',
+    id: 'an acceptance of the policy in the layer files, run from a tool call',
+    floor: 'ASK',
+    cases: ['ego init', 'ego sync', 'harness init', 'ego init --profile STRICT', './node_modules/.bin/ego init', 'ego init --local-target kube:team-dev'],
+  },
+  {
     family: 'ego',
     id: "the organization's local-target registry written",
     floor: 'DENY',
@@ -488,7 +521,20 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     family: 'command',
     id: 'privilege escalation',
     floor: 'ASK',
-    cases: ['sudo apt-get install x'],
+    // (AUTH-7: `sudo` closes over the command it carries when its own options run nothing; a root shell, an editor and a program the
+    // environment names are not that, and a phrase never reaches them)
+    cases: [
+      'sudo apt-get install x',
+      'sudo -i',
+      'sudo -s',
+      'sudo -e /etc/hosts',
+      'sudo -A ls',
+      'sudo su',
+      'sudo -u root -H bash',
+      'doas -s',
+      'sudo -n true',
+      'sudo -l',
+    ],
   },
   {
     family: 'command',
@@ -3725,6 +3771,17 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'ln -s . self',
     'ln -s .. parent',
     'ln -s /usr/local/bin/node node',
+  ],
+  // WAVE 5 (authority, closure-authority2.test.ts): reading ABOUT the harness's own commands, or about sudo, is not running them. The rules that
+  // gate `ego upgrade`, `ego init` and `sudo` are anchored at the command, and these are the statements an anchor that slipped would gate.
+  authority2: [
+    'grep -rn "ego upgrade" README.md',
+    'grep -rn "ego init" README.md',
+    'grep -n "ego skills install" README.md',
+    'echo ego skills install',
+    'echo "sudo -i"',
+    'which sudo',
+    'command -v ego',
   ],
   // WAVE 3 (git, environment): the statements the readers of those two dimensions must leave alone. A binding of a name that re-points nothing is
   // ordinary whatever builtin binds it; a git option spelled the ordinary way is an option, not an act; a hyphenated git command that has a
