@@ -1900,7 +1900,13 @@ function normalizeSegmentInner(segment: string): string[] {
   {
     // (the command is found where it STARTS: a wrapper in front of it - `env awk -f x`, `timeout 5 sed ...` - is not the head, and the
     // matchers this replaces read the normalized text, where the wrapper was already gone)
-    const t0 = lead0.map((x) => x.text).slice(chain0.at);
+    // (...and a shell keyword in front of it - `then sed ...`, `do awk ...`, `! sed ...` - is structure and not a wrapper: the segments of a
+    // conditional or a loop are cut at the `;`, and the first of them starts with the keyword)
+    // (the guard above stops at `npx` and at the carriers that retain something, because ITS question is what a package runner fetches; this
+    // one is where the command is, and `npx --no-install sed ...` runs sed. A carrier with a PAYLOAD - `xargs`, `find -exec` - holds a
+    // command of its own, which the normalizer reaches as a segment of its own and asks again)
+    const chainM = peelCarriers(lead0.map((x) => x.text), 0, { stopAt: (_name: string, spec: Carrier) => spec.payload === true, prefixes: HEAD_PREFIXES });
+    const t0 = lead0.map((x) => x.text).slice(chainM.at);
     const h0 = (t0[0] ?? '').replace(/^.*\//, '');
     // (the options are read the way awk's getopt reads them: `-Efile` and `-nEfile` are `-E file`, so they are found by the one reader
     // of awk's file options and not by a test for the word `-E` - review 11 #205)
@@ -1909,11 +1915,11 @@ function normalizeSegmentInner(segment: string): string[] {
     // ...AND A PROGRAM THE SHELL BUILDS (`awk "$PROG" f`) IS A PROGRAM NOBODY HAS READ, as one in a file is
     else if (/^(awk|gawk|mawk|nawk)$/.test(h0)) {
       const at = awkProgramAt(t0, 0);
-      if (at !== null && lead0[chain0.at + at]?.expands === true) extra.push(`${MARK}awk-program-file`);
+      if (at !== null && lead0[chainM.at + at]?.expands === true) extra.push(`${MARK}awk-program-file`);
     }
     // WHETHER A SED PROGRAM RUNS A COMMAND is the answer of the scanner that reads a sed script the way sed does (program-words.ts), asked
     // of the script sed's option parser finds - not of a regex over the line, which found the letter `e` in a file called `service.ts`
-    if (/^(sed|gsed)$/.test(h0) && sedExecutes(t0, 0, new Set(lead0.slice(chain0.at).filter((x) => x.expands).map((x) => x.text)))) extra.push(`${MARK}sed-executes`);
+    if (/^(sed|gsed)$/.test(h0) && sedExecutes(t0, 0, new Set(lead0.slice(chainM.at).filter((x) => x.expands).map((x) => x.text)))) extra.push(`${MARK}sed-executes`);
   }
   // A REDIRECTION TO `/dev/tcp` OR `/dev/udp` IS A NETWORK CONNECTION, and it needs no network binary. Both
   // directions matter: `> /dev/tcp/h/p` sends whatever the command produces, and `< /dev/tcp/h/p` makes the
@@ -14837,7 +14843,8 @@ function carriedShellBodies(seg: string): string[] {
   // (independent review 11: r11-22, r11-25, r11-27)
   const peeled = peelCarriers(t, 0, { prefixes: HEAD_PREFIXES });
   if (peeled.shellString !== null) out.push(peeled.shellString);
-  out.push(...payloadCommands(t, peeled.at));
+  const markedAll = tokenizeMarked(seg);
+  out.push(...payloadCommands(t, peeled.at, markedAll.length === t.length ? markedAll.map((x) => x.expands) : undefined));
   return [...new Set(out)];
 }
 
@@ -14849,11 +14856,18 @@ function carrierPartialOf(seg: string): string | null {
 
 /** THE COMMANDS A PAYLOAD CARRIER RUNS, as text with the quoting kept: every `-exec`/`-execdir`/`-ok`/`-okdir` clause of a
  *  `find`, every `-x`/`-X` clause of an `fd`. The clause ends at `;` or `+`. `{}` is left where it stands. */
-function payloadCommands(t: readonly string[], at: number): string[] {
+function payloadCommands(t: readonly string[], at: number, expands?: readonly boolean[]): string[] {
   // (where a clause begins and ends is carriers.ts's answer, shared with the normalizer's payload reader and the data-word reader)
   return payloadSpans(t, at)
     .filter(([from, to]) => to > from)
-    .map(([from, to]) => requote(t.slice(from, to)));
+    .map(([from, to]) =>
+      // (a word the shell expands is handed on in double quotes, where the `$` is still live: single quotes made `awk "$PROG"` the program
+      // `$PROG`, which is a text, and not a program nobody has read)
+      t
+        .slice(from, to)
+        .map((w, k) => (expands?.[from + k] === true && /[$`]/.test(w) ? `"${w.replace(/(["\\`])/g, '\\$1')}"` : requote([w])))
+        .join(' '),
+    );
 }
 
 /** AWK FORKS A SHELL, and the command it forks is a string EXPRESSION: `system("CMD")`, `print … | "CMD"` and
@@ -15717,6 +15731,8 @@ function analyzeSegmentsInto(
         // (a file the script READS into its output is as much a thing only the segment as written can show - its words are no longer judged
         // as paths, being another language's text - and so is a file an input redirection opens)
         sedReadFiles(b, ctx, env.cwd).length > 0 ||
+        // (an awk program the shell builds - `awk "$PROG" f` - is read from the word as written, where it is still one word)
+        normalizeSegment(b).some((n) => n.startsWith(`${MARK}awk-program-file`)) ||
         gitPagerCommands(b).length > 0 ||
         gitConfigCommands(b).length > 0 ||
         redirectionTargets(b).length > 0 ||

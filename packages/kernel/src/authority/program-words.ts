@@ -59,6 +59,18 @@ export function readsLanguageFromStdin(head: string): boolean {
   return lang !== null && lang !== 'osascript';
 }
 
+/** The commands that read standard input as TEXT - a string they search, count, transform or print, whatever it says - and do nothing
+ *  else with it. A string fed to any other command (`docker run -i img sh`, `ssh host`, `xargs rm`, `mysql`, `patch`, a script of the
+ *  project's own) may be a script, a list of arguments or a query, and stays what it was: shell words, read as such. A POSITIVE list:
+ *  the commands nobody has listed are the ones nobody has read. */
+const TEXT_STDIN =
+  /^(?:cat|tac|rev|nl|grep|egrep|fgrep|rg|ag|ack|sed|gsed|awk|gawk|mawk|nawk|jq|yq|tr|cut|sort|uniq|wc|head|tail|column|fold|fmt|paste|join|comm|base64|xxd|od|hexdump|shasum|sha1sum|sha224sum|sha256sum|sha384sum|sha512sum|md5sum|md5|cksum|bc|dc|read|mapfile|readarray|iconv|expand|unexpand)$/;
+
+/** Whether the standard input of a command is text for it to read (an interpreter's program, or the string a text tool works on). */
+export function readsTextFromStdin(head: string): boolean {
+  return languageOf(head) !== null || TEXT_STDIN.test(baseName(head));
+}
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * THE ROLE BUILDER
  * ------------------------------------------------------------------------------------------------------------- */

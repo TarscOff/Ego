@@ -22,7 +22,7 @@
 // evaluate.ts decide that), and whether a command is a probe or a dry run (helpProbeHead).
 
 import { payloadOpener, payloadSpans, peelCarriers } from './carriers.ts';
-import { programRoles } from './program-words.ts';
+import { programRoles, readsTextFromStdin } from './program-words.ts';
 
 /** What a word holds of the shell's redirection characters, by how it was WRITTEN: `none`; `real`, a `<` or `>` outside every quote -
  *  the shell's operator; `literal`, only characters a quote, a backslash or an ANSI-C string turned into text (`"=>"`, `\\>x`,
@@ -485,15 +485,14 @@ export function scanLine(
   }
   const own = wordRoles(line, at, shape, lenient);
   if (own !== null) into(own, 0);
-  // A HERESTRING IS A STRING FED TO THE COMMAND: it names no file and no option, and it is text in the command's own language - unless the
-  // command is a shell, whose standard input is a script (the carried body is read as the shell words it is)
-  if (head === null || !SHELL_STDIN.test(head))
+  // A HERESTRING IS A STRING FED TO THE COMMAND: it names no file and no option, and it is text - for a command that reads text (an
+  // interpreter's program, the string a search or a count works on). A shell's standard input is a script, a container's or a remote's
+  // may be, and a list of arguments or a query is not text either: the commands nobody has listed keep the string as shell words
+  if (head !== null && readsTextFromStdin(head))
     for (let i = at + 1; i < line.length; i++)
       if (/^\d*<<<$/.test(line[i - 1]!) && (shape === undefined || shape[i - 1] === 'real') && !(shape !== undefined && shape[i] === 'real')) out.roles[i] = 'program';
   return out;
 }
-/** the commands whose standard input is a script of shell words */
-const SHELL_STDIN = /^(?:(?:ba|z|da|k|a|c|tc)?sh|fish|source|\.|busybox|eval)$/;
 
 /** The words of `line` with every DATA word replaced by `placeholder`: what the text matchers read (a search pattern, a commit message
  *  and a printed string are neither the act nor the place it is done). A word glued to its option keeps the option: `--grep=hook`

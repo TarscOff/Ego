@@ -180,6 +180,31 @@ test('U-01..U-03: a shell is still a shell - the body of a script it reads from 
   assert.notEqual(run("sh <<'EOF'\nx = \"/**\"\nEOF", dir).verdict, 'ALLOW');
 });
 
+test('U-01..U-03: a herestring is text for a command that reads text, and the string stays shell words for every command nobody has listed', () => {
+  // text: a string a search, a count or a filter works on, or the program of an interpreter
+  allowed(["cat <<< 'rm -rf /'", "jq . <<< '{\"a\": \"/**\"}'", "grep -n foo <<< '// x'", "wc -c <<< '/etc/passwd'", "head -c 5 <<< '/etc/passwd'", "read x <<< 'a b'"], dir);
+  // a script, a list of arguments or a query: the command that receives it (a container's shell, a remote's, xargs, a database client) is not a text tool
+  gated(
+    [
+      "docker run --rm -i alpine sh -s <<< 'rm -rf /'",
+      "docker run --rm alpine sh <<< 'rm -rf /'",
+      "docker exec -i box sh <<< 'rm -rf /'",
+      "ssh host <<< 'rm -rf /'",
+      "xargs rm <<< '/etc/passwd'",
+      "xargs -I{} sh -c '{}' <<< 'rm -rf /'",
+      "parallel sh -c <<< 'rm -rf /'",
+      "unknown-tool <<< 'rm -rf /'",
+      "./run.sh <<< 'rm -rf /'",
+      "psql <<< 'DROP TABLE users'",
+      "sqlite3 app.db <<< 'drop table users'",
+      "redis-cli <<< 'FLUSHALL'",
+      "git apply <<< 'x'",
+    ],
+    dir,
+  );
+  gated(["bash <<< 'rm -rf /'", "sh <<< 'git push origin main'", "sudo sh <<< 'rm -rf /'", "xargs cat <<< ~/.ssh/id_rsa", "xargs rm <<< '.git/hooks/pre-commit'", "psql -h prod-db <<< 'DROP TABLE users'", "mysql -h prod-db <<< 'DROP TABLE users'", "patch -p1 <<< '--- a/.git/hooks/pre-commit'"], dir, true);
+});
+
 test('U-01..U-03: an UNQUOTED delimiter still lets the shell expand the body, and what it runs is judged', () => {
   gated(
     [
@@ -549,6 +574,38 @@ test('U-08: a sed program that RUNS something is gated in every spelling its par
     ],
     dir,
   );
+});
+
+test('U-08: ...and in every place of a shell program a command can stand: after a keyword, in a branch, behind a wrapper', () => {
+  const programs = ["sed '1e id' f.txt", "sed 's/a/b/e' f.txt", "sed -n 'e id' f.txt", 'awk -f evil.awk f.txt', 'awk "$PROG" f.txt', 'sed "$S" f.txt'];
+  const places: Array<(c: string) => string> = [
+    (c) => `if true; then ${c}; fi`,
+    (c) => `if false; then :; else ${c}; fi`,
+    (c) => `if false; then :; elif ${c}; then :; fi`,
+    (c) => `for i in 1; do ${c}; done`,
+    (c) => `while ${c}; do :; done`,
+    (c) => `until ${c}; do :; done`,
+    (c) => `select x in a; do ${c}; done`,
+    (c) => `case x in a) ${c} ;; esac`,
+    (c) => `! ${c}`,
+    (c) => `{ ${c}; }`,
+    (c) => `( ${c} )`,
+    (c) => `true && ${c}`,
+    (c) => `${c} &`,
+    (c) => `if true; then env ${c}; fi`,
+    (c) => `if true; then X=1 ${c}; fi`,
+    (c) => `f() { ${c}; }; f`,
+    (c) => `npx --no-install ${c}`,
+    (c) => `npx ${c}`,
+    (c) => `command ${c}`,
+    (c) => `nice -n 5 ${c}`,
+    (c) => `timeout 5 ${c}`,
+    (c) => `echo x | xargs -I{} ${c}`,
+    (c) => `find . -maxdepth 0 -exec ${c} \\;`,
+  ];
+  const wrong: string[] = [];
+  for (const prog of programs) for (const place of places) if (run(place(prog), dir).verdict === 'ALLOW') wrong.push(place(prog));
+  assert.deepEqual(wrong, []);
 });
 
 test('U-08: a program the shell BUILDS is a program nobody has read - and an expansion among a script\'s own characters is a number', () => {

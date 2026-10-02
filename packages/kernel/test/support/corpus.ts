@@ -127,17 +127,29 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
    * -------------------------------------------------------------------------------------------------------- */
   {
     family: 'command',
-    id: 'a protected store named in the program an interpreter reads from standard input',
+    id: 'a protected store named in the program an interpreter is fed as a string',
     floor: 'DENY',
-    // (the FIRST case is the one the producers carry, and a producer carries ONE line: a heredoc is several, and `make` or a `case` branch
-    // cut it where it ends - so the first is the pipe, and the heredocs follow for the canonical spellings)
+    cases: [
+      `python3 <<< "print(open('~/.ssh/id_rsa').read())"`,
+      `node <<< "console.log(require('fs').readFileSync('~/.aws/credentials', 'utf8'))"`,
+      `ruby <<< "puts File.read('~/.ssh/id_rsa')"`,
+      `perl <<< "open F, '~/.kube/config'; print <F>;"`,
+    ],
+  },
+  {
+    // The program an interpreter reads from standard input through a here-document or a pipe. In front of the interpreter itself it is
+    // REFUSED (closure-usability-a.test.ts holds every direct spelling to DENY); behind a carrier that hands the body on without
+    // reading it (`sudo`, `xargs`, `docker exec`) the body was never read and the question the carrier is stands - as it did before the
+    // body was a program and not shell words. The first case is the one the producers carry, and a producer carries ONE line.
+    family: 'command',
+    id: 'a protected store named in the program an interpreter reads from standard input',
+    floor: 'ASK',
     cases: [
       `echo "print(open('~/.ssh/id_rsa').read())" | python3`,
       "python3 - <<'PY'\nprint(open('~/.ssh/id_rsa').read())\nPY",
       "node - <<'EOF'\nconsole.log(require('fs').readFileSync('~/.aws/credentials', 'utf8'))\nEOF",
       "ruby <<'RB'\nputs File.read('~/.ssh/id_rsa')\nRB",
       "perl - <<'PL'\nopen F, '~/.kube/config'; print <F>;\nPL",
-      `python3 <<< "print(open('~/.ssh/id_rsa').read())"`,
     ],
   },
   {
