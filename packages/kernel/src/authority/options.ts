@@ -17,7 +17,7 @@
 //   - an option the grammar does not know is reported in `unknown`, never dropped, so a consumer can ask rather than guess;
 //   - a long option that is a prefix of SEVERAL options is reported with every candidate, and `has` / `valuesOf` answer for
 //     any of them: accepting an abbreviation the real tool would reject as ambiguous is fail-closed, never fail-open
-//     (the same rule expandGitAbbreviations states for git).
+//     (the same rule canonicalGitTokens states for git, git-invocation.ts).
 
 /** How an option takes its value. */
 export type Arity =

@@ -1,0 +1,144 @@
+// Generates packages/kernel/src/authority/git-verb-options.ts: the options of every built-in git command, as git itself prints them.
+//
+// WHY IT IS GENERATED. The evaluator reads a git command line by the CANONICAL names of its options, and git accepts any
+// unambiguous prefix of a long option (`git switch --force-c` is `--force-create`), a cluster of short ones (`-fC`), and
+// two spellings of the same option (`-C` is `--force-create`). The list that was kept by hand named twenty-one options and
+// missed `--force-create`; a list of what git accepts is a fact about git, so it is taken from git (`git <verb> -h`) and
+// written down once, and it is regenerated when git grows an option. Run: `node scripts/gen-git-options.mjs`.
+import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+const git = (args) => spawnSync('git', args, { encoding: 'utf8' });
+const version = git(['--version']).stdout.trim();
+const list = (group) =>
+  git([`--list-cmds=${group}`])
+    .stdout.split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+/** every command git ships as a program of its own or as a built-in, plus the documented ones that are scripts */
+const builtins = list('builtins');
+const main = list('main');
+const documented = [
+  'list-mainporcelain',
+  'list-ancillarymanipulators',
+  'list-ancillaryinterrogators',
+  'list-foreignscminterface',
+  'list-plumbingmanipulators',
+  'list-plumbinginterrogators',
+  'list-synchingrepositories',
+  'list-synchelpers',
+].flatMap(list);
+const verbs = [...new Set([...builtins, ...main, ...documented])].sort();
+
+/** `-c, --[no-]create <branch>` -> pieces [short, long, arg]; arg: 0 none, 1 takes a value, 2 an optional value that can only be glued */
+function parseSpec(spec) {
+  const out = [];
+  for (const piece of spec.split(/,\s+/)) {
+    const m = /^(-{1,2})(\[no-\])?([A-Za-z0-9][\w-]*)(.*)$/.exec(piece.trim());
+    if (!m) continue;
+    const [, dashes, noMark, name, rest] = m;
+    let arg = 0;
+    if (/^\[=?[<(]|^\[=/.test(rest)) arg = 2;
+    // (a value is always written in angle brackets or as a choice in parentheses; a bare word after one blank is the DESCRIPTION,
+    // which is how `-k, --[no-]keep-index keep index` reads when the option is exactly as wide as the column)
+    else if (/^[ =][<(]/.test(rest) || /^<[^>]*>$/.test(rest)) arg = 1;
+    else if (rest.startsWith('[')) arg = 2;
+    // `-O<pager>` / `-U<n>` glue an optional value
+    if (dashes === '-' && /^[<[]/.test(rest)) arg = rest.startsWith('[') ? 2 : 1;
+    if (dashes === '-') out.push([name, '', arg]);
+    else {
+      out.push(['', name, arg]);
+      if (noMark) out.push(['', `no-${name}`, arg]);
+    }
+  }
+  return out;
+}
+
+/** the options git prints for `git <words> -h`, one entry per usage line: [short letters, long names, arg] */
+function optionsOf(words) {
+  const r = git([...words, '-h']);
+  const text = (r.stdout || '') + (r.stderr || '');
+  return {
+    text,
+    options: text
+      .split('\n')
+      .map((line) => /^ {2,8}(-.*)$/.exec(line)?.[1])
+      .filter(Boolean)
+      .map((spec) => {
+        const pieces = parseSpec(spec.split(/ {2,}/)[0]);
+        const shorts = pieces.filter((p) => p[0]).map((p) => p[0]);
+        const longs = pieces.filter((p) => p[1]).map((p) => p[1]);
+        const arg = Math.max(0, ...pieces.map((p) => p[2]));
+        return [shorts.join(''), longs.join(','), arg];
+      })
+      .filter((o) => o[0] || o[1]),
+  };
+}
+
+/** the subcommands a usage text lists (`git stash push`, `git remote [-v] show`): the first plain word after the verb */
+function subcommandsOf(verb, text) {
+  const subs = new Set();
+  for (const line of text.split('\n')) {
+    const m = new RegExp(`^(?:usage:|\\s+or:)\\s+git ${verb.replace(/-/g, '\\-')}\\s+(.*)$`).exec(line);
+    if (!m) continue;
+    let depth = 0;
+    for (const tok of m[1].split(/\s+/)) {
+      const opens = (tok.match(/\[/g) || []).length;
+      const closes = (tok.match(/\]/g) || []).length;
+      if (depth === 0 && opens === 0 && /^[a-z][a-z-]+$/.test(tok)) {
+        subs.add(tok);
+        break;
+      }
+      depth += opens - closes;
+      // `[push ...` is the default subcommand, written in brackets
+      const dflt = /^\[([a-z][a-z-]+)$/.exec(tok);
+      if (dflt && depth === 1 && line.includes(`git ${verb} [`)) subs.add(dflt[1]);
+      if (depth === 0 && opens === 0) break;
+    }
+  }
+  return [...subs];
+}
+
+/** the configuration keys git documents (`git help -c`), with <placeholders> for the parts a user chooses */
+const configKeys = git(['help', '-c'])
+  .stdout.split('\n')
+  .map((l) => l.trim())
+  .filter((l) => /^[A-Za-z][\w.<>*:-]*$/.test(l))
+  .sort();
+
+const table = {};
+for (const verb of verbs) {
+  const { text, options } = optionsOf([verb]);
+  if (options.length) table[verb] = options;
+  for (const sub of subcommandsOf(verb, text)) {
+    const s = optionsOf([verb, sub]).options;
+    if (s.length) table[`${verb} ${sub}`] = s;
+  }
+}
+
+const header = `// GENERATED by scripts/gen-git-options.mjs from \`git <verb> -h\` of ${version}. Do not edit by hand; regenerate with
+// \`node scripts/gen-git-options.mjs\` when git grows an option. See that script for why this is data and not code.
+`;
+const body = `
+/** git's own version when this was generated */
+export const GIT_OPTIONS_SOURCE = ${JSON.stringify(version)};
+
+/** every command git ships (built-in, program of its own, or documented script), for "is this verb one git knows?" */
+export const GIT_KNOWN_VERBS: readonly string[] = ${JSON.stringify(verbs)};
+
+/** The built-in commands (the ones that are in the git binary): the rest are scripts and helpers. */
+export const GIT_BUILTIN_VERBS: readonly string[] = ${JSON.stringify(builtins.slice().sort())};
+
+/** the configuration keys git documents (\`git help -c\`); a part the user chooses is written in <angle brackets> */
+export const GIT_CONFIG_KEYS: readonly string[] = ${JSON.stringify(configKeys)};
+
+/**
+ * verb -> its options, one entry per option as git lists it: [short letters, long names (comma separated, \`no-\` twins
+ * included), argument]. The argument is 0 (a flag), 1 (takes a value: glued, \`=value\`, or the next word) or 2 (an optional
+ * value that can only be glued or follow \`=\`). A command with subcommands also has an entry per \`<verb> <subcommand>\`.
+ */
+export const GIT_VERB_OPTIONS: Readonly<Record<string, ReadonlyArray<readonly [string, string, 0 | 1 | 2]>>> = ${JSON.stringify(table)};
+`;
+writeFileSync(new URL('../packages/kernel/src/authority/git-verb-options.ts', import.meta.url), header + body);
+console.log(`${verbs.length} verbs, ${Object.keys(table).length} option tables, ${version}`);

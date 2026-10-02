@@ -11,6 +11,14 @@ notes: >
   every segment must be allowed for the command to be allowed and the most restrictive verdict wins. `command` patterns
   are regular expressions applied to the normalized segment; `path` patterns are glob-like prefixes applied to the
   resolved path relative to the workspace root or to the home directory (prefix `~/`); `url` patterns match hostnames.
+  A project's overlay (`.harness/overlay/matchers.md`) may only narrow, and its rules do not compete with these for first
+  place: a `command` rule adds its capability beside the one the rule above gave, and a `path` or `url` rule is combined
+  with the core's the same way, the strictest answer deciding. An overlay `path` is read as a `.gitignore` line is - a
+  name with no `/` matches at any depth (`service-account.json`, `*.pem`), a pattern with a `/` is anchored to the
+  workspace root, `dir/**` and `dir/` are the directory itself and everything below it, `{a,b}` is a choice and `[Pp]`
+  a class, `~/` is the home directory and a leading `/` the filesystem - and a rule whose tool never asks about its
+  field (`tool: Bash` with a `path`, `tool: WebFetch` with a `command`) is refused when the overlay is compiled, not
+  accepted as a protection that protects nothing.
 matchers:
   # --- acts whose SPELLING differs from the one already named, placed first because matching is
   # first-match-wins per segment and a friendlier rule for the same head sits below (exit review 6) ---
@@ -79,6 +87,23 @@ matchers:
   - capability: git.identity.override
     tool: Bash
     command: '^\x00ego\x00identity-override\b'
+  # A PATHSPEC AFTER A TREE-ISH OVERWRITES THE TREE WITH THAT COMMIT'S FILES. `git checkout HEAD -- .` discards every uncommitted change
+  # as `git checkout .` does, and a rule that ends its pathspec in `\b` never matched a pathspec that ends in `.`, `*` or `/` (review
+  # 11 #203). The evaluator reads the pathspecs of a checkout or a restore from the parsed command line (authority/git-invocation.ts)
+  # and says what they are: the whole tree is the repository-wide destruction `checkout .` is, any other path is a restore.
+  # (the marker is appended by the NORMALIZER to a segment the splitter has already decided is one command, so an operator inside a
+  # pathspec must not hide it: `[\s\S]*` and not `[^|;&]*`, as for `force-ref-reset` below)
+  - capability: command.destructive
+    tool: Bash
+    command: '^git\s+(checkout|restore)\b[\s\S]*\s\x00ego\x00git-whole-tree(\s|$)'
+  - capability: git.local.restore
+    tool: Bash
+    command: '^git\s+(checkout|restore)\b[\s\S]*\s\x00ego\x00git-path-restore(\s|$)'
+  # `git remote-ext <remote> <command line>` RUNS THE COMMAND LINE: it is the transport helper behind `ext::`, and it is a git command
+  # of its own, so the `^git\s+remote\b` rules below read it as a listing (review 11 #105). The same act, the same capability.
+  - capability: git.alias.inline
+    tool: Bash
+    command: '^git\s+remote-ext\b'
   - capability: command.env-inject
     tool: Bash
     command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|RUBYLIB|GEM_HOME|GEM_PATH|CLASSPATH|JAVA_HOME|NODE_PATH|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|GLIBC_TUNABLES|OBJC_INSERT_LIBRARIES|LUA_PATH|LUA_CPATH)'
@@ -94,12 +119,17 @@ matchers:
     # runtime state OUT — a read — and the rule matched the path in any position, so an absolute deny fell on
     # the act of LOOKING at the state EGO itself publishes (exit review 9). For the copying verbs the governed
     # path must therefore be past the first operand; every other verb here writes wherever it is pointed.
-    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?(?!\s+-m\s+(py_compile\b|json\.tool(\s+[^\s|;&<>]+)?\s*([|;&<>]|$)))|node(?!\s+(--check|-c)\s))\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*)\.harness/(runtime|generated|hooks)(/|\b)'
+    # THE SEGMENT CLASS `(?:[^|;&<]|<<+(?!<)|<\()*` is "anything that does not end the command": a here-document or here-string
+    # (`<<`, `<<<`, any run of `<` that is two or longer) and a process substitution `<(` stay inside it, a lone `<` redirection ends
+    # it. A run of `<` has ONE parse (`<<+(?!<)` takes the whole run): written `<<<?` it parsed a run of n in as many ways as n has
+    # splits into twos and threes, and a hundred of them hung the hook (time, closure audit 2026-10-01). `\S+\s(?:…)*` has one blank
+    # in front of the class, which holds blanks itself: `\S+\s+(?:…)*` split a run of blanks n ways. Both are the same language.
+    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s(?:[^|;&<]|<<+(?!<)|<\()*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch|python3?(?!\s+-m\s+(py_compile\b|json\.tool(\s+[^\s|;&<>]+)?\s*([|;&<>]|$)))|node(?!\s+(--check|-c)\s))\b(?:[^|;&<]|<<+(?!<)|<\()*|>>?\|?\s*\S*)\.harness/(runtime|generated|hooks)(/|\b)'
   - capability: ego.runtime.tamper
     tool: Bash
     # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST, exactly as for the runtime tree above: `cp
     # .harness/harness.md /tmp/copy.md` reads the charter out (self-attack on exit review 9).
-    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*)\.harness/harness\.md'
+    command: '(^|\s)(\b(cp|mv|ln|install|rsync(?![^|;&]*\s(--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)))\b\s+(?:-\S+\s+)*\S+\s(?:[^|;&<]|<<+(?!<)|<\()*|\b(tee|dd|sed\s+-i|perl\s+-p?i|truncate|rm|chmod|chown|touch)\b(?:[^|;&<]|<<+(?!<)|<\()*|>>?\|?\s*\S*)\.harness/harness\.md'
   - capability: ego.launcher.invoke-nested
     tool: Bash
     # `claude --version` PRINTS A VERSION and starts no session; the rule exists for a NESTED SESSION, which is what
@@ -142,7 +172,7 @@ matchers:
     tool: Bash
     # A COPY READS ITS FIRST OPERAND AND WRITES ITS LAST, as for the runtime tree: `cp ~/.ego/trust/keys.json
     # /tmp/keys-backup.json` reads a key out of the trust store, which is not tampering with it (exit review 10).
-    command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod|cp\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*)\b(?:[^|;&<]|<<<?|<\()*\.ego/(trust|index|releases|runtimes)/'
+    command: '(^|\s)(rm|mv|tee|sed\s+-i|truncate|chmod)\b(?:[^|;&<]|<<+(?!<)|<\()*\.ego/(trust|index|releases|runtimes)/|(^|\s)cp\b\s+(?:-\S+\s+)*\S+\s(?:[^|;&<]|<<+(?!<)|<\()*\.ego/(trust|index|releases|runtimes)/'
   # --- git remote (ADMIN_GOVERNED) ---
   # `--no-verify` ON A PUSH SKIPS THE PRE-PUSH HOOK, which is EGO's own repository-side gate for this very verb. It
   # sits ABOVE the push rules because matching is first-match-wins: below them the flag was read as the push it
@@ -323,9 +353,12 @@ matchers:
   # that is in no lockfile and no configuration. The DEFAULT endpoints are not this: a tool reaching its own
   # official host is the ordinary case, and localhost is a local development server (exit review 9).
   # It is a SEND, not a fetch: `network.external-write`, so the grant for fetching ("you can curl it") does not reach it.
+  # `--@scope:registry=URL` is npm's flag for the registry of ONE SCOPE: every package of `@scope` comes from that host, which is the same
+  # redirection as `--registry` for the packages that matter most (self-attack on exit review 10, #96). The environment spelling,
+  # `npm_config_@scope:registry`, is read by ENDPOINT_ENV_NAME in the evaluator; the two are one endpoint written two ways.
   - capability: network.external-write
     tool: Bash
-    command: '^(npm|pnpm|yarn|bun|pip|pip3|uv|poetry|helm|gh|glab|cargo|gem|nuget|composer|go)\b[^|;&]*\s(--registry|--index-url|--extra-index-url|--repo|--hostname|--host|--index|--default-index|--source)(=|\s+)(?!(https?://)?(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|api\.github\.com|github\.com|gitlab\.com|crates\.io|rubygems\.org|proxy\.golang\.org|repo1\.maven\.org|charts\.helm\.sh)([:/\s]|$))\S'
+    command: '^(npm|pnpm|yarn|bun|pip|pip3|uv|poetry|helm|gh|glab|cargo|gem|nuget|composer|go)\b[^|;&]*\s(--registry|--@[\w.~-]+:registry|--index-url|--extra-index-url|--repo|--hostname|--host|--index|--default-index|--source)(=|\s+)(?!(https?://)?(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|registry\.npmjs\.org|registry\.yarnpkg\.com|pypi\.org|files\.pythonhosted\.org|api\.github\.com|github\.com|gitlab\.com|crates\.io|rubygems\.org|proxy\.golang\.org|repo1\.maven\.org|charts\.helm\.sh)([:/\s]|$))\S'
   - capability: forge.repo.read
     tool: Bash
     command: '^(gh\s+(repo\s+view|api)|glab\s+(repo\s+view|api))\b'
@@ -463,7 +496,7 @@ matchers:
     path: '~/.git-credentials'
   - capability: fs.credential-store.write
     tool: Bash
-    command: '(^|\s)(\b(cp|install|ln|rsync)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(tee|mv|dd|sed\s+-i|perl\s+-p?i|truncate|chmod|chown|rm|ssh-keygen|ssh-add|ssh-copy-id|gpg\s+--import|gcloud\s+auth|az\s+login|kubectl\s+config|npm\s+(login|adduser|config\s+set|set))\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud|config/gh|azure|docker/config\.json|gnupg|git-credentials)\b'
+    command: '(^|\s)(\b(cp|install|ln|rsync)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<+(?!<)|<\()*|\b(tee|mv|dd|sed\s+-i|perl\s+-p?i|truncate|chmod|chown|rm|ssh-keygen|ssh-add|ssh-copy-id|gpg\s+--import|gcloud\s+auth|az\s+login|kubectl\s+config|npm\s+(login|adduser|config\s+set|set))\b(?:[^|;&<]|<<+(?!<)|<\()*|>>?\|?\s*\S*?)(~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|kube|netrc|npmrc|pypirc|config/gcloud|config/gh|azure|docker/config\.json|gnupg|git-credentials)\b'
   # `aws configure get|list|list-profiles` PRINT configuration and write nothing; only `configure`, `set`, `import`, `sso`
   # and the like write ~/.aws. A key that IS a credential (`get aws_secret_access_key`) is a credential READ, which is the
   # capability that says so - not the absolute refusal of writing the store, which `aws configure get region` was
@@ -614,10 +647,10 @@ matchers:
     path: '**/.git'
   - capability: fs.hook-config.write
     tool: Bash
-    command: '(^|\s)(\b(cp|mv|ln|install)\b\s+(?:-\S+\s+)*\S+\s+(?:[^|;&<]|<<<?|<\()*|\b(chmod|chown|rm|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
+    command: '(^|\s)(\b(cp|mv|ln|install)\b\s+(?:-\S+\s+)*\S+\s(?:[^|;&<]|<<+(?!<)|<\()*|\b(chmod|chown|rm|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<+(?!<)|<\()*|>>?\|?\s*\S*?)(\.git/hooks|\.husky/|\.githooks/|\.harness/hooks|\.claude/(settings|hooks/|agents/|commands/)|\.codex/|core\.hooksPath)'
   - capability: fs.git-internals.write
     tool: Bash
-    command: '(^|\s)(\b(cp|ln|install)\b\s+(?:-\S+\s+)*\S+(?=\s)(?:[^|;&<]|<<<?|<\()*|\b(chmod|chown|rm|mv|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<<?|<\()*|>>?\|?\s*\S*?)(^|\s|/)\.git/'
+    command: '(^|\s)(\b(cp|ln|install)\b\s+(?:-\S+\s+)*\S+(?=\s)(?:[^|;&<]|<<+(?!<)|<\()*|\b(chmod|chown|rm|mv|truncate|tee|touch|sed\s+-i|perl\s+-p?i)\b(?:[^|;&<]|<<+(?!<)|<\()*|>>?\|?\s*\S*?)(^|\s|/)\.git/'
   - capability: fs.generated.write
     tool: Write
     path: 'policies/generated/**'
@@ -922,7 +955,7 @@ matchers:
     # buildx's OWN verbs also publish: `bake --push` builds every target in a bake file and pushes each one, and
     # `--output type=registry` is what `--push` is shorthand FOR. Naming only `--push` covered neither, so an
     # upload to a shared registry reached ALLOW through the two spellings buildx documents (exit review 9).
-    command: '^((docker|podman|nerdctl)\s+((image|manifest|compose|buildx)\s+)?|docker-compose\s+|podman-compose\s+)[^|;&]*?\s?(push\b|publish\b|imagetools\s+create\b|(build|bake)\b[^|;&]*(--push\b|--cache-to[= ][^\s]*type=registry|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
+    command: '^((docker|podman|nerdctl)\s|docker-compose\s|podman-compose\s)[^|;&]*?(push\b|publish\b|imagetools\s+create\b|(build|bake)\b[^|;&]*(--push\b|--cache-to[= ][^\s]*type=registry|(--output|-o)[= ][^\s]*(type=registry|push=true)))'
   # THE CONTAINER READER NAMES THE EFFECTS A VERB HAS THAT NO SPELLING OF THE LINE SAYS (containers.ts). The patterns
   # above and below are written for the spellings people use; the reader knows the verbs - which of them destroy what
   # they name or rewrite the credential store, whatever program, group, alias or option stands around them - and says so
@@ -1034,7 +1067,7 @@ matchers:
   # reads it just as surely as `cat` would (round 14)
   - capability: fs.credential-store.read
     tool: Bash
-    command: '^(docker|podman|nerdctl)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|[^:\s]*\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
+    command: '^(docker|podman|nerdctl)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
   # `nerdctl` is containerd's docker-compatible client: the same flags, the same `--context`, the same effects.
   # It is enrolled in the target RESOLVER and was missing here, so nothing classified it and its target was never
   # resolved — found by the property that pins these two lists together (exit review 7).
@@ -1189,6 +1222,11 @@ matchers:
   # command.unknown and asked (challenge 6, finding 36; challenge 8, finding 28). Deliberately EXCLUDES the project
   # task runners — mvn, gradle, bazel, sbt, dotnet build, rake, bundle exec, composer — which execute
   # repository-defined tasks and are producers EGO does not model.
+  # THE WORD `version` IS A SUBCOMMAND ONLY FOR THE TOOLS THAT HAVE ONE (go, cargo, docker, kubectl, helm, terraform, gcloud, az, git-lfs,
+  # bundle, bazel, poetry, uv). After an interpreter it is a SCRIPT PATH - `node version` runs the file named `version` - after `make`
+  # and `rake` a TARGET and TASK, after `npx` a PACKAGE, and `yarn version` / `pnpm version` rewrite package.json: the
+  # alternation that accepted the bare word after every head read all of those as a probe and ALLOWed them, ahead of the
+  # interpreter-script rule, with the file never opened (exit review 11, #107). The flags are the probe for every head.
   # A VERSION PROBE IS NOT A TASK. `yarn|pnpm|bun|deno|npx|rake|sbt|bazel <version>` and `pip list|show|freeze`
   # reached command.unknown while `npm --version` was ALLOW, which is an omission in this list rather than a
   # judgement about those tools (corpus by semantic class, 2026-09-24). The form stays anchored with `\s*$`, so
@@ -1202,7 +1240,7 @@ matchers:
     command: '^(javac|kotlinc|scalac|swiftc|gcc|g\+\+|c\+\+|clang|clang\+\+|cc|ld|ar|nm|objdump|strip|rustc|tsc)(?=\s|$)|^swift\s+build\b|^dart\s+compile\b|^python3?\s+-m\s+venv\b'
   - capability: command.read-only
     tool: Bash
-    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs|yarn|pnpm|bun|deno|npx|rake|sbt|bazel)\s+(-v|-V|--version|-version|version)\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b|^(cmake|ninja)\s+(--version|-t\s+\w+|--help)\b|^pip3?\s+(list|show|freeze)\b'
+    command: '^(php|java|ruby|perl|python3?|node|go|cargo|rustc|javac|swift|dart|dotnet|mvn|gradle|pip3?|poetry|uv|bundle|gem|composer|brew|docker|kubectl|helm|terraform|aws|gcloud|az|make|cmake|git-lfs|yarn|pnpm|bun|deno|npx|rake|sbt|bazel)\s+(-v|-V|--version|-version)\s*$|^(go|cargo|docker|kubectl|helm|terraform|gcloud|az|git-lfs|bundle|bazel|poetry|uv)\s+version\s*$|^git\s+lfs\s+(ls-files|status|env|version|locks)\b|^(cmake|ninja)\s+(--version|-t\s+\w+|--help)\b|^pip3?\s+(list|show|freeze)\b'
   # Formatters, linters and type checkers with FIXED semantics: they read the workspace and rewrite source
   # files in it, and nothing else. Whole ecosystems had no path to ALLOW for ordinary `gofmt`/`ruff`/`black`/
   # `cargo fmt`, so a control plane that governs them all equally was unusable outside JavaScript (challenge 6,
@@ -1240,7 +1278,7 @@ matchers:
     tool: Bash
     # a pipe on EITHER side of a quoted string inside an awk program is a shell command (`"cmd" | getline`,
     # `print | "cmd"`); sed's `e` command and the s///e flag execute their result; `w` writes a file
-    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|\|\s*&?\s*getline|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|(^|[;{''"\s])[0-9$,~+]*\s*e[\s;}]|s(.)(?:(?!\3).)*\3(?:(?!\3).)*\3[a-z]*e)'
+    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|\|\s*&?\s*getline|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|(^|[;{''"\s])(?:[0-9$,~+]+\s*)?e[\s;}]|s(.)(?:(?!\3).)*\3(?:(?!\3).)*\3[a-z]*e)'
   # sed's `e` FLAG on a substitution executes the result, with ANY delimiter (`s|x|id|e`, `s#x#id#e`).
   # A dedicated matcher keeps the backreference unambiguous.
   - capability: command.interpreter-inline
@@ -1252,7 +1290,7 @@ matchers:
   # each of those is a program EGO never read (exit review 8).
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(sed|gsed)\b[\s\S]*(^|[;{''"\s])[0-9$,~+/^]*\s*e\s+\S'
+    command: '^(sed|gsed)\b[\s\S]*(^|[;{''"\s])(?:[0-9$,~+/^]+\s*)?e\s+\S'
   - capability: command.interpreter-script
     tool: Bash
     command: '^(awk|gawk|mawk|nawk|sed|gsed)\b[^|;&]*\s(-f|--file|--source)(=|\s)'
@@ -1345,7 +1383,7 @@ matchers:
   # ordinary scripts are written, and both asked (exit review 4).
   - capability: command.read-only
     tool: Bash
-    command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|cd|pushd|popd|for|while|until|case|esac|done|fi|then|else|elif|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`]*(?:\s*(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null|<\s*(?![~/])(?!\S*\.\.)[\w.@/-]+))*\s*$'
+    command: '^(set|shift|unset|readonly|local|declare|typeset|true|false|:|jobs|wait|hash|type|umask|ulimit|pwd|dirs|cd|pushd|popd|for|while|until|case|esac|done|fi|then|else|elif|do|continue|break|return|shopt|enable|caller|times|suspend)\b[^<>|`]*(?:(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null|<\s*(?![~/])(?!\S*\.\.)[\w.@/-]+)\s*)*$'
   - capability: command.read-only
     tool: Bash
     command: '^(?:(?:ls|cat|head|tail|less|more|wc|grep|rg|egrep|fgrep|tree|pwd|echo|printf|which|type|date|whoami|id|uname|df|du|stat|file|diff|uniq|cut|jq|yq|history|dirname|basename|sleep|seq|nproc|realpath|readlink|mktemp|tr|cmp|comm|expr|exit|test|read|gsed|gawk|shellcheck|printenv|sha1sum|sha256sum|shasum|md5sum|cksum|tput|hostname|getconf|locale|column|paste|join|fold|rev|nl|tac|numfmt|timeout\s+\d)\b|\[\s|find\b|fd\b|sort\b|awk(?!.*-i)\b|sed(?!\s+(?:-i|--in-place))\b|xargs\s+(?:ls|cat|grep|rg|wc)\b|node\s+(?:-v|--version)\b|node\s+-e\s+["'']?console\.log\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|npm\s+(?:ls|view|--version|-v|outdated|why|explain)\b|python3?\s+(?:--version|-V)\b|python3?\s+-c\s+["'']?print\((?:"[^"()]*"|''[^''()]*''|[0-9.]*)\)["'']?\s*$|tsc\s+--version\b|git\s+(--version|version)\b|env(?:\s+(?:-[iu0]\S*|[A-Za-z_][A-Za-z0-9_]*=\S*))*\s*$)'

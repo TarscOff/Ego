@@ -28,8 +28,9 @@
 // than it must — a word with no `..` has no physical reading of its own (the classifier canonicalises the lexical one),
 // so ordinary work pays for no filesystem call it did not already make.
 import { homedir, userInfo } from 'node:os';
-import { readdirSync, readlinkSync, realpathSync } from 'node:fs';
+import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { chargeWork } from './work-bound.ts';
 
 /** How many links one path resolution may follow before it is read as a loop (Linux stops at 40). */
 export const MAX_LINK_HOPS = 40;
@@ -42,14 +43,19 @@ export const MAX_LINK_HOPS = 40;
  *  first question is what it will say at the thirtieth. The cache lives for one evaluation (`withPathCache`) and is
  *  gone when the call returns, so a link that appears between two calls is seen by the second. */
 let cache: Map<string, string> | null = null;
+/** the directories a wildcard was expanded over, listed once per evaluation: the same directory is asked about again by every word that
+ *  names it, and by every reading of every word (as written and trimmed, lexical and physical, in each directory the shell may be in) */
+let listings: Map<string, Array<{ name: string; directory: boolean }> | null> | null = null;
 
 export function withPathCache<T>(body: () => T): T {
   if (cache !== null) return body(); // nested: the outer evaluation owns it
   cache = new Map();
+  listings = new Map();
   try {
     return body();
   } finally {
     cache = null;
+    listings = null;
   }
 }
 
@@ -81,8 +87,25 @@ export function canonicalPath(p: string): string {
   return out;
 }
 
-/** `budget` is shared by the whole resolution, as the kernel's own limit is: a farm of links cannot make it exponential. */
+/** `budget` is shared by the whole resolution, as the kernel's own limit is: a farm of links cannot make it exponential.
+ *
+ *  EVERY LEVEL OF THE WALK IS REMEMBERED, not only the path it was asked about (closure audit 2026-10-01, wave 3, "time"). A
+ *  name that does not exist is walked up to its nearest existing ancestor, one failed `realpath` and one failed `readlink`
+ *  per level, and a command that moves into a directory that is not there three hundred times (`cd a; cd a; …`) asks about
+ *  paths that are each one level deeper than the last: the answer for the parent was already known, and asking again made
+ *  the whole command quadratic in syscalls (ten seconds for two thousand `cd`). An answer is kept only when the walk
+ *  followed no link, because a link spends the shared budget and the answer then depends on how much was left. */
 function canonicalWalk(abs: string, budget: { left: number }): string {
+  const known = cache?.get(abs);
+  if (known !== undefined) return known;
+  const before = budget.left;
+  const out = canonicalWalkUncached(abs, budget);
+  if (budget.left === before) cache?.set(abs, out);
+  return out;
+}
+
+function canonicalWalkUncached(abs: string, budget: { left: number }): string {
+  chargeWork(WALK_STEP_COST);
   try {
     return realpathSync(abs);
   } catch {
@@ -102,6 +125,11 @@ function canonicalWalk(abs: string, budget: { left: number }): string {
     return walkComponents(isAbsolute(target) ? sep : dirname(here), target, budget);
   }
 }
+
+/** a disk question asked while deciding is paid for in the same units as text scanned (work-bound.ts): a few syscalls */
+const WALK_STEP_COST = 30;
+/** reading one word as a path: the fixed part of the work, before the text of the word and the directories are counted */
+const PATH_READ_COST = 200;
 
 /**
  * Walks `path` one component at a time from `from`, the way the kernel resolves it: a symlink is followed where it
@@ -407,6 +435,9 @@ export function pathCandidates(
   options: { whole?: boolean; literal?: boolean } = {},
 ): PathCandidates {
   const dirs = directoriesOf(cwds);
+  // every word is read in every directory the shell may be in, as written and trimmed, lexically and physically: that product
+  // is the cost, and it is paid before the reading (work-bound.ts)
+  chargeWork(PATH_READ_COST + word.length * dirs.length);
   // the word as written, and as a tool that trims it would read it
   const trimmed = hostTrim(word);
   const note: { uncertain: string | null } = { uncertain: null };
@@ -648,18 +679,29 @@ function expandGlobText(
   let frontier: string[] = [root];
   /** the entries of a directory, or none when it cannot be read; each one read is paid for */
   const entriesOf = (dir: string): Array<{ name: string; directory: boolean }> | null => {
-    let list;
-    try {
-      list = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return null;
+    let list = listings?.get(dir);
+    if (list === undefined) {
+      let read;
+      try {
+        read = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        read = null;
+      }
+      // (paid for outside the `try`, once, when the disk is asked)
+      if (read !== null) chargeListing(read.length);
+      list = read === null ? null : read.map((e) => ({ name: e.name, directory: e.isDirectory() }));
+      listings?.set(dir, list);
+    } else if (list !== null) {
+      // a listing already read is not read again, but every word that matches against it still looks at every entry
+      chargeWork(list.length * ENTRY_VISIT_COST);
     }
+    if (list === null) return null;
     budget.entries -= list.length;
     if (budget.entries < 0) {
       budget.bounded = true;
       return null;
     }
-    return list.map((e) => ({ name: e.name, directory: e.isDirectory() }));
+    return list;
   };
   for (let idx = 0; idx < segments.length && !budget.bounded; idx++) {
     const seg = segments[idx]!;
@@ -711,4 +753,56 @@ function expandGlobText(
     frontier = next;
   }
   for (const p of frontier) found.add(p);
+}
+
+/**
+ * What listing a directory costs, in the units of work-bound.ts: a syscall and a pass over what it returned (measured at about half a
+ * microsecond an entry). The budget of one wildcard expansion bounds ONE word; a command that names a wildcard over a directory of twenty
+ * thousand entries fifteen hundred times read it fifteen hundred times, and took thirteen seconds. Every place that lists a directory
+ * while deciding pays this AFTER the listing (the size is not known before), so the first list over the limit is the last. (The wildcard
+ * expander reads a directory once per decision, `listings`, and pays only for the entries each word looks at after that.)
+ */
+const DIR_READ_COST = 500;
+const DIR_ENTRY_COST = 3;
+/** looking at one entry of a listing already in hand: a pattern test */
+const ENTRY_VISIT_COST = 1;
+export function chargeListing(entries: number): void {
+  chargeWork(DIR_READ_COST + entries * DIR_ENTRY_COST);
+}
+
+/**
+ * Is this path an existing directory? Asked of the disk once per decision (the view of the filesystem a decision shares, `withPathCache`)
+ * and paid for in the units of work-bound.ts: a command that moves into a directory that is not there ten thousand times asks the
+ * same question ten thousand times, and each failed `stat` is a syscall that throws.
+ */
+export function isDirectory(abs: string): boolean {
+  const key = `\0dir\0${abs}`;
+  const known = cache?.get(key);
+  if (known !== undefined) return known === '1';
+  chargeWork(WALK_STEP_COST);
+  let is: boolean;
+  try {
+    is = statSync(abs).isDirectory();
+  } catch {
+    is = false;
+  }
+  cache?.set(key, is ? '1' : '0');
+  return is;
+}
+
+/**
+ * Is this word ONE PLAIN NAME - no slash, no quoting, glob or expansion character, not an option - that names an entry of `dir`? A bare
+ * word is a path operand exactly when there is something of that name where the command runs; the scan that took only words that LOOK
+ * like paths never asked about `cat service-account.json` (review 11 #117). It is asked here, with the other readers that join a directory
+ * and a word, because a plain name has no `..` and no link to follow: the join is the whole of its meaning.
+ */
+export function namesAnEntry(dir: string, name: string): boolean {
+  if (!/^[^\s/$`*?[\]{}()<>|&;'"\\=~-][^\s/$`*?[\]{}()<>|&;'"\\=]*$/.test(name)) return false;
+  chargeWork(WALK_STEP_COST);
+  try {
+    lstatSync(join(dir, name));
+    return true;
+  } catch {
+    return false;
+  }
 }

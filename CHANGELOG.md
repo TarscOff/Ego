@@ -338,3 +338,57 @@ discipline of decision Q84 (authority changes are never patch releases).
   (`kubectl get pods -o yaml` was a repository write in the advisory). A word the data reader proves to be data
   (`git log -S "=>" --oneline`) is no longer taken for env's `-S` command string, and a word that is no verb of kubectl, oc or
   helm is a plugin the tool starts with everything after it, never a manual (`kubectl foo --help bar`).
+- **A decision ends inside the hook's budget on any input** (closure audit 2026-10-01, wave 3, "time"). A sed script of seven hundred
+  spaces followed by `git push origin main` is an absolute deny, and the scan that read the script backtracked for 66 to 105
+  seconds before saying so; the host gives a hook thirty, and a hook that has not answered has not refused. The sed scanners
+  (`w FILE`, `e CMD`, the `s///w` flag), eight matcher patterns (the awk/sed `e` command, the copy verbs of the runtime, hook and
+  trust-store rules, the no-op builtins, the registry push, the credential mount) and four scans in the splitter and the path walk
+  were quadratic or worse and are linear. A work budget (`authority/work-bound.ts`) ends what is left: text read, processes spawned
+  and paths judged are paid for in units, the same units on every machine, and past the limit (10 million; the largest decision in the
+  corpus spends about a nineteenth of it) the decision ends with an ASK whose reason is "too large to classify within the bound" - what
+  was found before it is kept, so a DENY stays a DENY. One command larger than 32 KiB is not scanned but asks on its own, so the
+  commands around it are still read, and a command nested deeper than the stack is an ASK instead of an exception. Visible change:
+  a command (not a heredoc body) of more than 32 KiB, or one call that runs several dozen git commands or more, asks.
+- **One reader of a git command line** (closure audit 2026-10-01, wave 3, "git"). `authority/git-invocation.ts` reads a git line by the
+  canonical names of its options (taken from `git <verb> -h`: `switch --force-create` is `-C`, a long option is any unambiguous prefix, a
+  cluster is each letter, a global option that takes a value no longer displaces the verb), judges configuration keys by one table of the
+  keys git documents (`man.<tool>.path`, `browser.<tool>.path`, `sendemail.*`, `gpg.*.program` name programs; `author.*`, `committer.*`
+  and `--config-env` are identity), reads the pathspecs of a checkout or restore from the parsed line (`git checkout HEAD -- .` is
+  `git checkout .`), and treats a transport verb's repository operand as a read of the local path it denotes (`file://` URLs included).
+  Visible changes: `git clone --config user.name=…` and `git -c author.name=… commit` ask (git.identity.override); `git stash push
+  --include-untr` asks as `-u` does; a hyphenated git command no rule names (`git commit-graph write`, `git fetch-pack`, `git
+  status-x`) asks instead of being read as the verb it begins with (the patterns of matchers.md are told it is another word; the
+  readers that are keyed by the verb git has - the hooks it fires, the files it writes, `git checkout-index` among them - still see
+  it), and `git remote-ext` is the `ext::` act; the repository's own configuration is what git reports as local (`--show-scope`),
+  through as many includes as git follows (an include chain deeper than git's own limit makes git refuse, which is an ASK).
+- **One recorder of what a shell line binds** (closure audit 2026-10-01, wave 3, "environment"). `authority/bindings.ts` answers which
+  names a command binds - an assignment, `export` and its kin, `printf -v`, `read`, `mapfile`, `getopts`, a loop's variable, `let`, the
+  `${NAME:=default}` expansion - and a quoted assignment word handed to `env` or `export` binds as the bare one does. `printf -v PATH …; ls`
+  and `read EDITOR …; git commit` are gated as `PATH=… ls` is. The word `version` is a subcommand only after the tools that have one
+  (`go`, `cargo`, `docker`, `kubectl`, `helm`, `terraform`, `gcloud`, `az`, `git lfs`, `poetry`, `uv`): `node version`, `make version` and
+  `yarn version` are no longer read-only. A flag that selects the program npm runs scripts in asks whether or not the script is in the
+  manifest, npm's scoped registry flag (`--@scope:registry`) is an endpoint like `--registry`, and awk's file options are read as getopt
+  reads them (`gawk -Eevil.awk`, `-nievil.awk`).
+- **A project's overlay narrows, and is read as its author meant it** (closure audit 2026-10-01, wave 3, "overlay"). An overlay `command`
+  rule is added beside the core's answer and the strictest wins (it was appended after every core rule under first-match-wins, so a rule
+  for `make deploy` or `*.pem` never ran); a `path` or `url` rule is combined with the core's the same way. A `path` is read as a
+  `.gitignore` line is: a name matches at any depth, `dir/**` and `dir/` are the directory and everything below it, `{a,b}` and `[Pp]`
+  work, `~/` is the home directory and a leading `/` the filesystem; the Write and Edit tools are one rule; a bare file name that exists
+  where a command runs is a path operand (`cat service-account.json`, `cd secrets && cat db.txt`); and a recursive read of a tree that
+  holds a protected path (`grep -r x .` over `secrets/**`) reads it. A rule whose tool never asks about its field (`tool: Bash` with a
+  `path`) is refused when the overlay is compiled. Removing an overlay rule from the working tree is a widening, held pending until a
+  human accepts it. Visible change: an overlay that loaded with a rule that never ran now fails to compile and says which.
+- **The time bound reaches the readers the other wave-3 branches added** (closure audit 2026-10-01, wave 3: the "git, environment, overlay,
+  time" branch ported onto the carrier, option, database, container, cluster, make and proportionality readers). Measured on the merged
+  tree, a decision that is not under the bound could still take seconds: thirty kilobytes of `{a,b}{a,b}…` took 27 seconds to be refused
+  (every call of the brace expander reads the whole word, nine levels of recursion deep), `rm many/f?.txt` repeated fifteen hundred times
+  over a directory of twenty thousand entries took 13 seconds (each word listed the directory again), the stages of a pipeline of ten
+  thousand commands were listed in pairs, and a command that moves into a directory that is not there ten thousand times asked the disk
+  each time. They are paid for in the same units now: the brace expander per call, a directory listing per entry (and read once per
+  decision by the wildcard expander), the pairs of racing stages before they are listed, and the `stat` of a directory once per decision.
+  A pattern of the segment rules that read a here-document or here-string (`<<<?|<\(`, in the runtime, harness, hook-config, credential and
+  trust-store rules) parsed a run of `<` in as many ways as there are ways to write it as twos and threes - a hundred of them hung the
+  hook - and has one parse now (`<<+(?!<)`), the same language. Visible changes: none for an ordinary command (the largest decision in
+  the ordinary corpus spends 4% of the bound, the largest attack spelling 8%); `find -exec env EDITOR=x git commit \;` and `fd -x env
+  VAR=x …` carry the assignment like `env EDITOR=x git commit` does (it was ALLOW); `git checkout-index` and `git format-patch` are read
+  as the writes they are again, and a hyphenated git command is renamed for the patterns only, never for the readers keyed by the verb.

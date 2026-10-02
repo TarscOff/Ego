@@ -148,7 +148,7 @@ export const SHELL_GRAMMAR: Grammar = gnu(
 // gawk's long options are matched by any unique prefix: `--incl=inplace` rewrites its input file, `--fi prog.awk` takes its program from
 // a file, `--prof=FILE` writes a profile. The options with an OPTIONAL value (`-p[FILE]`, `-d[FILE]`, `-o[FILE]`, `-D[FILE]`) take it glued only.
 const AWK_GRAMMAR = gnu([
-  '-F|--field-separator:v', '-f|--file:v', '-v|--assign:v', '-b|--characters-as-bytes', '-c|--traditional', '-C|--copyright', '-d|--dump-variables:o',
+  '-F|--field-separator:v', '-f|--file|--source-file:v', '-v|--assign:v', '-b|--characters-as-bytes', '-c|--traditional', '-C|--copyright', '-d|--dump-variables:o',
   '-D|--debug:o', '-e|--source:v', '-E|--exec:v', '-g|--gen-pot', '-h|--help', '-i|--include:v', '-l|--load:v', '-L|--lint:o', '-M|--bignum',
   '-n|--non-decimal-data', '-N|--use-lc-numeric', '-o|--pretty-print:o', '-O|--optimize', '-p|--profile:o', '-P|--posix', '-r|--re-interval',
   '-s|--no-optimize', '-S|--sandbox', '-t|--lint-old', '-V|--version', '--csv', '--ignore-case', '--persist:o', '--trace', '--disable-extensions',
@@ -376,7 +376,7 @@ const GIT_BUNDLE = gnu(['--progress', '--quiet', '-q', '--all', '--version:v']);
 const GIT_FORMAT_PATCH = gnu([
   '-o|--output-directory:v', '--output:v', '--stdout', '--cover-letter', '--attach:o', '--inline:o', '--thread:o', '-n|--numbered', '-N|--no-numbered', '-k|--keep-subject',
   '-s|--signoff', '--start-number:v', '--zero-commit', '-p|--no-stat', '--subject-prefix:v', '--cc:v', '--to:v', '--from:o', '--in-reply-to:v', '--base:v',
-  '--range-diff:v', '--creation-factor:v', '--interdiff:v', '-v|--reroll-count:v', '--rfc', '--filename-max-length:v', '--notes:o', '--no-notes', '--signature:v', '--signature-file:v',
+  '--range-diff:v', '--creation-factor:v', '--interdiff:v', '-v|--reroll-count:v', '--rfc:o', '--filename-max-length:v', '--notes:o', '--no-notes', '--signature:v', '--signature-file:v',
   '--suffix:v', '-U|--unified:v', '-q|--quiet',
 ], { numeric: true });
 const GIT_DIFFLIKE = gnu(['--output:v']);

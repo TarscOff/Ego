@@ -437,6 +437,43 @@ loads (`clang --ld-path=./x`, `eslint -f ./fmt.js`, `prettier --config ./evil.js
 `python3 -m venv` with a `venv.py` beside it) asks too, and the closure of the packages such a runner imports from its
 dependencies is not modelled (a containment concern, #26).
 
+## A decision ends inside the hook's budget, and a git line and a shell binding are each read once
+
+The host gives a PreToolUse hook thirty seconds, and **a hook that has not answered has not refused: the tool call runs.** So a
+refusal has to be correct *and fast*, on any input, including input written to be slow (exit review 11, r11-243: a sed script
+of seven hundred spaces in front of `git push origin main` took ninety seconds to be refused). Three things hold that, and a
+fourth reader per dimension keeps the repairs from drifting apart:
+
+- [`authority/work-bound.ts`](../../packages/kernel/src/authority/work-bound.ts) is a **deterministic work budget**, in units and
+  not in milliseconds, so the same command costs the same on every machine and a regression test can pin it. Every primitive that
+  reads command-derived text (the splitter, the tokenizers, the normalizer, the brace expander, a matcher test), every process
+  spawned, every path judged, every directory listed and every pair of racing stages listed pays **before** it works; past the limit
+  (ten million units) the decision ends with an ASK whose reason is "too large to classify within the bound", keeping what was found
+  before it (a DENY stays a DENY). One command larger than 32 KiB is not scanned at all and asks on its own, so the commands around
+  it are read. The limit is a time proxy (a unit is about a tenth of a microsecond; a spawned git is a hundred thousand), set far
+  above any ordinary decision (the largest in the ordinary corpus spends 4% of it); a primitive that is added without a price is
+  how the bound stops being true, and `closure-git-env.test.ts` times each family of shapes that found one.
+- **The patterns are linear.** A pattern of `matchers.md` that has a quantifier over a class that holds blanks next to a quantifier
+  for blanks (`\S+\s+[^|;&]*`), or an alternation that can match one character two ways (`<<<?` and `<<`+`<`), is quadratic or
+  exponential on text built to make it so, and the bound cannot interrupt a single regular-expression call.
+- [`authority/git-invocation.ts`](../../packages/kernel/src/authority/git-invocation.ts) is the **one reader of a git command line**:
+  options by their canonical names (taken from `git <verb> -h` into `git-verb-options.ts` by `scripts/gen-git-options.mjs`), the
+  verb found past git's global options, the configuration keys that name a program or an identity from one table of what
+  `git help -c` documents, the pathspecs of a checkout or restore, the repository a transport verb reads. The write tables of
+  `tools.ts` are the other reader of the options of the verbs that write, and a test pins that they agree on arity; the dry-run reader
+  and the help-probe reader take their lists of value-taking options and of global options from it. A hyphenated
+  git command no rule names is another program (`git checkout-index`, `git status-x`); the **patterns** are told so (`matcherText`,
+  where a pattern is applied), and the readers keyed by the verb git has are not.
+- [`authority/bindings.ts`](../../packages/kernel/src/authority/bindings.ts) is the **one recorder of what a shell line binds**:
+  an assignment, `export` and its kin, `printf -v`, `read`, `mapfile`, `getopts`, a loop's variable, `let`, `${NAME:=default}`. The
+  environment reader peels the chain of carriers with `peelCarriers` (a `find -exec` or `fd -x` clause included) and takes each
+  assignment word apart with the same recorder.
+
+A project's overlay (`.harness/overlay/matchers.md`) may only narrow, and it does not compete with the core for first place: a
+`command` rule adds its capability beside the core's, a `path` or `url` rule is combined with the core's the same way (the strictest
+decides), a `path` is read as a `.gitignore` line is, and removing a rule from the working tree is a widening held until a human
+accepts it.
+
 ## The producer contract: true by construction, not by vigilance
 
 Four independent challenges exposed the same meta-defect in the repairs themselves, not in the rules: a rule would be
