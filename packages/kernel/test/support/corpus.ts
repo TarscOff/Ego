@@ -104,6 +104,9 @@ export interface SemanticClass {
 const kubeconfigAt = (server: string, credential = '{token: t}'): string =>
   `apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {server: "${server}"}\ncontexts:\n- name: kind-dev\n  context: {cluster: c, user: u}\n- name: docker-desktop\n  context: {cluster: c, user: u}\ncurrent-context: kind-dev\nusers:\n- name: u\n  user: ${credential}\n`;
 
+/** two thousand and a hundred empty log files: just over the number of names one wildcard used to be allowed to match (closure audit wave 5, PA-12) */
+const WIDE_LOGS: Record<string, string> = Object.fromEntries(Array.from({ length: 2100 }, (_, i) => [`logs/f${i}.txt`, '']));
+
 export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
   /* ----------------------------------------------------------------------------------------------------------
    * EXIT REVIEW 7 (2026-09-24). Each of these is an INSTANCE of a frozen class; they are listed here so the
@@ -2304,7 +2307,8 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       "sed -n '$w.claude/settings.json' README.md",
       "sed 's/a/b/gw.git/hooks/pre-commit' README.md",
       'sed --expr=w.claude/settings.json README.md',
-      'sed -e w.env README.md',
+      // (`w.env` stood here until `.env` became an ASK in STANDARD - closure audit wave 5, U-17; another governed file takes its place)
+      'sed -e w.mcp.json README.md',
     ],
     files: { 'README.md': 'x\n', '.claude/settings.json': '{}', '.env': 'A=1\n', 'a.c': 'int main(){}', 'x.tar': 'x' },
   },
@@ -2707,6 +2711,119 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'yarn info @acme/x --@acme:registry=https://evil.example',
     ],
   },
+  {
+    family: 'ego',
+    // A LINK THE SAME LINE MAKES IS NOT FOLLOWED BY THE PATH READER, because it does not exist yet (closure audit wave 5, PA-13): the line is
+    // read once more with every path word that goes through the link spelled through its target
+    id: 'a governed or outside path written through a link made earlier in the same line',
+    floor: 'DENY',
+    cases: [
+      'ln -s . self && echo x > self/control-plane/permissions/matchers.md',
+      'ln -s . self && tee self/control-plane/permissions/matchers.md',
+      'ln -s /etc/passwd p && echo x > p',
+      'ln -s control-plane cp2',
+    ],
+    files: { 'control-plane/permissions/matchers.md': 'x\n' },
+  },
+  {
+    family: 'command',
+    // A LOCATION VARIABLE IS JUDGED BY WHERE IT POINTS (env-vars.ts, U-11): a place the agent can write keeps the refusal
+    id: 'a library or toolchain location the agent can write, handed to a runner by the environment',
+    floor: 'DENY',
+    cases: [
+      'PYTHONPATH=/tmp/x python3 x.py',
+      'CLASSPATH=/tmp/x java Main',
+      'GOPATH=/tmp/gp go build ./...',
+      'NODE_PATH=/tmp/x node x.js',
+      'RUBYLIB=/tmp/x ruby x.rb',
+      'JAVA_HOME=/tmp/jdk mvn test',
+      'export PYTHONPATH=/tmp/x; python3 x.py',
+      // (`PYTHONPATH=$X python3 x.py` - a value nobody can read - is pinned in closure-usability-b.test.ts and not here: the brace-range
+      // transformation of the first word turns it into a command NAMED `PYTHONPATH=$X`, which is no assignment to the shell and no
+      // longer the line this class is about)
+    ],
+  },
+  {
+    family: 'command',
+    // ...and a place in the checkout, which holds code the agent could have written, is asked about and not refused
+    id: 'a library location in the checkout handed to a runner by the environment',
+    floor: 'ASK',
+    cases: ['PYTHONPATH=src python3 x.py', 'CLASSPATH=. java Main', 'NODE_PATH=src node x.js', 'CARGO_HOME=./.cargo-home cargo build', 'export PYTHONPATH=src; python3 x.py'],
+  },
+  {
+    family: 'command',
+    // A BINDING IN A STRING A CARRIER HANDS TO A SHELL is read by the normalizer, which replaced the patterns that matched `NAME=` anywhere
+    id: 'a binding that redefines execution inside a string a carrier hands to a shell',
+    floor: 'ASK',
+    cases: ["watch 'export FOO=bar BASH_ENV=/tmp/evil'", "watch 'declare -x LD_PRELOAD=/tmp/x.so'", "sh -c 'export BASH_ENV=/tmp/evil; ls'", "env -S 'LD_PRELOAD=/tmp/x.so ls'"],
+  },
+  {
+    family: 'network',
+    // EVERY FILE CURL WRITES BESIDES THE BODY (U-18): its own option table, and the destination a `-w` format carries inside its value
+    id: 'a file curl is told to write, in a protected tree, by an option other than -o',
+    floor: 'DENY',
+    cases: [
+      'curl -s http://localhost:3000 --libcurl .git/hooks/pre-commit',
+      'curl -s http://localhost:3000 --alt-svc .git/hooks/pre-commit',
+      'curl -s http://localhost:3000 --ssl-sessions .git/hooks/pre-commit',
+      'curl -s http://localhost:3000 --alt-s .git/hooks/pre-commit',
+      "curl -s -o /dev/null -w '%output{.git/hooks/pre-commit}x' http://localhost:3000",
+      "curl -s -w '%output{>>.git/hooks/pre-commit}' http://localhost:3000",
+      'curl -s http://localhost:3000 --dump-header .git/hooks/pre-commit',
+    ],
+  },
+  {
+    family: 'git',
+    // `-o` IS AN OUTPUT FOR SOME GIT VERBS AND A FLAG FOR OTHERS, and `-O` is the pager (U-16): the writing verbs are judged by where they write
+    id: 'a git verb that writes where its output option says, into a governed tree',
+    floor: 'DENY',
+    cases: ['git archive -o .git/hooks/pre-commit HEAD', 'git format-patch -1 -o .git/hooks', 'git archive --output=.husky/pre-commit HEAD', 'git format-patch -1 --output-directory=.git/hooks'],
+  },
+  {
+    family: 'fs',
+    // A WILDCARD AMONG THOUSANDS OF NAMES IS JUDGED BY WHAT COULD GOVERN THEM (PA-12): a link among them is followed to its target
+    id: 'a wildcard over thousands of names that reaches a link to a secret',
+    floor: 'ASK',
+    // (the link is named `hlnk`, the name the image producers recognise as a host path: what a link leads to is the host's, not an image's)
+    cases: ['cat logs/hlnk*', 'cat logs/*.txt', 'wc -l logs/hlnk.txt', 'cat logs/h*'],
+    files: { ...WIDE_LOGS, '.env': 'KEY=secret\n', 'logs/hlnk.txt': link('../.env') },
+  },
+  {
+    family: 'fs',
+    // A TEMPLATE IS NOT A SECRET, and a name that only looks like one is (U-17)
+    id: 'a secret-bearing environment file, and the write of one',
+    floor: 'ASK',
+    cases: ['cat .env', 'cat .env.local', 'cat .env.example.local', 'cp .env.example .env', 'touch .env.local', 'echo A=1 >> .env'],
+    files: { '.env': 'KEY=secret\n', '.env.local': 'KEY=secret\n', '.env.example.local': 'KEY=secret\n', '.env.example': 'KEY=\n' },
+  },
+  {
+    family: 'command',
+    // A DIRECTORY SELECTOR IS A `cd` (U-12): the script it runs is the directory's own, and the act in it is the act.
+    // THE FLOOR IS ASK, as it is for the plain `npm run deploy`: a transformation that leaves the name `npm` or the working directory
+    // unproven (a forged function marker, a definition in a branch, a heredoc body) takes the read away, and an unproven read is a
+    // question. The DENY of the untransformed spelling is pinned in closure-usability-b.test.ts, and the PRODUCERS below carry the
+    // act of a script through each selector at the floor of the body it resolves.
+    id: 'a script that acts, run through a directory selector',
+    floor: 'ASK',
+    cases: ['npm --prefix backend run deploy', 'npm run deploy --prefix backend', 'pnpm -C backend run deploy', 'yarn --cwd backend run deploy'],
+    files: { 'backend/package.json': '{"scripts":{"deploy":"git push origin main"}}', 'package.json': '{"scripts":{"deploy":"echo root"}}' },
+  },
+  {
+    family: 'command',
+    // ...and a selector that picks packages out of a graph this kernel does not model is a question
+    id: 'a workspace selector in front of a script',
+    floor: 'ASK',
+    cases: ['npm run build --workspace backend', 'npm run build -w backend', 'npm --prefix backend -w x run build', 'pnpm --filter backend run build'],
+    files: { 'backend/package.json': '{"scripts":{"build":"tsc -p ."}}', 'package.json': '{"scripts":{"build":"echo root"}}' },
+  },
+  {
+    family: 'command',
+    // A NAME CREATED OR REPLACED EARLIER IN THE LINE IS NOT THE NAME THE DERIVED-DIRECTORY ALLOWANCE RESTS ON, in the order of the line (U-14)
+    id: 'a derived directory removed after the line made its name mean another directory',
+    floor: 'ASK',
+    cases: ['mv docs dist && rm -rf dist', 'rm -rf dist; mv docs dist; rm -rf dist', 'ln -s docs dist && rm -rf dist/', 'rm -rf dist; cp -r docs dist; rm -rf dist'],
+    files: { 'docs/a.md': 'x' },
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -3002,6 +3119,13 @@ export const PRODUCERS: readonly Producer[] = [
     name: 'npm pre-script',
     build: (c) => [{ 'package.json': JSON.stringify({ scripts: { prerun: c, run: 'echo ok' } }) }, 'npm run run'],
   },
+  // A DIRECTORY SELECTOR NAMES THE DIRECTORY WHOSE package.json HOLDS THE SCRIPT (U-12), and the script runs there. The selector here names
+  // the directory the line is already in: a relative path in the body means the same thing it means for the plain `npm run`, and the
+  // selector still goes through the reader that moves the line into the directory it names.
+  { name: 'npm script through --prefix', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { run: c } }) }, 'npm --prefix . run run'] },
+  { name: 'npm script through -C', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { run: c } }) }, 'npm -C ./ run run'] },
+  { name: 'pnpm script through -C', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { run: c } }) }, 'pnpm -C . run run'] },
+  { name: 'yarn script through --cwd', build: (c) => [{ 'package.json': JSON.stringify({ scripts: { run: c } }) }, 'yarn --cwd . run run'] },
   { name: 'shell script', build: (c) => [{ 'run.sh': `#!/bin/sh\n${c}\n` }, './run.sh'] },
   { name: 'shell script, quoted substitution', build: (c) => [{ 'run.sh': `#!/bin/sh\necho "$(${c})"\n` }, './run.sh'] },
   { name: 'shell script, second line', build: (c) => [{ 'run.sh': `#!/bin/sh\necho start\n${c}\n` }, './run.sh'] },
@@ -3089,6 +3213,43 @@ export const PRODUCERS: readonly Producer[] = [
  * ------------------------------------------------------------------------------------------------------------- */
 
 export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
+  // WAVE 5 (usability, second half): the forms that only look (local-reads.ts), a location variable at the place the tool already uses, an
+  // output option that is not the pager, a template that is not a secret, a name removed twice, a link that records a name
+  looks: [
+    'go list ./...',
+    'go env GOPATH',
+    'go doc fmt.Println',
+    'go mod graph',
+    'cargo tree',
+    'cargo metadata --format-version 1',
+    'gem list',
+    'dotnet --version',
+    'git symbolic-ref --short HEAD',
+    'git submodule status',
+    'git config --list --show-origin',
+    'gh run list',
+    'gh auth status',
+    'ego status',
+    'ego doctor',
+    'ego help',
+    'ego explain capability git.remote.push',
+    'ego capabilities',
+    'helm repo list',
+    'helm plugin list',
+    'GOPATH=$HOME/go go build ./...',
+    'CARGO_HOME=$HOME/.cargo cargo build',
+    'NODE_OPTIONS=--experimental-vm-modules npm test',
+    'git grep -o foo',
+    'git archive -o out.tar.gz HEAD',
+    'git format-patch -3 -o patches/',
+    'git merge -S main',
+    'rm -rf dist; rm -rf dist',
+    'cat .env.example',
+    'grep -c . .env.example',
+    'ln -s . self',
+    'ln -s .. parent',
+    'ln -s /usr/local/bin/node node',
+  ],
   // WAVE 3 (git, environment): the statements the readers of those two dimensions must leave alone. A binding of a name that re-points nothing is
   // ordinary whatever builtin binds it; a git option spelled the ordinary way is an option, not an act; a hyphenated git command that has a
   // rule of its own keeps it
@@ -3385,19 +3546,35 @@ export const EXPECTED_GATES: Readonly<Record<string, string>> = {
   'pytest -q tests/': 'test runner executes repository-defined code',
   'go test ./...': 'test runner executes repository-defined code',
   'cargo test': 'test runner executes repository-defined code',
-  'mvn test': 'test runner executes repository-defined code',
-  './gradlew test': 'test runner executes repository-defined code',
+  // (a task runner no vocabulary lists is not "a test runner": nothing names it, and the reason said what it is NOT - closure audit wave 5, U-13)
+  'mvn test': 'a task runner no matcher names: what it runs is the repository\'s own',
+  './gradlew test': 'a task runner no matcher names: what it runs is the repository\'s own',
   // An install runs the dependency tree's own lifecycle scripts. `npm ci --ignore-scripts` is the spelling that
   // provably runs none, and it is ALLOW; pip has no equivalent. ACCEPTED_PRODUCT_BEHAVIOR.
   'pip install -r requirements.txt': 'installs run third-party lifecycle code',
   // An unmodelled task runner: EGO cannot say what a repository-defined task executes, in ANY invocation form,
   // including the version probe. UNKNOWN_PRODUCER-FAIL-SAFE, recorded in docs/architecture/phase-1-residuals.md.
   'mvn -v': 'unmodelled task runner',
-  'mvn -q compile': 'unmodelled task runner',
+  'mvn -q compile': 'a task runner no matcher names: what it runs is the repository\'s own',
   'gradle --version': 'unmodelled task runner',
-  './gradlew build': 'unmodelled task runner',
+  './gradlew build': 'a task runner no matcher names: what it runs is the repository\'s own',
   // A FETCH FROM AN UNCLASSIFIED BUCKET brings content the kernel has not seen into the workspace. It is no
   // longer a production MUTATION — the destination is local — but it is still an ingest, and the ingest gate is
   // the right one. ACCEPTED_PRODUCT_BEHAVIOR.
   'aws s3 cp s3://my-fixtures/data.json ./data.json': 'a remote fetch brings unseen content into the workspace',
+};
+
+/**
+ * THE CAPABILITIES EACH REASON IN `EXPECTED_GATES` MAY BE REPORTED AS. The reason is a sentence for a person; the evaluator reports a
+ * capability, and the two had come apart: five of the fourteen gates claimed "a test runner executes repository-defined code" or "an
+ * unmodelled task runner" while the evaluator printed `command.unknown | no matcher` for them, and nobody noticed because the test only
+ * asked that the command was listed (closure audit wave 5, U-13). Now a gate is listed with a reason, the reason names the capabilities
+ * it stands for, and a test compares them with what the evaluator says.
+ */
+export const GATE_REASONS: Readonly<Record<string, readonly string[]>> = {
+  'test runner executes repository-defined code': ['command.unmodelled-closure'],
+  'installs run third-party lifecycle code': ['command.ambient-unresolved'],
+  'unmodelled task runner': ['command.unmodelled-closure'],
+  "a task runner no matcher names: what it runs is the repository's own": ['command.unknown'],
+  'a remote fetch brings unseen content into the workspace': ['command.unknown'],
 };

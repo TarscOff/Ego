@@ -197,7 +197,9 @@ test('producer contract: the source has no second path around the canonical anal
   // AND THE BODY OF A SHELL FUNCTION AT ITS CALL (closure audit wave 2, RC-MK): the stages the definition already split are
   // handed back to this function once more when the files or the directory moved between the definition and the call - the
   // same analyzer, the same ledger, nothing classified on the side.
-  assert.equal(callers, 12, 'a new call site must feed the canonical pipeline, not go around it');
+  // AND ONE MORE (closure audit wave 5, PA-13): the segment a line that makes a link and then uses it is read as once more, with every
+  // path word that goes through the link spelled through its target (`segmentThroughLinks`) - fed back in as its own segment, same ledger.
+  assert.equal(callers, 13, 'a new call site must feed the canonical pipeline, not go around it');
   for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand', 'readsScriptFromStdin', 'carriedShellBodies', 'awkShellCommands', 'sedShellCommands', 'gitPagerCommands', 'gitConfigCommands', 'DB_CLIENT_HEADS'])
     assert.ok(src.includes(site), `${site} is one of the accounted-for paths`);
   // and the producer return type still has nowhere to put a verdict

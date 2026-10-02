@@ -911,11 +911,13 @@ const CASES: Case[] = [
     changeable: true /* the EGO_MAINTENANCE mode releases it */,
   },
   {
+    // (an ASK since closure audit wave 5, U-17: the first-run copy of `.env.example` is ordinary work; STRICT, HIGH_ASSURANCE and
+    // PRODUCTION_ADVISORY still refuse it, which closure-usability-b.test.ts pins)
     what: 'writing a secret-bearing environment file',
     call: write('$WS/.env'),
-    verdict: 'DENY',
+    verdict: 'ASK',
     capability: 'fs.env-file.write',
-    code: 'SCOPE_DENIED',
+    code: 'HUMAN_APPROVAL_REQUIRED',
     tier: 'none',
     changeable: false,
   },

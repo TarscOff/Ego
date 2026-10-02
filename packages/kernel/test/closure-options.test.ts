@@ -445,11 +445,12 @@ test('RC-OPT: a sed script is read as a script - the file may be glued to the co
     "sed 's|x|y|w.claude/settings.json' f",
     "sed -n 'y/a/b/;w.claude/settings.json' f",
     "gsed -n 'w.claude/settings.json' f",
-    'sed w.env src/a.ts',
+    // (`.env` stood here until it became an ASK in STANDARD - closure audit wave 5, U-17 - and `.mcp.json` is another governed file)
+    'sed w.mcp.json src/a.ts',
     'sed s/a/b/w.git/config src/a.ts',
     'sed wcontrol-plane/permissions/grants.md src/a.ts',
-    'sed -e w.env src/a.ts',
-    "gsed 's/a/b/w.env' f",
+    'sed -e w.mcp.json src/a.ts',
+    "gsed 's/a/b/w.mcp.json' f",
     // the script in a FILE, with the file given in any spelling of -f
     'sed -f s.sed f',
     'sed -fs.sed f',

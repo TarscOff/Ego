@@ -195,7 +195,10 @@ test('every spelling of the hook entry points is gate bypass', () => {
     assert.equal(r.verdict, 'DENY', cmd);
     assert.equal(r.decisive?.capability, 'ego.gate.bypass', cmd);
   }
-  assert.equal(bash('ego status').verdict, 'ASK');
+  // EGO's own read-only commands are reads (closure audit wave 5, AUTH-13: the session start text tells the agent to run them), and
+  // `ego init`, which accepts the widenings a human has not yet seen, is still a question
+  assert.equal(bash('ego status').verdict, 'ALLOW');
+  assert.equal(bash('ego init').verdict, 'ASK');
 });
 
 test('an EGO_HOME under the home directory is still protected against symlinked spellings', () => {
