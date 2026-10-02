@@ -435,6 +435,10 @@ discipline of decision Q84 (authority changes are never patch releases).
     starts (where it beats the sub-makefile's `CMD ?= ...`; `MAKEOVERRIDES` with the precedence of the command line - checked against GNU make
     3.81): they are command-line variables of everything below, and `$(MAKEFLAGS)` as a recipe prints it carries the command-line variables.
     An archive member (`make 'lib.a(foo.o)'`) is built by `$(AR) $(ARFLAGS)`, a program a variable names.
+  - When the freshness ledger says any file may have been written (`env -C sub ...; make all`), every built-in rule has a prerequisite that
+    may be there; the second link of a built-in chain (`all` <- `all.o` <- `all.c`) is then read only when the invocation gave a value to a
+    variable the built-in recipes read (a list derived from the rule table). Otherwise it was forty-eight recipes of make's own tools, and the
+    corpus sample's costliest decision (700 000 units) crossed the sixteenth of the work bound that `closure-git-env.test.ts` holds it under.
   - The reported 654-byte makefile took 42 s to answer (the hook has 30 s, and a hook that has not answered has not refused). Every
     expansion step is charged to the work counter, a variable is expanded once per expansion, and the size, the number of alternatives, the
     nesting and the depth are capped: a reached bound is a gap (ASK), and that makefile is answered in about 25 ms. An `include` line follows
