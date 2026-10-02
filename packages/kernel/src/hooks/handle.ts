@@ -83,6 +83,24 @@ function hookRefusal(code: ReasonCode, detail: string, rule: RuleExplanation): s
   return `EGO: ${renderFailure(code, detail, rule)}`;
 }
 
+/** THE HOOK REFUSES WHAT THE HOST SENT, with a code: a payload that is not an object, that names another event than the one registered, that
+ *  nests past what can be read, whose session id no file name can hold. Every one of them was an exception that main() printed as an
+ *  uncoded line (closure audit 2026-10-02, RB-4 / RB-5); the host reads this as the refusal it is, in its own dialect, with exit 2. */
+export function refuseHookPayload(event: HookDecision['event'], detail: string): HookDecision {
+  const code: ReasonCode = 'TARGET_UNCLASSIFIED';
+  return {
+    event,
+    action: 'deny',
+    reason: hookRefusal(code, `${detail}; failing closed`, {
+      source: 'the host payload: it cannot be read as the event this hook answers',
+      changeable: false,
+      changeBy: 'there is nothing to configure; the host must send a well-formed payload for the event the hook is registered for',
+    }),
+    code,
+    exitCode: 2,
+  };
+}
+
 const budgetRule = (profile: string, what: string): RuleExplanation => ({
   source: `profile ${profile}, ${what}`,
   changeable: true,

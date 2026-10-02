@@ -17,8 +17,8 @@ import {
 } from '../../kernel/src/launcher/self.ts';
 import { egoHome } from '../../kernel/src/launcher/home.ts';
 import { ensurePolicyCache, readPolicyCache } from '../../kernel/src/policy/cache.ts';
-import { handleHook } from '../../kernel/src/hooks/handle.ts';
-import { isHookEventName } from '../../kernel/src/hooks/events.ts';
+import { handleHook, refuseHookPayload } from '../../kernel/src/hooks/handle.ts';
+import { HookPayloadError, isHookEventName, type HookDecision } from '../../kernel/src/hooks/events.ts';
 import { parseClaudeCodeEvent, renderClaudeCodeOutput } from '../../adapter-claude-code/src/dialect.ts';
 import { parseCodexEvent, renderCodexOutput } from '../../adapter-codex-cli/src/dialect.ts';
 import { isHostId } from '../../kernel/src/hosts/matrix.ts';
@@ -634,15 +634,27 @@ function hook(io: CliIo, project: ProjectContext | null, positional: string[]): 
     io.err('EGO hook: not inside an initialized project; failing closed');
     return 2;
   }
+  // WHAT THE HOST SENT IS REFUSED WITH A CODE, IN ITS OWN DIALECT, when it cannot be read as the event this hook answers: `null`, an
+  // array or a number where an object belongs (the first property read threw a TypeError), a payload nested past what can be walked (a
+  // RangeError out of the summary), a session id no file name can hold (ENAMETOOLONG), a payload that names another event. Each of
+  // them used to leave as an exception that main() printed as one uncoded line (closure audit 2026-10-02, RB-4 / RB-5). A policy
+  // that does not load is not the payload's fault and keeps its own coded failure (describeFailure).
+  const refuse = (detail: string): number => {
+    const d: HookDecision = refuseHookPayload(event, detail);
+    const r = host === 'claude-code' ? renderClaudeCodeOutput(d) : renderCodexOutput(d);
+    io.out(r.stdout);
+    return 2;
+  };
   let payload: Record<string, unknown> = {};
   if (io.stdin.trim()) {
     try {
       payload = JSON.parse(io.stdin) as Record<string, unknown>;
     } catch {
       io.err('EGO hook: unparsable payload; failing closed');
-      return 2;
+      return refuse('the payload is not parsable JSON');
     }
   }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return refuse('the payload is not a JSON object');
   const rt = {
     projectRoot: project.root,
     pin: project.pin,
@@ -650,17 +662,25 @@ function hook(io: CliIo, project: ProjectContext | null, positional: string[]): 
     prePromotion: project.prePromotion,
     env: io.env,
   };
-  if (host === 'claude-code') {
-    const ev = parseClaudeCodeEvent(event, payload, io.env, io.cwd);
-    const r = renderClaudeCodeOutput(handleHook(ev, rt));
+  try {
+    const ev = host === 'claude-code' ? parseClaudeCodeEvent(event, payload, io.env, io.cwd) : parseCodexEvent(event, payload, io.cwd);
+    if (ev.sessionId.length > MAX_SESSION_ID_LENGTH) return refuse(`the session id is ${ev.sessionId.length} characters long`);
+    const decision = handleHook(ev, rt);
+    const r = host === 'claude-code' ? renderClaudeCodeOutput(decision) : renderCodexOutput(decision);
     io.out(r.stdout);
     return r.exitCode;
+  } catch (e) {
+    if (e instanceof HookPayloadError) return refuse(e.message);
+    if (e instanceof Error && e.name === 'ControlPlaneValidationError') throw e;
+    const name = e instanceof Error ? e.name : typeof e;
+    const code = e instanceof Error ? (e as NodeJS.ErrnoException).code : undefined;
+    if (io.env['EGO_DEBUG'] === '1' && e instanceof Error && e.stack) io.err(e.stack);
+    return refuse(e instanceof RangeError ? 'the payload nests deeper than it can be read' : `the payload could not be processed (${name}${typeof code === 'string' ? ` ${code}` : ''})`);
   }
-  const ev = parseCodexEvent(event, payload, io.cwd);
-  const r = renderCodexOutput(handleHook(ev, rt));
-  io.out(r.stdout);
-  return r.exitCode;
 }
+
+/** the longest session id a hook accepts: it names a file in the runtime directory (and the lock beside it), and a file name has 255 bytes */
+const MAX_SESSION_ID_LENGTH = 200;
 
 export function projectPrePromotion(pin: Pin, env: NodeJS.ProcessEnv): boolean {
   if (pin.profile === 'STANDARD') return false;

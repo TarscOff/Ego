@@ -8,7 +8,7 @@ import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.
 import { argvToCommandLine } from '../util/shell-quote.ts';
 import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
-import { evaluatedCommands } from './evaluated-words.ts';
+import { CodeFlow, evaluatedCommands } from './evaluated-words.ts';
 import {
   arithmeticSpanAt,
   expressionCommands,
@@ -363,6 +363,10 @@ const FUNCTION_BODY_END = `${MARK}end-function`;
  *  The definition now carries `inSubshell` itself, so the binding reader no longer needs the marker (and must not use it
  *  to forget an EARLIER definition that does stand); what still reads it is the "defined before use" ledger. */
 const FUNCTION_UNBIND = `${MARK}unbind-function`;
+/** The BODY of an arithmetic expansion or command the splitter consumed (`$(( x + 1 ))`, `$[ x ]`, `(( x ))`): the commands substituted into it are
+ *  segments of their own, and the text that is left is a number in the line - but a bare NAME in it is evaluated by evaluating what it holds, and
+ *  only the reader that knows what the line gave a variable can say whether that is code (evaluated-words.ts: CodeFlow). It carries nothing else. */
+const ARITHMETIC_BODY = `${MARK}arithmetic`;
 /** a segment that is only redirections — the tail of a group or subshell whose delimiters were consumed */
 const REDIRECT_ONLY_RE = /^(?:(?:\d*(?:>>?|<>?)\|?|&>>?)\s*(?:"[^"]*"|'[^']*'|\S+)\s*)+$/;
 /** shell keywords that may precede a command WITHOUT being one: after them, the next word is still a command */
@@ -525,6 +529,11 @@ export function splitShellPipeline(command: string): ShellStage[] {
           segments.push({ text: `${FUNCTION_UNBIND} ${sg.text.slice(FUNCTION_DEF_PREFIX.length + 1)}`, pipedFromPrevious: false });
     }
   };
+  /** an arithmetic body the splitter consumed: its substituted commands, and the body for the reader of variables */
+  const pushArithmetic = (body: string): void => {
+    pushSubshellCommands(expressionCommands(body));
+    if (/[A-Za-z_]/.test(body)) segments.push({ text: `${ARITHMETIC_BODY} ${body}`, pipedFromPrevious: false });
+  };
   const push = () => {
     const t = cur.trim();
     // A REDIRECTION IS NOT A COMMAND. Consuming a group's braces leaves `{ echo a; echo b; } > out.txt` with a
@@ -637,7 +646,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       if (ch === '$' && next === '[') {
         const arith = arithmeticSpanAt(command, i);
         if (arith !== null && !/[;&|\n]/.test(arith.body)) {
-          pushSubshellCommands(expressionCommands(arith.body));
+          pushArithmetic(arith.body);
           cur += '$ARITH';
           i = arith.end;
           continue;
@@ -789,7 +798,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // (shell-lexer.ts), in addition to the subshell reading below, which is the one that sees more where dash is the shell.
       if (ch === '(' && next === '(' && (atCommandStart() || /^(?:(?:time|!)\s+)*for\s*$/.test(cur.trim()))) {
         const arith = arithmeticSpanAt(command, i);
-        if (arith !== null) pushSubshellCommands(expressionCommands(arith.body));
+        if (arith !== null) pushArithmetic(arith.body);
       }
       if (ch === '(' && atCommandStart()) {
         if (subshell === 0) subshellStart = segments.length;
@@ -920,7 +929,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         if (arith !== null) {
           // the expression itself is never executed, so only the commands SUBSTITUTED INTO it are segments: the
           // arithmetic remainder that carries their output (`$SUBST + 1`) is a number here, not a command
-          pushSubshellCommands(expressionCommands(arith.body));
+          pushArithmetic(arith.body);
           cur += '$ARITH';
           i = arith.end;
           continue;
@@ -14984,9 +14993,18 @@ function analyzeSegments(
   try {
     return analyzeSegmentsInto(hits, table, ctx, compiled, segments, state, isolatedShells, inherited, concurrent);
   } catch (e) {
-    if (!(e instanceof WorkBoundExceeded)) throw e;
-    return [...hits, unknownHit(table, ctx, e.message)];
+    return [...hits, unknownHit(table, ctx, failureReason(e))];
   }
+}
+
+/** WHY AN EXCEPTION ENDED A CLASSIFICATION, as a reason a person can act on. EVERY exception ends in a verdict, because the contract of this
+ *  evaluator is that every tool call does (closure audit 2026-10-02, RB-1: a wildcard word of sixteen thousand characters made the engine
+ *  refuse a regular expression with a SyntaxError, which left as an uncoded message of ninety kilobytes). What was found before it stays
+ *  found - the callers keep their hits - and what was not read asks. The exception's own text is NEVER carried: it can be anything. */
+function failureReason(e: unknown): string {
+  if (e instanceof WorkBoundExceeded) return e.message;
+  if (e instanceof RangeError) return 'too deeply nested to classify within the bound';
+  return `could not classify: the evaluator met an internal limit (${e instanceof Error ? e.name : typeof e})`;
 }
 
 function analyzeSegmentsInto(
@@ -15053,6 +15071,8 @@ function analyzeSegmentsInto(
     }
     /** the literal values assigned earlier in this command line, where the assignment is proven to have happened */
     const shellVars = new Map<string, string>();
+    /** the variables this line gave a value that is CODE if it is evaluated (evaluated-words.ts) */
+    const codeFlow = new CodeFlow();
     const stages = unit;
     // A DEFINITION THE SHELL MAY NEVER EXECUTE BINDS NOTHING. `if false; then git() { echo hi; }; fi` does not
     // define `git`, and neither does a definition inside a `while`/`until`/`for`/`case` branch or one that is a
@@ -15267,6 +15287,14 @@ function analyzeSegmentsInto(
       definedNames.delete(cdTrimmed.slice(FUNCTION_UNBIND.length + 1));
       continue;
     }
+    // the body of an arithmetic expansion: a bare name in it is evaluated by evaluating what it holds (the splitter keeps the body
+    // for exactly this question; the commands substituted into it are segments of their own)
+    if (cdTrimmed.startsWith(`${ARITHMETIC_BODY} `)) {
+      for (const body of codeFlow.inExpression(cdTrimmed.slice(ARITHMETIC_BODY.length + 1)))
+        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env: state.env }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (a variable whose value is evaluated as code)`.trim() });
+      continue;
+    }
     // `unset NAME` of a VARIABLE forgets what this line knew of it (what it does to FUNCTIONS is the timeline's business:
     // `aws() { echo hi; }; unset -f aws; aws iam delete-user …` deleted an IAM user at ALLOW while the decoy was still
     // believed, exit review 9)
@@ -15424,6 +15452,14 @@ function analyzeSegmentsInto(
     for (const body of gitConfigCommands(seg))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by git from its configuration)`.trim() });
+    // A VARIABLE THE LINE FILLED WITH CODE, AND THAT THE SHELL THEN EVALUATES: `x='a[$(git push origin main)]'; echo $((x))`. The value was
+    // inert while it was assigned; arithmetic, `let`, `[[ -eq ]]`, `${!x}` and `eval "$x"` run what it holds (evaluated-words.ts: CodeFlow)
+    {
+      const head = statementHead(seg);
+      for (const body of codeFlow.commands(seg, head.prefix, head.verb, head.args))
+        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (a variable whose value is evaluated as code)`.trim() });
+    }
     for (const rawBody of carriedShellBodies(seg)) {
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
@@ -15802,6 +15838,7 @@ function analyzeSegmentsInto(
       // resolved, so every later use asks instead of being read as the home or working directory it used to be
       else if (/^(HOME|PWD|OLDPWD)$/.test(vn)) shellVars.set(vn, `\${${vn}:-assigned-at-run-time}`);
       else shellVars.delete(vn);
+      codeFlow.bind(vn, vv, bindingIsProven && b.how !== 'default-expansion');
       // (a value bound at run time is written as one that cannot be resolved, which is what it is)
       const written1 = `${vn}=${vv ?? '$RUNTIME'}`;
       Object.assign(carriedEnv, segmentEnvInputs(written1 + ' x', true));
@@ -16254,8 +16291,7 @@ export function evaluate(table: CompiledAuthorityTable, ctx: EvaluationContext, 
       } catch (e) {
         // (a shell command is answered inside `classifyBounded`, keeping what it found; this is every other tool - a path of megabytes, a
         // patch of thousands of files - and a command whose bound was reached while its answer was being finished)
-        if (!(e instanceof WorkBoundExceeded)) throw e;
-        const hit = unknownHit(table, ctx, e.message);
+        const hit = unknownHit(table, ctx, failureReason(e));
         const outcome = explainOutcome(table, ctx, hit)!;
         const where = `in profile ${ctx.profile}, mode ${ctx.mode} (${hit.via})`;
         const base =
@@ -16274,14 +16310,7 @@ function classifyBounded(table: CompiledAuthorityTable, ctx: EvaluationContext, 
   try {
     return classifyCommand(table, ctx, command);
   } catch (e) {
-    const why =
-      e instanceof WorkBoundExceeded
-        ? e.message
-        : e instanceof RangeError
-          ? 'too deeply nested to classify within the bound'
-          : null;
-    if (why === null) throw e;
-    return [unknownHit(table, ctx, why)];
+    return [unknownHit(table, ctx, failureReason(e))];
   }
 }
 

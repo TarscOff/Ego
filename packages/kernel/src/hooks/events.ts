@@ -58,6 +58,25 @@ export function isHookEventName(v: string): v is HookEventName {
   return (HOOK_EVENTS as readonly string[]).includes(v);
 }
 
+/** The host's payload cannot be what the hook was registered for: a payload that names another event than the one this hook
+ *  answers, or that is not an object. The CLI turns it into a coded refusal (exit 2), never into an event of the wrong kind that
+ *  answers `{}` and evaluates no tool. */
+export class HookPayloadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HookPayloadError';
+  }
+}
+
+/** The event a payload names, when it names one in a way a string can: the registered event stands, and a payload that disagrees with it
+ *  is refused. The payload is the host's, and the host is not the one deciding which question the kernel is being asked - an agent
+ *  that could make a PreToolUse hook read `"hook_event_name":"Stop"` would have the tool call answered `{}` with exit 0 and
+ *  nothing evaluated (closure audit 2026-10-02, RB-4). */
+export function checkPayloadEvent(registered: string, named: unknown): void {
+  if (typeof named === 'string' && named !== registered)
+    throw new HookPayloadError(`the payload names the event "${named.slice(0, 64)}" but this hook is registered for "${registered}"`);
+}
+
 /**
  * THE REASON A HOST SHOWS, WITH ITS CODE. Both host dialects render a decision's reason into their own channel, and
  * each used to read `d.reason` itself; a code that lived only in the text the kernel happened to write would reach the

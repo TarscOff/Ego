@@ -12,7 +12,7 @@
 // So the question is asked here, once, of the words of a command: WHICH OF THEM ARE EVALUATED. The commands inside them are found by
 // the lexer's one reader (shell-lexer.ts: expressionCommands). This module knows builtins; it knows no tool, no capability, no verdict.
 
-import { expressionCommands } from './shell-lexer.ts';
+import { arithmeticSpanAt, expressionCommands } from './shell-lexer.ts';
 
 /** how a builtin reads its operands */
 type Reading =
@@ -160,6 +160,83 @@ export function evaluatedOperands(verb: string, args: readonly string[]): { expr
     }
   }
   return { expressions, commands };
+}
+
+/**
+ * A VARIABLE WHOSE VALUE IS CODE, EVALUATED LATER ON THE SAME LINE. `x='a[$(git push origin main)]'; echo $((x))` runs the push: the value
+ * is inert text while it is assigned, and arithmetic evaluates a bare name by evaluating what it holds. So do `(( x ))`, `let x`,
+ * `[[ x -eq 1 ]]`, `declare -i y=x`, an assignment to a variable that has the integer attribute, `${!x}`, bash's `${x@P}` and zsh's `${(e)x}`;
+ * and `eval "$x"` and `trap "$x"` run the value as a command. The values that matter are the ones the line itself wrote (the environment
+ * is not the line's to write), and they are remembered here as they are bound.
+ */
+export class CodeFlow {
+  private readonly code = new Map<string, string>();
+  private readonly integers = new Set<string>();
+
+  /** A name was bound, to `value` when one is written (null when it is bound at run time to something unreadable). A value that holds
+   *  a substitution is CODE if it is ever evaluated; a certain binding to anything else is not. */
+  bind(name: string, value: string | null, certain: boolean): void {
+    if (value !== null && /\$\(|`/.test(value)) this.code.set(name, value);
+    else if (certain) this.code.delete(name);
+  }
+
+  /** The commands an arithmetic expression runs by naming a variable that holds code. */
+  inExpression(text: string): string[] {
+    const out: string[] = [];
+    if (this.code.size === 0) return out;
+    for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+      const v = this.code.get(m[0]);
+      if (v !== undefined) out.push(...expressionCommands(v));
+    }
+    return out;
+  }
+
+  /** The commands a statement runs by evaluating a variable that holds code, or by assigning to a variable whose value is evaluated. */
+  commands(raw: string, prefix: readonly string[], verb: string | undefined, args: readonly string[]): string[] {
+    const out: string[] = [];
+    // the names in an expression that hold code: the shell evaluates a bare name by evaluating its value
+    const names = (text: string): void => {
+      for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+        const v = this.code.get(m[0]);
+        if (v !== undefined) out.push(...expressionCommands(v));
+      }
+    };
+    const base = (verb ?? '').replace(/^.*\//, '');
+    // `declare -i y` and `integer y`: what is assigned to `y` from now on is an arithmetic expression
+    if (verb !== undefined && /^(declare|typeset|local|readonly|export|private|integer)$/.test(base)) {
+      const integer = base === 'integer' || args.some((a) => /^-[A-Za-z]*i/.test(a));
+      if (integer) for (const a of args) if (!/^[-+]/.test(a)) this.integers.add(splitAssignment(a).name.replace(/\[.*$/, ''));
+    }
+    // an assignment to an INTEGER variable evaluates its value, a bare name in it included
+    for (const w of prefix) {
+      const { name, value } = splitAssignment(w);
+      if (value !== null && this.integers.has(name.replace(/\[.*$/, ''))) {
+        out.push(...expressionCommands(value));
+        names(value);
+      }
+    }
+    if (this.code.size === 0) return out;
+    // the operands the head evaluates (`let x`, `[[ x -eq 1 ]]`, `declare -i y=x`, `print -P "$x"`)
+    if (verb !== undefined) for (const e of evaluatedOperands(verb, args).expressions) names(e);
+    // the arithmetic written into the statement: `$(( x ))`, `$[ x ]`, `(( x ))`, `for (( … ))`
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i] !== '$' && raw[i] !== '(') continue;
+      const a = arithmeticSpanAt(raw, i);
+      if (a !== null) names(a.body);
+    }
+    // the expansions that evaluate a variable's VALUE: `${!x}`, `${x@P}`, `${(e)x}`, `${(%)x}`
+    for (const m of raw.matchAll(/\$\{(?:!([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)@[Pp]|\([^)]*[e%][^)]*\)[~=]*([A-Za-z_][A-Za-z0-9_]*))/g)) {
+      const v = this.code.get((m[1] ?? m[2] ?? m[3])!);
+      if (v !== undefined) out.push(...expressionCommands(v));
+    }
+    // a value handed to \`eval\` or \`trap\` IS the command: \`eval "$x"\`, \`trap "$x" EXIT\`
+    if (base === 'eval' || base === 'trap')
+      for (const m of args.join(' ').matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {
+        const v = this.code.get((m[1] ?? m[2])!);
+        if (v !== undefined) out.push(v);
+      }
+    return out;
+  }
 }
 
 /** The commands a simple command runs by EVALUATING its operands: the verb and operands after the shell has removed the quoting, and
