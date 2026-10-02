@@ -25,16 +25,14 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evaluate } from '../src/authority/evaluate.ts';
-import { readContainerCommand } from '../src/authority/containers.ts';
-import { optionArity } from '../src/authority/k8s.ts';
+import { CONTAINER_ENGINE_ENV, readContainerCommand } from '../src/authority/containers.ts';
+import { K8S_SELECTING_ENV_NAMES, optionArity } from '../src/authority/k8s.ts';
 import { ensurePolicyCache, type PolicyCache } from '../src/policy/cache.ts';
-import * as LT from '../src/control-plane/local-targets.ts';
+import { hasProductionMarker, nameWords } from '../src/control-plane/local-targets.ts';
 import { workspace, verdict, table, ctx } from './support/corpus.ts';
 
 const CP = new URL('../../../control-plane/', import.meta.url).pathname;
 const SELF = { runtimeSha256: 'closure-clusters2-test', version: '0.0.0-test' };
-// (fixtures are made under one parent, as corpus.ts does: `detectProject` lists the siblings of a repository)
-void mkdtempSync(join(tmpdir(), 'ego-clusters2-root-'));
 
 type Expect = 'DENY' | 'ASK' | 'ALLOW' | 'GATED';
 type Case = readonly [cmd: string, expect: Expect, files?: Record<string, string>];
@@ -94,14 +92,14 @@ test('a name is production when a marker is a WORD of it: numbered environments,
     'minikube', 'kind-dev', 'docker-desktop', 'localhost', 'aks-dev-weu', 'team-eu', 'dev-1', 'staging', 'stg1', 'ProductCatalog', 'eksProducts',
   ];
   const bad: string[] = [];
-  for (const n of production) if (!LT.hasProductionMarker(n, MARKERS)) bad.push(`${n} should be production`);
-  for (const n of notProduction) if (LT.hasProductionMarker(n, MARKERS)) bad.push(`${n} should not be production`);
+  for (const n of production) if (!hasProductionMarker(n, MARKERS)) bad.push(`${n} should be production`);
+  for (const n of notProduction) if (hasProductionMarker(n, MARKERS)) bad.push(`${n} should not be production`);
   assert.deepEqual(bad, []);
   // a marker a layer adds is read the same way, and several words in a row are several words in a row
-  assert.ok(LT.hasProductionMarker('team-uat2-eu', [...MARKERS, 'uat']));
-  assert.ok(LT.hasProductionMarker('x-sandbox-eu-1', [...MARKERS, 'sandbox-eu']));
-  assert.ok(!LT.hasProductionMarker('x-sandbox-us', [...MARKERS, 'sandbox-eu']));
-  assert.deepEqual(LT.nameWords('eksProd2-WEU'), ['eks', 'prod', '2', 'weu']);
+  assert.ok(hasProductionMarker('team-uat2-eu', [...MARKERS, 'uat']));
+  assert.ok(hasProductionMarker('x-sandbox-eu-1', [...MARKERS, 'sandbox-eu']));
+  assert.ok(!hasProductionMarker('x-sandbox-us', [...MARKERS, 'sandbox-eu']));
+  assert.deepEqual(nameWords('eksProd2-WEU'), ['eks', 'prod', '2', 'weu']);
 });
 
 test('the numbered production name reaches the absolute denies in every family, whichever wildcard was accepted (AUTH-1)', () => {
@@ -150,7 +148,7 @@ test('every resolver agrees with the one reader, over generated names (the three
   for (let i = 0; i < 90; i++) {
     const w = words[next(words.length)]!;
     const name = `aks${joins[next(3)]}${w}${tails[next(tails.length)]}`;
-    const isProd = LT.hasProductionMarker(name, a.cache.table.localTargets.productionMarkers);
+    const isProd = hasProductionMarker(name, a.cache.table.localTargets.productionMarkers);
     const check = (cmd: string, capability: string): void => {
       const e = judge(a, cmd);
       const got = e.decisive?.capability === capability && e.verdict === 'DENY';
@@ -249,6 +247,9 @@ test('every variable that names a container engine or a connection is read, in e
     [`BUILDX_BUILDER=production docker buildx build .`, 'DENY', { Dockerfile: 'FROM alpine\n' }],
     // a connection that names no declared local one is not local either
     [`CONTAINER_CONNECTION=staging podman run ${E}`, 'GATED'],
+    // ...and one handed to a container's own tools reaches the engine the container's docker will use, which is the gate on it
+    [`docker run -e DOCKER_HOST=tcp://prod.example.com:2375 alpine docker ps`, 'DENY'],
+    [`docker run --env CONTAINER_CONNECTION=production alpine podman ps`, 'DENY'],
     // a variable that points at the FILE which holds the choice: the choice cannot be read from here, so it asks
     [`BUILDX_CONFIG=./bc docker buildx build .`, 'GATED', { Dockerfile: 'FROM alpine\n' }],
     [`CONTAINERS_CONF=./c.conf podman run ${E}`, 'GATED'],
@@ -272,6 +273,49 @@ test('every variable that names a container engine or a connection is read, in e
     [`CONTAINER_CONNECTION=production podman images`, 'ALLOW'],
     [`BUILDX_CONFIG=./bc docker buildx ls`, 'ALLOW'],
   ]);
+});
+
+test('every variable of the two tables is read where it is set: in front of the command, exported earlier, through env (the normalizer and the resolver know the same ones)', () => {
+  // the tables are the readers' (containers.ts, k8s.ts); a variable added to one without a sample here fails the test, so it cannot be known to the resolver alone
+  const container: Record<string, { tool: string; value: string; expect: 'DENY' | 'GATED' }> = {
+    DOCKER_HOST: { tool: 'docker run alpine true', value: 'tcp://prod.example.com:2375', expect: 'DENY' },
+    CONTAINER_HOST: { tool: 'podman run alpine true', value: 'ssh://root@prod.example.com', expect: 'DENY' },
+    CONTAINERD_ADDRESS: { tool: 'nerdctl run alpine true', value: '/run/containerd/production.sock', expect: 'DENY' },
+    DOCKER_CONTEXT: { tool: 'docker run alpine true', value: 'production', expect: 'DENY' },
+    CONTAINER_CONNECTION: { tool: 'podman run alpine true', value: 'production', expect: 'DENY' },
+    BUILDX_BUILDER: { tool: 'docker buildx build .', value: 'production', expect: 'DENY' },
+    DOCKER_CONFIG: { tool: 'docker run alpine true', value: './dc', expect: 'GATED' },
+    BUILDX_CONFIG: { tool: 'docker buildx build .', value: './bc', expect: 'GATED' },
+    CONTAINERS_CONF: { tool: 'podman run alpine true', value: './c.conf', expect: 'GATED' },
+    CONTAINERS_CONF_OVERRIDE: { tool: 'podman run alpine true', value: './c.conf', expect: 'GATED' },
+    PODMAN_CONNECTIONS_CONF: { tool: 'podman run alpine true', value: './c.json', expect: 'GATED' },
+    NERDCTL_TOML: { tool: 'nerdctl run alpine true', value: './n.toml', expect: 'GATED' },
+    DOCKER_CERT_PATH: { tool: 'docker run alpine true', value: './certs', expect: 'GATED' },
+    DOCKER_TLS_VERIFY: { tool: 'docker run alpine true', value: '1', expect: 'GATED' },
+    DOCKER_TLS: { tool: 'docker run alpine true', value: '1', expect: 'GATED' },
+    CONTAINER_SSHKEY: { tool: 'podman run alpine true', value: './k', expect: 'GATED' },
+    CONTAINER_PASSPHRASE: { tool: 'podman run alpine true', value: 'x', expect: 'GATED' },
+  };
+  const cluster: Record<string, { tool: string; value: string }> = {
+    KUBECONFIG: { tool: 'kubectl delete pod x', value: 'prod.yaml' },
+    KUBERNETES_MASTER: { tool: 'kubectl delete pod x', value: 'https://prod.example.com' },
+    KUBERNETES_SERVICE_HOST: { tool: 'kubectl delete pod x', value: 'prod.example.com' },
+    KUBE_CONTEXT: { tool: 'kubectl delete pod x', value: 'production' },
+    HELM_KUBECONTEXT: { tool: 'helm uninstall x', value: 'production' },
+    HELM_KUBEAPISERVER: { tool: 'helm uninstall x', value: 'https://prod.example.com' },
+    HELM_NAMESPACE: { tool: 'helm uninstall x', value: 'production' },
+  };
+  assert.deepEqual(Object.keys(container).sort(), [...CONTAINER_ENGINE_ENV.keys()].sort(), 'a variable of the container table has no sample');
+  assert.deepEqual(Object.keys(cluster).sort(), [...K8S_SELECTING_ENV_NAMES].sort(), 'a variable of the cluster table has no sample');
+  const files = { Dockerfile: 'FROM alpine\n', 'prod.yaml': kubeconfig('https://127.0.0.1:6443') };
+  const misses: string[] = [];
+  for (const [name, { tool, value, expect }] of Object.entries(container).map(([n, v]) => [n, v] as const).concat(Object.entries(cluster).map(([n, v]) => [n, { ...v, expect: 'DENY' as const }] as const))) {
+    for (const form of [`${name}=${value} ${tool}`, `export ${name}=${value}; ${tool}`, `env ${name}=${value} ${tool}`, `if true; then ${name}=${value} ${tool}; fi`]) {
+      const got = verdict(form, workspace(files));
+      if (expect === 'DENY' ? got !== 'DENY' : got === 'ALLOW') misses.push(`${expect} expected, ${got}: ${form}`);
+    }
+  }
+  assert.deepEqual(misses, []);
 });
 
 test('an engine reached through a local-looking socket is still the engine its name says (CT-06)', () => {
@@ -537,6 +581,29 @@ test('...in every way the Dockerfile reaches the build: compose, bake, a named f
     ['docker build -t app .', 'DENY', { ...DF('./build.sh'), 'build.sh': '#!/bin/sh\ngit push origin main\n' }],
     // what the build reads from the host through a secret mount is the host's, and judged as the host's
     ['docker build -t app --secret id=k,src=/etc/passwd .', 'GATED', df],
+  ]);
+});
+
+test('a context that holds a Dockerfile and a Containerfile is built from one of them, and podman and buildah are read as building either (sibling found by the corpus)', () => {
+  const evil = { Dockerfile: 'FROM alpine\nRUN echo ok\n', Containerfile: 'FROM alpine\nRUN git push origin main\n' };
+  const evilDockerfile = { Dockerfile: 'FROM alpine\nRUN git push origin main\n', Containerfile: 'FROM alpine\nRUN echo ok\n' };
+  run([
+    // podman and buildah take the Containerfile first: the Dockerfile that sat beside it was read, and the one that runs was not
+    ['podman build .', 'DENY', evil],
+    ['buildah build .', 'DENY', evil],
+    ['buildah bud .', 'DENY', evil],
+    ['podman build -t app .', 'DENY', evil],
+    ['podman image build .', 'DENY', evil],
+    // ...and the other way round: not knowing which one runs is not a reason to read one
+    ['podman build .', 'DENY', evilDockerfile],
+    // docker has no Containerfile, and a Containerfile beside its Dockerfile is no part of its build
+    ['docker build .', 'ALLOW', evil],
+    ['docker build .', 'DENY', evilDockerfile],
+    // one file is the file it is
+    ['podman build .', 'DENY', { Containerfile: evil.Containerfile }],
+    ['podman build .', 'ALLOW', { Containerfile: evil.Dockerfile }],
+    ['podman build -f Dockerfile .', 'ALLOW', evil],
+    ['podman build -f Containerfile .', 'DENY', evil],
   ]);
 });
 

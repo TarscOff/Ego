@@ -49,6 +49,7 @@ import {
   KUBECTL_VERBS,
   k8sEffect,
   k8sGlobalOptions,
+  K8S_SELECTING_ENV_NAMES,
   k8sHasVerb,
   k8sObjectNames,
   k8sOptionMayTakeValue,
@@ -88,7 +89,6 @@ import {
   commandBuildEffects,
   effectMarkers,
   effectStatement,
-  environmentEngines,
   isEngineRead,
   bindsEngine,
   readContainerCommand,
@@ -9590,9 +9590,10 @@ const TARGET_ENV_RE =
   // or a herestring it did not, and a shell on a production daemon asked (exit review 6, generated cross-product).
   new RegExp(
     '^(' +
-      'PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBERNETES_SERVICE_HOST|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|HELM_NAMESPACE|CLICKHOUSE_HOST|LIQUIBASE_COMMAND_URL|LIQUIBASE_URL|DBMATE_DATABASE_URL|PRISMA_DATABASE_URL|TYPEORM_URL|SEQUELIZE_URL|POSTGRES_URL|POSTGRES_HOST|MONGODB_HOST|' +
-      // the variables that select a container engine are THE CONTAINER READER'S table (containers.ts), not a list of this file's
-      [...CONTAINER_ENGINE_ENV.keys()].join('|') +
+      'PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|CLICKHOUSE_HOST|LIQUIBASE_COMMAND_URL|LIQUIBASE_URL|DBMATE_DATABASE_URL|PRISMA_DATABASE_URL|TYPEORM_URL|SEQUELIZE_URL|POSTGRES_URL|POSTGRES_HOST|MONGODB_HOST|' +
+      // the variables that select a container engine are THE CONTAINER READER'S table (containers.ts), and the ones that select a cluster the
+      // CLUSTER READER'S (k8s.ts): not lists of this file's, so the normalizer and the resolver cannot know different ones
+      [...CONTAINER_ENGINE_ENV.keys(), ...K8S_SELECTING_ENV_NAMES].join('|') +
       ')$',
   );
 const TARGET_ENV_HEADS = new Set([
@@ -10164,25 +10165,22 @@ function resolveContainerTarget(
   for (const e of cc?.engines ?? []) engine(e);
   // the engine is selected by ENVIRONMENT too — `DOCKER_HOST` and `DOCKER_CONTEXT` are the same two flags by
   // another name, and docker's own help documents `--context` as overriding `DOCKER_HOST`. WHICH variables select it is the
-  // container reader's table (CONTAINER_ENGINE_ENV), for the command's own environment and for what an earlier command of the
-  // line exported alike
-  for (const e of cc ? environmentEngines(cc) : []) engine(e);
-  for (const [k, v] of Object.entries(envInputs)) {
-    const kind = CONTAINER_ENGINE_ENV.get(k);
-    if (kind !== undefined && v !== '') engine({ kind, value: kind === 'client configuration' ? null : v, flag: k });
+  // container reader's table (CONTAINER_ENGINE_ENV): the ones an earlier command of the line exported...
+  const engineEnv = (name: string, value: string): void => {
+    const kind = CONTAINER_ENGINE_ENV.get(name);
+    // (a variable set to nothing is a variable that is not set: `DOCKER_CONFIG= docker ps` selects nothing)
+    if (kind !== undefined && value !== '') engine({ kind, value: kind === 'client configuration' ? null : value, flag: name });
+  };
+  for (const [k, v] of Object.entries(envInputs)) engineEnv(k, v);
+  // …and as a TOKEN, because that is how the normalizer re-attaches a target assignment it stripped from the
+  // head. Reading only `envInputs` meant the re-attachment reached the resolver and was ignored by it, which is
+  // the "accepted but unconsumed" defect one layer down (exit review 6, generated cross-product). EVERY token is read, not only the ones in
+  // front of the program or after its arguments: `docker run -e DOCKER_HOST=tcp://prod... alpine docker ps` hands the container's own docker
+  // the production engine, and the over-reading is the gate on it
+  for (const t of tokens) {
+    const eq = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
+    if (eq) engineEnv(eq[1]!, eq[2]!.replace(/^['"]|['"]$/g, ''));
   }
-  // ...and, for a line the reader could not place (a wrapper that keeps its head, a marker), as a TOKEN: that is how the
-  // normalizer re-attaches a target assignment it stripped from the head. Reading only `envInputs` meant the re-attachment reached
-  // the resolver and was ignored by it, which is the "accepted but unconsumed" defect one layer down (exit review 6, generated
-  // cross-product). Where the reader DID place the command, the assignments that are its environment are the ones in front of it and
-  // the ones re-attached after it: `docker run -e DOCKER_HOST=… alpine` sets the CONTAINER's variable, not the engine's.
-  if (cc === null)
-    for (const t of tokens) {
-      const eq = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
-      const kind = eq ? CONTAINER_ENGINE_ENV.get(eq[1]!) : undefined;
-      const value = eq?.[2]!.replace(/^['"]|['"]$/g, '') ?? '';
-      if (kind !== undefined && value !== '') engine({ kind, value: kind === 'client configuration' ? null : value, flag: eq![1]! });
-    }
   if (!signals.length) return { cls: 'LOCAL', target: 'local daemon', mutating: false };
   // A READ against another engine is not a mutation of it: `docker -H … ps` lists, it does not deploy. Whether a verb
   // is one of those is the reader's table: a MANAGEMENT GROUP is not a verb (`image` and `context` name a family whose
@@ -10239,8 +10237,7 @@ function k8sInvocation(norm: string, rawSeg: string | undefined): { headWord: K8
 
 /** The variables that select a cluster, with every value they have in scope: the ones the command line sets for this
  *  command, and the ones an earlier command of the same line exported. */
-const K8S_SELECTING_ENV =
-  /^(KUBECONFIG|KUBERNETES_MASTER|KUBERNETES_SERVICE_HOST|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|HELM_NAMESPACE)$/;
+const K8S_SELECTING_ENV = new RegExp(`^(${K8S_SELECTING_ENV_NAMES.join('|')})$`);
 function k8sEnvironment(norm: string, envInputs: Record<string, string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   const put = (name: string, value: string): void => {
@@ -13718,8 +13715,10 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         // a bind mount is read-write by default: judge it as BOTH, and keep whichever is more restrictive
         for (const tool of ['Write', 'Read'] as const) {
           const h = classifyPath(table, ctx, tool, entry.lex ?? entry.abs);
+          // (the source of a bind mount is a path of the ENGINE's host, whatever runs the command: in a RUN line it is not the image's
+          // path, and is not confined to it)
           if (h.verdict !== 'ALLOW')
-            hits.push({ ...h, via: `bind mount source ${src} (${h.via})`, segment: seg });
+            hits.push({ ...h, onPath: false, via: `bind mount source ${src} (${h.via})`, segment: seg });
         }
         const posix = entry.abs.split(sep).join('/');
         const homePosix = canonicalPath(homedir()).split(sep).join('/');

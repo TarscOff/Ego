@@ -388,19 +388,10 @@ export interface ContainerCommand {
   rootOptions: ReadOption[];
   /** an option whose arity this grammar does not know stood among the verb's options */
   unknownOption: string | null;
-  /** THE ASSIGNMENTS THAT ARE THIS PROCESS'S ENVIRONMENT: the ones in front of the program (`DOCKER_HOST=tcp://x docker ps`) and the
-   *  ones the normalizer re-attached after its arguments. An assignment anywhere else is not: `docker run -e DOCKER_HOST=tcp://x alpine`
-   *  is the CONTAINER's environment, and reading it as the engine's made every `-e` of that name an engine selection */
-  environment: Array<{ name: string; value: string }>;
 }
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const TRAILING_ENV = /^[A-Z][A-Z0-9_]*=/;
-const assignmentOf = (word: string): Array<{ name: string; value: string }> => {
-  const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(word);
-  return m ? [{ name: m[1]!, value: m[2]!.replace(/^(['"])([\s\S]*)\1$/, '$2') }] : [];
-};
-
 /** THE VARIABLES THAT SELECT WHICH ENGINE A CONTAINER TOOL TALKS TO, in ONE table - the same selection as the options of PROGRAMS above,
  *  by environment. The resolver reads the value of each by its kind, and the normalizer's list of the assignments it must re-attach to
  *  the segment is DERIVED from it, so a variable cannot be known to one and not to the other (wave 5, CT-01: `CONTAINER_CONNECTION`, the
@@ -432,17 +423,6 @@ export const CONTAINER_ENGINE_ENV: ReadonlyMap<string, EngineKind> = new Map<str
   ['CONTAINER_PASSPHRASE', 'client configuration'],
 ]);
 
-/** The engine signals a command's own ENVIRONMENT carries: one per variable of the table that is set to something. */
-export function environmentEngines(cmd: ContainerCommand): EngineSignal[] {
-  const out: EngineSignal[] = [];
-  for (const { name, value } of cmd.environment) {
-    const kind = CONTAINER_ENGINE_ENV.get(name);
-    // (a variable set to nothing is a variable that is not set: `DOCKER_CONFIG= docker ps` selects nothing)
-    if (kind === undefined || value === '') continue;
-    out.push({ kind, value: kind === 'client configuration' ? null : value, flag: name });
-  }
-  return out;
-}
 
 /** the engine options, as values, wherever the verb's own grammar does not know them */
 const ENGINE_VALUES = grammar('-H --host --url --address --context --connection --builder --config', '');
@@ -471,7 +451,6 @@ function blank(program: ContainerProgram, ws: string[]): ContainerCommand {
     groupOptions: [],
     rootOptions: [],
     unknownOption: null,
-    environment: [],
   };
 }
 
@@ -486,13 +465,8 @@ export function readContainerCommand(tokens: readonly string[]): ContainerComman
   let ws = tokens.slice(at + 1);
   // the normalizer re-attaches the target-selecting assignments it stripped at the END of the command, after the
   // arguments; they are environment, and they must not become an operand
-  const environment = tokens.slice(0, at).flatMap(assignmentOf);
-  while (ws.length && TRAILING_ENV.test(ws[ws.length - 1]!)) {
-    environment.push(...assignmentOf(ws[ws.length - 1]!));
-    ws = ws.slice(0, -1);
-  }
+  while (ws.length && TRAILING_ENV.test(ws[ws.length - 1]!)) ws = ws.slice(0, -1);
   const cmd = blank(program, ws);
-  cmd.environment = environment;
   const signal = (o: ReadOption, kind: EngineKind | undefined): void => {
     if (kind !== undefined) cmd.engines.push({ kind, value: kind === 'client configuration' ? null : o.value, flag: o.name });
   };
@@ -543,11 +517,7 @@ export function readContainerCommand(tokens: readonly string[]): ContainerComman
     // `lima CMD` runs CMD in the default VM; `lima nerdctl …` is nerdctl in it, with the VM's own engine
     if (/^(nerdctl|docker|podman)$/.test(first)) {
       const inner = readContainerCommand(ws.slice(i));
-      if (inner) {
-        // (the variables set in front of `lima` are the inner tool's environment too)
-        inner.environment = [...cmd.environment, ...inner.environment];
-        return inner;
-      }
+      if (inner) return inner;
     }
     return unmodelled([first], i + 1, `lima runs ${first} inside a virtual machine`);
   }
@@ -1126,30 +1096,35 @@ export function collectBuildInputs(cmd: ContainerCommand, io: BuildIO): BuildRes
 
 const lastOf = <T>(xs: readonly T[]): T | undefined => xs[xs.length - 1];
 
+/** The builds of several Dockerfiles as one: every body runs, and a file that was not read is a gap of the whole. */
+function mergeDockerfileBuilds(parts: BuildResult[]): BuildResult {
+  const body = parts.flatMap((p) => p.body ?? []);
+  const unresolved: BuildGap[] = parts
+    .filter((p) => p.resolution !== 'RESOLVED_COMPLETE' && p.resolution !== 'ABSENT_VERIFIED')
+    .map((p) => ({ what: 'body', where: p.key, why: p.reason }));
+  const sources = parts.flatMap((p) => (p.provenance ? [p.provenance] : []));
+  return {
+    key: parts.map((p) => p.key).join('+'),
+    reason: unresolved.length ? `Dockerfiles; NOT fully resolved: ${unresolved[0]!.why}` : 'Dockerfiles',
+    resolution: unresolved.length ? 'PARTIAL' : parts.every((p) => p.resolution === 'ABSENT_VERIFIED') ? 'ABSENT_VERIFIED' : 'RESOLVED_COMPLETE',
+    body: parts.every((p) => p.body === null) && !unresolved.length ? null : body,
+    hostBody: [],
+    unresolved,
+    ...(sources.length ? { provenance: { source: sources.map((s) => s.source).join(','), fingerprint: sources.map((s) => s.fingerprint).join(',') } } : {}),
+  };
+}
+
 /** `docker build`: one Dockerfile, named by `-f` (relative to the working directory) or sitting in the context */
 function collectDockerfileBuild(cmd: ContainerCommand, io: BuildIO): BuildResult {
   const fileOptions = cmd.options.filter((o) => o.name === '-f' || o.name === '--file');
   // docker takes the LAST `-f`; podman and buildah build EVERY file they are given. Which tool this is cannot be asked of a
   // word, so each is read, and a build that names two Dockerfiles runs all of them as far as this reader can tell.
-  if (fileOptions.length > 1) {
-    const parts = fileOptions.map((keep) =>
-      collectDockerfileBuild({ ...cmd, options: cmd.options.filter((o) => o === keep || !(o.name === '-f' || o.name === '--file')) }, io),
+  if (fileOptions.length > 1)
+    return mergeDockerfileBuilds(
+      fileOptions.map((keep) =>
+        collectDockerfileBuild({ ...cmd, options: cmd.options.filter((o) => o === keep || !(o.name === '-f' || o.name === '--file')) }, io),
+      ),
     );
-    const body = parts.flatMap((p) => p.body ?? []);
-    const unresolved: BuildGap[] = parts
-      .filter((p) => p.resolution !== 'RESOLVED_COMPLETE' && p.resolution !== 'ABSENT_VERIFIED')
-      .map((p) => ({ what: 'body', where: p.key, why: p.reason }));
-    const sources = parts.flatMap((p) => (p.provenance ? [p.provenance] : []));
-    return {
-      key: parts.map((p) => p.key).join('+'),
-      reason: unresolved.length ? `Dockerfiles; NOT fully resolved: ${unresolved[0]!.why}` : 'Dockerfiles',
-      resolution: unresolved.length ? 'PARTIAL' : parts.every((p) => p.resolution === 'ABSENT_VERIFIED') ? 'ABSENT_VERIFIED' : 'RESOLVED_COMPLETE',
-      body: parts.every((p) => p.body === null) && !unresolved.length ? null : body,
-      hostBody: [],
-      unresolved,
-      ...(sources.length ? { provenance: { source: sources.map((s) => s.source).join(','), fingerprint: sources.map((s) => s.fingerprint).join(',') } } : {}),
-    };
-  }
   const named = lastOf(fileOptions.map((o) => o.value))?.replace(/^=/, '') ?? null;
   const result = (r: Omit<BuildResult, 'hostBody' | 'unresolved'> & { unresolved?: BuildGap[] }): BuildResult => ({ hostBody: [], unresolved: [], ...r });
   // `-f -` reads the Dockerfile from STANDARD INPUT. That is a stream - UNLESS the command line holds it, which a
@@ -1187,12 +1162,24 @@ function collectDockerfileBuild(cmd: ContainerCommand, io: BuildIO): BuildResult
       reason: 'the build context is a stream or a remote URL, so its Dockerfile was never read',
       resolution: 'UNREADABLE',
     });
-  // PODMAN'S DEFAULT BUILD FILE IS `Containerfile`, and it falls back to `Dockerfile`
+  // PODMAN'S DEFAULT BUILD FILE IS `Containerfile`, and it falls back to `Dockerfile`; docker's is `Dockerfile`. The code read the Dockerfile
+  // first for every tool, so `podman build .` in a context that holds a benign Dockerfile and a Containerfile that pushes was ALLOW (wave 5, found
+  // by the corpus crossing a class with the image producers). A context that holds BOTH is built from one of them, which one is a fact about
+  // the tool this reader does not rest a positive claim on: for podman and buildah, which prefer the other, both are read.
   let dockerfile = named ?? `${context}/Dockerfile`;
   const present = (word: string): boolean => {
     const o = io.open(io.cwd, word);
     return o !== null && io.exists(o);
   };
+  if (named === null && (cmd.program === 'podman' || cmd.program === 'buildah') && present(`${context}/Dockerfile`) && present(`${context}/Containerfile`))
+    return mergeDockerfileBuilds(
+      ['Containerfile', 'Dockerfile'].map((f) =>
+        collectDockerfileBuild(
+          { ...cmd, options: [...cmd.options, { at: -1, names: ['-f'], name: '-f', value: `${context}/${f}`, length: 2, known: true, glued: false }] },
+          io,
+        ),
+      ),
+    );
   if (named === null && !present(dockerfile) && present(`${context}/Containerfile`)) dockerfile = `${context}/Containerfile`;
   const abs = io.open(io.cwd, dockerfile);
   if (abs === null)

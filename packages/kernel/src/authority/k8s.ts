@@ -112,6 +112,12 @@ export interface K8sEffect {
  * word after it MAY be its value, and nothing that rests on that word being a flag is granted.
  * ------------------------------------------------------------------------------------------------------------- */
 
+/** THE VARIABLES THAT SELECT A CLUSTER, in one list: the resolver reads each of them, and the normalizer's list of the assignments it re-attaches
+ *  to a command is derived from it. */
+export const K8S_SELECTING_ENV_NAMES: readonly string[] = [
+  'KUBECONFIG', 'KUBERNETES_MASTER', 'KUBERNETES_SERVICE_HOST', 'KUBE_CONTEXT', 'HELM_KUBECONTEXT', 'HELM_KUBEAPISERVER', 'HELM_NAMESPACE',
+];
+
 /** kubectl's PERSISTENT options, the only ones that may stand in front of the verb, and the klog options it still lists */
 const KUBECTL_GLOBAL_VALUE = [
   '--as', '--as-group', '--as-uid', '--as-user-extra', '--cache-dir', '--certificate-authority', '--client-certificate',

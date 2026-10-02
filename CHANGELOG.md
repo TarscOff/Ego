@@ -418,8 +418,7 @@ discipline of decision Q84 (authority changes are never patch releases).
   (2) *Container engines.* The variables that select an engine are one table (`CONTAINER_ENGINE_ENV`, containers.ts) read by the resolver and
   derived into the normalizer's list: `CONTAINER_CONNECTION`, `CONTAINERD_ADDRESS` and the variables that point at the file that holds the choice
   (`CONTAINERS_CONF`, `PODMAN_CONNECTIONS_CONF`, `BUILDX_CONFIG`, `NERDCTL_TOML`, `DOCKER_CERT_PATH`, `CONTAINER_SSHKEY`, ...) were read by neither.
-  An assignment is the engine's only in front of the program or re-attached after it (`docker run -e DOCKER_HOST=...` is the container's). A
-  socket (`unix://`, `npipe://`, `fd://`, a path) is local unless its name says production. `--pull` of `run`/`create` takes a value.
+  A socket (`unix://`, `npipe://`, `fd://`, a path) is local unless its name says production. `--pull` of `run`/`create` takes a value.
   `save`, `history` and `top` print what `inspect` and `logs` print and are no longer reads of another engine. `docker logout` is an ASK, not an
   absolute refusal; `docker init`, `scout quickview|cves|...`, `model ls|status|...` and `desktop status|version|logs` are modelled reads and the rest
   of those plugins still ask. `docker cp`, `podman cp`, `compose cp` and `kubectl cp` out of a container are writes to their destination, judged as
