@@ -19,7 +19,9 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { workspace, verdict, ORDINARY_MAKEFILES } from './support/corpus.ts';
+import { workspace, verdict, ORDINARY_MAKEFILES, ctx, table } from './support/corpus.ts';
+import { evaluate } from '../src/authority/evaluate.ts';
+import { WORK_LIMIT, workSpent } from '../src/authority/work-bound.ts';
 import { generateCases, implicitCases, oracleRoot, realMakeAvailable, runReal, siteCases } from './support/make-oracle.ts';
 import {
   MakeStore,
@@ -423,6 +425,22 @@ test('MK-09. a reached bound is a gap, and the same makefile read by the unmeter
   assert.deepEqual(x.alts.map((a) => a.text), [null]);
   // (what ran before the bound was reached is kept, once: a repeated command is not a longer list)
   assert.ok(x.ran.length <= 1);
+});
+
+test('MK-09. a ledger that says any file may have been written does not make make\'s own tools a fan-out, and still reads the invocation\'s text', () => {
+  const dir = workspace();
+  const spent = (command: string): { got: string; units: number } => {
+    const got = evaluate(table, ctx(dir), { tool: 'Bash', input: { command } }).verdict;
+    return { got, units: workSpent() };
+  };
+  // (`env -C` leaves the ledger saying "anything": every built-in rule has a prerequisite that may be there, and the chain through the
+  //  intermediate files is forty-eight recipes of make's own tools - it was 700 000 units, over a sixteenth of the bound)
+  const plain = spent('env -C sub true && make all');
+  assert.equal(plain.got, 'ASK');
+  assert.ok(plain.units * 16 < WORK_LIMIT, `${plain.units} units of ${WORK_LIMIT}`);
+  // ...but a variable those recipes read is the invocation's text, and it is read at every link of the chain
+  for (const [goal, name] of [['all', 'COMPILE.c'], ['all', 'CC'], ['all', 'LEX'], ['all', 'YACC'], ['all.o', 'COMPILE.c'], ['all.o', 'CC'], ['all.c', 'LEX'], ['all.c', 'YACC']] as const)
+    assert.equal(spent(`env -C sub true && make '${name}=${ACT} ;' ${goal}`).got, 'DENY', `${name} on the way to ${goal}`);
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *

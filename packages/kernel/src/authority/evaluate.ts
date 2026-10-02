@@ -74,7 +74,7 @@ import {
 import { GIT_VERB_OPTIONS } from './git-verb-options.ts';
 import { MAKE_WILDCARD, MakeStore, encodeMakeParts, flagDefinitions, parseMakeCommandLine, readMakeNames, recipeCommands } from './make.ts';
 import { MakeReader, newMakeModel, type MakeHost, type MakeModel } from './make-reader.ts';
-import { builtinRulesFor, matchPatternRule, stemmed } from './make-builtins.ts';
+import { IMPLICIT_RULE_VARIABLES, builtinRulesFor, matchPatternRule, stemmed } from './make-builtins.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 import {
@@ -8020,6 +8020,8 @@ function resolveScriptCommand(
       parseWrites ??= merged.parseRan.some((c) => commandMayWrite(table, c));
       return merged.rules.has(p) || parseWrites || onDisk(p);
     };
+    let takesInput: boolean | undefined;
+    const rulesTakeInput = (): boolean => (takesInput ??= store.names().some((n) => IMPLICIT_RULE_VARIABLES.has(n) && store.originOf(n) !== 'default'));
     const implicitUnits = (t: string, viaImplicit: boolean): Array<{ prereqs: string[]; recipes: string[]; stem: string | undefined }> => {
       const matches: Array<{ prereqs: string[]; recipes: string[]; stem: string | undefined }> = [];
       for (const pr of merged.patternRules) {
@@ -8032,7 +8034,13 @@ function resolveScriptCommand(
       if (applicable.length) return applicable;
       // (a rule of the makefile that cannot apply is still read - and it does not hide the built-in one that can: `.deploy:` is the
       //  single-suffix rule `%: %.deploy`, and it was taken for the only rule that could build `foo`)
-      const built = cl.noBuiltinRules ? [] : builtinRulesFor(t, there, viaImplicit);
+      // WHEN THE LEDGER SAYS ANY FILE MAY HAVE BEEN WRITTEN, every built-in rule has a prerequisite that "is there" and the chain through
+      // intermediate files (`foo` <- `foo.o` <- `foo.c` <- `foo.y`) is a guess about files nobody can name: the second link of it is
+      // read only when the invocation gave a variable its recipes read a value - that text is the invocation's and runs wherever a rule
+      // can reach it - and not when every one of them is make's own, whose tools are the same on every path (the decision is an ASK
+      // for the staleness either way; an unconditional chain made one `env -C sub …; make all` cost forty-eight recipes)
+      const chainGuess = viaImplicit && written.has('\0any') && !rulesTakeInput();
+      const built = cl.noBuiltinRules || chainGuess ? [] : builtinRulesFor(t, there, viaImplicit);
       if (matches.length || built.length)
         return [...matches, ...built.map((h) => ({ prereqs: h.prereqs, recipes: [...h.rule.recipes], stem: h.stem as string | undefined }))];
       // `.DEFAULT` IS THE RECIPE OF A GOAL NO RULE BUILDS AND NO FILE IS: make runs it for any name it cannot make (exit review 6)

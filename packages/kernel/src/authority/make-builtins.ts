@@ -230,3 +230,21 @@ export const IMPLICIT_RULE_INPUTS: ReadonlySet<string> = (() => {
   for (const t of texts) for (const m of t.matchAll(/\$[({]([A-Za-z_][A-Za-z0-9_.,-]*)[)}]/g)) used.add(m[1]!);
   return new Set([...used].filter((n) => !defined.has(n) && !/^(MAKE$|MAKE_|CHECKOUT)/.test(n)));
 })();
+
+/**
+ * EVERY NAME A BUILT-IN RECIPE READS, directly or through the default value of another variable (`CC` through `COMPILE.c`, `CFLAGS`
+ * through `LINK.c`). A recipe none of these has been given a value for is make's own and runs make's own tools; one that has is
+ * the invocation's text, and it is read wherever it can run. Derived from the two tables, like the knobs above.
+ */
+export const IMPLICIT_RULE_VARIABLES: ReadonlySet<string> = (() => {
+  const refs = (t: string): string[] => [...t.matchAll(/\$[({]([A-Za-z_][A-Za-z0-9_.,-]*)[)}]/g)].map((m) => m[1]!);
+  const defaults = new Map(BUILTIN_VARIABLES);
+  const reached = new Set<string>();
+  const queue = BUILTIN_RULES.flatMap((r) => r.recipes.flatMap(refs));
+  for (let n = queue.pop(); n !== undefined; n = queue.pop()) {
+    if (reached.has(n)) continue;
+    reached.add(n);
+    queue.push(...refs(defaults.get(n) ?? ''));
+  }
+  return reached;
+})();
