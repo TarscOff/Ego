@@ -767,6 +767,10 @@ test("RV-DB-3: what a client's operand IS decides whether it can be a server", (
     `mysqlsh --uri=root@prod-db.acme.com -e 'select 1'`,
     `mysqlsh --uri root@prod-db -e 'select 1'`,
     `mysqlsh mysqlx://root@prod-db.acme.com/app`,
+    // an address that cannot be a database name (`host/db`, `host:port`, `user@host`) is a server even beside a local `--host`
+    `mongosh --host localhost prod-mongo.acme.com/app --eval 'db.users.deleteMany({})'`,
+    `mongosh --host=localhost prod-mongo:27017 --eval 'db.users.deleteMany({})'`,
+    `mysqlsh --host localhost root@prod-db.acme.com -e 'select 1'`,
   ])
     assert.equal(verdict(c, dir), 'DENY', c);
   allowed(

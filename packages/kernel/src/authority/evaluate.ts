@@ -10376,6 +10376,8 @@ function looksLikeDbTarget(t: string): boolean {
 /** The server an ADDRESS names (mongosh's and clickhouse-client's first operand, mysqlsh's `--uri`): what follows `user@`, which is a host
  *  wherever it stands; otherwise the address itself when it is written like one. Null when it is a database name. */
 function addressHost(text: string): string | null {
+  // (a URI has its host read by the scan every token goes through, with the scheme and the credentials taken off)
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return null;
   const userinfo = /^[^@/\s]*@(.+)$/.exec(text);
   if (userinfo) return userinfo[1]!.split(/[:/]/)[0] || null;
   return looksLikeDbTarget(text) ? text.split(/[:/]/)[0]! : null;
@@ -11810,7 +11812,10 @@ function resolveDbTarget(
   // mongosh/psql/mysql accept a bare `host[:port][/db]` with no scheme at all — but a filename is not a host
   const FILE_EXT = /\.(sql|js|mjs|cjs|ts|json|txt|csv|sh|py|rb|dump|bak|gz|zip|db|sqlite3?)$/i;
   const addressNamed = address === undefined || FILE_EXT.test(address) ? null : addressHost(address);
-  if (signals.length === 0 && addressNamed !== null) push(addressNamed, 'host');
+  // A DOTTED NAME ALONE MAY BE A DATABASE, so it is read as a server only when nothing else named one; but `host/db`, `host:port` and
+  // `user@host` cannot be a database name, and `mongosh --host localhost prod-mongo.acme.com/app` is not the local server
+  const unmistakable = target !== null && address !== undefined && /[:/@]/.test(address);
+  if ((signals.length === 0 || unmistakable) && addressNamed !== null) push(addressNamed, 'host');
   if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { cls: worst.cls, target: worst.target, executes };
