@@ -881,6 +881,37 @@ test('G: a destination the tool table finds is judged whole when its name holds 
   ordinary(dir, ["mktemp -u -p 'a b'", "sort -o 'out file.txt' in.txt", "mktemp -p 'some dir'"]);
 });
 
+test('G: a destination the table finds is read when its variables are known, and when its dollar is a character of a name', () => {
+  // found by the filesystem oracle: `cc --serialize-diagnostics $HOME//proj/lc/hooks/h.sh ...` and `mktemp -d '$PWD'/../../' lead'/hooks/zz.XXXX`
+  const dir = workspace({
+    lc: link('.claude'),
+    '$PWD': link('.git/hooks'),
+    ' lead': link('.claude'),
+    'x.c': 'int main(void){return 0;}\n',
+    'in.txt': 'x\n',
+    '.claude/hooks/h.sh': 'x',
+    '.claude/settings.json': '{}',
+  });
+  refused(dir, [
+    'cc --serialize-diagnostics $PWD/lc/hooks/h.sh -c x.c',
+    'cc --serialize-diagnostics $PWD//lc/hooks/h.sh -c x.c',
+    'cc --serialize-diagnostics ${PWD}/lc/hooks/h.sh -c x.c',
+    'cc --serialize-diagnostics "$PWD/lc/hooks/h.sh" -c x.c',
+    'cc --serialize-diagnostics $PWD/./lc/hooks/h.sh -c x.c',
+    'sort -o $PWD/lc/settings.json in.txt',
+    'mktemp -p $PWD/lc/hooks',
+    "mktemp -d '$PWD'/../../' lead'/hooks/zz.XXXX",
+    "mktemp -p '$PWD'/../../' lead'/hooks",
+    "cc --serialize-diagnostics '$PWD'/../../' lead'/hooks/zz -c x.c",
+    "sort -o '$PWD'/../../' lead'/settings.json in.txt",
+  ]);
+  // a known variable that names an ordinary file is ordinary; one nobody can read is asked about where it is an operand, as it always was
+  // (in a workspace that has no link called `$PWD`: where there is one, `$PWD/out.dia` is also the file in it)
+  const plain = workspace({ 'x.c': 'int main(void){return 0;}\n', 'in.txt': 'x\n', lc: link('.claude'), '.claude/settings.json': '{}' });
+  ordinary(plain, ['cc --serialize-diagnostics $PWD/out.dia -c x.c', 'sort -o $PWD/out.txt in.txt', 'mktemp -p $PWD/src-nope -u']);
+  gated(plain, ['cc -c x.c -o $OUT', 'sort -o $OUT in.txt']);
+});
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * H. THE HOST ADAPTER AND THE FIELDS OF A SHELL CALL (PA-04, PA-15, PA-17), through the real hook path
  * ------------------------------------------------------------------------------------------------------------- */

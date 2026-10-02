@@ -13415,6 +13415,11 @@ function classifyShellPaths(
   // inside quotes, so tokenizing it gives exactly the words of the command line.
   const literal = literalWords(rawSeg);
   const text = restoreQuoting(seg, literal.hostile);
+  // WHETHER A VALUE THE TOOL'S TABLE FOUND CANNOT BE READ: it holds a part the shell fills in that nobody here can name (`$OUT`). That is asked about where
+  // the word is an operand; here it is left. One built from names this reader knows (`$HOME//proj/x`, `$PWD/lc/h`) is a path like any other, and
+  // one whose `$` the shell does not expand (single-quoted, escaped) is a character of a name - the word, or a piece of one that holds a blank
+  const unreadable = (w: string): boolean =>
+    /[$`]/.test(w) && !literal.dollars.some((d) => d === w || textPieces(d).includes(w)) && pathCandidates(cwd, w, old).dynamic;
   // the files this line opens for input: the standard input is one of them, and `/dev/stdin` names it (PA-06)
   const stdinFiles = [...new Set([...redirectionSources(rawSeg), ...redirectionSources(text)])].filter((f) => !/[$`]/.test(f));
   const writeThroughStdin = (word: string, hitsInto: CapabilityHit[]): boolean => {
@@ -13539,7 +13544,7 @@ function classifyShellPaths(
       }
     for (const w of [...effects.writes, ...effects.writeDirs]) {
       // (`-` is standard output: `wget -qO- URL`)
-      if (!w || w === '-' || (/[$`]/.test(w) && !literal.dollars.includes(w))) continue;
+      if (!w || w === '-' || unreadable(w)) continue;
       if (writeThroughStdin(w, hits)) continue;
       if (discardWord(cwd, w, old)) continue;
       extraDests.add(w);
@@ -13930,7 +13935,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         ...[...ownShorts].flatMap((letter) => optionValues(tokenize(text), letter, [])),
       ];
   for (const extra of outputValues) {
-    if (!extra || extra.startsWith('-') || (/[$`]/.test(extra) && !literal.dollars.includes(extra))) continue;
+    if (!extra || extra.startsWith('-') || unreadable(extra)) continue;
     // `curl -o /dev/null` DISCARDS: the same reader a redirection asks (isDiscardDevice) says so for an option's value too
     if (writeThroughStdin(extra, hits)) continue;
     if (discardWord(cwd, extra)) continue;
@@ -14471,7 +14476,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       if (!value || !(braceName || /[ \t\n]/.test(value)) || patternWords.includes(value)) continue;
       // a word with a glob or a substitution in it is text more often than a name (`select * from t`), and its pieces
       // already answer for it as globs and dynamic words do
-      if (!braceName && /[*?[{$`]/.test(value)) continue;
+      if (!braceName && (/[*?[{]/.test(value) || (/[$`]/.test(value) && !literal.dollars.includes(value)))) continue;
       if (!write && !value.includes('/') && !value.startsWith('~')) continue; // a read of a bare name: nothing to resolve
       wholeWords.add(value);
       if (!paths.some((p) => p.raw === value)) paths.push(...pathEntries(cwd, value, old));

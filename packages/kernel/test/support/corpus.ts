@@ -2734,6 +2734,9 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       `touch '~+/pre-commit'`,
       `touch '$PWD/pre-commit'`,
       `cp payload 'q{a,b}/pre-commit'`,
+      // (a blank and an angle bracket in one word. A `cd` into a name typed like an expansion is tested by name in closure-paths2: a wrapper in
+      // front of `cd` runs it in a process of its own, so the line after it is no longer the line the case is about)
+      `cp payload 'qsp b'/../'qa<b'/pre-commit`,
     ],
     files: {
       payload: 'x\n',
@@ -2748,6 +2751,7 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       '~+': link('.git/hooks'),
       $PWD: link('.git/hooks'),
       'q{a,b}': link('.git/hooks'),
+      'qsp b': link('.git/hooks'),
     },
   },
   {
@@ -2776,7 +2780,7 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     family: 'fs',
     id: 'a bare wildcard over a link to a credential',
     floor: 'DENY',
-    cases: ['cat lke*', 'cat l?ey', 'head -1 lk[e]y', 'cp lke* /tmp/x', 'cat l?sh/id_rsa', 'wc -c lke?', 'tar -cf o.tar lke*'],
+    cases: ['cat lke*', 'cat l?ey', 'head -1 lk[e]y', 'cp lke* /tmp/x', 'cat l?sh/id_rsa', 'wc -c lke?', 'tar -cf o.tar lke*', 'touch ./ls?h/../.ssh/zz-new'],
     files: { lkey: link(`${homedir()}/.ssh/id_rsa`), lssh: link(`${homedir()}/.ssh`) },
   },
   {
