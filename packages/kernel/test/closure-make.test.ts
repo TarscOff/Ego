@@ -63,11 +63,11 @@ test('A. a recursive make started with a variable the makefile reads is a differ
     ['the reported conditional', 'make run', { Makefile: CONDITIONAL_NEXT }, 'DENY'],
     ['the unbounded spelling', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\tCMD="${ACT}" make run\n` }, 'DENY'],
     ['through env', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\tenv CMD="${ACT}" make run\n` }, 'DENY'],
-    // ($(MAKE) is a variable this resolver does not read, so a recipe line that spells it asks - it never allows)
-    ['through $(MAKE)', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\tCMD="${ACT}" $(MAKE) run\n` }, 'GATED'],
+    // ($(MAKE) is the make that is running, so the line is read like the `make` it stands for - a DENY, not an opacity that asks; wave 6, TG-01)
+    ['through $(MAKE)', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\tCMD="${ACT}" $(MAKE) run\n` }, 'DENY'],
     ['through an export', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\texport CMD="${ACT}"; make run\n` }, 'GATED'],
     ['the command-line spelling', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\tmake run CMD="${ACT}"\n` }, 'DENY'],
-    ['the command-line spelling through $(MAKE)', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\t$(MAKE) run CMD="${ACT}"\n` }, 'GATED'],
+    ['the command-line spelling through $(MAKE)', 'make run', { Makefile: `CMD ?= echo hi\nrun:\n\t$(CMD)\n\t$(MAKE) run CMD="${ACT}"\n` }, 'DENY'],
     // a one-word value is the spelling every shape of the environment carries alike: `sh a` runs the file a
     ['a one-word value, inline', 'make run', { Makefile: 'CMD ?= echo hi\nrun:\n\t$(CMD) a\n\tCMD=sh make run\n', a: `${ACT}\n` }, 'DENY'],
     ['a one-word value, through env', 'make run', { Makefile: 'CMD ?= echo hi\nrun:\n\t$(CMD) a\n\tenv CMD=sh make run\n', a: `${ACT}\n` }, 'DENY'],

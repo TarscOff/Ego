@@ -3398,6 +3398,150 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     ],
     files: { 'creds.txt': `${homedir()}/.ssh/id_rsa\n`, '.harness/generated/x': 'g', '.claude/settings.json': '{}' },
   },
+
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-02, WAVE 6 (make). The causes, not the reported spellings: one command line, one line
+   * reader, one variable store, one expansion, one table of make's own rules (authority/make.ts, make-reader.ts,
+   * make-builtins.ts). Each class is a way the reader and make could disagree about what a makefile says.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'command',
+    // MK-01: every word that holds `=` is a variable definition to make, never a goal no rule defines
+    id: 'a make variable defined on the command line in a spelling that is not NAME=value',
+    floor: 'DENY',
+    cases: [
+      'make -f cli.mk T:=deploy run',
+      'make -f cli.mk T?=deploy run',
+      'make -f cli.mk T+=deploy run',
+      'make -f cli.mk T::=deploy run',
+      'make -f cli.mk T\\ =\\ deploy run',
+      'make -f cli.mk T=safe T=deploy run',
+      'make -f cli.mk .DEFAULT_GOAL=deploy',
+    ],
+    files: { 'cli.mk': 'T = safe\nrun: $(T)\nsafe: ; @echo safe\ndeploy:\n\tgit push --force origin main\n' },
+  },
+  {
+    family: 'command',
+    // MK-02, MK-03, MK-08: a line the line reader dropped, joined or ended in the wrong place
+    id: 'a makefile line that make reads and a line reader that guesses does not',
+    floor: 'DENY',
+    cases: [
+      'make -f tabvar.mk run',
+      'make -f tabcond.mk run',
+      'make -f tabinc.mk run',
+      'make -f even.mk deploy',
+      'make -f evencomment.mk deploy',
+      'make -f evenrecipe.mk deploy',
+      'make -f override.mk all',
+      'make -f overridedef.mk all',
+    ],
+    files: {
+      'tabvar.mk': 'CMD = echo safe\n\tCMD = git push --force origin main\nrun:\n\t$(CMD)\n',
+      'tabcond.mk': 'CMD = echo safe\n\tifndef FOO\nCMD = git push --force origin main\n\telse\nCMD = echo safe\n\tendif\nrun:\n\t$(CMD)\n',
+      'tabinc.mk': 'CMD = echo safe\n\tinclude evil-inc.mk\nrun:\n\t$(CMD)\n',
+      'evil-inc.mk': 'CMD = git push --force origin main\n',
+      'even.mk': 'X = a\\\\\ndeploy:\n\tgit push --force origin main\n',
+      'evencomment.mk': '# note\\\\\ndeploy:\n\tgit push --force origin main\n',
+      'evenrecipe.mk': 'deploy:\n\techo a\\\\\n\tgit push --force origin main\n',
+      'override.mk': 'all:\n\techo a\noverride Q = 1\n\tgit push --force origin main\n',
+      'overridedef.mk': 'all:\n\techo a\noverride define D\nx\nendef\n\tgit push --force origin main\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-04: a command in a multi-line variable runs wherever the variable is expanded, and an indirect expansion evaluates it too
+    id: 'a command that runs when a define, a call or a computed name is expanded',
+    floor: 'DENY',
+    cases: ['make -f defcall.mk all', 'make -f defind.mk all', 'make -f defcond.mk all', 'make -f defsimple.mk all', 'make -f canned.mk all'],
+    files: {
+      'defcall.mk': 'define RUN\n$(shell git push --force origin main)\nendef\nX := $(call RUN)\nall: ; @echo hi\n',
+      'defind.mk': 'define RUN\n$(shell git push --force origin main)\nendef\nN := RUN\nX := $($(N))\nall: ; @echo hi\n',
+      'defcond.mk': 'define RUN\n$(shell git push --force origin main)\nendef\nifeq ($(call RUN),x)\nendif\nall: ; @echo hi\n',
+      'defsimple.mk': 'define X :=\n$(shell git push --force origin main)\nendef\nall: ; @echo hi\n',
+      'canned.mk': 'define CANNED\n@echo a\ngit push --force origin main\nendef\nall:\n\t$(CANNED)\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-06, MK-07: an include is read inline against what the includer set; a name make computes is the name
+    id: 'a variable an include declines to assign, or whose name make computes',
+    floor: 'DENY',
+    cases: ['make -f inctop.mk all', 'make -f incguard.mk all', 'make -f computed.mk all', 'make -f computedsimple.mk all', 'make -f twofiles-a.mk -f twofiles-b.mk all'],
+    files: {
+      'inctop.mk': 'CMD = git push --force origin main\ninclude inccfg.mk\nall:\n\t$(CMD)\n',
+      'inccfg.mk': 'CMD ?= echo safe\n',
+      'incguard.mk': 'CMD = git push --force origin main\ninclude incguardcfg.mk\nall:\n\t$(CMD)\n',
+      'incguardcfg.mk': 'ifndef CMD\nCMD = echo safe\nendif\n',
+      'computed.mk': 'CMD = echo safe\nN = CMD\n$(N) = git push --force origin main\nall: ; $(CMD)\n',
+      'computedsimple.mk': 'CMD = echo safe\nN = CMD\nexport $(N) := git push --force origin main\nall: ; $(CMD)\n',
+      'twofiles-a.mk': 'CMD = git push --force origin main\n',
+      'twofiles-b.mk': 'CMD ?= echo safe\nall:\n\t$(CMD)\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-05: `make foo` with a foo.c beside it runs the compiler make knows about, and the variables that rule reads are execution inputs
+    id: 'a goal or prerequisite make builds with a rule of its own, through the variable that rule reads',
+    floor: 'DENY',
+    cases: [
+      'make -f builtin.mk foo',
+      'make -f builtin-compile.mk foo.o',
+      'make -f builtin-dep.mk all',
+      'make -f builtin-norecipe.mk all',
+      'make -f builtin-flags.mk foo',
+      'make -f builtin-lex.mk foo.c',
+      'make -f pattern-norecipe.mk all',
+      'make -f builtin-comment.mk foo',
+    ],
+    files: {
+      'foo.c': 'int main(void) { return 0; }\n',
+      'foo.h': 'x\n',
+      'foo.l': '%%\n',
+      'builtin.mk': 'CC = git push --force origin main\n',
+      'builtin-compile.mk': 'COMPILE.c = git push --force origin main ;\n',
+      'builtin-dep.mk': 'CC = git push --force origin main ;\nall: foo.o\n',
+      'builtin-norecipe.mk': 'CC = git push --force origin main ;\nall: foo.o\nfoo.o: foo.h\n',
+      'builtin-flags.mk': 'CFLAGS = ; git push --force origin main\n',
+      'builtin-lex.mk': 'LEX = git push --force origin main ;\n',
+      'pattern-norecipe.mk': 'all: foo.o\nfoo.o: foo.h\n%.o: %.c\n\tgit push --force origin main\n',
+      'builtin-comment.mk': 'CC = git push --force origin main #\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-05, without a makefile at all: the compiler of the command line
+    id: 'a built-in rule of make run with a program the command line names, no makefile',
+    floor: 'DENY',
+    cases: ['make CC=./tool.sh foo', 'make LINK.c=./tool.sh foo', 'make COMPILE.c=./tool.sh foo.o', 'make CC\\ =\\ ./tool.sh foo'],
+    files: { 'foo.c': 'int main(void) { return 0; }\n', 'tool.sh': '#!/bin/sh\ngit push --force origin main\n' },
+  },
+  {
+    family: 'command',
+    // the environment a recipe runs in: everything the makefile exports and everything the command line defines
+    id: 'a variable make exports to every recipe that re-points what the recipe runs',
+    floor: 'ASK',
+    cases: ['make -f expall.mk all', 'make -f expall2.mk all', 'make -f expnames.mk all', 'make LD_PRELOAD=./evil.so -f plain.mk all'],
+    files: {
+      'evil.so': 'x',
+      'plain.mk': 'all: ; @ls\n',
+      'expall.mk': 'export\nLD_PRELOAD := ./evil.so\nall: ; @ls\n',
+      'expall2.mk': '.EXPORT_ALL_VARIABLES:\nLD_PRELOAD := ./evil.so\nall: ; @ls\n',
+      'expnames.mk': 'LD_PRELOAD := ./evil.so\nexport LD_PRELOAD OTHER\nall: ; @ls\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-09: a hook that has not answered has not refused. 654 bytes took 42 seconds; the verdict is a gap, at once
+    id: 'a makefile whose expansion fans out until the hook budget is gone',
+    floor: 'ASK',
+    cases: ['make -f fan.mk all', 'make -f fan-define.mk all'],
+    files: {
+      'fan.mk':
+        'A0 = $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1)\nA1 = $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2)\nA2 = $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3)\nA3 = $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4)\nA4 = $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5)\nA5 = $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6)\nA6 = $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7)\nA7 = $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8)\nA8 = git push origin main\nall: ; $(A0)\n',
+      'fan-define.mk':
+        'define F0\n$(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1))\nendef\ndefine F1\n$(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1))\nendef\ndefine F2\n$(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1))\nendef\ndefine F3\n$(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1))\nendef\ndefine F4\ngit push origin main\nendef\nall: ; $(call F0,x)\n',
+    },
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -4260,7 +4404,115 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'cp README.md ..', // a named write into a parent directory touches no protected path
     'aws s3 cp s3://my-fixtures/data.json ./data.json', // a download changes nothing in the cloud
   ],
+  // WAVE 6 (make): the invocations that must stay ALLOW whatever reader reads the makefile. This workspace has none, so these are the command
+  // lines alone - goals, options and variable definitions of every spelling make accepts; the makefiles they run are ORDINARY_MAKEFILES below
+  make: [
+    'make',
+    'make build',
+    'make -j4 test',
+    'make -s build',
+    'make -n build',
+    'make -f Makefile build',
+    'make V=1 build',
+    'make VERBOSE:=1 build',
+    'make "NAME = value" build',
+    'make -k -- build',
+    'make --version',
+  ],
 };
+
+/**
+ * MAKEFILES AS THE WORLD WRITES THEM, WITH THE COMMANDS THAT RUN THEM (closure audit wave 6, TG-01). ORDINARY runs in a repository that has
+ * a package.json and nothing else, so a producer - the thing that reads the makefile, the Dockerfile, the compose file - saw no file there and
+ * the exact set of gated commands could not notice one that a real makefile gates. These carry the content: each is an idiom of C, Go, Node and
+ * documentation repositories, every command it runs is classified ALLOW on its own, and the whole must be ALLOW. An entry that asks is a
+ * producer over-gate, not an accepted behaviour.
+ */
+export const ORDINARY_MAKEFILES: ReadonlyArray<{ readonly id: string; readonly files: Readonly<Record<string, string>>; readonly commands: readonly string[] }> = [
+  {
+    id: 'a C project: variables with defaults, wildcard and patsubst, a pattern rule, generated dependency files, clean',
+    files: {
+      Makefile:
+        'CC ?= gcc\nCFLAGS += -Wall -O2\nSRCS := $(wildcard *.c)\nOBJS := $(patsubst %.c,%.o,$(SRCS))\nDEPS := $(OBJS:.o=.d)\n\nall: app\n\napp: $(OBJS)\n\t$(CC) $(CFLAGS) -o $@ $^\n\n%.o: %.c\n\t$(CC) $(CFLAGS) -MMD -c $< -o $@\n\n-include $(DEPS)\n\nclean:\n\t$(RM) $(OBJS) $(DEPS) app\n\n.PHONY: all clean\n',
+      'a.c': 'int main(void) { return 0; }\n',
+      'b.c': 'int b;\n',
+    },
+    commands: ['make', 'make all', 'make clean', 'make -j4', 'make app'],
+  },
+  {
+    id: 'a C project that leaves the compiling to make: objects named, no rule for them',
+    files: { Makefile: 'OBJS = a.o b.o\nall: app\napp: $(OBJS)\n\tcc -o $@ $^\n', 'a.c': 'int a;\n', 'b.c': 'int b;\n' },
+    commands: ['make', 'make app'],
+  },
+  {
+    id: 'a static pattern rule over a list of objects, and an old-style suffix rule',
+    files: {
+      Makefile: 'SRC = a.c b.c\nOBJ = $(SRC:.c=.o)\nall: $(OBJ)\n$(OBJ): %.o: %.c\n\tcc -c $< -o $@\n',
+      'a.c': 'x',
+      'b.c': 'y',
+      'old.mk': '.SUFFIXES: .c .o\n.c.o:\n\tcc -c $<\nall: a.o\n',
+    },
+    commands: ['make all', 'make -f old.mk'],
+  },
+  {
+    id: 'a self-documenting makefile: a help target that greps $(MAKEFILE_LIST)',
+    files: {
+      Makefile:
+        ".DEFAULT_GOAL := help\n.PHONY: help build\nhelp: ## Show this help\n\t@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = \":.*?## \"}; {printf \"%-20s %s\\n\", $$1, $$2}'\nbuild: ## Build\n\t@echo building\n",
+    },
+    commands: ['make', 'make help', 'make build'],
+  },
+  {
+    id: 'variables make sets itself: CURDIR, MAKE, MAKECMDGOALS, MAKELEVEL, MAKE_VERSION, the user\'s HOME and PWD, and the built-in RM and CC',
+    files: {
+      Makefile:
+        'build:\n\tdocker run --rm -v $(CURDIR):/app node:22 npm test\n\techo $(MAKECMDGOALS) $(MAKELEVEL) $(MAKE_VERSION) $(HOME) $(PWD)\n\t$(RM) -r dist\n\t$(CC) -o app a.c\n\t$(MAKE) --no-print-directory sub\nsub:\n\techo sub\n',
+      'a.c': 'int main(void) { return 0; }\n',
+    },
+    commands: ['make build', 'make sub'],
+  },
+  {
+    id: 'a recursive make: $(MAKE) -C, ${MAKE}, a sub-make with a goal, in a dry run',
+    files: {
+      Makefile: 'all:\n\t$(MAKE) -C sub all\n\t${MAKE} -C sub test\n.PHONY: all\n',
+      'sub/Makefile': 'all:\n\techo ok\ntest:\n\techo t\n',
+    },
+    commands: ['make', 'make all', 'make -n all'],
+  },
+  {
+    id: 'a makefile that includes a file of defaults with ?= and a guard',
+    files: {
+      Makefile: 'include config.mk\nbuild:\n\techo $(NAME) $(VERSION) $(PORT)\n',
+      'config.mk': 'NAME ?= app\nVERSION ?= 1.0\nifndef PORT\nPORT = 8080\nendif\n',
+    },
+    commands: ['make', 'make build', 'make NAME=other build'],
+  },
+  {
+    id: 'a canned recipe: define and $(call)',
+    files: { Makefile: 'define BUILD\n@echo building $(1)\ncc -o $(1) $(1).c\nendef\nall:\n\t$(call BUILD,app)\n', 'app.c': 'int main(void) { return 0; }\n' },
+    commands: ['make', 'make all'],
+  },
+  {
+    id: 'a strict shell: SHELL, .SHELLFLAGS and .ONESHELL',
+    files: { Makefile: 'SHELL := /bin/bash\n.SHELLFLAGS := -eu -o pipefail -c\n.ONESHELL:\nbuild:\n\techo a\n\techo b\n' },
+    commands: ['make', 'make build'],
+  },
+  {
+    id: 'a version taken from the repository and used in a quoted string; a continued recipe',
+    files: { Makefile: 'VERSION := $(shell git describe --tags --always)\nbuild:\n\techo "building $(VERSION)"\n\techo a \\\n\t  b \\\n\t  c\n' },
+    commands: ['make', 'make build'],
+  },
+  {
+    id: 'directories as order-only prerequisites, and a shell loop over a list',
+    files: { Makefile: 'BIN := bin\nSUBDIRS := a b\n$(BIN):\n\tmkdir -p $@\nbuild: | $(BIN)\n\techo hi > $(BIN)/x\n\tfor d in $(SUBDIRS); do echo $$d; done\n' },
+    commands: ['make build', 'make -j2 build'],
+  },
+  {
+    id: 'a recipe that spells a variable the way a program does: automatic variables, $$ and a conditional on the platform',
+    files: { Makefile: 'ifeq ($(shell uname -s),Linux)\nPLATFORM = linux\nelse\nPLATFORM = other\nendif\nall: a.txt b.txt\n\tcat $^ > all.txt\n\techo $$HOME $(PLATFORM) $@ $<\n%.txt: %.in\n\tcp $< $@\n', 'a.in': 'a', 'b.in': 'b' },
+    commands: ['make', 'make all'],
+  },
+];
 
 /** The ordinary commands that DO gate, each with the reason it is not a defect. Anything else gating is one. */
 export const EXPECTED_GATES: Readonly<Record<string, string>> = {

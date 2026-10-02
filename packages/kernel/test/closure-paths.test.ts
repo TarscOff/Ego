@@ -745,7 +745,9 @@ test('H. no site resolves a shell word on its own: the evaluator does not import
     const hit =
       /\bpath\.resolve\(|\bresolvePath\(/.test(code) ||
       // join(<a directory the shell is in>, <a word>) is `resolve` by another name
-      /\bjoin\((?:cwd|effectiveCwd|baseDir|dir|base|start|env\.cwd|state\.env\.cwd|ctx\.cwd)\s*,\s*(?:t|tok|word|raw|operand|target|file|f|w|v|value|arg)\b/.test(code) ||
+      // (`makeDir` is the directory make runs in, and `pattern` and `head` are makefile words: the make producer joined a prerequisite and a
+      //  wildcard's head to it lexically under those names, and `lnk/../foo.c` was a file of this directory)
+      /\bjoin\((?:cwd|effectiveCwd|baseDir|dir|base|start|makeDir|env\.cwd|state\.env\.cwd|ctx\.cwd)\s*,\s*(?:t|tok|word|raw|operand|target|file|f|w|v|value|arg|pattern|head)\b/.test(code) ||
       // the ternary every site used to carry
       /isAbsolute\((\w+)\)\s*\?\s*\1\s*:\s*(?:resolve|join)\(/.test(code);
     if (hit && !CONFIGURATION_VALUES.has(enclosing(i))) offenders.push(`${i + 1}: ${line.trim()}`);
