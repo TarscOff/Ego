@@ -37,7 +37,7 @@ export function parseCodexEvent(
       name === 'Bash'
         ? shellInput(inputRaw)
         : inputRaw && typeof inputRaw === 'object'
-          ? (inputRaw as Record<string, unknown>)
+          ? hostOperand(name, inputRaw as Record<string, unknown>)
           : typeof inputRaw === 'string'
             ? { command: inputRaw }
             : {};
@@ -58,6 +58,22 @@ function firstString(p: Record<string, unknown>, keys: string[]): string | undef
   return undefined;
 }
 
+/** Codex's own names for the operand of a tool the kernel models under another key: `apply_patch` sends the patch as `input`, `view_image` and
+ *  `read_file` name the file `path`. An operand under a key the kernel does not read is a call it cannot judge (refused), and the call the host
+ *  makes of it is not the one it asked about - so the key the host uses is mapped to the one the kernel judges, when the call carries no other. */
+function hostOperand(name: string, input: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...input };
+  if (name === 'apply_patch' && typeof out['input'] === 'string' && !('command' in out) && !('patch' in out)) {
+    out['patch'] = out['input'];
+    delete out['input'];
+  }
+  if ((name === 'Read' || name === 'Write') && typeof out['path'] === 'string' && !('file_path' in out)) {
+    out['file_path'] = out['path'];
+    delete out['path'];
+  }
+  return out;
+}
+
 /**
  * Codex runs a shell STRING as `["bash","-lc",<script>]`: that argv is how it spells "run this script", it is the HOST's
  * wrapper rather than anything the model chose, and judging it as the command `bash -lc '…'` (an unknown head, ASK)
@@ -65,13 +81,14 @@ function firstString(p: Record<string, unknown>, keys: string[]): string | undef
  * exact three-element form (a shell, `-c`/`-lc`/`-cl`, one script) is therefore judged as the script. Any other shape —
  * a fourth element that becomes `$0`, `-i`, `-x`, `--rcfile` — keeps its wrapper and is judged as written.
  */
-const HOST_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
+/** WHICH PROGRAM IS "THE HOST'S SHELL": a bare name the host finds on its PATH, or a path in the directories a system keeps its shells in. Matching
+ *  the BASENAME made `./bash` - an executable of the repository, whose body is anything - the host's own wrapper, and the call was judged as
+ *  the script after it while the host ran the file (PA-04). A path that is anywhere else is a program like any other, and is judged as one. */
+const HOST_SHELL = /^(?:(?:\/(?:usr\/)?(?:local\/)?s?bin|\/opt\/homebrew\/bin)\/)?(?:bash|sh|zsh|dash)$/;
 function hostShellScript(argv: unknown): string | null {
   if (!Array.isArray(argv) || argv.length !== 3 || !argv.every((a) => typeof a === 'string')) return null;
   const [shell, flag, script] = argv as [string, string, string];
-  return HOST_SHELLS.has(shell.replace(/^.*\//, '')) && (flag === '-c' || flag === '-lc' || flag === '-cl')
-    ? script
-    : null;
+  return HOST_SHELL.test(shell) && (flag === '-c' || flag === '-lc' || flag === '-cl') ? script : null;
 }
 function commandLine(argv: unknown): string | null {
   return hostShellScript(argv) ?? argvToCommandLine(argv);
@@ -89,9 +106,15 @@ function commandLine(argv: unknown): string | null {
  */
 function shellInput(raw: unknown): Record<string, unknown> {
   let value = raw;
+  // A STRING THAT PARSES AS A JSON ARRAY is either the host's argv or a SCRIPT that happens to be valid JSON (PA-15), and the slot is the same.
+  // The host that runs it as an argv runs no shell, so `$(...)` in an element is data; the host that hands it to a shell runs the substitution.
+  // Both readings are judged when they can differ.
+  let asText: string | null = null;
   if (typeof value === 'string' && /^\s*[[{]/.test(value)) {
     try {
-      value = JSON.parse(value);
+      const parsed: unknown = JSON.parse(value);
+      if (Array.isArray(parsed)) asText = value;
+      value = parsed;
     } catch {
       /* not JSON after all (`[ -f x ] && ls`, `{ ls; }`): it is the command text itself */
     }
@@ -99,19 +122,32 @@ function shellInput(raw: unknown): Record<string, unknown> {
   if (typeof value === 'string') return { command: value };
   if (Array.isArray(value)) {
     const line = commandLine(value);
-    return line === null ? {} : { command: line };
+    if (line === null) return {};
+    return { command: asText !== null && value.some((a) => typeof a === 'string' && /[$`\\]/.test(a)) ? `${line}\n${asText}` : line };
   }
   if (!value || typeof value !== 'object') return {};
   const obj = { ...(value as Record<string, unknown>) };
   for (const key of ['command', 'cmd', 'argv']) {
     if (!(key in obj)) continue;
     const v = obj[key];
-    const line = typeof v === 'string' ? v : commandLine(v);
-    const workdir = obj['workdir'];
-    if (line === null || (workdir !== undefined && (typeof workdir !== 'string' || workdir === ''))) return obj;
-    delete obj[key];
-    delete obj['workdir'];
-    return { ...obj, command: typeof workdir === 'string' ? `cd ${shellQuote(workdir)} && ${line}` : line };
+    // `exec_command` names the program that interprets `cmd`: a shell of its own choosing (`shell: "./bash"`), a login shell unless it says not
+    const shell = key === 'cmd' && typeof v === 'string' && typeof obj['shell'] === 'string' && obj['shell'] !== '' ? obj['shell'] : null;
+    const line = shell !== null ? commandLine([shell, obj['login'] === false ? '-c' : '-lc', v as string]) : typeof v === 'string' ? v : commandLine(v);
+    // WHERE THE COMMAND RUNS: `workdir` and the other spellings of it become the `cd` they are, each one that is present (the host may honour any
+    // of them, and they are all judged); a value that is not a plain string is not folded and stays beside the command, where the kernel asks
+    const dirKeys = ['workdir', 'working_directory', 'cwd', 'dir'].filter((k) => k in obj);
+    if (line === null || dirKeys.some((k) => typeof obj[k] !== 'string' || obj[k] === '')) return obj;
+    const dirs = dirKeys.map((k) => obj[k] as string);
+    // THE ENVIRONMENT it runs with: each pair is an `export` in front of the command, so an `LD_PRELOAD` or a `PATH` is judged as the injection it is
+    let command = line;
+    const env = obj['env'];
+    if (env !== undefined) {
+      const pairs = env !== null && typeof env === 'object' && !Array.isArray(env) ? Object.entries(env as Record<string, unknown>) : null;
+      if (pairs === null || pairs.some(([k, x]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || typeof x !== 'string')) return obj;
+      if (pairs.length > 0) command = `${pairs.map(([k, x]) => `export ${k}=${shellQuote(x as string)}`).join('; ')}; ${line}`;
+    }
+    for (const k of [key, 'shell', 'login', 'env', ...dirKeys]) delete obj[k];
+    return { ...obj, command: dirs.length > 0 ? dirs.map((d) => `cd ${shellQuote(d)} && ${command}`).join('\n') : command };
   }
   return obj;
 }
