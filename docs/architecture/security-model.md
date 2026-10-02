@@ -583,8 +583,9 @@ A `ResolutionContext` (`packages/kernel/src/authority/evaluate.ts`) carries the 
 to and whether that directory was **proven**. It is threaded through effect resolution: a `make -C` recipe resolves
 in the `-C` directory, an npm script in its manifest's directory, a shell script in the caller's. The recursion's
 cycle guard keys on the directory too, so a same-named target elsewhere is a different effect rather than a skipped
-one. Where the context cannot be proven — a dynamic `cd`, an unmodelled workspace selector (`-w`, `--prefix`,
-`--filter`), a makefile whose target is only visible through an `include` or a pattern rule — the conclusion is
+one. Where the context cannot be proven — a dynamic `cd`, an unmodelled workspace selector (`-w`, `--filter`; a
+`--prefix`, `-C`, `--dir` or `--cwd` that only names a directory inside a registered root is read as the `cd` it is,
+`authority/pkg-selectors.ts`), a makefile whose target is only visible through an `include` or a pattern rule — the conclusion is
 downgraded to opaque instead of being asserted.
 
 **Analysis truncation is also opaque.** Reaching the recursion depth limit returns an opacity hit; it never falls
