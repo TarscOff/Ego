@@ -623,8 +623,8 @@ test('the built-in table is the table of the make that is installed', { skip: !r
   for (let i = 0; i < lines.length; i++) {
     if (lines[i] === '# default') {
       const m = /^([^\s=:]+(?:,v)?)\s*:?=/.exec(lines[i + 1] ?? '');
-      // (the entries that describe the host - where make is, its version, the features - are not a rule's business)
-      if (m && !known.has(m[1]!) && !/^(MAKE|MAKEFILES|MAKEFILEPATH|SUFFIXES|\.FEATURES|\.VARIABLES|\.INCLUDE_DIRS|\.LIBPATTERNS)/.test(m[1]!)) missing.push(`variable ${m[1]}`);
+      // (the entries that describe the host or make itself - where make is, its version, its features, the special variables - are not a rule's business)
+      if (m && !known.has(m[1]!) && !/^(\.|MAKE|GNUMAKEFLAGS|SHELL$|CURDIR$|SUFFIXES$)/.test(m[1]!)) missing.push(`variable ${m[1]}`);
     }
   }
   const have = new Set(BUILTIN_RULES.map((r) => `${r.target}: ${r.prereqs.join(' ')}`));
