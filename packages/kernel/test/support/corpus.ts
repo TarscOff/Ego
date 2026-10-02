@@ -129,12 +129,14 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     family: 'command',
     id: 'a protected store named in the program an interpreter reads from standard input',
     floor: 'DENY',
+    // (the FIRST case is the one the producers carry, and a producer carries ONE line: a heredoc is several, and `make` or a `case` branch
+    // cut it where it ends - so the first is the pipe, and the heredocs follow for the canonical spellings)
     cases: [
+      `echo "print(open('~/.ssh/id_rsa').read())" | python3`,
       "python3 - <<'PY'\nprint(open('~/.ssh/id_rsa').read())\nPY",
       "node - <<'EOF'\nconsole.log(require('fs').readFileSync('~/.aws/credentials', 'utf8'))\nEOF",
       "ruby <<'RB'\nputs File.read('~/.ssh/id_rsa')\nRB",
       "perl - <<'PL'\nopen F, '~/.kube/config'; print <F>;\nPL",
-      `echo "print(open('~/.ssh/id_rsa').read())" | python3`,
       `python3 <<< "print(open('~/.ssh/id_rsa').read())"`,
     ],
   },

@@ -1,7 +1,7 @@
 // Evaluates a host tool call against the compiled authority table. Deterministic: no model involvement.
 import { homedir, tmpdir } from 'node:os';
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync, type Dirent } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.ts';
 import { packageRoot } from '../launcher/self.ts';
 import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.ts';
@@ -346,11 +346,12 @@ const PROGRAM_TEXT = `${MARK}program-text`;
 /** a program's text as the stage that carries it */
 const programTextStage = (text: string): string => `${PROGRAM_TEXT} ${requote([text])}`;
 /** A path inside an image: absolute, and not the user's home written as `~` (which names the image user's home, but is judged as this
- *  machine's, as it always was). */
-const isImagePath = (word: string): boolean => word.startsWith('/');
+ *  machine's, as it always was), and not a name under `/proc`, where `self/cwd` and `<pid>/root` are second names for a directory of the
+ *  process - the working directory of a RUN that mounts the workspace is the workspace (`/tmp/../proc/self/cwd/x` is the same name). */
+const isImagePath = (word: string): boolean => word.startsWith('/') && !/^\/proc(?:\/|$)/.test(posix.normalize(word));
 /** A line with every absolute path set aside, for the rules that read a PLACE named in text when the line runs in an image. */
 function withoutImagePaths(line: string): string {
-  return line.replace(/(^|[\s='":,])\/[^\s'";&|<>()]*/g, `$1${MARK}path`);
+  return line.replace(/(^|[\s='":,])(\/[^\s'";&|<>()]*)/g, (all, before: string, path: string) => (isImagePath(path) ? `${before}${MARK}path` : all));
 }
 /** The capabilities whose rules name a PLACE on this machine's disk: a credential store, a git hook, git's own directory, EGO's state. */
 const HOST_PLACE_CAPABILITY = /^(?:fs\.(?:credential-store|hook-config|git-internals)\.|ego\.(?:runtime|trust)\.)/;

@@ -679,6 +679,21 @@ test('U-04: what a Dockerfile RUN line does that is NOT an image path stays gate
     const w2 = workspace({ Dockerfile: `FROM alpine\n${line}\n` });
     assert.equal(run('docker build -t t .', w2).verdict, 'DENY', line);
   }
+  // an absolute path UNDER /proc is not a place in the image but a second name for a directory of the process (`self/cwd` is the directory the
+  // build runs in, which a mount may make the workspace): every spelling of that name keeps the refusal it had
+  for (const line of [
+    'RUN echo x > /proc/self/cwd/src/a.ts',
+    'RUN echo x > /proc/self/root/work/src/a.ts',
+    'RUN echo x > /proc/1/cwd/src/a.ts',
+    'RUN echo x > //proc/self/cwd/src/a.ts',
+    'RUN echo x > /tmp/../proc/self/cwd/src/a.ts',
+    'RUN echo x > /./proc/self/cwd/src/a.ts',
+    'RUN echo x > /proc/self/cwd/.git/hooks/pre-commit',
+    'RUN echo x > /proc/self/cwd/.harness/runtime/pin.json',
+  ]) {
+    const w3 = workspace({ Dockerfile: `FROM alpine\n${line}\n` });
+    assert.equal(run('docker build -t t .', w3).verdict, 'DENY', line);
+  }
   // an unreadable body is unreadable wherever it runs
   const w = workspace({ Dockerfile: 'FROM alpine\nRUN echo hi > $OUT\n' });
   assert.notEqual(run('docker build -t t .', w).verdict, 'ALLOW');
@@ -720,6 +735,9 @@ test('U-04: the command a container runs writes the container\'s paths; the cont
       "docker run --rm -v \"$PWD\":/w alpine sh -c 'echo x > /w/.git/hooks/pre-commit'",
       "docker run --rm -v \"$PWD\":/w -w /w alpine sh -c 'echo x > .git/hooks/pre-commit'",
       "kubectl --context kind-dev exec pod -- sh -c 'echo x > .harness/runtime/pin.json'",
+      // (and a name under /proc is a second name for a directory of the process, not a path of the container)
+      "docker exec app sh -c 'echo x > /proc/self/cwd/src/a.ts'",
+      "kubectl --context kind-dev exec pod -- sh -c 'echo x > /proc/self/cwd/src/a.ts'",
     ],
     dir,
     true,
