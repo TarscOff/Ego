@@ -2707,6 +2707,91 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'yarn info @acme/x --@acme:registry=https://evil.example',
     ],
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-02, WAVE 6 (shell structure: SH-1 .. SH-4). Four causes, each found at ONE spelling by a reviewer who ran a
+   * real shell with fake executables, and each with siblings: the classes are the CAUSES, the cases are the spellings the audit met
+   * and the ones its differential (closure-shell2.test.ts) generated beside them.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'command',
+    // A COMMAND RUNS WHEREVER THE SHELL EVALUATES TEXT: an arithmetic word in either spelling, a subscript however it is quoted, the operand of
+    // a builtin that evaluates it, a variable the line filled with code. One reader of where (shell-lexer.ts, evaluated-words.ts).
+    id: 'a command run while the shell evaluates an expression, a subscript or a variable that holds code',
+    floor: 'DENY',
+    cases: [
+      'echo $[$(git push origin main)]',
+      'echo $[a[1]+$(git push origin main)]',
+      'echo $[ "$(git push origin main)" ]',
+      "declare 'a[$(git push origin main)]=1'",
+      "typeset 'a[$(git push origin main)]=1'",
+      "declare -i 'a[$(git push origin main)]=1'",
+      "let 'a[$(git push origin main)]=1'",
+      "[[ 'a[$(git push origin main)]' -eq 1 ]]",
+      "[[ -v 'a[$(git push origin main)]' ]]",
+      "read 'a[$(git push origin main)]' <<< x",
+      "a=(1); unset 'a[$(git push origin main)]'",
+      "printf -v 'a[$(git push origin main)]' x",
+      "a['$(git push origin main)']=1",
+      "a=(['$(git push origin main)']=1)",
+      "echo ${a['$(git push origin main)']}",
+      "declare $'a[\\x24(git push origin main)]=1'",
+      "(( 'a[$(git push origin main)]' ))",
+      "x='a[$(git push origin main)]'; echo $((x))",
+      "x='a[$(git push origin main)]'; (( x ))",
+      "x='a[$(git push origin main)]'; declare -i y; y=x",
+      "x='$(git push origin main)'; eval \"$x\"",
+      "mapfile -C 'git push origin main' -c 1 a <<< x",
+      "declare 'a[$(kubectl --context production delete pod x)]=1'",
+      "declare 'a[$(rm -rf control-plane)]=1'",
+    ],
+  },
+  {
+    family: 'command',
+    // A FUNCTION BODY RUNS WHEN IT IS CALLED, in the table of functions at the call and with the call's arguments: a name that anything in the
+    // unit removes is not proved bound inside any body, and a body that names its parameters is read with the call's words.
+    id: 'a function that removes its own binding, or is called after it was removed, and then runs the real program',
+    floor: 'DENY',
+    cases: [
+      'git() { unset -f git; git "$@"; }; git push origin main',
+      'git() { unset -f git; git push origin main; }; git status',
+      'git() { unset -f git; git push origin main; }',
+      'kubectl() { unset -f kubectl; kubectl "$@"; }; kubectl --context production delete pod x',
+      'rm() { unset -f rm; rm "$@"; }; rm -rf control-plane',
+      'git() { true; }; f() { git push origin main; }; unset -f git; f',
+      'git() { true; }; f() { unset -f git; git push origin main; }; f',
+      'git() { true; }; f() { unset -f git; }; g() { f; git push origin main; }; g',
+      // (a forwarder that names its parameters is read with the call's words - tested in closure-shell2.test.ts; its definition is not a plain
+      // command, so the transformations that put a wrapper IN FRONT of it make text no shell parses, and are not what the class is about)
+      'run() { "$@"; }; run git push origin main',
+    ],
+  },
+  {
+    family: 'k8s',
+    // THE LAST DRY-RUN FLAG THE TOOL SEES DECIDES, and a word the shell builds after it may be that flag: a command's output, a default, every
+    // argument. A plain variable in a name slot is a name; anywhere else it is not proved.
+    id: 'a production delete whose dry-run flag is undone by a word the shell builds after it',
+    floor: 'DENY',
+    cases: [
+      'kubectl --context production delete pod x --dry-run $(echo --dry-run=none)',
+      'kubectl --context production delete pod x --dry-run=client $(echo --dry-run=none)',
+      'kubectl --context production delete pod x --dry-run ${X:---dry-run=none}',
+      'kubectl --context production delete pod x --dry-run "$@"',
+      'kubectl --context production delete pod x y --dry-run $(cat flags)',
+      'oc --context production delete pod x --dry-run $(echo --dry-run=none)',
+      'helm --kube-context production uninstall app --dry-run $(echo --dry-run=false)',
+    ],
+  },
+  {
+    family: 'git',
+    id: 'a push whose dry-run flag is undone by a word the shell builds after it',
+    floor: 'DENY',
+    cases: [
+      'git push --dry-run origin main $(echo --no-dry-run)',
+      'git push -n origin main $(echo --no-dry-run)',
+      'git push --dry-run origin main "$@"',
+      'git push --dry-run origin main --$OPT',
+    ],
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -3366,6 +3451,38 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
   // LOOKING AT SOMETHING IS NOT DOING IT. Every one of these was an absolute DENY, which is the one verdict a
   // human cannot approve — so the inspection an operator performs BEFORE deciding was the thing being refused
   // (exit review 8). They are ordinary precisely because they change nothing.
+  // THE WORDS A SHELL EVALUATES ARE FEW, AND THE ONES IT DOES NOT ARE MOST. An arithmetic word that holds no command, a declaration whose value is text,
+  // a function that stays a function, a verb under a match directory: each was one word away from a construct that runs a command, and the
+  // reader that separates them must not take ordinary development with it (closure audit 2026-10-02, wave 6).
+  evaluation: [
+    'echo $[1+2]',
+    'x=$[1+2]; echo $x',
+    'echo $[ 3 * (2 + 1) ]',
+    'echo $[a[1]+1]',
+    'echo $((a[1]+1))',
+    'read -r -p "name: " name < /dev/null',
+    'declare -a arr=(1 2 3)',
+    'declare -A m=([k]=v)',
+    "declare -x NOTE='see the docs'",
+    'declare -i n=5; n=n+1',
+    'local x=1',
+    'readonly Y=2',
+    'unset FOO',
+    'f() { echo hi; }; f',
+    'git() { echo stub; }; git status',
+    'ls() { command ls -l "$@"; }; ls',
+    'log() { echo "[$1]"; }; log start',
+    '[[ -f README.md ]] && echo yes',
+    'x=5; [[ $x -gt 3 ]] && echo big',
+    'find a -maxdepth 0 -execdir psql -h localhost -c "select 1" \\;',
+    'find . -maxdepth 1 -execdir git status \\;',
+    'find . -maxdepth 1 -execdir kubectl --context kind-dev get pods \\;',
+    'find . -maxdepth 1 -execdir docker ps \\;',
+    'kubectl --context production delete --dry-run=client pod $NAME',
+    "awk '{c[$(NF-1)]++} END{for(k in c) print k}' README.md",
+    "grep -rn 'foo[$(bar)]' src",
+    "echo 'a[$(date)]'",
+  ],
   inspection: [
     'git config core.hooksPath', // reading the value, not setting it
     'make -n deploy', // a dry run prints the recipe and does not run it

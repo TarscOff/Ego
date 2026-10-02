@@ -255,9 +255,10 @@ export function evaluatedCommands(prefix: readonly string[], verb: string | unde
     const r = evaluatedOperands(verb, args);
     expressions.push(...r.expressions);
     commands.push(...r.commands);
-    // a compound assignment spread over several words: `declare -a a=(x ['$(cmd)']=1)`
-    const joined = args.join(' ');
-    if (/=\(/.test(joined)) expressions.push(...compoundSubscripts(joined));
   }
+  // a compound assignment spread over several words: `a=(x ['$(cmd)']=1)`, `declare -a a=(x ['$(cmd)']=1)`
+  const joined = [...prefix, ...(verb !== undefined ? [verb] : []), ...args].join(' ');
+  const open = joined.search(/\w\+?=\(/);
+  if (open >= 0) expressions.push(...compoundSubscripts(joined.slice(open)));
   return [...commands, ...expressions.flatMap((e) => expressionCommands(e))];
 }

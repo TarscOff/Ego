@@ -566,7 +566,8 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // THE WORDS THIS COMMAND EVALUATES RUN COMMANDS TOO: `declare 'a[$(…)]=1'`, `read 'a[$(…)]'`, `[[ 'a[$(…)]' -eq 1 ]]`, `a['$(…)']=1`.
       // A quote kept them out of the scan above, and the builtin evaluates what it receives (evaluated-words.ts). They are read
       // after the segment is placed, so nothing that records where it stands (the heredoc opener above) is moved by them.
-      if (/[$`]/.test(t)) pushSubshellCommands(evaluatedWordCommands(t));
+      // (every segment is asked: the head that evaluates may be spelled in a way no pattern over the text finds, and a callback has no `$` in it)
+      if (t.length <= MAX_STAGE_CHARS) pushSubshellCommands(evaluatedWordCommands(t));
     }
     cur = '';
   };
@@ -796,7 +797,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // ...BUT `((` IS ALSO WHERE BASH AND ZSH EVALUATE AN EXPRESSION - the arithmetic command, and the header of `for ((;;))` - and a
       // quote in it keeps nothing from running: `(( 'a[$(git push origin main)]' ))` runs the push. Read by the one reader of arithmetic
       // (shell-lexer.ts), in addition to the subshell reading below, which is the one that sees more where dash is the shell.
-      if (ch === '(' && next === '(' && (atCommandStart() || /^(?:(?:time|!)\s+)*for\s*$/.test(cur.trim()))) {
+      if (ch === '(' && next === '(' && (atCommandStart() || /^(?:(?:if|then|else|elif|while|until|do|!|time|coproc)\s+)*for\s*$/.test(cur.trim()))) {
         const arith = arithmeticSpanAt(command, i);
         if (arith !== null) pushArithmetic(arith.body);
       }
@@ -5418,6 +5419,33 @@ interface EffectState {
  *  call: `f() { make -C sub all; }; cp evil.mk sub/Makefile; f` runs the replaced makefile. `ledger` and `dirs` are what the write
  *  ledger and the working directory were when the body was last analysed; a call that finds either changed reads the body again
  *  (closure audit wave 2, RC-MK). */
+/** a body's mention of its positional parameters: `$1`…`$9`, `$@`, `$*`, in the braced spellings too */
+const POSITIONAL_RE = /\$(?:[@*1-9]|\{[@*1-9]\})/;
+
+/** The words of a call after the callee, as they were written (quoting kept) - redirections are not arguments. */
+function callArguments(seg: string): string[] {
+  const text = separateGluedRedirections(seg);
+  const words = commandWords(tokenizeMarked(text)) as Array<{ text: string; at?: number; end?: number }>;
+  const at = commandHeadIndex(words.map((w) => w.text));
+  return words.slice(at + 1).map((w) => (w.at !== undefined && w.end !== undefined ? text.slice(w.at, w.end) : w.text));
+}
+
+/** A statement of a function body with its parameters put where they stand: `"$@"` and `$@` become the call's words, `$1` the first. Only a
+ *  WHOLE word is replaced - a parameter inside a longer word (`"x$1"`) keeps the quoting around it, and a word nobody can read stays one. */
+function withPositionals(text: string, args: readonly string[]): string {
+  let out = '';
+  let from = 0;
+  for (const w of tokenizeMarked(text)) {
+    const m = /^"?\$(?:([@*])|\{([@*])\}|([1-9])|\{([1-9])\})"?$/.exec(text.slice(w.at, w.end));
+    if (m === null) continue;
+    const digit = m[3] ?? m[4];
+    const quoted = text[w.at] === '"';
+    out += text.slice(from, w.at) + (digit !== undefined ? (args[Number(digit) - 1] ?? (quoted ? "''" : '')) : args.join(' '));
+    from = w.end;
+  }
+  return out + text.slice(from);
+}
+
 interface FunctionDef {
   body: readonly ShellStage[];
   ledger: number;
@@ -5477,8 +5505,23 @@ function stripComment(line: string): string {
 
 /** `$[ … ]` is the OLD arithmetic form, still accepted by bash: its `<<` is a left shift, exactly as inside
  *  `$(( … ))`. Leaving it alone let `echo $[1<<true]` open a heredoc whose delimiter never arrived, so every
- *  remaining line of the script was read as its body (exit review 8). */
-const OLD_ARITH_RE = /\$\[[^\]]*\]/g;
+ *  remaining line of the script was read as its body (exit review 8). The extent of one is the lexer's (arithmeticSpanAt), the reader the
+ *  splitter uses: the pattern this was blanked with ended at the FIRST `]`, so `$[a[1]<<true]` left `<<true]` to open the same heredoc. */
+function blankArithmetic(line: string): string {
+  let out = '';
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '$' && (line[i + 1] === '[' || line[i + 1] === '(')) {
+      const a = arithmeticSpanAt(line, i);
+      if (a !== null) {
+        out += '$ARITH';
+        i = a.end - 1;
+        continue;
+      }
+    }
+    out += line[i];
+  }
+  return out;
+}
 
 /** The heredoc delimiter a line opens, or null. A `<<` only opens one when it is UNQUOTED, is not the `<<<`
  *  herestring, and is not the left-shift operator inside an arithmetic expansion. Matching `<<` anywhere on the
@@ -5489,7 +5532,7 @@ const OLD_ARITH_RE = /\$\[[^\]]*\]/g;
 function heredocDelimiter(line: string): string | null {
   // `$[ … ]` and `$(( … ))` both hold ARITHMETIC, where `<<` is a left shift. Blanking the old form here is what
   // keeps `echo $[1<<true]` from opening a heredoc whose delimiter never arrives (exit review 8).
-  line = line.replace(OLD_ARITH_RE, '$ARITH');
+  line = blankArithmetic(line);
   let quote: string | null = null;
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!;
@@ -9659,8 +9702,9 @@ const CLOUD_DRY_RUN: DryRunGrammar = {
   short: '',
   shortValued: '',
   boolean: /^(--no-[a-z-]+|--recursive|--delete|--quiet|--debug|--force|--yes|--only-show-errors|--wait|--auto-approve|--follow-symlinks)$/,
-  // (service, verb and the operands of the verb: `aws s3 cp --dryrun SRC DEST`, `terraform plan -destroy`)
-  slots: 6,
+  // (the service and its verb: whatever stands after them AND after the flag may be the flag that undoes it - an operand of the verb is
+  // written before the options, `aws s3 cp SRC DEST --dryrun`, and the one that is not asks like the act it then is)
+  slots: 2,
 };
 const RSYNC_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: 'eBTfM@', valued: VALUE_OPTS_BY_HEAD['rsync']!, slots: 2 };
 const PATCH_DRY_RUN: DryRunGrammar = {
@@ -15073,6 +15117,12 @@ function analyzeSegmentsInto(
     const shellVars = new Map<string, string>();
     /** the variables this line gave a value that is CODE if it is evaluated (evaluated-words.ts) */
     const codeFlow = new CodeFlow();
+    /** the commands such a variable holds, analysed as the commands they are (the one place this unit hands them back to the analyzer) */
+    const analyzeCodeBodies = (bodies: readonly string[], inEnv: ExecutionEnvironment): void => {
+      for (const body of bodies)
+        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env: inEnv }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (a variable whose value is evaluated as code)`.trim() });
+    };
     const stages = unit;
     // A DEFINITION THE SHELL MAY NEVER EXECUTE BINDS NOTHING. `if false; then git() { echo hi; }; fi` does not
     // define `git`, and neither does a definition inside a `while`/`until`/`for`/`case` branch or one that is a
@@ -15290,9 +15340,7 @@ function analyzeSegmentsInto(
     // the body of an arithmetic expansion: a bare name in it is evaluated by evaluating what it holds (the splitter keeps the body
     // for exactly this question; the commands substituted into it are segments of their own)
     if (cdTrimmed.startsWith(`${ARITHMETIC_BODY} `)) {
-      for (const body of codeFlow.inExpression(cdTrimmed.slice(ARITHMETIC_BODY.length + 1)))
-        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env: state.env }, true))
-          hits.push({ ...h, via: `${h.via ?? ''} (a variable whose value is evaluated as code)`.trim() });
+      analyzeCodeBodies(codeFlow.inExpression(cdTrimmed.slice(ARITHMETIC_BODY.length + 1)), state.env);
       continue;
     }
     // `unset NAME` of a VARIABLE forgets what this line knew of it (what it does to FUNCTIONS is the timeline's business:
@@ -15395,8 +15443,16 @@ function analyzeSegmentsInto(
         // the definition that stands: the last one that certainly ran, and any later one that may have (which of them is bound is not known)
         const standing = defs.slice(-4);
         const lastSure = standing.map((d) => d.unconditional).lastIndexOf(true);
+        // THE BODY'S POSITIONAL PARAMETERS ARE THE CALL'S ARGUMENTS. `git() { unset -f git; git "$@"; }; git push origin main` runs the real
+        // `git push origin main`, and the body read at its definition has only `git "$@"`, a word nobody can read. A body that names its
+        // parameters is therefore read again at every call, with the words of the call put where they stand (closure audit 2026-10-02, SH-2)
+        const argv = callArguments(seg);
         for (const def of lastSure > 0 ? standing.slice(lastSure) : standing) {
-          if (written.size === def.ledger && dirsNow === def.dirs) continue;
+          const positional = def.body.some((st) => !st.text.startsWith(MARK) && POSITIONAL_RE.test(st.text));
+          if (!positional && written.size === def.ledger && dirsNow === def.dirs) continue;
+          const body = positional
+            ? def.body.map((st) => (st.text.startsWith(MARK) ? st : { ...st, text: withPositionals(st.text, argv) }))
+            : def.body;
           const runIn = point.dirs.filter((d) => d !== CWD_UNKNOWN);
           for (const dir of runIn.length ? runIn : [env.cwd]) {
             const callEnv: ExecutionEnvironment = {
@@ -15413,7 +15469,7 @@ function analyzeSegmentsInto(
               [],
               { ...state, depth: state.depth + 1, env: callEnv },
               false,
-              { stages: def.body, functions: fnDefs, names: functionNames, active: new Set([...(inherited?.active ?? []), segHead]) },
+              { stages: body, functions: fnDefs, names: functionNames, active: new Set([...(inherited?.active ?? []), segHead]) },
             ))
               hits.push({ ...h, via: `${h.via ?? ''} (the body of ${segHead}, run at its call)`.trim() });
           }
@@ -15456,9 +15512,7 @@ function analyzeSegmentsInto(
     // inert while it was assigned; arithmetic, `let`, `[[ -eq ]]`, `${!x}` and `eval "$x"` run what it holds (evaluated-words.ts: CodeFlow)
     {
       const head = statementHead(seg);
-      for (const body of codeFlow.commands(seg, head.prefix, head.verb, head.args))
-        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
-          hits.push({ ...h, via: `${h.via ?? ''} (a variable whose value is evaluated as code)`.trim() });
+      analyzeCodeBodies(codeFlow.commands(seg, head.prefix, head.verb, head.args), env);
     }
     for (const rawBody of carriedShellBodies(seg)) {
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
