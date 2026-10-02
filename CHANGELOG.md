@@ -428,3 +428,7 @@ discipline of decision Q84 (authority changes are never patch releases).
   escalation request among them - asks (`host-fields.ts`). Visible changes: `rm *.log`, `chmod +x scripts/*.sh` and `mv *.log logs/` no longer
   ask; a substitution whose output is known (`touch "$(echo .harness/runtime/pin.json)"`) is the refusal the path it prints is; `xargs`
   and `$(...)` fed by a command that is neither listed nor readable ask where they were ALLOW; a seeded filesystem oracle is a permanent test.
+  The oracle's further seeds closed five more spellings at the same readers: a `cd` word is read as typed as well (`cd '~+'/..` is the directory
+  called `~+`), a name with a blank and an angle bracket in one word is one name, `..` after a wildcard component goes up from where the matched
+  name leads, a destination a tool's table finds is read when its variables are known (`cc --serialize-diagnostics $HOME/x`), and `mktemp -u`
+  creates nothing in the directory `-p` names either.
