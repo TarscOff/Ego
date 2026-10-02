@@ -112,6 +112,12 @@ export interface K8sEffect {
  * word after it MAY be its value, and nothing that rests on that word being a flag is granted.
  * ------------------------------------------------------------------------------------------------------------- */
 
+/** THE VARIABLES THAT SELECT A CLUSTER, in one list: the resolver reads each of them, and the normalizer's list of the assignments it re-attaches
+ *  to a command is derived from it. */
+export const K8S_SELECTING_ENV_NAMES: readonly string[] = [
+  'KUBECONFIG', 'KUBERNETES_MASTER', 'KUBERNETES_SERVICE_HOST', 'KUBE_CONTEXT', 'HELM_KUBECONTEXT', 'HELM_KUBEAPISERVER', 'HELM_NAMESPACE',
+];
+
 /** kubectl's PERSISTENT options, the only ones that may stand in front of the verb, and the klog options it still lists */
 const KUBECTL_GLOBAL_VALUE = [
   '--as', '--as-group', '--as-uid', '--as-user-extra', '--cache-dir', '--certificate-authority', '--client-certificate',
@@ -136,6 +142,8 @@ const HELM_GLOBAL_VALUE = [
   '--burst-limit', '--kube-apiserver', '--kube-as-group', '--kube-as-user', '--kube-ca-file', '--kube-context',
   '--kube-tls-server-name', '--kube-token', '--kubeconfig', '-n', '--namespace', '--qps', '--registry-config',
   '--repository-cache', '--repository-config',
+  // helm 4 (read from `helm --help`: each takes a value) - the colour of the output and where fetched charts are cached
+  '--color', '--colour', '--content-cache',
 ] as const;
 const HELM_GLOBAL_FLAG = ['--debug', '--kube-insecure-skip-tls-verify', '-h', '--help'] as const;
 
@@ -156,6 +164,8 @@ const VERB_VALUE = new Set<string>([
   '--cert-file', '--key-file', '--ca-file', '--keyring', '--post-renderer', '--post-renderer-args', '--exec-command',
   '--exec-api-version', '--exec-arg', '--exec-env', '--auth-provider', '--auth-provider-arg', '--show-only', '-s',
   '--output-dir', '--name-template', '--kube-version', '--api-versions', '--offset', '--filter',
+  // `kubectl cp`: how many times to retry a failed copy
+  '--retries',
 ]);
 /** options KNOWN to take no value */
 const VERB_FLAG = new Set<string>([
@@ -172,6 +182,8 @@ const VERB_FLAG = new Set<string>([
   '--skip-schema-validation', '--render-subchart-notes', '--no-color', '--all-containers', '--ignore-daemonsets',
   '--delete-emptydir-data', '--disable-eviction', '--keep-annotations', '--rollback-on-failure', '--take-ownership',
   '--embed-certs', '--merge', '--current', '--print-flags', '-it', '-ti',
+  // `kubectl cp`: do not keep the ownership and permissions of what is copied out
+  '--no-preserve',
 ]);
 /** a spelling that is a flag in one verb and an option with a value in another: `logs -f` follows, `get -f` names a file,
  *  `config view --raw` prints and `get --raw` takes a path */
@@ -262,7 +274,7 @@ export function k8sGlobalOptions(head: string): { value: RegExp; bool: RegExp } 
 
 /** every verb kubectl has, so a first word that is none of them is a PLUGIN */
 export const KUBECTL_VERBS: ReadonlySet<string> = new Set([
-  ...['get', 'describe', 'logs', 'top', 'explain', 'api-resources', 'api-versions', 'version', 'config', 'cluster-info', 'wait', 'diff', 'events', 'kustomize', 'completion', 'options', 'help', 'plugin'],
+  ...['get', 'describe', 'logs', 'top', 'explain', 'api-resources', 'api-versions', 'version', 'config', 'cluster-info', 'wait', 'diff', 'events', 'kustomize', 'completion', 'options', 'help', 'plugin', 'kuberc'],
   ...['apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon', 'taint', 'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward', 'debug', 'certificate', 'proxy', 'auth', 'apply-set', 'alpha'],
 ]);
 /** the verbs `oc` has beyond kubectl's */
@@ -289,13 +301,15 @@ export const HELM_VERBS: ReadonlySet<string> = new Set([
 export const K8S_MUTATING_VERBS: ReadonlySet<string> = new Set([
   'apply', 'create', 'delete', 'patch', 'edit', 'scale', 'rollout', 'replace', 'drain', 'cordon', 'uncordon', 'taint',
   'exec', 'cp', 'annotate', 'label', 'set', 'expose', 'run', 'autoscale', 'attach', 'port-forward', 'debug',
-  'certificate', 'proxy', 'auth', 'apply-set', 'alpha', ...OC_ACT,
+  'certificate', 'proxy', 'auth', 'apply-set', 'alpha', 'kuberc', ...OC_ACT,
 ]);
 /** `rollout` restarts and undoes - and it also REPORTS, with `status` and `history`; `auth` changes nothing in the
  *  `can-i` and `whoami` forms, which are the two commands an operator runs to find out what they may do */
 export const K8S_READ_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   rollout: new Set(['status', 'history']),
   auth: new Set(['can-i', 'whoami']),
+  // `kubectl kuberc view` prints the preferences file; `set` writes it
+  kuberc: new Set(['view']),
   certificate: new Set([]),
 };
 /** `dependency update|build` FETCHES remote charts into the chart directory, `helm pull` fetches one, and `helm repo add`
@@ -429,7 +443,9 @@ const asMap = (v: YamlValue | undefined): { [k: string]: YamlValue } =>
 function readKubeconfig(text: string): KubeModel | null {
   let doc: YamlValue;
   try {
-    doc = parseYaml(text);
+    // a kubeconfig may be written as JSON (kubectl reads either; `kubectl config view -o json > kc.json` makes one), which is a document the
+    // YAML reader of this kernel was not asked to take
+    doc = text.trimStart().startsWith('{') ? (JSON.parse(text) as YamlValue) : parseYaml(text);
   } catch {
     return null;
   }
@@ -465,6 +481,47 @@ function readKubeconfig(text: string): KubeModel | null {
   const current = str(doc['current-context']);
   if (current !== undefined && current !== '') m.current = current;
   return m;
+}
+
+/** THE OPTIONS A PREFERENCES FILE (kuberc) MAY GIVE A DEFAULT FOR WITHOUT CHOOSING A TARGET: what the output looks like, how a write is
+ *  sent, how long a call may take. A positive list - a default for any option not here (`context`, `cluster`, `user`, `server`,
+ *  `namespace`, `kubeconfig`, an impersonation, a token, an option nobody listed) can send the command somewhere the line does not
+ *  name, and is a question. */
+const KUBERC_INERT_OPTIONS = new Set([
+  'output', 'o', 'server-side', 'force-conflicts', 'interactive', 'i', 'show-managed-fields', 'show-labels', 'no-headers', 'show-kind',
+  'validate', 'wait', 'cascade', 'grace-period', 'field-manager', 'overwrite', 'save-config', 'recursive', 'R', 'prune', 'watch', 'w',
+  'chunk-size', 'sort-by', 'timeout', 'dry-run', 'all', 'ignore-not-found', 'template', 'tail', 'since', 'timestamps', 'follow', 'f',
+]);
+
+/** Why a preferences file cannot be taken for one that leaves the target alone, or null when it can. */
+function kubercProblem(f: K8sFile): string | null {
+  if (f.state === 'outside') return 'is outside the workspace, which the kernel cannot read';
+  if (f.state === 'absent') return 'is not there';
+  if (f.state === 'dynamic') return 'is built at run time';
+  if (f.state !== 'text') return 'cannot be read';
+  if (f.stale === true) return 'may be rewritten by this command line before it is opened';
+  let doc: YamlValue;
+  try {
+    doc = f.text.trimStart().startsWith('{') ? (JSON.parse(f.text) as YamlValue) : parseYaml(f.text);
+  } catch {
+    return 'is not a preferences file this reader understands';
+  }
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) return 'is not a preferences file this reader understands';
+  // (aliases are reached by a first word that is none of the tool's verbs, which already runs a plugin; the defaults and the overrides
+  // are what changes a command that names its verb)
+  for (const section of ['defaults', 'overrides']) {
+    for (const entry of asList(doc[section])) {
+      const options = entry['options'];
+      if (options === undefined) continue;
+      if (!Array.isArray(options)) return 'has options this reader does not understand';
+      for (const o of options) {
+        const name = typeof o === 'object' && o !== null && !Array.isArray(o) ? str(o['name']) : undefined;
+        if (name === undefined || !KUBERC_INERT_OPTIONS.has(name.replace(/^-+/, '')))
+          return `sets a default for ${name === undefined ? 'an option this reader cannot name' : `--${name.replace(/^-+/, '')}`}, which can choose where the command goes`;
+      }
+    }
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -563,52 +620,69 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
   };
   if (p.unplaced !== null) signals.push({ cls: 'UNCLASSIFIED', target: p.unplaced });
 
-  // the kubeconfig files the tool will read: the option and the variable are the same signal
-  const kubeFiles: Array<{ word: K8sWord | string; label: string }> = [];
-  for (const w of opt('--kubeconfig', ...(head === 'oc' ? ['--config'] : []))) kubeFiles.push({ word: w, label: 'kubeconfig ' });
-  for (const v of env['KUBECONFIG'] ?? []) for (const f of v.split(':').filter(Boolean)) kubeFiles.push({ word: f, label: 'KUBECONFIG=' });
-  const models: KubeModel[] = [];
+  // THE KUBECONFIG FILES THE TOOL WILL READ. A string option given twice is applied ONCE - the last - so each `--kubeconfig` is a file of its
+  // own and not part of a list; `KUBECONFIG` is the one that is a LIST, merged, and in it the first file that defines a name wins (K8-05:
+  // `--kubeconfig a --kubeconfig b` was read as the pair, the first model answered, and the second file - the one kubectl dialled - was never
+  // asked). Which of them the tool really uses is the tool's business: every one is read as the WORLD it could be, and the strictest decides.
+  interface KubeFile {
+    word: K8sWord | string;
+    label: string;
+  }
+  const worldFiles: KubeFile[][] = [
+    ...opt('--kubeconfig', ...(head === 'oc' ? ['--config'] : [])).map((w): KubeFile[] => [{ word: w, label: 'kubeconfig ' }]),
+    ...(env['KUBECONFIG'] ?? []).map((v): KubeFile[] => v.split(':').filter(Boolean).map((f) => ({ word: f, label: 'KUBECONFIG=' }))),
+  ];
+  const worlds: KubeModel[][] = [];
   const absent: string[] = [];
-  for (const { word: fw, label } of kubeFiles) {
-    const name = textOf(fw);
-    // (every file the kernel does not read is a kubeconfig nobody vouched for: it may name a credential plugin, or another server)
-    if (dyn(fw)) {
-      signals.push(hidden(label, name));
-      unvouched ??= `${label}${name} is a kubeconfig a shell fills in`;
-      continue;
-    }
-    // a path that says production is production, whatever the file holds
-    if (host.productionMarked(name)) {
-      signals.push({ cls: 'PRODUCTION', target: label + name });
-      unvouched ??= `${label}${name} is a kubeconfig the kernel did not read`;
-      continue;
-    }
-    const f = host.file(name);
-    if (f.state === 'text') {
-      const model = readKubeconfig(f.text);
-      if (model === null) {
-        signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (not a kubeconfig this reader understands)` });
-        unvouched ??= `${label}${name} is not a kubeconfig this reader understands`;
-      } else models.push(model);
-      // what is on the disk is the worst case it can be taken for, not the whole truth: it may be rewritten before the tool opens it
-      if (f.stale === true) {
-        signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (this command line may rewrite it)` });
-        unvouched ??= `${label}${name} may be rewritten by this command line before it is opened`;
+  for (const files of worldFiles) {
+    const models: KubeModel[] = [];
+    worlds.push(models);
+    for (const { word: fw, label } of files) {
+      const name = textOf(fw);
+      // (every file the kernel does not read is a kubeconfig nobody vouched for: it may name a credential plugin, or another server)
+      if (dyn(fw)) {
+        signals.push(hidden(label, name));
+        unvouched ??= `${label}${name} is a kubeconfig a shell fills in`;
+        continue;
       }
-    } else if (f.state === 'outside') {
-      // the workspace does not own it, so it says nothing about where a declared name points
-      signals.push({ cls: 'EXTERNAL', target: label + name });
-      unvouched ??= `${label}${name} is a kubeconfig outside the workspace, which the kernel cannot read`;
-    } else if (f.state === 'absent') {
-      absent.push(label + name);
-      unvouched ??= `${label}${name} is not there`;
-    } else {
-      signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (${f.state === 'fresh' ? 'this command line writes it' : 'it cannot be read'})` });
-      unvouched ??= `${label}${name} cannot be read`;
+      // a path that says production is production, whatever the file holds
+      if (host.productionMarked(name)) {
+        signals.push({ cls: 'PRODUCTION', target: label + name });
+        unvouched ??= `${label}${name} is a kubeconfig the kernel did not read`;
+        continue;
+      }
+      const f = host.file(name);
+      if (f.state === 'text') {
+        const model = readKubeconfig(f.text);
+        if (model === null) {
+          signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (not a kubeconfig this reader understands)` });
+          unvouched ??= `${label}${name} is not a kubeconfig this reader understands`;
+        } else models.push(model);
+        // what is on the disk is the worst case it can be taken for, not the whole truth: it may be rewritten before the tool opens it
+        if (f.stale === true) {
+          signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (this command line may rewrite it)` });
+          unvouched ??= `${label}${name} may be rewritten by this command line before it is opened`;
+        }
+      } else if (f.state === 'outside') {
+        // the workspace does not own it, so it says nothing about where a declared name points
+        signals.push({ cls: 'EXTERNAL', target: label + name });
+        unvouched ??= `${label}${name} is a kubeconfig outside the workspace, which the kernel cannot read`;
+      } else if (f.state === 'absent') {
+        absent.push(label + name);
+        unvouched ??= `${label}${name} is not there`;
+      } else {
+        signals.push({ cls: 'UNCLASSIFIED', target: `${label}${name} (${f.state === 'fresh' ? 'this command line writes it' : 'it cannot be read'})` });
+        unvouched ??= `${label}${name} cannot be read`;
+      }
     }
   }
+  const allModels = worlds.flat();
+  /** the worlds a context, a cluster or a current-context is looked up in: one per file the line names, or the one with nothing in it */
+  const eachWorld = (visit: (models: readonly KubeModel[]) => void): void => {
+    for (const models of worlds.length > 0 ? worlds : [[]]) visit(models);
+  };
   const selectedUsers = new Set<string>();
-  const lookup = <T>(pick: (m: KubeModel) => T | undefined): T | undefined => {
+  const lookup = <T>(models: readonly KubeModel[], pick: (m: KubeModel) => T | undefined): T | undefined => {
     for (const m of models) {
       const found = pick(m);
       if (found !== undefined) return found;
@@ -620,14 +694,16 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
   const context = (label: string, w: K8sWord | string): void => {
     named(label, w);
     if (dyn(w)) return;
-    const def = lookup((m) => m.contexts.get(textOf(w)));
-    if (def === undefined) return;
-    if (def.user !== undefined) selectedUsers.add(def.user);
-    const url = lookup((m) => (def.cluster === undefined ? undefined : m.clusters.get(def.cluster)))?.server;
-    if (url === undefined) signals.push({ cls: 'UNCLASSIFIED', target: `${label}${textOf(w)} (its cluster names no server)` });
-    else server(`${label}${textOf(w)} server `, url);
-    if (def.cluster !== undefined && host.productionMarked(def.cluster)) signals.push({ cls: 'PRODUCTION', target: `cluster ${def.cluster}` });
-    if (def.namespace !== undefined && host.productionMarked(def.namespace)) signals.push({ cls: 'PRODUCTION', target: `namespace ${def.namespace}` });
+    eachWorld((models) => {
+      const def = lookup(models, (m) => m.contexts.get(textOf(w)));
+      if (def === undefined) return;
+      if (def.user !== undefined) selectedUsers.add(def.user);
+      const url = lookup(models, (m) => (def.cluster === undefined ? undefined : m.clusters.get(def.cluster)))?.server;
+      if (url === undefined) signals.push({ cls: 'UNCLASSIFIED', target: `${label}${textOf(w)} (its cluster names no server)` });
+      else server(`${label}${textOf(w)} server `, url);
+      if (def.cluster !== undefined && host.productionMarked(def.cluster)) signals.push({ cls: 'PRODUCTION', target: `cluster ${def.cluster}` });
+      if (def.namespace !== undefined && host.productionMarked(def.namespace)) signals.push({ cls: 'PRODUCTION', target: `namespace ${def.namespace}` });
+    });
   };
 
   const contextWords = [...opt('--context', '--kube-context')];
@@ -639,11 +715,13 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
   if (switchesContext && p.operands[1] !== undefined) context('context use ', word(p.operands[1]));
   const contextNamed = contextWords.length > 0 || contextEnv.length > 0 || switchesContext;
   // no context named: the file's own current-context is the one used
-  if (!contextNamed && models.length > 0) {
-    const current = lookup((m) => m.current);
-    if (current !== undefined) context('current-context ', current);
-    else signals.push({ cls: 'UNCLASSIFIED', target: 'a kubeconfig that names no current context' });
-  }
+  if (!contextNamed)
+    for (const models of worlds)
+      if (models.length > 0) {
+        const current = lookup(models, (m) => m.current);
+        if (current !== undefined) context('current-context ', current);
+        else signals.push({ cls: 'UNCLASSIFIED', target: 'a kubeconfig that names no current context' });
+      }
   // a kubeconfig that is not there yet names nothing that contradicts a context that is local by name. Anything else it
   // would have told us - no context at all, a context that is not local - is not local either
   if (!(contextNamed && signals.every((s) => s.cls === 'LOCAL'))) for (const label of absent) signals.push({ cls: 'EXTERNAL', target: label });
@@ -651,8 +729,11 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
   // `--cluster` replaces the cluster the context names, `--user` the credentials: a name is judged like a context's
   for (const w of opt('--cluster')) {
     named('cluster ', w);
-    const url = models.length > 0 && !dyn(w) ? lookup((m) => m.clusters.get(w.text))?.server : undefined;
-    if (url !== undefined) server(`cluster ${w.text} server `, url);
+    if (!dyn(w))
+      eachWorld((models) => {
+        const url = models.length > 0 ? lookup(models, (m) => m.clusters.get(w.text))?.server : undefined;
+        if (url !== undefined) server(`cluster ${w.text} server `, url);
+      });
   }
   for (const w of [...opt('--user'), ...opt('--kube-as-user', '--as')]) {
     if (!dyn(w)) selectedUsers.add(w.text);
@@ -660,6 +741,19 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
     if (host.productionMarked(w.text)) signals.push({ cls: 'PRODUCTION', target: `user ${w.text}` });
     else if (dyn(w)) signals.push({ cls: 'UNCLASSIFIED', target: `user ${w.text}` });
   }
+  // A PREFERENCES FILE NAMED ON THE LINE CAN SET THE DEFAULT OF ANY FLAG, `--context` among them (K8-02: kubectl 1.36 with a kuberc whose
+  // defaults give `context: prod-eu` dialled the production cluster while the kubeconfig's current-context said kind-dev). The file is read;
+  // a default for an option that is known to leave the cluster and the credentials alone is ordinary, and anything else - a context, a
+  // cluster, a user, a server, a namespace, another kubeconfig, an option nobody listed - is a target that was chosen out of sight
+  if (head !== 'helm')
+    for (const w of opt('--kuberc')) {
+      const name = textOf(w);
+      const marked = !dyn(w) && host.productionMarked(name);
+      const why = dyn(w) ? 'is a preferences file a shell fills in' : marked ? 'is a preferences file the kernel did not read' : kubercProblem(host.file(name));
+      if (why === null) continue;
+      signals.push(marked ? { cls: 'PRODUCTION', target: `kuberc ${name}` } : { cls: 'UNCLASSIFIED', target: `kuberc ${name} (${why})` });
+      unvouched ??= `kuberc ${name} ${why}`;
+    }
   // (`-s` is the server of kubectl and the `--show-only` of helm template)
   // (an API server named HERE - on the line or in the environment - is not one the user's kubeconfig defines: unless it is a declared
   // local one, the credentials of the kubeconfig go to a host nobody vouched for)
@@ -685,7 +779,7 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
   if (opt('--post-renderer').length > 0) programs.push('helm --post-renderer runs the program it names on every rendered manifest');
   // a credential plugin in a kubeconfig the kernel read, for the user the command selects (or, when nothing selects one,
   // for any user the file defines)
-  const programUsers = models.flatMap((m) => [...m.users].filter(([, u]) => u.program).map(([n]) => n));
+  const programUsers = allModels.flatMap((m) => [...m.users].filter(([, u]) => u.program).map(([n]) => n));
   if (programUsers.length > 0) {
     const picked = [...selectedUsers].filter((u) => programUsers.includes(u));
     if (picked.length > 0 || selectedUsers.size === 0)
@@ -762,6 +856,39 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
   };
 }
 
+/** The words of `kubectl cp` / `oc cp` that name a file spec, in order: the operands after the verb, and the words an option of unknown
+ *  arity may or may not have taken as its value. Null for any other command. THE ONE READER OF WHERE THE VERB'S OPERANDS ARE, for the
+ *  evaluator's judge of the local side of a copy (copy-writes.ts). */
+export function k8sCopyOperands(head: string, words: readonly K8sWord[]): string[] | null {
+  if (head !== 'kubectl' && head !== 'oc') return null;
+  const p = parse(head, words);
+  if (p.verb !== 'cp' || p.plugin) return null;
+  return p.words.filter((_, i) => i > p.verbAt && (p.roles[i] === 'operand' || p.roles[i] === 'maybe')).map((w) => w.text);
+}
+
+/** THE WORDS OF A kubectl COMMAND THAT NAME OBJECTS OF THE CLUSTER, and are therefore not paths: `deploy/$APP`, `pod/$P`, `svc/$SVC`, a pod
+ *  called `$POD`, the `ns/pod:/path` of a file spec (K8-04: the generic scan of path-shaped words read `deploy/$APP` as a directory built
+ *  at run time and asked, for the most ordinary scripted use of the tool). What a name is is the cluster's to answer, and k8s.ts answers it:
+ *  a name a shell fills in is data, and the target it reaches is decided by the context, the cluster and the server. The words that ARE
+ *  files stay the generic scan's: the value of `-f`, `--kubeconfig`, `--from-file`, the local side of a copy, a directory a verb renders. */
+export function k8sObjectNames(head: string, words: readonly K8sWord[]): string[] {
+  if (head !== 'kubectl' && head !== 'oc') return [];
+  const p = parse(head, words);
+  // a verb the tool does not have is a plugin, whose operands are anything; `kustomize DIR` renders a directory; `proxy` serves one; and
+  // the verbs `oc` adds (`rsync`, `new-app ./dir`, `login URL`, `image mirror`) take paths and addresses
+  if (p.verb === undefined || p.plugin || p.unplaced !== null || /^(kustomize|completion|plugin|proxy|alpha)$/.test(p.verb) || !KUBECTL_VERBS.has(p.verb)) return [];
+  const optionValues = new Set(p.options.flatMap((o) => (o.value === undefined ? [] : [o.value.text])));
+  const out: string[] = [];
+  for (let i = p.verbAt + 1; i < words.length; i++) {
+    if (p.roles[i] !== 'operand') continue;
+    const text = words[i]!.text;
+    // (the local side of a copy is a file; the side that holds `:` is `[namespace/]pod:path`, a name of the cluster)
+    if (p.verb === 'cp' && !(text.indexOf(':') > 0)) continue;
+    if (!optionValues.has(text)) out.push(text);
+  }
+  return out;
+}
+
 /** Whether the command prints a Secret: a resource type that is one, a type a shell fills in, the raw API, or a manifest
  *  the command is pointed at that declares one (or cannot be shown not to). */
 function secretRead(p: Parsed, host: K8sHost): string | null {
@@ -776,10 +903,13 @@ function secretRead(p: Parsed, host: K8sHost): string | null {
   const listForm = candidates[0]?.w.text.includes('/') ?? false;
   const shifted = candidates.some(({ i }) => p.roles[i] === 'maybe');
   for (const [k, { w }] of candidates.entries()) {
+    // ONLY THE TYPE POSITION HOLDS A TYPE. `get pod secrets` reads the pod called `secrets` and `get secrets` reads the Secrets:
+    // the NAMES after the type are names, whatever they spell (wave 5, K8-03: a pod called `secrets-api` is not a credential read)
+    if (!(k === 0 || listForm || shifted)) continue;
     const types = w.text.split(',').map((el) => el.split('/')[0]!);
     if (types.some((t) => SECRET_TYPE.test(t))) return `${what} ${w.text} prints a Secret`;
     // the TYPE of `pod/$NAME` is `pod`: a word that fills in only the name leaves the type written
-    if ((k === 0 || listForm || shifted) && types.some((t) => /[$`]/.test(t)))
+    if (types.some((t) => /[$`]/.test(t)))
       return `the resource type of ${what} is a word a shell fills in, and it may name Secrets`;
   }
   // the raw API: a path that names secrets, or one a shell fills in

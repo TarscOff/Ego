@@ -315,7 +315,8 @@ test('a verb nobody modelled, on a production engine named before or after it, i
     ['docker debug --host=ssh://root@prod.acme.com app', undefined, 'DENY'],
     ['docker --host ssh://root@prod.acme.com debug app', undefined, 'DENY'],
     ['docker pass --host tcp://prod.acme.com get X', undefined, 'DENY'],
-    ['docker scout --context production quickview', undefined, 'DENY'],
+    // (`scout quickview` is a modelled read since wave 5, CT-05, and a read of another engine stays a read: closure-clusters2.test.ts. The rest of `scout` is not)
+    ['docker scout --context production enroll acme', undefined, 'DENY'],
     ['docker init --context production', undefined, 'DENY'],
     ['DOCKER_HOST=tcp://prod.acme.com:2375 docker debug app', undefined, 'DENY'],
     ['DOCKER_CONTEXT=production docker pass get X', undefined, 'DENY'],
@@ -330,8 +331,8 @@ test('a verb nobody modelled asks, locally: debug, pass, scout, init, a plugin (
       ['docker pass get GH_TOKEN', undefined, 'ASK'],
       ['docker pass set X=1', undefined, 'ASK'],
       ['docker pass run -- ls', undefined, 'ASK'],
-      ['docker scout quickview', undefined, 'ASK'],
-      ['docker init', undefined, 'ASK'],
+      // (`scout quickview` and `init` are modelled since wave 5, CT-05: closure-clusters2.test.ts. The rest of `scout` is still a verb nobody decided about)
+      ['docker scout enroll acme', undefined, 'ASK'],
       ['docker buildx history ls', undefined, 'ASK'],
       ['docker container frobnicate x', undefined, 'ASK'],
       ['podman farm list', undefined, 'ASK'],
@@ -512,18 +513,23 @@ test('an output that writes outside the workspace is a write there (r11-230)', (
  * 7. WHAT THE SAME CAUSE LEFT AT MEDIUM
  * ------------------------------------------------------------------------------------------------------------- */
 
-test('login and logout rewrite the credential store, for every program that has them (r11-188)', () => {
+test('login rewrites the credential store and logout removes a login, for every program that has them (r11-188, wave 5 CT-05)', () => {
   const rows: Row[] = [
-    ['docker logout', undefined, 'DENY'],
-    ['docker --debug logout', undefined, 'DENY'],
-    ['docker logout registry.example.com', undefined, 'DENY'],
-    ['podman logout', undefined, 'DENY'],
     ['podman login registry.example.com', undefined, 'DENY'],
     ['nerdctl login', undefined, 'DENY'],
-    ['nerdctl logout', undefined, 'DENY'],
     ['docker login', undefined, 'DENY'],
+    // a logout is a question and not the absolute refusal a login is: the person who wants to clean up must be able to approve it
+    ['docker logout', undefined, 'ASK'],
+    ['docker --debug logout', undefined, 'ASK'],
+    ['docker logout registry.example.com', undefined, 'ASK'],
+    ['podman logout', undefined, 'ASK'],
+    ['nerdctl logout', undefined, 'ASK'],
   ];
   assert.deepEqual(underFloor(rows), []);
+  assert.deepEqual(
+    notExactly(['docker logout', 'podman logout', 'nerdctl logout'].map((c): Row => [c, undefined, 'ASK'])),
+    [],
+  );
 });
 
 test('compose forwards a credential like docker does, and a boolean spelled with a value is the boolean (r11-232, sa10-101)', () => {

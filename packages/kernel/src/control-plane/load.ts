@@ -716,6 +716,7 @@ function parseBoundedCommands(file: string, problems: string[]): BoundedCommands
     installsDependencies: list('installs_dependencies'),
     discoversContent: list('discovers_content'),
     discoversConfig: list('discovers_config'),
+    imageSetup: list('image_setup'),
     file,
   };
 }
@@ -791,7 +792,7 @@ export function loadControlPlane(root: string): ControlPlane {
   const boundedFile = req('workspace/bounded-commands.md');
   const boundedCommands = boundedFile
     ? parseBoundedCommands(boundedFile, problems)
-    : { bounded: [], installsDependencies: [], discoversContent: [], discoversConfig: [], file: '' };
+    : { bounded: [], installsDependencies: [], discoversContent: [], discoversConfig: [], imageSetup: [], file: '' };
   const targetsFile = req('workspace/local-targets.md');
   const localTargets = targetsFile
     ? parseLocalTargets(targetsFile, problems)

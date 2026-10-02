@@ -363,26 +363,16 @@ matchers:
     tool: Bash
     command: '^(gh\s+(repo\s+view|api)|glab\s+(repo\s+view|api))\b'
   # --- production (absolute; contexts named production/prod) ---
-  - capability: production.k8s.mutate
-    tool: Bash
-    # A DRY RUN AND A HELP PROBE PERFORM NOTHING, and `rollout status|history` REPORTS — three spellings of
-    # looking at production that were refused absolutely, which is the one verdict nobody can approve. The
-    # mutating spellings of `rollout` keep the verb (exit review 9).
-    command: '^(kubectl|oc)\b(?![^|;&]*\sset\s+env\b[^|;&]*\s--list\b)(?![^|;&]*\s(--help|-help|--usage)(\s|$))(?![^|;&]*\s(--version|-version)\s*(\||;|&|$))(?![^|;&]*\shelp\s*(\||;|&|$))(?![^|;&]*\s--(dry-run|dryrun|server-dry-run|what-if|no-act)(=|\s|$))(?=.*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))(?![^|;&]*\sauth\s+(can-i|whoami)\b)(?=.*\s(apply|delete|patch|edit|scale|rollout\s+(?!status\b|history\b)|create|replace|drain|cordon|uncordon|taint|exec|cp|annotate|label|set|expose|run|autoscale|attach|port-forward|debug|certificate|proxy)\b)'
-  # READING A SECRET IS A CREDENTIAL READ, whatever the verb is called. `kubectl --context production get -f
-  # secret.yaml -o yaml` prints the Secret's data — base64 is not encryption — and the production matcher below
-  # lists only MUTATING verbs, so the read reached ALLOW (exit review 9). `describe` and `-o json|yaml` are the
-  # same act by other spellings.
-  - capability: fs.credential-store.read
-    tool: Bash
-    command: '^(kubectl|oc)\b(?=[^|;&]*(--context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))[^|;&]*\s(get|describe|extract)\b[^|;&]*\b(secret|secrets)\b'
-  # ...and reading one by FILE is the same read: `-f secret.yaml` names the object, and the file says it is a Secret
-  - capability: fs.credential-store.read
-    tool: Bash
-    command: '^(kubectl|oc)\b(?=[^|;&]*(--context[= ]\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*|--server[= ]\S*(prod|production)\S*))[^|;&]*\s(get|describe)\b[^|;&]*\s-f[= ]?\S*secret\S*'
-  - capability: production.helm.mutate
-    tool: Bash
-    command: '^helm\b(?![^|;&]*\sdiff\s+(upgrade|rollback|revision|release)\b)(?![^|;&]*\s(--help|-help|--usage)(\s|$))(?![^|;&]*\s(--version|-version)\s*(\||;|&|$))(?![^|;&]*\shelp\s*(\||;|&|$))(?![^|;&]*\s--(dry-run|dryrun|server-dry-run|what-if|no-act)(=|\s|$))(?=.*\s(install|upgrade|uninstall|rollback|delete|test)\b)(?=.*(--kube-context[= ]\S*(prod|production)\S*|(^|\s)-n\s*\S*(prod|production)\S*|--namespace[= ]\S*(prod|production)\S*|--kubeconfig[= ]\S*(prod|production)\S*))'
+  # A KUBERNETES OR HELM COMMAND AIMED AT PRODUCTION IS CLASSIFIED BY THE EVALUATOR'S TARGET MODEL, AND ONLY THERE
+  # (`production.k8s.mutate`, `production.helm.mutate`, and the credential read of a Secret on production: k8s.ts and
+  # target-kinds.ts). Four matchers lived here with their own copy of "is this production" - the letters `prod` anywhere in a
+  # context, a namespace, a kubeconfig or a server - and their own copy of every read-only exception, and the copies disagreed
+  # with the reader in both directions: `-n products` on a kind cluster was an ABSOLUTE deny, a word `secrets` anywhere on a
+  # production line (a pod called `secrets-api`, `auth can-i get secrets`) was a credential read, and `prd1`, `prod01` and
+  # `live2` were not production at all (wave 5, K8-01, K8-03, AUTH-1). The same step was taken for the database clients
+  # below, for the same reason. The name is read by `hasProductionMarker` (control-plane/local-targets.ts), the verb, the
+  # dry run and the resource type by k8s.ts, and the compiler lists the landing capabilities as pre-denied from the table
+  # the evaluator lands on.
   - capability: production.cloud.mutate
     tool: Bash
     # `cp`, `mv` and `sync` ARE DIRECTIONAL, and the direction is the whole effect. `aws s3 cp s3://fixtures/x .`
@@ -1063,11 +1053,13 @@ matchers:
   - capability: container.inspect
     tool: Bash
     command: '^(docker|podman)\s+(ps|images|inspect|logs|top|stats|version|info|image\s+ls)\b'
-  # a bind mount hands the container the host path: mounting home, the filesystem root or a credential directory
-  # reads it just as surely as `cat` would (round 14)
-  - capability: fs.credential-store.read
-    tool: Bash
-    command: '^(docker|podman|nerdctl)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
+  # A BIND MOUNT HANDS THE CONTAINER THE HOST PATH: mounting home, the filesystem root or a credential directory reads it just as
+  # surely as `cat` would (round 14). It is judged by the PATH JUDGE, on the real path the source resolves to (`containerMountSources`
+  # in the evaluator: `-v`, `--volume`, `--mount type=bind`, a local volume with a device), and not here. A pattern lived here with a
+  # second reading of "which sources are credential stores" - `/:` for the root, `~` and `$HOME` for the home, a list of dot
+  # directories - and its `/:` matched every host path that ENDS IN A SLASH: `-v ./src/:/app/src` was a credential-store read
+  # (wave 5, CT-04), and so was every directory of the home that was not one. The path judge says what the path is: the root and the home
+  # are the credential read they are, `~/.ssh` is a credential store, `/etc` is outside the workspace, `./src/` is the workspace.
   # `nerdctl` is containerd's docker-compatible client: the same flags, the same `--context`, the same effects.
   # It is enrolled in the target RESOLVER and was missing here, so nothing classified it and its target was never
   # resolved — found by the property that pins these two lists together (exit review 7).

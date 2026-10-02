@@ -4,6 +4,7 @@
 import { basename } from 'node:path';
 import { sha256Canonical } from '../util/hash.ts';
 import { overlayPathGlobs } from './overlay-paths.ts';
+import { PRODUCTION_LANDINGS } from './target-kinds.ts';
 import {
   diffLocalTargets,
   mergeLocalTargets,
@@ -127,6 +128,7 @@ export interface CompiledAuthorityTable {
     installsDependencies: string[];
     discoversContent: string[];
     discoversConfig: string[];
+    imageSetup: string[];
   };
 }
 
@@ -403,6 +405,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       installsDependencies: [...cp.boundedCommands.installsDependencies].sort(),
       discoversContent: [...cp.boundedCommands.discoversContent].sort(),
       discoversConfig: [...cp.boundedCommands.discoversConfig].sort(),
+      imageSetup: [...cp.boundedCommands.imageSetup].sort(),
     },
     localTargets: {
       // the kernel's default with the layers' additions merged in: a layer can add a local target and a production
@@ -434,15 +437,19 @@ export function deriveMatcherViews(
         effective[m.capability] === 'DENY',
     )
     .map((m) => ({ path: m.path!, tool: m.tool, capability: m.capability }));
+  // ...plus the production capabilities the TARGET MODEL lands on (target-kinds.ts). `production.k8s.mutate` and
+  // `production.helm.mutate` were pre-denied by two patterns that read the production names a second time; the target model
+  // is their only reader now, and a protection that moved is not one that was removed
   const preDeniedCommandClasses = [
-    ...new Set(
-      matchers
+    ...new Set([
+      ...matchers
         .filter(
           (m) =>
             m.command && capabilities[m.capability]?.lock !== 'none' && effective[m.capability] === 'DENY',
         )
         .map((m) => m.capability),
-    ),
+      ...PRODUCTION_LANDINGS.filter((id) => capabilities[id] !== undefined && capabilities[id]!.lock !== 'none' && effective[id] === 'DENY'),
+    ]),
   ].sort();
   const readOnlyCommandPatterns = matchers
     .filter((m) => m.command && m.capability === 'command.read-only')

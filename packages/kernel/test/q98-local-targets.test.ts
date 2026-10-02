@@ -243,7 +243,7 @@ test('a layer cannot remove a production marker, and the markers it adds only na
   // narrowing is not a widening: no human is needed, a hook applies it
   const cache = asHook(dir);
   assert.equal(cache.pendingWidening, undefined);
-  assert.deepEqual(cache.table.localTargets.productionMarkers, ['live', 'prd', 'prod', 'production', 'uat']);
+  assert.deepEqual(cache.table.localTargets.productionMarkers, ['live', 'prd', 'preprod', 'prod', 'production', 'uat']);
   assert.equal(cap(cache, dir, 'kubectl --context kind-uat apply -f a.yaml'), 'production.k8s.mutate');
   assert.equal(cap(cache, dir, 'kubectl --context kind-dev apply -f a.yaml'), 'k8s.local.apply');
   // an empty list, or a file that lists nothing, removes nothing - the kernel's markers are not the layer's to take away

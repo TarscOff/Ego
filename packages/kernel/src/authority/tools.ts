@@ -411,7 +411,8 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
 };
 
 /** compilers and linkers read by the `cc` table */
-export const CC_HEADS = /^(gcc|g\+\+|cc|c\+\+|clang|clang\+\+|icc|icx|tcc|cpp|ld|ld\.lld|ld\.gold|lld|gfortran|nvcc|armcc|[a-z0-9_-]+-(?:linux-)?(?:gnu-)?(?:gcc|g\+\+|clang))$/;
+// (a compiler whose name carries its version - `gcc-13`, `clang-17`, `g++-12.2` - is the same compiler, and was read as no compiler at all)
+export const CC_HEADS = /^(gcc|g\+\+|cc|c\+\+|clang|clang\+\+|icc|icx|tcc|cpp|ld|ld\.lld|ld\.gold|lld|gfortran|nvcc|armcc|[a-z0-9_-]+-(?:linux-)?(?:gnu-)?(?:gcc|g\+\+|clang))(?:-\d+(?:\.\d+)*)?$/;
 
 /** The table a command is read by: the program, or the program and its subcommand (`git archive`). */
 export function toolTableFor(head: string, argv: readonly string[]): { key: string; table: ToolTable; from: number } | null {

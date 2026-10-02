@@ -8,6 +8,10 @@ import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.
 import { argvToCommandLine } from '../util/shell-quote.ts';
 import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
+import { HELM_PRODUCTION, TARGET_KINDS, productionCapabilityFor } from './target-kinds.ts';
+import { copyOutDestinations } from './copy-writes.ts';
+import { canonicalHost } from './hosts.ts';
+import { programOperand } from './program-operands.ts';
 import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
 import { SHELL_GRAMMAR, expandLongOptions, gitConfigAsks, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
 import {
@@ -45,7 +49,9 @@ import {
   KUBECTL_VERBS,
   k8sEffect,
   k8sGlobalOptions,
+  K8S_SELECTING_ENV_NAMES,
   k8sHasVerb,
+  k8sObjectNames,
   k8sOptionMayTakeValue,
   k8sOptionTakesValue,
   type K8sEffect,
@@ -75,6 +81,7 @@ import { GIT_VERB_OPTIONS } from './git-verb-options.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 import {
+  CONTAINER_ENGINE_ENV,
   canonicalCommand,
   carriedHostCommand,
   carriesArgv,
@@ -85,6 +92,7 @@ import {
   isEngineRead,
   bindsEngine,
   readContainerCommand,
+  type EngineSignal,
 } from './containers.ts';
 import {
   containerLocalPatterns,
@@ -148,6 +156,12 @@ export interface CapabilityHit {
   effectOf?: string;
   /** opacity that means "something WILL run that could not be read", as opposed to "the target does not exist" */
   opaqueUnread?: boolean;
+  /** the hit is a JUDGEMENT OF A PATH (a file or a directory the command names), not of a command. Inside a container image the path
+   *  is the image's, so the body of a Dockerfile does not answer for it on the host (see `confinedToImage`) */
+  onPath?: boolean;
+  /** the hit is the FALLBACK for a command no matcher of the table classifies: nothing says what this program is. Inside a container
+   *  image it is the image's program (see `confinedToImage`) */
+  unmatched?: boolean;
   /** WHERE a Kubernetes, database or container operation lands, as the target resolver classified it. The hit carried
    *  this only inside its `via` sentence, which is for a person; the approval presentation reads it from here */
   target?: { cls: TargetClass; name: string };
@@ -213,6 +227,9 @@ function envInjects(name: string, assignment: string): boolean {
       .filter(Boolean)
       .every((o) => NODE_OPTIONS_INERT.test(o));
   }
+  // cgo's on/off switch is a digit, not a program: `CGO_ENABLED=0 go build` is the standard static build, and the family it belongs to
+  // (CGO_CFLAGS, CGO_LDFLAGS, ...) carries flags that can name a linker or a plugin, and stays governed
+  if (name === 'CGO_ENABLED') return !/^[01]$/.test(value0.trim());
   // A PAGER OR AN EDITOR IS A PROGRAM, and the value names it: `GIT_PAGER=cat git log` is the idiom that turns the pager
   // OFF, and `GIT_EDITOR=true git rebase --continue` the one that accepts the message as it is. What is accepted is the
   // short list of values known to run nothing else - `cat`, `true`, `false`, `:`, and `less`/`more` with plain flags - and
@@ -321,8 +338,9 @@ const DATA_WORD = `${MARK}data`;
 /** Mangle EGO's own marker sentinel out of text that came from OUTSIDE the analyzer. Every hand-over of external
  *  bytes goes through here; the replacement keeps the length and the word shape, so what the reader sees is a
  *  plain unknown command rather than a marker. */
+const MANGLED_MARK = '\uFFFDego\uFFFD';
 export function externalText(text: string): string {
-  return text.includes(MARK) ? text.split(MARK).join('\uFFFDego\uFFFD') : text;
+  return text.includes(MARK) ? text.split(MARK).join(MANGLED_MARK) : text;
 }
 
 /** identity of each subshell the splitter opens, unique across nested calls */
@@ -4428,6 +4446,15 @@ function classifyResolved(
   tool: 'Read' | 'Write' | 'Edit',
   abs: string,
 ): CapabilityHit {
+  return { ...classifyResolvedPath(table, ctx, tool, abs), onPath: true };
+}
+
+function classifyResolvedPath(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  tool: 'Read' | 'Write' | 'Edit',
+  abs: string,
+): CapabilityHit {
   // a path is tested against every path rule of the table (a few hundred globs): that is the work, and it is paid first
   chargeWork(PATH_JUDGE_COST + abs.length);
   if (tool !== 'Read' && ctx.egoHome && 'ego.trust.tamper' in table.capabilities) {
@@ -4571,7 +4598,7 @@ function judgeCandidates(
   c: PathCandidates,
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = c.paths.length > 0 ? [worstHit(c.paths.map((p) => classifyResolved(table, ctx, kind, p)))] : [];
-  if (c.uncertain !== null) hits.push(unknownHit(table, ctx, c.uncertain));
+  if (c.uncertain !== null) hits.push({ ...unknownHit(table, ctx, c.uncertain), onPath: true });
   return hits;
 }
 
@@ -5302,6 +5329,8 @@ function childEnvironment(
     // a producer's body inherits the process inputs of the invocation that produced it; tree freshness is read
     // from the SHARED ledger, so it crosses the producer boundary in both directions
     envInputs: over.envInputs ?? parent.envInputs,
+    // a body run from inside an image runs in that image, however many producers deep
+    ...(over.containerPaths ?? parent.containerPaths ? { containerPaths: true } : {}),
     get treeFresh(): boolean {
       return !parent.written.has(TREE_DIRTY);
     },
@@ -8327,7 +8356,10 @@ function resolveScriptCommand(
         if (t === '--no-ignore-scripts' || t === '--ignore-scripts=false') return false;
         return acc;
       }, false);
-      if (!ignore)
+      // ...EXCEPT IN AN IMAGE: `RUN npm ci` runs the dependency tree's scripts in the build, not on this machine (wave 5, CT-02). The
+      // project's own lifecycle scripts are still resolved and handed over below
+      const inImage = env.containerPaths === true;
+      if (!ignore && !inImage)
         return {
           kind: 'npm-script',
           key: `npm:${pkgPath ? dirname(pkgPath) : cwd}:install`,
@@ -8342,7 +8374,7 @@ function resolveScriptCommand(
           kind: 'npm-script',
           key: `npm:install:none`,
           body: null,
-          reason: 'no lifecycle script and --ignore-scripts',
+          reason: inImage && !ignore ? 'no lifecycle script of the project, and the dependency scripts run in the image' : 'no lifecycle script and --ignore-scripts',
           resolution: 'ABSENT_VERIFIED',
         };
       return {
@@ -9306,6 +9338,17 @@ function resolveScriptCommand(
   ).reduce<[string, string | null]>((a, b) => ((b[1]?.length ?? -1) > (a[1]?.length ?? -1) ? b : a), ['none', null]);
   // ACQUIRES third-party code and runs it: the same surface as an npm install lifecycle script, which is already
   // a human gate. Leaving `pip install` and `poetry install` at ALLOW was an inconsistency, not a decision.
+  // ...INSIDE AN IMAGE, A DEPENDENCY INSTALL IS WHAT AN IMAGE IS FOR: `RUN npm ci`, `RUN pip install -r requirements.txt` and `RUN
+  // apt-get install -y curl` run the packages' scripts in the build, with the build's reach and not this machine's (wave 5, CT-02).
+  // The line still goes through every rule for what it does BEYOND the image: a registry that is not the default, a fetch piped into a shell
+  if (winner[0] === 'installs' && env.containerPaths === true)
+    return {
+      kind: 'none',
+      key: `installs-in-image:${winner[1]}`,
+      body: null,
+      reason: `${bare} installs into the image being built`,
+      resolution: 'NOT_A_PRODUCER',
+    };
   if (winner[0] === 'installs')
     return {
       kind: 'none',
@@ -9433,27 +9476,7 @@ function opaqueHit(
 // ---------------------------------------------------------------------------------------------------------------
 
 /** Environment variables that choose which database or cluster a client talks to. */
-/** Options that hand an arbitrary program to an otherwise well-behaved command. The list is a real family, not a
- *  spelling chase: every entry is "this option's value is executed". */
-const PROGRAM_OPERAND_LONG =
-  '--use-compress-program|--checkpoint-action|--to-command|--rsh-command|--rsh|--exec|--ok-dir|-TT|--unzip-command|--filter=.*command|--pre|--hostname-bin|--upload-pack|--receive-pack|--editor|--pager|--ssh-command|--proxy-command' +
-  // The COMPILER family. Adding compilers and coreutils to the bounded vocabulary without extending this rule
-  // reopened the very class the rule exists for: `clang -B dir` and `gcc -wrapper prog` run prog instead of the
-  // real tool, `-fplugin=` and `-specs=` load code into the compiler, `go build -toolexec` wraps every tool
-  // invocation, `javac -processor` runs an annotation processor, and `sort --compress-program` runs a program
-  // under a capability literally named command.read-only (decision challenge, findings 5, 25, 26, 30).
-  '|--post-renderer|--exec-path|--compress-program|--wrapper|-wrapper|-fplugin|-fplugin-arg-[\\w-]+|-specs|--specs|-toolexec|-ldflags|-gccgo|-B|-processor|-processorpath|-Xplugin|--plugin|-load|-Xclang|-fpass-plugin|--preprocessor|-no-integrated-cpp' +
-  // rsync's `-e ssh` names a remote SHELL. The lookahead matched those letters ANYWHERE in the value, so a
-  // database statement beginning `show …` contained `sh` and `mysql -e 'show tables'` — a read of the local
-  // socket — was classified as naming an unbounded program (exit review 7). The value must BE the program.
-  // ...and an ASSIGNMENT is not a program name: `docker run -e SHELL=/bin/sh myapp` sets a variable inside the
-  // container and was read as naming a remote shell (exit review 7)
-  '|-e(?=\\s+(?![A-Za-z_][A-Za-z0-9_]*=)(?:\\S*/)?(ssh|sh|bash|zsh|dash|python3?|perl|ruby|node)(\\s|$))';
-const PROGRAM_OPERAND_LONG_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG})(=|\\s)`);
-/** the short forms whose value is GLUED to the letter: `gcc -B/tmp/evil`, `clang -Xclangfoo`, `-loadplugin` */
-const PROGRAM_OPERAND_GLUED_RE = /\s(-B|-Xclang|-Xplugin|-load|-fplugin|-specs|-wrapper|-agentlib|-agentpath|-javaagent)[:=]?\S/;
-/** the archive tools where a short `-I` names a compression PROGRAM (for make it is an include directory) */
-const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
+// (WHICH OPTION OF WHICH TOOL HANDS IT A PROGRAM is program-operands.ts: one option, one tool - `-B` is a program to gcc and a number of lines to grep)
 /** A RESPONSE FILE IS A COMMAND LINE. `clang @opts.rsp`, `gcc @flags`, `javac @args`, `swiftc @f`, `link @f` and
  *  `dotnet @f` all read that file and splice its contents into argv — so `-fplugin=/tmp/evil.so` sitting in it
  *  loads a compiler plugin, and every option rule above was reading a command line the tool will never see
@@ -9463,7 +9486,6 @@ const PROGRAM_OPERAND_TOOL_RE = /^(tar|bsdtar|gtar|pax)\b/;
  *  read, the opacity is what it is. */
 const RESPONSE_FILE_TOOLS =
   /^(clang|clang\+\+|gcc|g\+\+|cc|c\+\+|ld|lld|javac|java|kotlinc|scalac|swiftc|swift|link|lib|cl|csc|vbc|dotnet|rustc|nvcc|icc|icx|tsc|ar|nm|objcopy|strip)$/;
-const PROGRAM_OPERAND_RE = new RegExp(`\\s(${PROGRAM_OPERAND_LONG}|-I)(=|\\s)`);
 
 const DB_CLIENT_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'sqlite3', 'redis-cli', 'clickhouse-client', 'cqlsh',
@@ -9566,7 +9588,14 @@ const TARGET_ENV_RE =
   // RESOLVER but not here, so the assignment was stripped as noise and never re-attached: the engine survived
   // only while the assignment happened to stay leading in the raw segment. Inside an `if`, a loop body, a `trap`
   // or a herestring it did not, and a shell on a production daemon asked (exit review 6, generated cross-product).
-  /^(PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|KUBECONFIG|KUBERNETES_MASTER|KUBERNETES_SERVICE_HOST|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|HELM_NAMESPACE|CLICKHOUSE_HOST|DOCKER_HOST|DOCKER_CONTEXT|CONTAINER_HOST|BUILDX_BUILDER|LIQUIBASE_COMMAND_URL|LIQUIBASE_URL|DBMATE_DATABASE_URL|PRISMA_DATABASE_URL|TYPEORM_URL|SEQUELIZE_URL|POSTGRES_URL|POSTGRES_HOST|MONGODB_HOST)$/;
+  new RegExp(
+    '^(' +
+      'PGHOST|PGHOSTADDR|PGSERVICE|PGDATABASE|PGPORT|PGURI|MYSQL_HOST|MYSQL_TCP_PORT|REDIS_HOST|REDIS_URL|MONGODB_URI|MONGO_URL|DATABASE_URL|FLYWAY_URL|CLICKHOUSE_HOST|LIQUIBASE_COMMAND_URL|LIQUIBASE_URL|DBMATE_DATABASE_URL|PRISMA_DATABASE_URL|TYPEORM_URL|SEQUELIZE_URL|POSTGRES_URL|POSTGRES_HOST|MONGODB_HOST|' +
+      // the variables that select a container engine are THE CONTAINER READER'S table (containers.ts), and the ones that select a cluster the
+      // CLUSTER READER'S (k8s.ts): not lists of this file's, so the normalizer and the resolver cannot know different ones
+      [...CONTAINER_ENGINE_ENV.keys(), ...K8S_SELECTING_ENV_NAMES].join('|') +
+      ')$',
+  );
 const TARGET_ENV_HEADS = new Set([
   'psql', 'mysql', 'mariadb', 'mongosh', 'mongo', 'redis-cli', 'clickhouse-client', 'cqlsh', 'sqlite3',
   'kubectl', 'oc', 'helm', 'kustomize', 'flyway', 'liquibase', 'alembic', 'dbmate', 'prisma', 'knex', 'sequelize',
@@ -9889,36 +9918,7 @@ const TARGET_SENSITIVE: Record<string, 'k8s' | 'db' | 'container' | 'cloud'> = {
   'production.secrets.mutate': 'cloud',
 };
 
-/**
- * WHAT EACH KIND OF TARGET RESOLVES TO. For a Kubernetes tool, a database client or a container engine the resolver
- * answers one of four classes (LOCAL, PRODUCTION, EXTERNAL, UNCLASSIFIED); this table says which capability each
- * non-local class lands on, and which list of `local-targets.md` declares a local one. It is read twice and by nothing
- * else: `retargetLocalCapability` picks the capability from it, and `targetRuleFor` prints the rule from it — so the
- * rule `ego explain capability` shows a person is the rule the evaluator applies, not a description that can drift.
- */
-const TARGET_KINDS = {
-  k8s: {
-    noun: 'kube context or namespace',
-    declaredIn: ['k8s_local_contexts'],
-    production: 'production.k8s.mutate',
-    external: 'k8s.nonlocal.mutate',
-    unclassified: 'k8s.target.unclassified',
-  },
-  db: {
-    noun: 'database host',
-    declaredIn: ['db_local_hosts'],
-    production: 'production.database.mutate',
-    external: 'db.nonlocal.mutate',
-    unclassified: 'db.target.unclassified',
-  },
-  container: {
-    noun: 'container engine context or host',
-    declaredIn: ['k8s_local_contexts', 'db_local_hosts'],
-    production: 'production.deploy',
-    external: 'container.nonlocal.run',
-    unclassified: 'container.target.unclassified',
-  },
-} as const;
+// (WHAT EACH KIND OF TARGET RESOLVES TO is `TARGET_KINDS`, in target-kinds.ts: the compiler reads it too)
 /** the one place the cloud CLIs de-escalate: a provider endpoint that is a declared local host (an emulator) */
 const CLOUD_LOCAL_CAPABILITY = 'cloud.local.mutate';
 
@@ -9931,6 +9931,7 @@ export function targetDependentCapabilities(table: CompiledAuthorityTable): stri
     ids.add(k.external);
     ids.add(k.unclassified);
   }
+  ids.add(HELM_PRODUCTION);
   return [...ids].filter((id) => id in table.capabilities).sort();
 }
 
@@ -9945,7 +9946,7 @@ export function targetGroups(
       .filter(([, k]) => k === kind)
       .map(([id]) => id);
   for (const [kind, k] of Object.entries(TARGET_KINDS)) {
-    const ids = [...resolved(kind), k.production, k.external, k.unclassified].filter((id) => id in table.capabilities);
+    const ids = [...resolved(kind), k.production, ...(kind === 'k8s' ? [HELM_PRODUCTION] : []), k.external, k.unclassified].filter((id) => id in table.capabilities);
     const rule = ids.map((id) => (resolved(kind).includes(id) ? targetRuleFor(table, id) : undefined)).find(Boolean);
     if (rule) groups.push({ kind, capabilities: ids.sort(), rule });
   }
@@ -9976,7 +9977,7 @@ export function targetRuleFor(table: CompiledAuthorityTable, capability: string)
     const lists = k.declaredIn.join(' or ');
     if (kindOf === kind)
       return `judged by where it points, not by the tool (${kind}): a ${k.noun} declared in ${declared} (${lists}) keeps this capability; a production marker (${markers}) in the target is ${label(k.production)}; a named target that is not declared is ${label(k.external)}; a target that cannot be resolved (ambient context, a variable) is ${label(k.unclassified)}`;
-    if (capability === k.production)
+    if (capability === k.production || (kind === 'k8s' && capability === HELM_PRODUCTION))
       return `the result of target classification (${kind}): a production marker (${markers}) in the ${k.noun}, wherever the tool is run from`;
     if (capability === k.external)
       return `the result of target classification (${kind}): the ${k.noun} is named but is not declared local in ${declared} (${lists}), so it is EXTERNAL`;
@@ -10015,6 +10016,9 @@ const TARGET_SENSITIVE_HEAD: Array<[RegExp, 'k8s' | 'db' | 'container']> = [
 
 /** The host an endpoint names, with scheme, credentials, port, IPv6 brackets and path removed. */
 function endpointHost(v: string): string {
+  return canonicalHost(authorityHost(v));
+}
+function authorityHost(v: string): string {
   // THE AUTHORITY ENDS AT THE FIRST `/`, `?` OR `#`. Cutting only at `/` left a FRAGMENT in the string, and a
   // fragment may contain an `@`: `https://s3.amazonaws.com#@localhost:4566` then read as the host `localhost`,
   // which defeated the whole-host comparison the container resolver and the cloud de-escalation both rest on —
@@ -10025,7 +10029,8 @@ function endpointHost(v: string): string {
   if (cut >= 0) h = h.slice(0, cut);
   const at = h.lastIndexOf('@');
   if (at >= 0) h = h.slice(at + 1);
-  const bracketed = /^\[([^\]]*)\]/.exec(h);
+  // (a bracket is closed by the end of the authority or by a port: `[::1]evil:6443` is no URL, and its host is not the loopback)
+  const bracketed = /^\[([^\]]*)\](?::\d*)?$/.exec(h);
   if (bracketed) return bracketed[1]!;
   const colon = h.lastIndexOf(':');
   return colon >= 0 && /^\d+$/.test(h.slice(colon + 1)) ? h.slice(0, colon) : h;
@@ -10102,6 +10107,14 @@ function classifyTargetName(
 // (`default`, `unix`, ...) are local for the container tools and not for Kubernetes (exit review 7).
 const k8sContexts = kubeLocalPatterns;
 
+/** An engine endpoint that is a socket on THIS machine: a unix socket, a named pipe, an inherited descriptor - and, for the variables
+ *  that name an address, a path (containerd's address is a socket file). */
+const localEndpoint = (v: string, kind: string): boolean => /^(unix:|npipe:|fd:)/i.test(v) || (kind === 'engine' && v.startsWith('/'));
+
+/** The part of a local endpoint that NAMES it: the socket, without its scheme and without the home directory it happens to sit in
+ *  (`/Users/live/.docker/run/docker.sock` is a person's, not an environment's). */
+const socketName = (v: string): string => v.replace(/^(unix|npipe|fd):(\/\/)?/i, '').replace(/^\/(Users|home)\/[^/]+\//, '/');
+
 /**
  * Which ENGINE a container command talks to. Only an EXPLICIT selection is classified: `-H`/`--host`,
  * `-c`/`--context`, podman `--url`/`--connection`, and `docker context use <name>`, which changes the engine every
@@ -10126,33 +10139,44 @@ function resolveContainerTarget(
     // THE HOST IS COMPARED WHOLE. A substring test made every endpoint that merely CONTAINS a local name local:
     // `tcp://[fd00:acme:prod::1]:2375` contains `::1` and `tcp://prod-localhost.acme.com:2375` contains
     // `localhost`, so a production engine was read as the local daemon (exit review 4).
-    if (/^(unix:|npipe:|fd:)/i.test(v) || targets.dbLocalHosts.some((h) => endpointHost(v) === h || v === h))
+    // ...BUT THE NAME STILL WINS OVER THE SCHEME. A socket on this machine is the local daemon, and also the usual way to reach a
+    // remote one (a socket forwarded to the production host's daemon), so `unix:///tmp/prod.sock` is the production engine its name
+    // says (wave 5, CT-06) - the same rule a context and a host already had. A home directory is the person's, not an environment's.
+    if (localEndpoint(v, kind))
+      signals.push({
+        cls: hasProductionMarker(socketName(v), targets.productionMarkers) ? 'PRODUCTION' : 'LOCAL',
+        target: `${kind} ${v}`,
+      });
+    else if (targets.dbLocalHosts.some((h) => endpointHost(v) === h || v === h))
       // (endpointHost cuts the authority at the first `/`, `?` or `#`, so a fragment cannot fake the host)
       signals.push({ cls: 'LOCAL', target: `${kind} ${v}` });
     else if (isOpaqueTarget(v)) signals.push({ cls: 'UNCLASSIFIED', target: `${kind} ${v}` });
     else signals.push({ cls: classifyTargetName(v, containerLocalPatterns(targets), targets), target: `${kind} ${v}` });
   };
   const cc = readContainerCommand(tokens);
-  for (const e of cc?.engines ?? []) {
+  const engine = (e: EngineSignal): void => {
     // THE CLIENT CONFIG DIRECTORY SELECTS THE ENGINE. `docker --config DIR` reads DIR/config.json for the current
     // context, and `podman --remote` switches to a connection named in a file: both were skipped as opaque option
     // noise, so a production daemon reached ALLOW (exit review 6). Neither file can be read from here, so the
     // target is UNCLASSIFIED — never local.
     if (e.kind === 'client configuration') signals.push({ cls: 'UNCLASSIFIED', target: `client configuration ${e.flag}` });
     else if (e.value !== null) add(e.value, e.kind);
-  }
+  };
+  for (const e of cc?.engines ?? []) engine(e);
   // the engine is selected by ENVIRONMENT too — `DOCKER_HOST` and `DOCKER_CONTEXT` are the same two flags by
-  // another name, and docker's own help documents `--context` as overriding `DOCKER_HOST`
-  const engineEnv = (k: string, v: string): void => {
-    if (/^(DOCKER_HOST|CONTAINER_HOST)$/.test(k)) add(v, 'engine');
-    else if (k === 'DOCKER_CONTEXT') add(v, 'context');
-    // `BUILDX_BUILDER` selects the builder exactly as `--builder` does, and buildx ships the build context to it
-    else if (k === 'BUILDX_BUILDER') add(v, 'builder');
+  // another name, and docker's own help documents `--context` as overriding `DOCKER_HOST`. WHICH variables select it is the
+  // container reader's table (CONTAINER_ENGINE_ENV): the ones an earlier command of the line exported...
+  const engineEnv = (name: string, value: string): void => {
+    const kind = CONTAINER_ENGINE_ENV.get(name);
+    // (a variable set to nothing is a variable that is not set: `DOCKER_CONFIG= docker ps` selects nothing)
+    if (kind !== undefined && value !== '') engine({ kind, value: kind === 'client configuration' ? null : value, flag: name });
   };
   for (const [k, v] of Object.entries(envInputs)) engineEnv(k, v);
   // …and as a TOKEN, because that is how the normalizer re-attaches a target assignment it stripped from the
   // head. Reading only `envInputs` meant the re-attachment reached the resolver and was ignored by it, which is
-  // the "accepted but unconsumed" defect one layer down (exit review 6, generated cross-product).
+  // the "accepted but unconsumed" defect one layer down (exit review 6, generated cross-product). EVERY token is read, not only the ones in
+  // front of the program or after its arguments: `docker run -e DOCKER_HOST=tcp://prod... alpine docker ps` hands the container's own docker
+  // the production engine, and the over-reading is the gate on it
   for (const t of tokens) {
     const eq = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
     if (eq) engineEnv(eq[1]!, eq[2]!.replace(/^['"]|['"]$/g, ''));
@@ -10213,8 +10237,7 @@ function k8sInvocation(norm: string, rawSeg: string | undefined): { headWord: K8
 
 /** The variables that select a cluster, with every value they have in scope: the ones the command line sets for this
  *  command, and the ones an earlier command of the same line exported. */
-const K8S_SELECTING_ENV =
-  /^(KUBECONFIG|KUBERNETES_MASTER|KUBERNETES_SERVICE_HOST|KUBE_CONTEXT|HELM_KUBECONTEXT|HELM_KUBEAPISERVER|HELM_NAMESPACE)$/;
+const K8S_SELECTING_ENV = new RegExp(`^(${K8S_SELECTING_ENV_NAMES.join('|')})$`);
 function k8sEnvironment(norm: string, envInputs: Record<string, string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   const put = (name: string, value: string): void => {
@@ -12241,7 +12264,7 @@ function retargetLocalCapability(
   const outcomes = TARGET_KINDS[kind];
   const capability =
     resolved.cls === 'PRODUCTION'
-      ? outcomes.production
+      ? productionCapabilityFor(kind, commandHead(norm))
       : resolved.cls === 'EXTERNAL'
         ? outcomes.external
         : outcomes.unclassified;
@@ -12257,6 +12280,25 @@ function retargetLocalCapability(
     absolute: isAbsoluteCap(table, capability),
     target: { cls: resolved.cls, name: resolved.target },
   });
+}
+
+/** Whether a hit found in the body of a Dockerfile says nothing about the host. `RUN go build -o /app/server .` writes the image, and
+ *  so do `RUN echo x > /etc/apt/sources.list.d/x.list` and `RUN rm -rf /var/lib/apt/lists/*`: what a RUN line does to a PATH is the
+ *  image's (the judgement of a path, `onPath`, and the removal of the paths a deletion names), and so is the update of a package index by
+ *  a program the vocabulary says an image is set up with and no rule classifies (`apt-get update`). What the same line does BEYOND the image - a
+ *  push, a fetch piped into a shell, an upload, a cloud call, a program nobody declared - is a different capability, and stays. (A
+ *  `COPY` from the build context and a `--secret` are the host's, and are judged where the build is, in `hostBody`.) */
+function confinedToImage(table: CompiledAuthorityTable, h: CapabilityHit): boolean {
+  if (h.onPath === true) return true;
+  const head = commandHead(h.segment ?? '');
+  // (a deletion of paths: `rm`, `shred`; a clean of a repository or a `find -delete` is a command on a tree, and is not this)
+  if (h.capability === 'command.destructive') return /^(rm|rmdir|shred|unlink)$/.test(head);
+  // a program the vocabulary says an image is SET UP with, or an install it names, which no rule classifies (`apt-get update`, `useradd`,
+  // `bundle install`): not every unmatched head - a git configuration key that names a program is a form nobody classified ON PURPOSE
+  if (h.unmatched !== true) return false;
+  const v = table.boundedCommands;
+  const line = tokenize(h.segment ?? '').join(' ');
+  return (v.imageSetup ?? []).includes(head) || v.installsDependencies.some((e) => line === e || line.startsWith(`${e} `));
 }
 
 /** What a cluster command does BESIDES reaching a cluster, as hits of their own: it prints the local kubeconfig with its
@@ -12874,6 +12916,9 @@ function classifyNormalized(
       via: 'no matcher',
       segment: norm,
       absolute: false,
+      // (a MARKER no matcher names - a Dockerfile's `# syntax=` frontend, a `SHELL` that is not a shell - is a gate on purpose, not a program)
+      // (the `# syntax=` frontend and the `SHELL` of a Dockerfile reach here as a marker an external hand-over has mangled: the gate is that nobody classified it)
+      ...(norm.startsWith(MARK) || norm.includes(MANGLED_MARK) ? {} : { unmatched: true }),
     },
     ...additive,
   ];
@@ -12981,10 +13026,14 @@ function classifyNormalized(
       isolated,
       undefined,
       concurrent,
-    ).map((h) => ({
-      ...h,
-      effectOf: h.effectOf ?? effect.reason,
-    }));
+    )
+      // WHAT A BODY THAT RUNS IN AN IMAGE DOES TO THE IMAGE IS NOT AN ACT ON THIS MACHINE, wherever in the body it was found: a
+      // redirection, an output flag, an operand, a script the line runs and the script's own lines alike (wave 5, CT-02)
+      .filter((h) => bodyEnvironment.containerPaths !== true || !confinedToImage(table, h))
+      .map((h) => ({
+        ...h,
+        effectOf: h.effectOf ?? effect.reason,
+      }));
   // a script is ONE shell; make recipe lines and npm pre/post are independent shells — unless .ONESHELL hands
   // the whole recipe to one shell, which the producer reports through `oneShell`; `make -j` runs the recipe lines at the
   // same time, which the producer reports through `concurrent`
@@ -13232,7 +13281,13 @@ function classifyShellPaths(
   const statementWords = new Set(
     (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
   );
-  const paths = pathTokens(bare, cwd, old).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw));
+  // THE NAMES OF A CLUSTER COMMAND'S OBJECTS ARE NAMES (k8s.ts, K8-04): `kubectl logs deploy/$APP` is not a directory built at run time
+  const clusterNames = new Set(
+    head === 'kubectl' || head === 'oc'
+      ? k8sObjectNames(head, tokens.slice(1).map((text) => ({ text, quoted: false, expands: /[$`]/.test(text) })))
+      : [],
+  );
+  const paths = pathTokens(bare, cwd, old).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw) && !clusterNames.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
   // approvable question, never a silent yes.
@@ -13259,14 +13314,13 @@ function classifyShellPaths(
   // UNBOUNDED PROGRAM OPERAND -> treat as UNKNOWN/OPAQUE (challenge finding 14).
   // `-I` names a compression PROGRAM for tar/pax but an include DIRECTORY for make and a pattern file for grep,
   // so the short form is scoped to the archive tools; the long spellings are unambiguous everywhere.
-  const program =
-    (PROGRAM_OPERAND_TOOL_RE.test(seg) ? PROGRAM_OPERAND_RE : PROGRAM_OPERAND_LONG_RE).exec(seg) ??
-    PROGRAM_OPERAND_GLUED_RE.exec(seg);
-  if (program)
+  // (read PER TOOL, program-operands.ts: `-B` is gcc's directory of sub-programs and grep's lines of context)
+  const program = programOperand(head, seg, rawWords.map((w) => w.text));
+  if (program !== null)
     hits.push({
       capability: 'command.script-opaque',
       verdict: verdictFor(table, ctx, 'command.script-opaque'),
-      via: `the option ${program[1]} names a program the command class does not bound`,
+      via: `the option ${program} names a program the command class does not bound`,
       segment: seg,
       absolute: false,
       opaqueUnread: true,
@@ -13333,6 +13387,24 @@ function classifyShellPaths(
       extraDests.add(w);
       if (!paths.some((q) => q.raw === w)) paths.push(...pathEntries(cwd, w, old));
     }
+  }
+  // A COPY OUT OF A CONTAINER OR A POD WRITES ITS LOCAL DESTINATION, and the destination is judged as `cp`'s is (copy-writes.ts):
+  // `docker cp app:/x control-plane/permissions/matchers.md` puts bytes a container supplied into the policy (wave 5, CT-08)
+  for (const w of copyOutDestinations(tokens)) {
+    if (!w) continue;
+    if (/[$`]/.test(w)) {
+      hits.push({
+        capability: 'command.unknown',
+        verdict: verdictFor(table, ctx, 'command.unknown'),
+        via: `${head} copies out of a container to a path built at run time`,
+        segment: seg,
+        absolute: false,
+      });
+      continue;
+    }
+    if (discardWord(cwd, w, old)) continue;
+    extraDests.add(w);
+    if (!paths.some((q) => q.raw === w)) paths.push(...pathEntries(cwd, w, old));
   }
   // A database client handed a program file, or carrying an in-band shell escape, executes code the kernel never
   // read: `psql -f x.sql`, `\!`, sqlite3 `.shell`/`.system`, mysql `SYSTEM`, `COPY … TO PROGRAM` (challenge
@@ -13582,14 +13654,12 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         continue;
       }
       const spliced = `${head} ${text.split(/\r?\n/).join(' ')}`;
-      const prog =
-        (PROGRAM_OPERAND_TOOL_RE.test(spliced) ? PROGRAM_OPERAND_RE : PROGRAM_OPERAND_LONG_RE).exec(spliced) ??
-        PROGRAM_OPERAND_GLUED_RE.exec(spliced);
-      if (prog)
+      const prog = programOperand(head, spliced, tokenize(spliced));
+      if (prog !== null)
         hits.push({
           capability: 'command.script-opaque',
           verdict: verdictFor(table, ctx, 'command.script-opaque'),
-          via: `the response file ${rf} supplies ${prog[1] ?? prog[0]}, which names a program the command class does not bound`,
+          via: `the response file ${rf} supplies ${prog}, which names a program the command class does not bound`,
           segment: seg,
           absolute: false,
           opaqueUnread: true,
@@ -13645,8 +13715,10 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         // a bind mount is read-write by default: judge it as BOTH, and keep whichever is more restrictive
         for (const tool of ['Write', 'Read'] as const) {
           const h = classifyPath(table, ctx, tool, entry.lex ?? entry.abs);
+          // (the source of a bind mount is a path of the ENGINE's host, whatever runs the command: in a RUN line it is not the image's
+          // path, and is not confined to it)
           if (h.verdict !== 'ALLOW')
-            hits.push({ ...h, via: `bind mount source ${src} (${h.via})`, segment: seg });
+            hits.push({ ...h, onPath: false, via: `bind mount source ${src} (${h.via})`, segment: seg });
         }
         const posix = entry.abs.split(sep).join('/');
         const homePosix = canonicalPath(homedir()).split(sep).join('/');
