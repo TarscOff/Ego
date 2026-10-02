@@ -276,12 +276,11 @@ bounded:
   - 'ego'
   - 'harness'
   - 'psql'
-  # the PostgreSQL clients that create and drop databases and roles: they connect and send one statement, as psql does (AUTH-7: `dropdb app`
-  # was a db.local.drop that carried a second ASK for an "unmodelled closure", so the phrase "drop the local database" lifted `psql` and not `dropdb`)
+  # the PostgreSQL client that drops a database: it connects and sends one statement, as psql does (AUTH-7: `dropdb app` was a db.local.drop that
+  # carried a second ASK for an "unmodelled closure", so the phrase "drop the local database" lifted `psql` and not `dropdb`). Only the one the
+  # grant row is for: `createdb`, `createuser` and `dropuser` are claimed by the database-client matcher too, and bounding them would turn the
+  # closure ASK that is their only gate into the ALLOW a statement against a local database is - a decision for the database task, not this one
   - 'dropdb'
-  - 'createdb'
-  - 'dropuser'
-  - 'createuser'
   - 'mysql'
   - 'mysqldump'
   - 'pg_dump'
