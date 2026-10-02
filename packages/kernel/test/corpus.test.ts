@@ -84,8 +84,8 @@ test('ordinary development is gated in exactly the places that are accounted for
   // + the 8 that the wildcard, redirection, directory-stack and statement-option readers must leave alone (closure-db-paths.test.ts)
   // + the 19 looks that are not acts (`proportionality`, closure-proportionality.test.ts)
   // + the 23 statements the git and environment readers must leave alone (closure-git-env.test.ts)
-  // + the 5 everyday cluster commands the one reader of a production name must leave alone (closure-clusters2.test.ts)
-  assert.equal(total, 258, 'the ordinary corpus changed size; update the count deliberately');
+  // + the 26 cluster, container and option commands the readers of wave 5 must leave alone (closure-clusters2.test.ts)
+  assert.equal(total, 279, 'the ordinary corpus changed size; update the count deliberately');
   assert.deepEqual(unexpected, [], `ordinary development gated without a reason:\n  ${unexpected.join('\n  ')}`);
   assert.deepEqual(stale, [], `EXPECTED_GATES is out of date:\n  ${stale.join('\n  ')}`);
 });

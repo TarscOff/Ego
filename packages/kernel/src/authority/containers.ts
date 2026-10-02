@@ -201,10 +201,17 @@ export const CONTAINER_PROGRAMS: ReadonlySet<string> = new Set(Object.keys(PROGR
 
 /** the options a management group puts between its name and its verb: buildx's `--builder` and `-D`, compose's
  *  project options */
+// (a docker CLI PLUGIN is given the words after its name, and the engine options among them are the same selection as the ones in front of
+// it: `docker scout --context production quickview` reaches the production engine, and an option stood there whose arity nobody knows
+// leaves the verb unplaced)
+const PLUGIN_GROUP_OPTIONS = grammar('--context -c -H --host --config --builder', '-D --debug -h --help');
 const GROUP_OPTIONS: Readonly<Record<string, Grammar>> = {
   buildx: grammar('--builder', '-D --debug -h --help'),
   builder: grammar('--builder', '-D --debug -h --help'),
   compose: COMPOSE_ROOT,
+  scout: PLUGIN_GROUP_OPTIONS,
+  model: PLUGIN_GROUP_OPTIONS,
+  desktop: PLUGIN_GROUP_OPTIONS,
 };
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -247,22 +254,29 @@ function leaves(src: string): ReadonlyMap<string, Leaf> {
 const BUILDX_LEAVES = 'bake:B f=bake build:b b=build create:n du:r imagetools inspect ls:r prune:d rm:d remove=rm stop use:n version:r';
 
 /** the verbs docker accepts without a group; most are the group's verb under its short name */
+//
+// WHAT A VERB PRINTS DECIDES WHETHER IT IS A LOOK (wave 5, CT-03). `r` is a read that stays harmless against a non-local engine
+// because it prints NAMES AND NUMBERS: `ps`, `images`, `port`, `stats`, `events`, `diff`, `info`, `version`. `inspect` and `logs` print
+// the environment, the mounts and whatever the container logged, and were left out of it for that reason - and `save` (every layer
+// of an image), `history` (every build command, so every ARG and ENV a Dockerfile put a secret in) and `top` (every process's
+// command line) print the same kind of thing and were in it. They are out of it now. `logout` removes a stored login: at most a
+// question, never the absolute refusal that `login`, which WRITES a credential, is.
 const DOCKER_TOP = leaves(
-  'attach:hx build:b commit cp:h create:c diff:r events:r exec:cx export history:r images:r import info:r inspect kill load ' +
-    'login:k logout:k logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save:r search:r start:h stats:r stop tag ' +
-    'top:r unpause update version:r wait help:r bake:B',
+  'attach:hx build:b commit cp:h create:c diff:r events:r exec:cx export history images:r import info:r inspect kill load ' +
+    'login:k logout:d logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save search:r start:h stats:r stop tag ' +
+    'top unpause update version:r wait help:r bake:B init',
 );
 const PODMAN_TOP = leaves(
-  'attach:hx build:b commit cp:h create:c diff:r events:r exec:cx export history:r images:r import info:r inspect kill load ' +
-    'login:k logout:k logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save:r search:r start:h stats:r stop tag ' +
-    'top:r unpause update version:r wait help:r untag completion checkpoint restore init',
+  'attach:hx build:b commit cp:h create:c diff:r events:r exec:cx export history images:r import info:r inspect kill load ' +
+    'login:k logout:d logs pause port:r ps:r pull push:p rename restart rm:d rmi:d run:c save search:r start:h stats:r stop tag ' +
+    'top unpause update version:r wait help:r untag completion checkpoint restore init',
 );
 const GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   container: leaves(
     'attach:hx commit cp:h create:c diff:r exec:cx export inspect kill logs ls:r list=ls ps=ls pause port:r prune:d rename ' +
-      'restart rm:d remove=rm run:c start:h stats:r stop top:r unpause update wait',
+      'restart rm:d remove=rm run:c start:h stats:r stop top unpause update wait',
   ),
-  image: leaves('build:b history:r import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save:r tag'),
+  image: leaves('build:b history import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save tag'),
   volume: leaves('create inspect ls:r list=ls prune:d rm:d remove=rm update'),
   network: leaves('connect create disconnect inspect ls:r list=ls prune:d rm:d remove=rm'),
   system: leaves('df:r dial-stdio events:r info:r prune:d'),
@@ -282,20 +296,31 @@ const GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   builder: leaves(BUILDX_LEAVES),
   compose: leaves(
     'attach:h build:b commit config:r convert=config cp:h create:cm down:D events:r exec:cx export images:r kill logs ls:r list=ls ' +
-      'pause port:r ps:r publish:p pull push:p restart rm:d run:cm scale start stats:r stop top:r unpause up:m version:r volumes:r ' +
+      'pause port:r ps:r publish:p pull push:p restart rm:d run:cm scale start stats:r stop top unpause up:m version:r volumes:r ' +
       'wait watch:b',
   ),
 };
+// THE DOCKER CLI PLUGINS (Docker 29) THAT ONLY LOOK. `docker scout`, `model` and `desktop` are verbs of the product as much as
+// `compose` is, and a verb nobody modelled asked, so `docker scout quickview` and `docker desktop status` - the first things anyone
+// runs - were questions (wave 5, CT-05). What is here is the part of each that reads; every other verb of the plugin (`scout enroll`,
+// `model run`, `desktop stop`) is still a verb nobody decided about, and asks. `debug`, `pass`, `ai` and `extension` are not here at all.
+const DOCKER_PLUGIN_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
+  scout: leaves('quickview:r cves:r recommendations:r compare:r sbom:r version:r help:r'),
+  model: leaves('ls:r list=ls status:r inspect df:r version:r help:r'),
+  desktop: leaves('status:r version:r logs help:r'),
+};
 const BUILDX_IMAGETOOLS = leaves('create:p inspect:r');
+
+const DOCKER_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = { ...GROUPS, ...DOCKER_PLUGIN_GROUPS };
 
 // podman and nerdctl add groups of their own
 const PODMAN_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   ...GROUPS,
   container: leaves(
     'attach:hx commit cp:h create:c diff:r exec:cx export inspect kill logs ls:r list=ls ps=ls pause port:r prune:d rename ' +
-      'restart rm:d remove=rm run:c start:h stats:r stop top:r unpause update wait exists init checkpoint restore cleanup clone',
+      'restart rm:d remove=rm run:c start:h stats:r stop top unpause update wait exists init checkpoint restore cleanup clone',
   ),
-  image: leaves('build:b diff:r exists history:r import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save:r tag untag'),
+  image: leaves('build:b diff:r exists history import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save tag untag'),
   healthcheck: leaves('run'),
   pod: leaves('clone create exists inspect kill logs pause prune:d ps:r ls=ps list=ps restart rm:d start stats stop top unpause'),
   machine: leaves('cp info:r init inspect list:r ls=list os reset:d rm:d set ssh:c start stop'),
@@ -308,7 +333,7 @@ const PODMAN_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
 const PODMAN_SYSTEM_CONNECTION = leaves('add:n default:n list:r ls=list remove:d rm=remove rename');
 const NERDCTL_GROUPS: Readonly<Record<string, ReadonlyMap<string, Leaf>>> = {
   ...GROUPS,
-  image: leaves('build:b convert decrypt encrypt history:r import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save:r tag'),
+  image: leaves('build:b convert decrypt encrypt history import inspect load ls:r list=ls prune:d pull push:p rm:d remove=rm save tag'),
   namespace: leaves('create inspect ls:r list=ls remove:d rm=remove update'),
 };
 const BUILDAH_TOP = leaves('build:b bud=build build-using-dockerfile=build');
@@ -363,10 +388,61 @@ export interface ContainerCommand {
   rootOptions: ReadOption[];
   /** an option whose arity this grammar does not know stood among the verb's options */
   unknownOption: string | null;
+  /** THE ASSIGNMENTS THAT ARE THIS PROCESS'S ENVIRONMENT: the ones in front of the program (`DOCKER_HOST=tcp://x docker ps`) and the
+   *  ones the normalizer re-attached after its arguments. An assignment anywhere else is not: `docker run -e DOCKER_HOST=tcp://x alpine`
+   *  is the CONTAINER's environment, and reading it as the engine's made every `-e` of that name an engine selection */
+  environment: Array<{ name: string; value: string }>;
 }
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const TRAILING_ENV = /^[A-Z][A-Z0-9_]*=/;
+const assignmentOf = (word: string): Array<{ name: string; value: string }> => {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(word);
+  return m ? [{ name: m[1]!, value: m[2]!.replace(/^(['"])([\s\S]*)\1$/, '$2') }] : [];
+};
+
+/** THE VARIABLES THAT SELECT WHICH ENGINE A CONTAINER TOOL TALKS TO, in ONE table - the same selection as the options of PROGRAMS above,
+ *  by environment. The resolver reads the value of each by its kind, and the normalizer's list of the assignments it must re-attach to
+ *  the segment is DERIVED from it, so a variable cannot be known to one and not to the other (wave 5, CT-01: `CONTAINER_CONNECTION`, the
+ *  podman twin of `DOCKER_CONTEXT`, was in neither, and `export CONTAINER_CONNECTION=production; podman run` was ALLOW).
+ *    engine    - the value is an endpoint: `tcp://`, `ssh://`, `unix://`, `npipe://`, `fd://`, or a socket path
+ *    context   - the value is the name of a context or a connection
+ *    builder   - the value is the name of a buildx builder
+ *    client configuration - the value is a FILE or a DIRECTORY that holds the choice (the current context, the connection table, the
+ *      builder instances, the credentials of a remote engine): it cannot be read from here, so an engine selected through it is not
+ *      known to be the local one, and a verb that changes something asks */
+export const CONTAINER_ENGINE_ENV: ReadonlyMap<string, EngineKind> = new Map<string, EngineKind>([
+  ['DOCKER_HOST', 'engine'],
+  ['CONTAINER_HOST', 'engine'],
+  ['CONTAINERD_ADDRESS', 'engine'],
+  ['DOCKER_CONTEXT', 'context'],
+  ['CONTAINER_CONNECTION', 'context'],
+  ['BUILDX_BUILDER', 'builder'],
+  ['DOCKER_CONFIG', 'client configuration'],
+  ['BUILDX_CONFIG', 'client configuration'],
+  ['CONTAINERS_CONF', 'client configuration'],
+  ['CONTAINERS_CONF_OVERRIDE', 'client configuration'],
+  ['PODMAN_CONNECTIONS_CONF', 'client configuration'],
+  ['NERDCTL_TOML', 'client configuration'],
+  // the credentials of a remote engine: they only matter to one nobody named on the line
+  ['DOCKER_CERT_PATH', 'client configuration'],
+  ['DOCKER_TLS_VERIFY', 'client configuration'],
+  ['DOCKER_TLS', 'client configuration'],
+  ['CONTAINER_SSHKEY', 'client configuration'],
+  ['CONTAINER_PASSPHRASE', 'client configuration'],
+]);
+
+/** The engine signals a command's own ENVIRONMENT carries: one per variable of the table that is set to something. */
+export function environmentEngines(cmd: ContainerCommand): EngineSignal[] {
+  const out: EngineSignal[] = [];
+  for (const { name, value } of cmd.environment) {
+    const kind = CONTAINER_ENGINE_ENV.get(name);
+    // (a variable set to nothing is a variable that is not set: `DOCKER_CONFIG= docker ps` selects nothing)
+    if (kind === undefined || value === '') continue;
+    out.push({ kind, value: kind === 'client configuration' ? null : value, flag: name });
+  }
+  return out;
+}
 
 /** the engine options, as values, wherever the verb's own grammar does not know them */
 const ENGINE_VALUES = grammar('-H --host --url --address --context --connection --builder --config', '');
@@ -395,6 +471,7 @@ function blank(program: ContainerProgram, ws: string[]): ContainerCommand {
     groupOptions: [],
     rootOptions: [],
     unknownOption: null,
+    environment: [],
   };
 }
 
@@ -409,8 +486,13 @@ export function readContainerCommand(tokens: readonly string[]): ContainerComman
   let ws = tokens.slice(at + 1);
   // the normalizer re-attaches the target-selecting assignments it stripped at the END of the command, after the
   // arguments; they are environment, and they must not become an operand
-  while (ws.length && TRAILING_ENV.test(ws[ws.length - 1]!)) ws = ws.slice(0, -1);
+  const environment = tokens.slice(0, at).flatMap(assignmentOf);
+  while (ws.length && TRAILING_ENV.test(ws[ws.length - 1]!)) {
+    environment.push(...assignmentOf(ws[ws.length - 1]!));
+    ws = ws.slice(0, -1);
+  }
   const cmd = blank(program, ws);
+  cmd.environment = environment;
   const signal = (o: ReadOption, kind: EngineKind | undefined): void => {
     if (kind !== undefined) cmd.engines.push({ kind, value: kind === 'client configuration' ? null : o.value, flag: o.name });
   };
@@ -461,12 +543,16 @@ export function readContainerCommand(tokens: readonly string[]): ContainerComman
     // `lima CMD` runs CMD in the default VM; `lima nerdctl …` is nerdctl in it, with the VM's own engine
     if (/^(nerdctl|docker|podman)$/.test(first)) {
       const inner = readContainerCommand(ws.slice(i));
-      if (inner) return inner;
+      if (inner) {
+        // (the variables set in front of `lima` are the inner tool's environment too)
+        inner.environment = [...cmd.environment, ...inner.environment];
+        return inner;
+      }
     }
     return unmodelled([first], i + 1, `lima runs ${first} inside a virtual machine`);
   }
 
-  const groups = program === 'podman' ? PODMAN_GROUPS : program === 'nerdctl' ? NERDCTL_GROUPS : GROUPS;
+  const groups = program === 'podman' ? PODMAN_GROUPS : program === 'nerdctl' ? NERDCTL_GROUPS : program === 'docker' ? DOCKER_GROUPS : GROUPS;
   const standaloneCompose = program === 'docker-compose' || program === 'podman-compose';
   const top =
     program === 'buildah'
@@ -610,6 +696,13 @@ function finish(cmd: ContainerCommand, def: ProgramDef): ContainerCommand {
   return cmd;
 }
 
+/** The operands of a COPY verb (`cp`, `container cp`, `compose cp`, `machine cp`), or null for any other command: the file specs the
+ *  verb names, in order, with the options and the words of a program's argv taken out. */
+export function copyOperands(cmd: ContainerCommand): string[] | null {
+  if (!cmd.determinate || !cmd.modelled || cmd.path[cmd.path.length - 1] !== 'cp') return null;
+  return cmd.operands;
+}
+
 /** does the verb change which engine later commands use, or write a name-to-engine binding */
 export function bindsEngine(cmd: ContainerCommand): boolean {
   return cmd.modelled && cmd.flags.includes('n');
@@ -664,11 +757,14 @@ const RUN_OPTIONS = grammar(
     '--arch --authfile --cgroup-conf --chrootdirs --conmon-pidfile --creds --decryption-key --env-merge --gidmap --uidmap ' +
     '--group-entry --hostuser --image-volume --init-path --pod --pod-id-file --preserve-fd --preserve-fds --retry --retry-delay ' +
     '--rootfs --sdnotify --seccomp-policy --secret --subgidname --subuidname --timeout --umask --unsetenv --variant --os --passwd-entry ' +
-    '--personality --userns-gid-map --userns-uid-map --net --cpu-count --cpu-percent --io-maxbandwidth --io-maxiops',
+    '--personality --userns-gid-map --userns-uid-map --net --cpu-count --cpu-percent --io-maxbandwidth --io-maxiops --pull',
   '-d --detach --init -i --interactive --no-healthcheck --oom-kill-disable --privileged -P --publish-all -q --quiet --read-only --rm ' +
     '--sig-proxy -t --tty --disable-content-trust --replace --http-proxy --tls-verify --no-hosts --passwd --read-only-tmpfs --systemd ' +
-    '--env-host --unsetenv-all -h --help --help-all --use-api-socket --pull',
+    '--env-host --unsetenv-all -h --help --help-all --use-api-socket',
 );
+// (`--pull` of `run` and `create` TAKES a policy - `always`, `missing`, `never` - in docker, podman and nerdctl alike. It stood in the
+// switches, so `podman run --pull always --connection production alpine` read `always` as the image and the engine option behind it
+// as the container's own words: wave 5, CT-07. `build`'s `--pull` is a switch in docker, and stays one in BUILD_OPTIONS below.)
 // every option of `build`, `buildx build`, `podman build`, `nerdctl build` and `buildah build`. `--pull` and `--push`
 // are booleans: pflag does not give a boolean a space-separated value.
 const BUILD_OPTIONS = grammar(

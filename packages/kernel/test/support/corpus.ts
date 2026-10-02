@@ -1746,7 +1746,9 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     cases: [
       'docker pass get GH_TOKEN',
       'docker debug app',
-      'docker scout quickview',
+      // (`scout quickview` is a modelled read since wave 5, CT-05; the rest of the plugin is a verb nobody decided about)
+      'docker scout enroll acme',
+      'docker desktop stop',
       "docker buildx bake --set '*.output=type=registry'",
       'docker buildx build -otype=registry .',
       'docker buildx b -o type=image,name=reg.example/x,push=true .',
@@ -2712,6 +2714,92 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
    * closure-clusters2.test.ts; the floors here carry it through every transformation and every producer.
    * -------------------------------------------------------------------------------------------------------- */
   {
+    family: 'container',
+    // WHICH ENGINE A CONTAINER COMMAND TALKS TO HAS ONE TABLE OF THE VARIABLES THAT SELECT IT (CT-01, CT-06, CT-07). `CONTAINER_CONNECTION` is
+    // podman's `DOCKER_CONTEXT`; a socket forwarded to a production daemon is a path on this machine with the word in it; `--pull always`
+    // took the image's place and the engine option behind it became the container's own words
+    id: 'a production container engine selected by a variable, a socket whose name says so, or an option behind one that takes a value',
+    floor: 'DENY',
+    cases: [
+      'CONTAINER_CONNECTION=production podman run alpine true',
+      'DOCKER_HOST=unix:///tmp/prod.sock docker run alpine true',
+      'docker -H unix:///tmp/production-docker.sock run alpine true',
+      'podman run --pull always --connection production alpine true',
+      'nerdctl run --pull always -H tcp://prod.example.com:2375 alpine true',
+      'CONTAINER_HOST=ssh://root@prod.example.com podman run alpine true',
+      'export CONTAINER_CONNECTION=prd1; podman run alpine true',
+    ],
+  },
+  {
+    family: 'container',
+    // A VARIABLE THAT POINTS AT THE FILE WHICH HOLDS THE CHOICE: the connection table, the builder instances, the client configuration. The
+    // choice cannot be read from here, so an engine selected through it is not known to be the local one
+    id: 'a container engine selected through a configuration file the kernel cannot read',
+    floor: 'ASK',
+    cases: [
+      'CONTAINERS_CONF=./c.conf podman run alpine true',
+      'PODMAN_CONNECTIONS_CONF=./c.json podman run alpine true',
+      'NERDCTL_TOML=./n.toml nerdctl run alpine true',
+      'DOCKER_CERT_PATH=./certs docker run alpine true',
+      'CONTAINER_SSHKEY=./k podman run alpine true',
+      'BUILDX_CONFIG=./bc docker buildx build .',
+    ],
+    files: { Dockerfile: 'FROM alpine\n' },
+  },
+  {
+    family: 'container',
+    // WHAT A VERB PRINTS AGAINST ANOTHER ENGINE IS AN ACT ON IT (CT-03): `inspect` and `logs` were gated for the credentials they print, and
+    // `save` (every layer), `history` (every build command) and `top` (every command line) were not
+    id: 'an image export, a build history or a process list read from a production engine',
+    floor: 'DENY',
+    cases: [
+      'docker --context production save app -o app.tar',
+      'docker --context production history --no-trunc app',
+      'docker --context production top app',
+      'docker -H tcp://prod.example.com:2375 save app',
+      'podman --connection production save app',
+      'docker --context production image history app',
+      'docker --context production compose top',
+    ],
+  },
+  {
+    family: 'ego',
+    // A COPY OUT OF A CONTAINER OR A POD WRITES ITS LOCAL DESTINATION (CT-08): the content a container supplies lands in the policy that decides
+    // every later verdict, or in the agent's own configuration
+    id: 'a file copied out of a container or a pod into a governed path',
+    floor: 'DENY',
+    cases: [
+      'docker cp app:/x control-plane/permissions/matchers.md',
+      'kubectl --context kind-dev cp pod:/x control-plane/permissions/matchers.md',
+      'podman cp app:/x policies/organization/x.md',
+      'docker container cp app:/x .mcp.json',
+      'docker compose cp svc:/x control-plane/x.md',
+      'nerdctl cp app:/x control-plane/x.md',
+    ],
+  },
+  {
+    family: 'k8s',
+    // A PREFERENCES FILE NAMED ON THE LINE CAN SET THE DEFAULT OF --context (K8-02), and a repeated --kubeconfig is a string option applied
+    // once, not a list whose first member answers (K8-05)
+    id: 'a kubectl command pointed elsewhere by a preferences file, or by the last of two kubeconfig files',
+    // (ASK, not DENY: carried by a substitution or a shell the files are no longer proven to be where the line says, and a kubeconfig the
+    // kernel cannot read is a question - it is DENY wherever the files are read)
+    floor: 'ASK',
+    cases: [
+      'kubectl --kubeconfig kc2.yaml --kuberc ctx.yaml delete pod x',
+      'kubectl --kubeconfig kc2.yaml --kuberc=ctx.yaml delete pod x',
+      'kubectl --kubeconfig a.yaml --kubeconfig b.yaml delete pod x',
+      'kubectl --kubeconfig=a.yaml --kubeconfig=b.yaml delete pod x',
+      'helm --kubeconfig a.yaml --kubeconfig b.yaml uninstall x',
+    ],
+    files: {
+      'kc2.yaml': 'apiVersion: v1\nkind: Config\nclusters:\n- name: dev\n  cluster: {server: "https://127.0.0.1:11"}\n- name: remote\n  cluster: {server: "https://203.0.113.9:22"}\ncontexts:\n- name: kind-dev\n  context: {cluster: dev, user: u1}\n- name: other\n  context: {cluster: remote, user: u1}\ncurrent-context: kind-dev\nusers:\n- name: u1\n  user: {token: t}\n',
+      'ctx.yaml': 'apiVersion: kubectl.config.k8s.io/v1beta1\nkind: Preference\ndefaults:\n- command: delete\n  options:\n  - name: context\n    default: other\n',
+      'a.yaml': kubeconfigAt('https://127.0.0.1:6443'),
+      'b.yaml': kubeconfigAt('https://203.0.113.9:6443'),
+    },
+  },
+  {
     family: 'production',
     // "IS THIS NAME PRODUCTION" HAS ONE READER (AUTH-1). `kind-prd1` is local by the `kind-*` the kernel declares and production
     // by the word `prd` in it; a number after the marker, or a CamelCase boundary, made it neither for the readers that wanted a
@@ -2968,7 +3056,10 @@ const noHostPath = (c: string): boolean =>
   // use are named `dlnk`, `hlnk`, `chain-d`, `rel-d`, `spaced up` and `spaced link`, and what they lead to is `settings.json`
   // or an archive extracted beside the workspace)
   // (...and a WILDCARD that reaches a hidden credential file without spelling it: `.e*`, `.??v`, `dotglob`, `*(D)`, `sub/.*`)
-  !/(\.harness|\.git\/|githooks|control-plane|policies\b|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials|\bdlnk\b|\bhlnk\b|chain-d|rel-d|spaced (?:up|link)|settings\.json|(?:^|[\s/])\.[a-z?]*[*?[]|dotglob|glob_dots|\(D\))/.test(c) &&
+  // (wave 5, CT-02: the paths of a RUN line are judged as the image's EVERYWHERE, not in the one reader that used to ask. Three more spellings of a
+  // host path that no text above names: a link the class makes (`lnk-hook`), the working directory through /proc, a repository read by a
+  // `file://` URL, and a sed script FILE whose own lines name the file it writes - each is the image's file inside a build)
+  !/(\.harness|\.git\/|githooks|control-plane|policies\b|\.claude|\.husky|\.githooks|node_modules|\/dev\/|\.ssh|\.aws|\/etc\/|\.mcp\.json|\.ego\/|\.env|\.npmrc|\.netrc|id_rsa|credentials|\bdlnk\b|\bhlnk\b|chain-d|rel-d|spaced (?:up|link)|settings\.json|(?:^|[\s/])\.[a-z?]*[*?[]|dotglob|glob_dots|\(D\)|\blnk-hook\b|\/proc\/self\/|file:\/\/|\bsed\s+(?:-\S+\s+)*-[a-zA-Z]*f)/.test(c) &&
   // ...and a bulk deletion of the working tree is a path effect too, however it is spelled — as is a command
   // whose governed path is named by a FILE rather than on the line, since that file is the image's too. `zip` MOVES
   // its sources with `-m` and with `--move`. A case with a newline in it is several shell lines, and a RUN is one.
@@ -3122,6 +3213,30 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     'kubectl --context kind-product-catalog get pods',
     'kubectl --context kind-dev get pod secrets-api-7d9',
     'helm --kube-context kind-dev upgrade app ./chart -n products',
+    // a name a shell fills in is a name; the loopback is the loopback; the OpenShift client and helm 4 are what they are
+    'kubectl --context kind-dev logs deploy/$APP',
+    'kubectl --context kind-dev rollout restart deployment/$NAME',
+    'kubectl --context kind-dev cp ./x $POD:/x',
+    'helm --color never template ./chart',
+    'oc --context kind-dev get pods',
+    // an option is a program for the tool that has it: -B is context to grep and a linker flag list is no linker
+    'grep -B 3 foo README.md',
+    'rg -B 2 foo',
+    'make -B build',
+    'go build -ldflags "-s -w" -o bin/app ./cmd/app',
+    'CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o app .',
+    // the container tools: a source directory with a trailing slash, the plugin verbs that look, the engine's own look at itself
+    'docker run --rm -v ./src/:/app/src alpine true',
+    'docker cp app:/etc/hosts .',
+    'docker scout quickview',
+    'docker model ls',
+    'docker desktop status',
+    'docker init',
+    'docker save app -o app.tar',
+    'docker history app',
+    'docker top app',
+    'lima nerdctl ps',
+    'podman-compose up',
   ],
   // WAVE 3 (git, environment): the statements the readers of those two dimensions must leave alone. A binding of a name that re-points nothing is
   // ordinary whatever builtin binds it; a git option spelled the ordinary way is an option, not an act; a hyphenated git command that has a

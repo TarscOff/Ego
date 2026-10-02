@@ -1053,11 +1053,13 @@ matchers:
   - capability: container.inspect
     tool: Bash
     command: '^(docker|podman)\s+(ps|images|inspect|logs|top|stats|version|info|image\s+ls)\b'
-  # a bind mount hands the container the host path: mounting home, the filesystem root or a credential directory
-  # reads it just as surely as `cat` would (round 14)
-  - capability: fs.credential-store.read
-    tool: Bash
-    command: '^(docker|podman|nerdctl)\s+\S+\b[^|;&]*\s(-v|--volume|--mount)(=|\s)\S*((~|\$HOME|\$\{HOME\})(/[^:\s]*)?:|/:|\.(ssh|aws|kube|gnupg|docker|npmrc|pypirc)[^:\s]*:)'
+  # A BIND MOUNT HANDS THE CONTAINER THE HOST PATH: mounting home, the filesystem root or a credential directory reads it just as
+  # surely as `cat` would (round 14). It is judged by the PATH JUDGE, on the real path the source resolves to (`containerMountSources`
+  # in the evaluator: `-v`, `--volume`, `--mount type=bind`, a local volume with a device), and not here. A pattern lived here with a
+  # second reading of "which sources are credential stores" - `/:` for the root, `~` and `$HOME` for the home, a list of dot
+  # directories - and its `/:` matched every host path that ENDS IN A SLASH: `-v ./src/:/app/src` was a credential-store read
+  # (wave 5, CT-04), and so was every directory of the home that was not one. The path judge says what the path is: the root and the home
+  # are the credential read they are, `~/.ssh` is a credential store, `/etc` is outside the workspace, `./src/` is the workspace.
   # `nerdctl` is containerd's docker-compatible client: the same flags, the same `--context`, the same effects.
   # It is enrolled in the target RESOLVER and was missing here, so nothing classified it and its target was never
   # resolved — found by the property that pins these two lists together (exit review 7).

@@ -128,6 +128,7 @@ export interface CompiledAuthorityTable {
     installsDependencies: string[];
     discoversContent: string[];
     discoversConfig: string[];
+    imageSetup: string[];
   };
 }
 
@@ -404,6 +405,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       installsDependencies: [...cp.boundedCommands.installsDependencies].sort(),
       discoversContent: [...cp.boundedCommands.discoversContent].sort(),
       discoversConfig: [...cp.boundedCommands.discoversConfig].sort(),
+      imageSetup: [...cp.boundedCommands.imageSetup].sort(),
     },
     localTargets: {
       // the kernel's default with the layers' additions merged in: a layer can add a local target and a production

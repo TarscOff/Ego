@@ -197,6 +197,9 @@ export interface BoundedCommands {
   /** heads that run whatever their CONFIGURATION names. Each entry is `<tool> <code-config-file>…`: the closure is
    *  bounded while none of those files is present, and opaque once one is. */
   discoversConfig: string[];
+  /** heads a container image is SET UP with (a package manager, an account or ownership tool): bounded, and classified by no rule, so on
+   *  this machine they ask and inside a Dockerfile's RUN lines they are the image's own work */
+  imageSetup: string[];
   file: string;
 }
 

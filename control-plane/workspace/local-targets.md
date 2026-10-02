@@ -38,6 +38,9 @@ db_local_hosts:
   - '0.0.0.0'
   - '*.localhost'
   - 'host.docker.internal'
+  # Docker Desktop's own name for the machine's Kubernetes API server: it writes the name into the kubeconfig of the `docker-desktop`
+  # context and into /etc/hosts as the loopback (wave 5, K8-06)
+  - 'kubernetes.docker.internal'
 production_markers:
   - 'prod'
   - 'production'

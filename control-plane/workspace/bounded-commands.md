@@ -217,6 +217,28 @@ bounded:
   - 'brew'
   - 'apt'
   - 'apt-get'
+  # the other system package managers: what a Dockerfile's RUN lines install with. `apk add` and `yum install` acquire third-party
+  # code exactly as `apt-get install` does (below); on this machine they ask, in an image they are what an image is for
+  - 'apk'
+  - 'yum'
+  - 'dnf'
+  - 'microdnf'
+  - 'zypper'
+  # ...and the account, ownership and system-setup programs a Dockerfile's RUN lines are made of. None of them executes anything it was
+  # not named for; no rule classifies them, so on this machine they still ask (no matcher), and in an image build they are the image's
+  - 'install'
+  - 'chown'
+  - 'chgrp'
+  - 'useradd'
+  - 'groupadd'
+  - 'adduser'
+  - 'addgroup'
+  - 'usermod'
+  - 'groupmod'
+  - 'update-ca-certificates'
+  - 'ldconfig'
+  - 'locale-gen'
+  - 'update-alternatives'
   - 'open'
   - 'code'
   - 'less'
@@ -294,6 +316,13 @@ bounded:
   - 'docker-compose'
   - 'podman'
   - 'nerdctl'
+  # the OpenShift client is kubectl with verbs of its own, and the container clients below read like docker: the cluster reader
+  # (k8s.ts) and the container reader (containers.ts) model each of them, and their branches for these programs were unreachable
+  # while the vocabulary had never heard of them (wave 5, K8-06)
+  - 'oc'
+  - 'podman-compose'
+  - 'lima'
+  - 'buildah'
   - 'curl'
   - 'wget'
   # the other HTTP clients the network matcher reads by request: a client the evaluator reads cannot be "an unmodelled
@@ -355,6 +384,11 @@ installs_dependencies:
   - 'code --install-extension'
   - 'apt-get install'
   - 'apt install'
+  - 'apk add'
+  - 'yum install'
+  - 'dnf install'
+  - 'microdnf install'
+  - 'zypper install'
 discovers_content:
   # build-system drivers: `cmake -P x.cmake` runs a CMake script (execute_process and all), `cmake --build` and
   # `ninja` run the edges a generated build file names. They were in `bounded`, which claimed their closure was
@@ -408,6 +442,30 @@ discovers_config:
   - 'pylint pylint_plugins.py'
   - 'flake8 flake8_plugin.py'
   - 'rubocop rubocop_ext.rb'
+image_setup:
+  # what a container image is SET UP with. Each is also in `bounded` (it executes nothing it was not named for); none has a rule of its own, so
+  # on this machine each is `command.unknown` and asks - and in the RUN lines of a Dockerfile, which run in the image being built, each
+  # is the image's own work (wave 5, CT-02)
+  - 'apt'
+  - 'apt-get'
+  - 'apk'
+  - 'yum'
+  - 'dnf'
+  - 'microdnf'
+  - 'zypper'
+  - 'install'
+  - 'chown'
+  - 'chgrp'
+  - 'useradd'
+  - 'groupadd'
+  - 'adduser'
+  - 'addgroup'
+  - 'usermod'
+  - 'groupmod'
+  - 'update-ca-certificates'
+  - 'ldconfig'
+  - 'locale-gen'
+  - 'update-alternatives'
 ---
 
 # Bounded commands
@@ -469,3 +527,12 @@ An entry may name a head alone (`pytest`) or a head and the arguments that make 
 while `go test` does not.
 
 A head in neither list is simply unmodelled and reaches `command.unknown` as before.
+
+## `image_setup`
+
+The programs a container image is set up with: the system package managers, and the account and ownership tools a
+Dockerfile's `RUN` lines are made of (`apt-get update`, `useradd`, `chown`). They are bounded, and no rule classifies
+them, so a bare `apt-get update` on this machine is a question. A `RUN` line runs in the image being built, not here:
+what it does to a path is the image's, and a program on this list that nothing classifies is the image's own work. It
+is a list of heads and not a rule about unknown programs, because the fallback for an unclassified command is also
+what gates a form nobody classified on purpose (`git -c man.man.path=…` names a program to run).
