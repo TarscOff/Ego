@@ -46,17 +46,31 @@ let cache: Map<string, string> | null = null;
 /** the directories a wildcard was expanded over, listed once per evaluation: the same directory is asked about again by every word that
  *  names it, and by every reading of every word (as written and trimmed, lexical and physical, in each directory the shell may be in) */
 let listings: Map<string, Array<{ name: string; directory: boolean }> | null> | null = null;
+/** what a reader computed ONCE from the disk for this evaluation and keeps (see `memoPerEvaluation`) */
+let memo: Map<string, unknown> | null = null;
 
 export function withPathCache<T>(body: () => T): T {
   if (cache !== null) return body(); // nested: the outer evaluation owns it
   cache = new Map();
   listings = new Map();
+  memo = new Map();
   try {
     return body();
   } finally {
     cache = null;
     listings = null;
+    memo = null;
   }
+}
+
+/** A value read from the disk that does not change while one decision is made (where a protected name really leads), computed on the first
+ *  question and kept until the evaluation ends. Outside an evaluation nothing is kept: a unit test of one reader sees the disk as it is. */
+export function memoPerEvaluation<T>(key: string, compute: () => T): T {
+  if (memo === null) return compute();
+  if (memo.has(key)) return memo.get(key) as T;
+  const value = compute();
+  memo.set(key, value);
+  return value;
 }
 
 /**
@@ -249,6 +263,16 @@ const DISCARD_DEVICES: ReadonlySet<string> = new Set([
   '/proc/thread-self/fd/2',
 ]);
 
+/** The names of the descriptor a command reads its standard input from. When a line opens a FILE for input (`< file`) these are that file, and
+ *  not a stream: on Linux `open("/dev/stdin", O_WRONLY|O_TRUNC)` reopens the underlying inode with write access, so `echo x < .claude/settings.json
+ *  > /dev/stdin` rewrites the file whose READ was allowed (PA-06). A name that is not one of these is not an alias of the input. */
+const STDIN_ALIASES: ReadonlySet<string> = new Set(['/dev/stdin', '/dev/fd/0', '/proc/self/fd/0', '/proc/thread-self/fd/0']);
+
+/** True when ONE ABSOLUTE PATH is the standard input under another name (see STDIN_ALIASES). */
+export function isStdinAlias(path: string): boolean {
+  return path.startsWith('/') && STDIN_ALIASES.has(resolve(path));
+}
+
 /** True when ONE ABSOLUTE PATH names a discard device. Resolves first: `/dev/../etc/passwd` is `/etc/passwd`. */
 export function isDiscardDevice(path: string): boolean {
   if (!path.startsWith('/')) return false;
@@ -377,6 +401,10 @@ export interface PathCandidates {
   /** The word has a part nobody can know (`$VAR`, a command substitution, `~-3`): nothing is said about where it lands. */
   readonly dynamic: boolean;
   readonly glob: boolean;
+  /** The paths that are the word AS TYPED - `$PWD`, `*` and `{a,b}` taken for the names they would be if they were quoted, which is what a
+   *  name is when it is. They are a subset of `paths`, and they name one file each: a caller that treats a glob as a set must not treat
+   *  these as part of it. */
+  readonly typed: ReadonlySet<string>;
   /** Why the word cannot be pinned down although its text is known — a `/proc/self/cwd` alias, an open descriptor, another
    *  user's home. The caller asks: the readings above are a lower bound. */
   readonly uncertain: string | null;
@@ -387,6 +415,8 @@ interface Reading {
   lexical: string[];
   physical: string[];
   glob: boolean;
+  /** the lexical and physical readings of the word as typed (see `PathCandidates.typed`) */
+  typed: string[];
 }
 
 function readVariant(
@@ -400,20 +430,32 @@ function readVariant(
   const texts = literalText ? [variant] : expandStart(variant, dirs, old, note);
   // a part the shell fills in at run time: one reading that cannot be named makes the word unnameable
   if (texts === null || (!literalText && texts.some((x) => /[$`]/.test(x)))) return null;
-  const out: Reading = { lexical: [], physical: [], glob: false };
-  for (const text of texts) {
-    const cut = literalText ? -1 : text.search(/[*?[{]/);
+  const out: Reading = { lexical: [], physical: [], glob: false, typed: [] };
+  // THE WORD AS TYPED IS A READING OF ITSELF. `~`, `$PWD`, `*`, `[x]` and `{a,b}` are expanded here as the shell expands them, but only
+  // when they are not quoted, and a path reader holds the VALUE of a word: `touch '$PWD/pre-commit'` and `touch $PWD/pre-commit` reach it
+  // as the same text. A link called `$PWD` (or `~+`, or `{a,b}`) that leads into .git/hooks was therefore never opened by the kernel and
+  // always by the shell (PA-03). The name as typed is one more path the word may denote, and a reading can only make the verdict stricter.
+  // (the expanded texts first; the word as typed only where it is not already one of them, and not under `whole`, which reads the text as it stands)
+  const asTyped = !literalText && !whole && /[~$*?[{]/.test(variant);
+  const readings: Array<{ text: string; typed: boolean }> = texts.map((text) => ({ text, typed: false }));
+  if (asTyped && !(texts.length === 1 && texts[0] === variant && !/[*?[{]/.test(variant))) readings.push({ text: variant, typed: true });
+  for (const { text, typed: isTyped } of readings) {
+    const cut = literalText || isTyped ? -1 : text.search(/[*?[{]/);
     if (cut >= 0) out.glob = true;
     const literal = cut >= 0 && !whole ? text.slice(0, cut) : text;
     for (const base of isAbsolute(literal) ? [null] : dirs) {
       const lexical = base === null ? resolve(literal) : resolve(base, literal);
       out.lexical.push(lexical);
+      if (isTyped) out.typed.push(lexical);
       // the physical reading differs only where a `..` can follow a link; a word without one is judged by the
       // lexical reading's canonical form, which is what the classifier makes of it
       // (a path longer than PATH_MAX cannot be opened at all - ENAMETOOLONG - so it has no physical reading to walk)
       if (hasDotDot(literal) && literal.length <= PATH_MAX) {
         const physical = physicalReading(base, literal);
-        if (physical !== canonicalPath(lexical)) out.physical.push(physical);
+        if (physical !== canonicalPath(lexical)) {
+          out.physical.push(physical);
+          if (isTyped) out.typed.push(physical);
+        }
       }
       out.lexical.push(...aliasReadings(literal, lexical, dirs, note));
     }
@@ -442,14 +484,22 @@ export function pathCandidates(
   const trimmed = hostTrim(word);
   const note: { uncertain: string | null } = { uncertain: null };
   const paths = new Set<string>();
+  const typed = new Set<string>();
   let glob = false;
   for (const variant of trimmed !== word && trimmed !== '' ? [word, trimmed] : [word]) {
     const r = readVariant(variant, dirs, old, note, options.whole === true, options.literal === true);
-    if (r === null) return { paths: [], dynamic: true, glob: false, uncertain: null };
+    if (r === null) {
+      // a word with a part nobody can know is still, as typed, a name: `'a$b/pre-commit'` is a directory called `a$b` where `$b` is quoted, and
+      // `$b` is unset where it is not - the typed reading is one more place it may be (it is judged beside the question the dynamic part asks)
+      for (const base of isAbsolute(variant) ? [null] : dirs) typed.add(base === null ? resolve(variant) : resolve(base, variant));
+      return { paths: [], dynamic: true, glob: false, typed, uncertain: null };
+    }
     glob ||= r.glob;
     for (const p of [...r.lexical, ...r.physical]) paths.add(p);
+    for (const p of r.typed) typed.add(p);
   }
-  return { paths: [...paths], dynamic: false, glob, uncertain: note.uncertain };
+  // (a path that is only the word AS TYPED, and that no expansion of it also reaches, is not part of what the word expands to)
+  return { paths: [...paths], dynamic: false, glob, typed, uncertain: note.uncertain };
 }
 
 function directoriesOf(cwds: string | readonly string[]): string[] {
@@ -755,6 +805,39 @@ function expandGlobText(
   for (const p of frontier) found.add(p);
 }
 
+export interface WildcardNames {
+  /** the concrete paths to judge: the names that exist and match, and the word as typed (a name, since the shell leaves a pattern that
+   *  matches nothing as it is) */
+  readonly paths: string[];
+  /** how many existing names matched */
+  readonly matched: number;
+  /** why the set is not the whole answer - the word is built at run time, or it matches more names than are enumerated - or null */
+  readonly open: string | null;
+}
+
+/**
+ * WHAT A WILDCARD WORD DENOTES WHERE THE COMMAND WRITES IT (closure audit 2026-10-02, PA-09). A wildcard destination was never enumerated:
+ * `touch .har?ess/generated/x` and `echo x > .cla[u]de/settings.json` (or a star in the same place) were an ASK a human can approve, where the spelled-out path is an absolute
+ * refusal, and `rm *.log` was an ASK for a name that matches only ordinary files. A wildcard denotes the names that exist and match it, so
+ * those are the destinations: the caller judges each of them as the path it is. A pattern that matches nothing is left as it is by the
+ * shell, and is a name (its typed reading). `open` is the question the names do not answer.
+ */
+export function wildcardNames(
+  cwds: string | readonly string[],
+  word: string,
+  old: readonly string[] | undefined,
+  options: { dotfiles: boolean; ignoreCase?: boolean; extended?: boolean },
+): WildcardNames {
+  const c = pathCandidates(cwds, word, old);
+  if (c.dynamic) return { paths: [], matched: 0, open: 'the word is built at run time' };
+  if (!c.glob) return { paths: c.paths, matched: 0, open: c.uncertain };
+  const set = globMatches(cwds, word, old, options);
+  if (set.dynamic) return { paths: [...c.typed], matched: 0, open: 'the word is built at run time' };
+  const paths = new Set<string>(set.paths);
+  for (const t of c.typed) paths.add(t);
+  return { paths: [...paths], matched: set.paths.length, open: set.bounded ? 'it matches more names than this kernel enumerates' : c.uncertain };
+}
+
 /**
  * What listing a directory costs, in the units of work-bound.ts: a syscall and a pass over what it returned (measured at about half a
  * microsecond an entry). The budget of one wildcard expansion bounds ONE word; a command that names a wildcard over a directory of twenty
@@ -797,10 +880,33 @@ export function isDirectory(abs: string): boolean {
  * and a word, because a plain name has no `..` and no link to follow: the join is the whole of its meaning.
  */
 export function namesAnEntry(dir: string, name: string): boolean {
-  if (!/^[^\s/$`*?[\]{}()<>|&;'"\\=~-][^\s/$`*?[\]{}()<>|&;'"\\=]*$/.test(name)) return false;
+  // (a name is what is on the disk, whatever characters it holds: `a"b` and `a<b` are links the hostile repository ships, and the existence
+  // test below is what keeps `$HOME`, `a=b` and `*` - words that name nothing - out; only an option, an empty word and a path are not a plain name)
+  if (name === '' || name.length > 255 || name.startsWith('-') || name.includes('/') || name.includes('\0')) return false;
   chargeWork(WALK_STEP_COST);
   try {
     lstatSync(join(dir, name));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is this word - which BEGINS WITH A DASH - the name of something that exists where the command runs? `cp payload -dash/pre-commit` is a
+ * copy into `-dash/` for a parser that stops looking for options at the first operand (BSD's, the one macOS has), and `cp payload --
+ * -dash/pre-commit` is one for every parser; the operand readers skip every word that starts with a dash because it is an option, and a
+ * link called `-dash` that leads into .git/hooks was written through without a hit (PA-03). The question is asked of the disk, so an
+ * ordinary option (`-r`, `-Ix`) - which names nothing - is still an option. Only the first component is looked up: it is the one
+ * that can be a link, and the rest of the name is read by `pathCandidates` like any other.
+ */
+export function namesADashedEntry(dir: string, word: string): boolean {
+  if (word.length < 2 || word[0] !== '-' || word === '--') return false;
+  const slash = word.indexOf('/');
+  const first = slash < 0 ? word : word.slice(0, slash);
+  chargeWork(WALK_STEP_COST);
+  try {
+    lstatSync(join(dir, first));
     return true;
   } catch {
     return false;

@@ -159,6 +159,16 @@ const NO_EXEC_READERS = new Set(
       'dirname realpath readlink nproc uname whoami id date hostname pwd echo printf seq expr jq yq',
   ),
 );
+/** The heads of NO_EXEC_READERS that OPEN THEIR OPERANDS AS FILES - the rest of that set computes a name or prints a fact (`basename`, `date`,
+ *  `echo`) - and the searchers and viewers that are not in it because an option of theirs can run a program. The consumers of a list of
+ *  paths that somebody else produced (flow.ts): the operand is read, so what it names is what is read. */
+export const FILE_OPERAND_READERS: ReadonlySet<string> = new Set([
+  ...[...NO_EXEC_READERS].filter(
+    (h) => !words('which type whereis whatis basename dirname realpath readlink nproc uname whoami id date hostname pwd echo printf seq expr df').includes(h),
+  ),
+  ...words('sort less more grep egrep fgrep zgrep rg ag ack sed awk gawk mawk bat batcat view'),
+]);
+
 /** the commands whose operands are strings they print, so every operand is data */
 const PRINTERS = new Set(['echo', 'printf']);
 
