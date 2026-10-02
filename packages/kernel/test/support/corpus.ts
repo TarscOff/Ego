@@ -3566,7 +3566,7 @@ export const EXPECTED_GATES: Readonly<Record<string, string>> = {
 
 /**
  * THE CAPABILITIES EACH REASON IN `EXPECTED_GATES` MAY BE REPORTED AS. The reason is a sentence for a person; the evaluator reports a
- * capability, and the two had come apart: five of the fourteen gates claimed "a test runner executes repository-defined code" or "an
+ * capability, and the two had come apart: four of the gates claimed "a test runner executes repository-defined code" or "an
  * unmodelled task runner" while the evaluator printed `command.unknown | no matcher` for them, and nobody noticed because the test only
  * asked that the command was listed (closure audit wave 5, U-13). Now a gate is listed with a reason, the reason names the capabilities
  * it stands for, and a test compares them with what the evaluator says.

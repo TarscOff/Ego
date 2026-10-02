@@ -99,7 +99,7 @@ discipline of decision Q84 (authority changes are never patch releases).
     write nothing at the target; a name the same line makes is read through its link, a link into or to a governed tree is the route it
     always was. The write branch and the link branch now ask the same question of "a root or above it" (`atOrAboveRoot`).
   - **The gates the corpus accounts for say why** (`U-13`): `GATE_REASONS` ties each reason to the capability the evaluator reports, and a
-    test compares them; the five claims that were false are corrected.
+    test compares them; the four claims that were false are corrected.
 - **A cluster command is read once** (closure of root cause RC-K8S, independent reviews 7-11: `sa10-33` CRITICAL and
   `r11-68 69 70 71 72 73 74 75 76 77 169 170 186 187 191 206`). `kubectl`, `oc`, `helm` and minikube's own `kubectl`
   were judged by four readers that each knew a slice of the command line — a verb table, a dry-run scanner, the regexes

@@ -12837,7 +12837,13 @@ function networkWriteHits(
 
 const ENV_INJECT_MARK = `${MARK}env-inject `;
 const ENV_OVERRIDE_MARK = `${MARK}env-override `;
-/** The home directory, for the one question of whether a location is where a tool keeps its own files. */
+/**
+ * WHERE A LOCATION VARIABLE POINTS DECIDES WHAT IT COSTS (env-vars.ts, U-11). The normalizer reports a binding of a watched name as a
+ * refusal and carries the value of a LOCATION (`PYTHONPATH`, `GOPATH`, `JAVA_HOME`...) beside it; this is the one place the value is read,
+ * with the path reader's own eyes. Every doubt keeps the refusal: a word a shell fills in, a glob, a relative word in a directory nobody
+ * proved, a scratch directory the agent can write, a credential store or a path a rule governs. What is left is a place in the checkout
+ * (asked about, because it holds code the agent could have written) or where the tool already keeps its own files (ordinary).
+ */
 function relaxLocation(table: CompiledAuthorityTable, ctx: EvaluationContext, hit: CapabilityHit, norm: string, env: ExecutionEnvironment): CapabilityHit {
   // (`NAME`, the sentinel, `at`, the value: the pieces are cut at the sentinel because a regular expression may not hold a NUL)
   const pieces = norm.slice(ENV_INJECT_MARK.length).trim().split(`${MARK}at `);
@@ -15342,19 +15348,6 @@ function execCarriedCommand(seg: string): string | null {
   return dd >= 0 && dd + 1 < t.length ? requote(t.slice(dd + 1)) : null;
 }
 
-/** THE canonical semantic-analysis pipeline.
- *
- *  Invariant (product decision, 2026-09-22): the same semantic action receives the same security analysis whether it
- *  appears at top level, inside a Makefile recipe, inside a package script, inside a shell script or behind any other
- *  supported producer. Nested analysis may ADD context; it may never lose a protection that applies at top level.
- *
- *  Both entry points delegate here: `classifyCommand` for a host tool call, and the effect recursion in
- *  `classifyNormalized` for a resolved producer body. Before this existed the recursion re-entered a SUB-layer
- *  (matchers only), so a nested effect was analysed strictly more weakly than the identical text at top level —
- *  `echo x > $EGO_HOME/trust/keys` was an absolute deny at top level and an ALLOW inside a make recipe.
- *
- *  Recursion is bounded by `state.depth` (truncation is opaque, never the parent's class) and by `state.seen`, which
- *  keys on execution identity (directory + target), not on a bare name. */
 /**
  * A LINE THAT MAKES A LINK AND THEN WRITES THROUGH IT (closure audit wave 5, PA-13). `ln -s . self` is no route into anything by
  * itself - it records a name - and the path reader follows a link that exists: the next command that writes `self/control-plane/x`
@@ -15390,6 +15383,19 @@ function segmentThroughLinks(seg: string, pairs: ReadonlyArray<readonly [string,
   return out;
 }
 
+/** THE canonical semantic-analysis pipeline.
+ *
+ *  Invariant (product decision, 2026-09-22): the same semantic action receives the same security analysis whether it
+ *  appears at top level, inside a Makefile recipe, inside a package script, inside a shell script or behind any other
+ *  supported producer. Nested analysis may ADD context; it may never lose a protection that applies at top level.
+ *
+ *  Both entry points delegate here: `classifyCommand` for a host tool call, and the effect recursion in
+ *  `classifyNormalized` for a resolved producer body. Before this existed the recursion re-entered a SUB-layer
+ *  (matchers only), so a nested effect was analysed strictly more weakly than the identical text at top level —
+ *  `echo x > $EGO_HOME/trust/keys` was an absolute deny at top level and an ALLOW inside a make recipe.
+ *
+ *  Recursion is bounded by `state.depth` (truncation is opaque, never the parent's class) and by `state.seen`, which
+ *  keys on execution identity (directory + target), not on a bare name. */
 function analyzeSegments(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
