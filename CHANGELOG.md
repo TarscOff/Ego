@@ -404,3 +404,38 @@ discipline of decision Q84 (authority changes are never patch releases).
   command, and the guard against `make -E` / `--eval` scanned the normalised words, in which `V="gawk -Eevil.awk d.txt"` holds a word
   spelled like make's option: the command line was called "supplied on stdin", the makefile unreadable, and the program file the override
   names was never read (`grep -E` in an override asked too). make's command line has one reader, which reads the words make is handed.
+- **One reader of "is this name production", and the cluster, container and option readers that disagreed with it** (closure audit 2026-10-02,
+  wave 5: independent findings AUTH-1, K8-01 to K8-06, CT-01 to CT-08, OT-01). The seven reviewers of what the five waves changed found the
+  repository's old cause again: one dimension, several readers, a fix at one spelling.
+  (1) *Production names.* A marker is a WORD of a name (`hasProductionMarker`, `control-plane/local-targets.ts`): the name is cut at every
+  non-alphanumeric character, between a letter and a digit and where the case changes, so `prd1`, `prod01`, `live2`, `eksProd` and `aks-prd1-weu` are
+  production - under an accepted wildcard (`aks-*`) they were ALLOW - and `products`, `product-catalog`, `reproduce` and `liveness` are not. Four
+  matchers in `matchers.md` read the letters `prod` anywhere in a context, namespace or kubeconfig (`kubectl --context minikube -n products rollout
+  restart` was an ABSOLUTE deny) and the word `secrets` anywhere on a production line (a pod called `secrets-api`, `auth can-i get secrets`): they are
+  gone, the target model answers (k8s.ts), a production Helm release lands on `production.helm.mutate` and the compiler lists the landing capabilities
+  as pre-denied, so the authority diff reports no protection removed. A namespace, a user or a kubeconfig path is still read by the same word
+  reader; only the type position of `get`/`describe` holds a resource type. `preprod` joins the kernel's `production_markers`.
+  (2) *Container engines.* The variables that select an engine are one table (`CONTAINER_ENGINE_ENV`, containers.ts) read by the resolver and
+  derived into the normalizer's list: `CONTAINER_CONNECTION`, `CONTAINERD_ADDRESS` and the variables that point at the file that holds the choice
+  (`CONTAINERS_CONF`, `PODMAN_CONNECTIONS_CONF`, `BUILDX_CONFIG`, `NERDCTL_TOML`, `DOCKER_CERT_PATH`, `CONTAINER_SSHKEY`, ...) were read by neither.
+  An assignment is the engine's only in front of the program or re-attached after it (`docker run -e DOCKER_HOST=...` is the container's). A
+  socket (`unix://`, `npipe://`, `fd://`, a path) is local unless its name says production. `--pull` of `run`/`create` takes a value.
+  `save`, `history` and `top` print what `inspect` and `logs` print and are no longer reads of another engine. `docker logout` is an ASK, not an
+  absolute refusal; `docker init`, `scout quickview|cves|...`, `model ls|status|...` and `desktop status|version|logs` are modelled reads and the rest
+  of those plugins still ask. `docker cp`, `podman cp`, `compose cp` and `kubectl cp` out of a container are writes to their destination, judged as
+  `cp` is. The bind-mount matcher is gone (its `/:` matched every source with a trailing slash); the path judge reads the real source.
+  (3) *Dockerfiles.* What a RUN line does to a PATH is the image's, wherever in the body it is found (a redirection, an output flag, an operand, a
+  script the line runs): `RUN CGO_ENABLED=0 go build -o /app/server .` and `RUN echo x > /etc/apt/sources.list.d/x.list` no longer deny; `rm`,
+  dependency installs (`npm ci`, `pip install`, `apt-get install`, `apk add`) and the programs the new `image_setup` vocabulary list names
+  (`apt-get update`, `useradd`, `chown`) are the image's own work. Commands that reach beyond the image - a push, a fetch piped into a shell, an
+  upload, a cloud call, an unknown program - are classified as before. `CGO_ENABLED=0|1` is a switch, not a program.
+  (4) *Clusters.* A repeated `--kubeconfig` is a string option: each file is read as the world it could be and the strictest decides (`KUBECONFIG`
+  stays a merged list); `--kuberc` is read - a default for `context`, `cluster`, `user`, `server`, `namespace` or an option nobody listed asks;
+  the names in the place of a resource (`deploy/$APP`, `pod/$P`, the pod side of `cp`) are data, not directories built at run time; helm 4's
+  `--color`, `--colour` and `--content-cache` are options; a JSON kubeconfig is read; `kubernetes.docker.internal` and the IPv6, mapped, upper-case
+  and trailing-dot spellings of the loopback are local (`[::1]evil` is no URL); `kubectl kuberc`, `oc`, `podman-compose`, `lima` and `buildah` are
+  known to the vocabulary.
+  (5) *Program options.* An option names a program for the TOOL that has it (`program-operands.ts`): `-B` is gcc's directory of sub-programs and
+  grep's lines of context, `-ldflags` is a flag list read by what the flags are (`-s -w -X` are ordinary, `-extld` is a program), `-e sh` is a pattern
+  to grep, and a compiler with a version in its name is the compiler. `grep -B 3`, `make -B` and `go build -ldflags "-s -w"` no longer ask.
+  Tests: `packages/kernel/test/closure-clusters2.test.ts`, with differentials against the real kubectl, docker and helm that skip when the tool is absent.
