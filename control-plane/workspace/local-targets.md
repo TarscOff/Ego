@@ -74,8 +74,14 @@ view --raw|--flatten`), whether it changes anything (a flag value is data, never
 program (a verb the tool does not have is a plugin).
 
 For database clients (`psql`, `mysql`, `mongosh`, `redis-cli`, …) the target is the host in the connection URI or in
-`-h` / `--host`. With no host at all these clients connect to the local socket or to localhost, which is local.
-`sqlite3` operates on a file, which the path rules already govern.
+`-h` / `--host`, in every spelling the client itself accepts: an unambiguous abbreviation (`--ho=`), a value glued to the
+letter or to a cluster (`-qAt -hdb`), a list (`-h a,b`), an option given twice (every host is judged and the strongest
+decides). The client's own grammar says which words are options, which are their values and what an operand is: the first
+operand of `psql`, `mysql` and the dump tools is a database NAME (`my.app` is a database, never a host), `cqlsh`'s is a host,
+and `mongosh`'s and `clickhouse-client`'s is an address that is a host when it is written like one. A connection string where
+a database name goes (`psql -d "$URL"`) or a profile resolved from a file of the client's own (`--login-path`) is a target
+this kernel cannot read, which is UNCLASSIFIED. With no host at all these clients connect to the local socket or to
+localhost, which is local. `sqlite3` operates on a file, which the path rules already govern.
 
 For container tools (`docker`, `podman`, `buildx`, …) the target is the engine named by `-H` / `--host`, by `--context`,
 by `DOCKER_HOST` / `DOCKER_CONTEXT`, or by `docker context use`. With no explicit selection the local daemon is used.

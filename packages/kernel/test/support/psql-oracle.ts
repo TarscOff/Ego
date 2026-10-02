@@ -131,3 +131,19 @@ export const PSQL_LEXICAL_CASES: ReadonlyArray<{ runs: boolean; script: string; 
   { runs: false, script: "select '\n\\o |touch @MARK@\n'\n", why: 'a string may hold a line break' },
   { runs: false, script: 'select "a\n\\o |touch @MARK@\n"\n', why: 'a quoted name may hold a line break' },
 ];
+
+/** Runs a shell script inside a throwaway container with NO NETWORK, made from an image that is already on this machine (the first
+ *  one whose name matches `image`), and returns what it printed - or null when there is no docker, no daemon or no such image. For
+ *  the clients' own option parsers: a tool reports what it took an option for before it ever connects. */
+export function runInLocalImage(image: RegExp, script: string): string | null {
+  if (process.env.EGO_NO_DOCKER_TESTS) return null;
+  if (!docker(['info', '--format', '{{.ServerVersion}}']).ok) return null;
+  // (the newest of the matching images: a tool's options change between versions, and the tables are written from the current ones)
+  const found = docker(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'])
+    .out.split('\n')
+    .filter((i) => image.test(i))
+    .sort((a, b) => Number(/:(\d+)/.exec(b)?.[1] ?? 0) - Number(/:(\d+)/.exec(a)?.[1] ?? 0))[0];
+  if (found === undefined) return null;
+  const r = spawnSync('docker', ['run', '--rm', '--network', 'none', '--entrypoint', 'sh', found, '-c', script], { encoding: 'utf8', timeout: 120_000 });
+  return r.status === null ? null : `${r.stdout ?? ''}`;
+}
