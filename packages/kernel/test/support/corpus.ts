@@ -1506,6 +1506,84 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
     ],
   },
   {
+    family: 'db',
+    // wave-5 review RV-DB-1: the HOST was found by a scan that matched the word `--host` and knew nothing of getopt's prefixes, a
+    // cluster, a list or the client's own letters; the client's table (db-options.ts) now says what every spelling of an option is
+    id: 'a production database named by a host option in a spelling the client accepts but the word --host is not',
+    floor: 'DENY',
+    cases: [
+      'psql --ho=prod-db.acme.com -c "update users set active=false"',
+      "psql --hos prod-db.acme.com -c 'delete from users'",
+      "psql -qAt -hprod-db.acme.com -c 'delete from users'",
+      "psql -h localhost,prod-db.acme.com -c 'delete from users'",
+      "mysql --hos=prod-db.acme.com -e 'update users set active=0'",
+      "mariadb --ho=prod-db.acme.com -e 'drop table users'",
+      'mysqladmin --ho=prod-db.acme.com drop appdb',
+      'mysqldump --ho=prod-db.acme.com app',
+      'pg_dump --ho=prod-db.acme.com app',
+      'pg_dumpall --ho=prod-db.acme.com',
+      'pg_restore --ho=prod-db.acme.com -d app dump.dump',
+      'createdb --ho=prod-db.acme.com app',
+      'dropdb --ho=prod-db.acme.com app',
+      "clickhouse-client --ho=prod-ch.acme.com -q 'alter table t delete where 1'",
+      "clickhouse client --ho=prod-ch.acme.com -q 'alter table t delete where 1'",
+      "mongosh --host=prod-mongo.acme.com:27017 --eval 'db.users.deleteMany({})'",
+      "cqlsh prod-cass -e 'drop table t'",
+      "influx -host prod-influx.acme.com -execute 'drop database x'",
+    ],
+  },
+  {
+    family: 'db',
+    // RV-DB-1's siblings: the other places a client's target hides - a connection string where a database name goes, built at run time
+    // (libpq takes the server from it, whatever `-h` says), and a profile named in an abbreviation
+    id: 'a database client pointed by a connection string the shell fills in or a profile it resolves from a file',
+    floor: 'ASK',
+    cases: [
+      `psql -d "$DATABASE_URL" -c 'drop table users'`,
+      `psql --dbname="$DATABASE_URL" -c 'drop table users'`,
+      `psql --dbn "$DATABASE_URL" -c 'drop table users'`,
+      `pg_dump -d "$DATABASE_URL" -f out.sql`,
+      `pg_restore -d "$DATABASE_URL" dump.dump`,
+      `createdb --maintenance-db="$DATABASE_URL" app`,
+      `redis-cli -u "$REDIS_URL" flushall`,
+      "mysql --login-p=prod -e 'drop table users'",
+      "clickhouse-client --connection=prod -q 'alter table t delete where 1'",
+    ],
+  },
+  {
+    family: 'db',
+    // RV-DB-2 and its siblings: the scanner that finds the commands a psql script runs must read the script the way the client does.
+    // `\;` ends nothing, and a variable's text is lexed as part of the script (the `$`-in-a-name and backquote seams are in
+    // closure-db2.test.ts, where the script is a heredoc: a `$` here would be expanded by the shell variants of this corpus)
+    id: 'a psql script whose program-running command a lexer that reads it differently would take for text',
+    floor: 'ASK',
+    cases: [
+      "printf 'select 1 \\\\; \\\\o |touch /tmp/marker\\n' | psql",
+      "printf 'select 1\\\\;\\\\o |touch /tmp/marker\\n' | psql",
+      "echo ':x' | psql -v 'x=\\\\o |touch /tmp/marker'",
+      "psql -v 'x=\\\\o |touch /tmp/marker' -c ':x'",
+      "psql --set='x=\\\\! id' -c ':x'",
+      "psql -c ':x'",
+    ],
+  },
+  {
+    family: 'db',
+    // RV-DB-2's pipe edge: standard input is a script wherever the client was given no statement of its own - and `mysql -c`/`-f` are
+    // flags, `sqlite3 -cmd` is not a statement (checked against the real sqlite3), `psql -F x` is a separator
+    id: 'a script piped to a database client whose options are flags, not a statement of its own',
+    floor: 'ASK',
+    cases: [
+      "echo 'system id' | mysql -c",
+      "echo 'system id' | mysql -f",
+      "echo 'system id' | mysql --comments",
+      "printf '\\\\! id\\n' | psql -F x",
+      "printf '\\\\! id\\n' | psql -At",
+      "echo '.shell id' | sqlite3 -cmd '.tables' app.db",
+      "echo '.shell id' | sqlite3 -header -column app.db",
+      "echo 'load(\"x\")' | mongosh --quiet",
+    ],
+  },
+  {
     family: 'command',
     // make's own option parser: a value that looks like a flag, clusters, abbreviations and `--`
     id: 'a makefile target reached by options make parses differently from a substring scan',
@@ -3388,6 +3466,23 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
     // closure audit wave 3: a statement given by `-q` twice is two reads, and a migration runner with no target named is the dev loop
     'clickhouse-client -q "select 1" -q "select 2"',
     'dbmate up',
+  ],
+  // THE VALUE OF AN OPTION, A DATABASE NAME AND A LOCAL HOST IN ANY SPELLING ARE NOT A SERVER (wave-5 review RV-DB-3, closure-db2.test.ts):
+  // a dotted user, a dotted database, a table with a schema, a password, a pattern - names whose shape is a host's. The client's table
+  // says which words are values and what an operand is
+  databaseGrammar: [
+    'mongosh -u john.doe --eval "db.stats()"',
+    'mysql -u app.user -e "drop table x"',
+    'psql -U app my.app',
+    'psql -U app my.app -c "select 1"',
+    'psql -Uhenry -c "update t set a = 1"',
+    'redis-cli -a pass.word set k v',
+    'pg_dump -t public.users -f dump.sql app',
+    'mysqldump -u app.user app',
+    'mongosh --host localhost:27017 --eval "db.stats()"',
+    'psql -h localhost -Atl',
+    'psql -v tbl=users -c "select count(*) from :tbl"',
+    'echo "select 1" | psql -v schema=public',
   ],
   // CLUSTER WORK AGAINST A LOCAL CLUSTER, AND LOOKING AT A PRODUCTION ONE, is what the one reader of a cluster command
   // (authority/k8s.ts) must leave alone: it asks about a plugin, a credential plugin, a cluster it cannot place and a

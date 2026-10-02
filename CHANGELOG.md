@@ -292,6 +292,32 @@ discipline of decision Q84 (authority changes are never patch releases).
   (now read to 64, and beyond that the directory is unproved); the carrier, http-client and git-config-include walks say
   so too. *The directory stack is edited by the option*: `pushd -n DIR` and `popd -n` leave the directory, `+N`/`-N` and
   unknown options make it unknown, `dirs -c` empties the stack (pinned against bash and zsh).
+- **A database client's command line is read by the client's own table - for the target, the statements, the files and the
+  pipe** (wave-5 review of the closure audit, RV-DB-1, RV-DB-2, RV-DB-3). `authority/db-options.ts` holds one table per
+  client (psql, mysql and its administration and dump tools, mongosh, redis-cli, clickhouse-client, cqlsh, influx, the
+  PostgreSQL tools) and one parser; the statement reader, the target resolver, the output-file reader, the `-l` and
+  `redis-cli INFO` exceptions and the standard-input condition all ask its answer.
+  *The target.* `psql --ho=prod-db.acme.com -c 'update users set active=false'` was ALLOW and `--host=` an absolute deny
+  (getopt takes any unambiguous prefix; the host scan matched the word `--host`); `mysql --hos=`, `clickhouse-client --ho=`
+  and the dump tools were the same. Every host option is now read in every spelling the client accepts (an abbreviation,
+  a glued value, a cluster, a list, `host:port` for mongosh, repeated: the strongest decides). A connection string where a
+  database name goes (`psql -d "$DATABASE_URL"`, `pg_dump --dbname=`, `redis-cli -u "$URL"`: the server is the string's, whatever
+  `-h` says) and a profile named in an abbreviation (`mysql --login-p=`) are UNCLASSIFIED, where they were the local socket.
+  *What is a host.* `mongosh -u john.doe`, `mysql -u app.user -e 'drop table x'`, `psql -U app my.app` and `redis-cli -a
+  pass.word` were absolute denials: a dotted word was a host wherever the old scan did not know it for an option's value. The
+  table says which words are values and what an operand is - a database NAME in psql, mysql and the dump tools (so `psql
+  prod-db.acme.com` is a database on the local socket), a host in cqlsh, an address in mongosh and clickhouse-client - and
+  `psql -Uhenry` is a user, not `-U` and a host `enry`.
+  *The psql script.* `printf 'select 1 as a$$$\n\\o |touch f\n' | psql` ran the program at ALLOW: the scanner took the second `$` for a
+  dollar quote. The scanner (`authority/sql-lex.ts`) now follows psql's own lexer, checked against the real psql 15, 16 and 17 and
+  fuzzed against it: a `$` continues a name, a number that runs into a letter is one token, `\;` and `\:` leave the line going on
+  as SQL (they used to swallow it: `select 1 \; \o |cmd`), a backquote is no quote, a tag may hold non-ASCII letters; the two
+  forms older and newer clients lex differently are refused. `:name` interpolates a variable and psql lexes its text, so the
+  values `-v` and `\set` give are read in place and any other reference (`\gset`, `\getenv`, nothing on the line) asks.
+  *The pipe.* Standard input is a script where the client was given no statement of its own, which is the table's answer, not a
+  prefix test of the words: `echo 'system id' | mysql -c` (a flag), `echo '.shell id' | sqlite3 -cmd .tables db` (not a statement)
+  ran the program at ALLOW; `psql -qc 'x'` and `--comm` are statements and replace it. Visible: `pg_dump --fil=out.sql` and
+  `mysqldump --res=out.sql` write the file their path says, like `-f`.
 - **A look is not an act - one reader of the role of a word** (closure audit 2026-10-01, register cause F: 50 over-gated
   findings, 13 of them HIGH, and the critical review-11 #142). `grep -rn "hook claude-code PreToolUse" docs/` - reading the
   documentation that describes the gate - was an absolute deny, as were `git commit -m "docs: explain --no-verify"`,
