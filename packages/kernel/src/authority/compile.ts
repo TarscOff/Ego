@@ -5,7 +5,6 @@ import { basename } from 'node:path';
 import { sha256Canonical } from '../util/hash.ts';
 import { overlayPathGlobs } from './overlay-paths.ts';
 import {
-  diffLocalTargets,
   mergeLocalTargets,
   type LocalTargetsLayerDoc,
 } from '../control-plane/local-targets.ts';
@@ -410,7 +409,8 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
       ...mergeLocalTargets(cp.localTargets, opts.localTargetLayers ?? []),
       k8sLocalContexts: [...cp.localTargets.k8sLocalContexts].sort(),
       dbLocalHosts: [...cp.localTargets.dbLocalHosts].sort(),
-      file: rel(opts.projectRoot ?? '', cp.localTargets.file),
+      // (relative to the control plane, not to the project: the hash is the same wherever either of them sits - AUTH-11)
+      file: `control-plane/${rel(cp.root, cp.localTargets.file)}`,
     },
   };
   return { ...body, tableHash: sha256Canonical(body) };
@@ -462,287 +462,18 @@ function rel(root: string, file: string): string {
   return base !== '' && file.startsWith(base + '/') ? file.slice(base.length + 1) : file;
 }
 
-/** Diff two compiled tables for `authority_changes` (Q84): effective verdict changes, added and removed IDs. */
-export interface AuthorityChange {
-  capability: string;
-  kind:
-    | 'added'
-    | 'removed'
-    | 'changed'
-    | 'matcher-repartitioned'
-    | 'matcher-removed'
-    | 'matcher-added'
-    | 'lock-changed'
-    | 'budget-changed'
-    | 'sanitizer-weakened'
-    | 'grants-widened'
-    | 'grants-narrowed'
-    | 'protection-removed'
-    | 'local-target-added'
-    | 'local-target-removed'
-    | 'production-marker-added'
-    | 'production-marker-removed';
-  /** profile/mode cell where a verdict change was observed (first one found); absent for table-wide changes */
-  cell?: string;
-  from?: Verdict;
-  to?: Verdict;
-  fromLock?: CapabilityLock;
-  toLock?: CapabilityLock;
-  detail?: string;
-}
-
-function matcherKey(x: CompiledMatcher): string {
-  return `${x.tool}|${x.command ?? ''}|${x.path ?? ''}|${x.url ?? ''}`;
-}
-
-/**
- * Diff two compiled tables for `authority_changes` (Q84) across EVERY profile × mode cell: a verdict change in any
- * cell counts, matcher removals and re-partitions count, lock-tier moves count, budget changes are reported separately.
- */
-export function diffAuthorityTables(
-  prev: CompiledAuthorityTable,
-  next: CompiledAuthorityTable,
-): AuthorityChange[] {
-  const out: AuthorityChange[] = [];
-  const seen = new Set<string>();
-  const push = (c: AuthorityChange) => {
-    const k = `${c.kind}|${c.capability}|${c.from ?? ''}|${c.to ?? ''}|${c.detail ?? ''}`;
-    if (seen.has(k)) return;
-    seen.add(k);
-    out.push(c);
-  };
-  const ids = new Set([...Object.keys(prev.effective), ...Object.keys(next.effective)]);
-  for (const id of [...ids].sort()) {
-    if (!(id in prev.effective)) push({ capability: id, kind: 'added', to: next.effective[id]! });
-    else if (!(id in next.effective)) push({ capability: id, kind: 'removed', from: prev.effective[id]! });
-  }
-  const cells = new Set<string>();
-  for (const t of [prev, next])
-    for (const p of Object.keys(t.profiles))
-      for (const m of Object.keys(t.profiles[p]!.modes)) cells.add(`${p}/${m}`);
-  for (const cell of [...cells].sort()) {
-    const [p, m] = cell.split('/') as [string, string];
-    const a = prev.profiles[p]?.modes[m];
-    const b = next.profiles[p]?.modes[m];
-    if (!a || !b) {
-      push({
-        capability: '*',
-        kind: a ? 'removed' : 'added',
-        cell,
-        detail: `profile/mode cell ${cell} ${a ? 'removed' : 'added'}`,
-      });
-      // a new cell is judged against the default mode of its profile: any capability it makes wider is a verdict change
-      const base = b ? next.profiles[p]?.modes[next.defaultMode] : undefined;
-      if (b && base)
-        for (const id of Object.keys(b).sort())
-          if (base[id] && VERDICT_RANK[b[id]!] < VERDICT_RANK[base[id]!])
-            push({
-              capability: id,
-              kind: 'changed',
-              cell,
-              from: base[id]!,
-              to: b[id]!,
-              detail: `new cell ${cell} is wider than ${p}/${next.defaultMode}`,
-            });
-      continue;
-    }
-    for (const id of [...ids].sort()) {
-      if (id in a && id in b && a[id] !== b[id])
-        push({ capability: id, kind: 'changed', cell, from: a[id]!, to: b[id]! });
-    }
-  }
-  for (const id of [...ids].sort()) {
-    const fromLock = prev.capabilities[id]?.lock;
-    const toLock = next.capabilities[id]?.lock;
-    if (fromLock && toLock && fromLock !== toLock)
-      push({ capability: id, kind: 'lock-changed', fromLock, toLock });
-    // a capability that stops leaving the machine stops being clamped: every grant phrase for it now lifts it
-    if (prev.capabilities[id]?.effect === 'external' && next.capabilities[id]?.effect === 'local')
-      push({
-        capability: id,
-        kind: 'grants-widened',
-        detail: 'effect external -> local: a session grant now lifts it from ASK to ALLOW',
-      });
-  }
-  const prevByKey = new Map(prev.matchers.map((x) => [matcherKey(x), x] as const));
-  const nextByKey = new Map(next.matchers.map((x) => [matcherKey(x), x] as const));
-  next.matchers.forEach((x, i) => {
-    const k = matcherKey(x);
-    const y = prevByKey.get(k);
-    if (!y) {
-      // a new matcher placed before an existing matcher of the same tool with a different verdict re-partitions the
-      // operations that existing matcher used to classify (Q84: MAJOR); appended after every peer it only narrows what
-      // was unknown (MINOR when its capability is not ALLOW)
-      const mine = next.effective[x.capability] ?? 'ASK';
-      const shadowed = next.matchers
-        .slice(i + 1)
-        .some(
-          (z) =>
-            prevByKey.has(matcherKey(z)) &&
-            (z.tool === x.tool || z.tool === 'any' || x.tool === 'any') &&
-            (next.effective[z.capability] ?? 'ASK') !== mine,
-        );
-      push({
-        capability: x.capability,
-        kind: shadowed ? 'matcher-repartitioned' : 'matcher-added',
-        detail: shadowed ? `${k}: inserted before existing matchers of a different verdict` : k,
-      });
-    } else if (y.capability !== x.capability)
-      push({
-        capability: x.capability,
-        kind: 'matcher-repartitioned',
-        detail: `${k}: ${y.capability} -> ${x.capability}`,
-      });
-  });
-  // grant phrases turn ASK into ALLOW: a new phrase or a removed negation widens, a removed phrase narrows
-  const phrases = (t: CompiledAuthorityTable) =>
-    new Set(t.grants.flatMap((g) => g.phrases.map((ph) => `${g.capability}|${ph}`)));
-  const gp = phrases(prev);
-  const gn = phrases(next);
-  for (const k of gn)
-    if (!gp.has(k))
-      push({ capability: k.split('|')[0]!, kind: 'grants-widened', detail: `grant phrase added: ${k}` });
-  for (const k of gp)
-    if (!gn.has(k))
-      push({ capability: k.split('|')[0]!, kind: 'grants-narrowed', detail: `grant phrase removed: ${k}` });
-  for (const n of prev.grantNegations)
-    if (!next.grantNegations.includes(n))
-      push({ capability: '*', kind: 'grants-widened', detail: `grant negation removed: ${n}` });
-  if (next.grantNegationWindowTokens < prev.grantNegationWindowTokens)
-    push({
-      capability: '*',
-      kind: 'grants-widened',
-      detail: `negation window ${prev.grantNegationWindowTokens} -> ${next.grantNegationWindowTokens}`,
-    });
-  const pp = (t: CompiledAuthorityTable) =>
-    new Set(t.protectedPaths.map((x) => `${x.tool}|${x.path}|${x.capability}`));
-  const nextPp = pp(next);
-  for (const k of pp(prev))
-    if (!nextPp.has(k))
-      push({
-        capability: k.split('|')[2]!,
-        kind: 'protection-removed',
-        detail: `protected path removed: ${k}`,
-      });
-  for (const c of prev.preDeniedCommandClasses)
-    if (!next.preDeniedCommandClasses.includes(c))
-      push({ capability: c, kind: 'protection-removed', detail: `pre-denied command class removed: ${c}` });
-  // locked redaction minimums are part of the contract: a removed or lowered minimum is a MAJOR change
-  for (const [id, sev] of Object.entries(prev.sanitizerLockedMinimums)) {
-    const now = next.sanitizerLockedMinimums[id];
-    if (!now) push({ capability: '*', kind: 'sanitizer-weakened', detail: `locked detector ${id} removed` });
-    else if (sev === 'block' && now === 'warn')
-      push({
-        capability: '*',
-        kind: 'sanitizer-weakened',
-        detail: `locked detector ${id} lowered from block to warn`,
-      });
-  }
-  // THE LOCAL-DEVELOPMENT REGISTRY IS AUTHORITY. Declaring a target local turns a refusal into an allowed
-  // operation without changing a single capability verdict, so a diff that compared verdicts alone reported the
-  // widening as no change at all. Both the human gate (`tableWidenings`) and this diff read the same function.
-  for (const c of diffLocalTargets(prev.localTargets, next.localTargets))
-    push({
-      capability: '*',
-      kind: (
-        {
-          'target-added': 'local-target-added',
-          'target-removed': 'local-target-removed',
-          'marker-added': 'production-marker-added',
-          'marker-removed': 'production-marker-removed',
-        } as const
-      )[c.kind],
-      detail: c.detail,
-    });
-  for (const [k, y] of prevByKey)
-    if (!nextByKey.has(k)) push({ capability: y.capability, kind: 'matcher-removed', detail: k });
-  for (const p of Object.keys(next.profiles).sort()) {
-    const a = prev.profiles[p]?.budgets;
-    const b = next.profiles[p]!.budgets;
-    if (!a) continue;
-    for (const k of Object.keys(b) as Array<keyof ExecutionBudgets>)
-      if (a[k] !== b[k])
-        push({
-          capability: '*',
-          kind: 'budget-changed',
-          detail: `${p}.${k}: ${String(a[k])} -> ${String(b[k])}`,
-        });
-  }
-  return out;
-}
-
-/**
- * SemVer classification of a set of authority changes (Q84): any effective verdict change, removal, re-partition,
- * matcher removal (an operation loses its classification), lock move, or a new ALLOW is MAJOR; a new ASK/DENY id, a
- * new matcher that narrows, or a budget change is MINOR.
- */
-export function classifyAuthorityChanges(
-  changes: AuthorityChange[],
-  next: CompiledAuthorityTable,
-): 'none' | 'minor' | 'major' {
-  if (changes.length === 0) return 'none';
-  let level: 'minor' | 'major' = 'minor';
-  for (const c of changes) {
-    if (
-      c.kind === 'changed' ||
-      c.kind === 'removed' ||
-      c.kind === 'matcher-repartitioned' ||
-      c.kind === 'matcher-removed' ||
-      c.kind === 'lock-changed' ||
-      c.kind === 'sanitizer-weakened' ||
-      c.kind === 'grants-widened' ||
-      c.kind === 'protection-removed' ||
-      c.kind === 'local-target-added' ||
-      c.kind === 'production-marker-removed'
-    )
-      level = 'major';
-    if (c.kind === 'added' && c.to === 'ALLOW') level = 'major';
-    if (
-      c.kind === 'added' &&
-      c.capability !== '*' &&
-      (next.absoluteDenies.includes(c.capability) || next.adminGoverned.includes(c.capability))
-    )
-      level = 'major';
-    if (c.kind === 'matcher-added' && next.effective[c.capability] === 'ALLOW') level = 'major';
-  }
-  return level;
-}
-
-const LOCK_RANK: Record<CapabilityLock, number> = { none: 0, 'admin-governed': 1, absolute: 2 };
-
-/**
- * WHETHER A CHANGE MAKES THE TABLE MORE PERMISSIVE, or removes something that held it back: the changes a human must
- * see before they apply (issue #16 section 7: "versioned and diffable with no silent widening"). Narrowings, new
- * ASK or DENY capabilities and budget changes are listed but not marked; anything this cannot prove narrower is
- * marked, because a missed widening costs more than a spurious mark. `ego authority diff` prints the mark and
- * `--fail-on-widening` turns it into an exit code.
- */
-export function isWideningChange(c: AuthorityChange, next: CompiledAuthorityTable): boolean {
-  switch (c.kind) {
-    case 'changed':
-      return c.from !== undefined && c.to !== undefined && VERDICT_RANK[c.to] < VERDICT_RANK[c.from];
-    case 'added':
-      return c.to === 'ALLOW';
-    case 'removed':
-      return c.from !== 'ALLOW';
-    case 'lock-changed':
-      return c.fromLock !== undefined && c.toLock !== undefined && LOCK_RANK[c.toLock] < LOCK_RANK[c.fromLock];
-    case 'matcher-added':
-      return next.effective[c.capability] === 'ALLOW';
-    // (declaring a target local, or removing a production marker, turns a refusal into an allowed operation without
-    // changing a single capability verdict: it is a widening even though no cell moves)
-    case 'matcher-removed':
-    case 'matcher-repartitioned':
-    case 'sanitizer-weakened':
-    case 'grants-widened':
-    case 'protection-removed':
-    case 'local-target-added':
-    case 'production-marker-removed':
-      return true;
-    case 'grants-narrowed':
-    case 'budget-changed':
-    case 'local-target-removed':
-    case 'production-marker-added':
-      return false;
-  }
-}
+// The diff of two compiled tables, the grade of a set of changes and the predicate "this change widens" are ONE description of the
+// table and live in `table-diff.ts`; they are re-exported here because this is where the release pipeline and the commands have
+// always imported them from.
+export {
+  AUTHORITY_TABLE_FIELDS,
+  classifyAuthorityChanges,
+  describeAuthorityChange,
+  diffAuthorityTables,
+  fieldOfChange,
+  isWideningChange,
+  matcherIdentity,
+  type AuthorityChange,
+  type TableBody,
+  type TableField,
+} from './table-diff.ts';

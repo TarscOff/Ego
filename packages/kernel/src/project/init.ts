@@ -22,7 +22,12 @@ import {
   isRuntimeCached,
   listIndexEntries,
 } from '../launcher/home.ts';
-import { ensurePolicyCache, readPolicyCache, POLICY_CACHE_RELATIVE } from '../policy/cache.ts';
+import {
+  ensurePolicyCache,
+  readPolicyCache,
+  POLICY_CACHE_RELATIVE,
+  type WideningAcceptance,
+} from '../policy/cache.ts';
 import { compileAuthority } from '../authority/compile.ts';
 import { loadControlPlane } from '../control-plane/load.ts';
 import type { IgnoredLocalTarget } from '../control-plane/types.ts';
@@ -30,6 +35,7 @@ import { authorityDiffReport, type AuthorityDiffReport } from './authority-diff.
 import {
   detectLocalSurfaces,
   parseLocalTargetSpec,
+  PROJECT_LOCAL_TARGETS_FILE,
   planAdoption,
   renderLocalSurfaces,
   workingTreeTargets,
@@ -45,7 +51,7 @@ import {
   readTextIfExists,
   writeAtomic,
   writeJsonAtomic,
-  readJsonIfExists,
+  readJsonIfReadable,
 } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
 import { writeClaudeSettings, writeSlashCommands } from '../../../adapter-claude-code/src/dialect.ts';
@@ -343,21 +349,38 @@ export function initProject(opts: InitOptions): InitReport {
   // Widenings that reached the layer files since the last accepted init - an agent's edit, a teammate's commit - are
   // shown to a person BEFORE they are accepted, when there is a person to ask. They are asked about first and alone:
   // what the human adopts with a flag below is their own act and needs no second question.
-  let acceptWidening = !agentShell;
+  // WHAT A PERSON ACCEPTS IS WHAT THEY WERE SHOWN (AUTH-4). With a question asked, the acceptance below is bound to the layer
+  // files as they were when the widenings were listed - and, when nothing was waiting, to the files as they were then, so a
+  // widening that arrives in the seconds after "nothing to accept" is not accepted by the call that follows.
+  let acceptWidening: WideningAcceptance = !agentShell;
   if (acceptWidening && opts.confirmWidening) {
-    const waiting = ensurePolicyCache(controlPlaneDir(), projectRoot, policySelf, {
-      acceptWidening: false,
-    }).cache.pendingWidening;
+    const seen = ensurePolicyCache(controlPlaneDir(), projectRoot, policySelf).cache;
+    const waiting = seen.pendingWidening;
     if (waiting && !opts.confirmWidening(waiting.widenings)) {
       if (plan.add.length)
         throw new Error(
           'declined: widenings are waiting in the layer files; accept or remove them before adopting another target',
         );
       acceptWidening = false;
-    }
+    } else
+      acceptWidening = waiting
+        ? { layerSources: { ...waiting.layerSources }, widenings: [...waiting.widenings] }
+        : { layerSources: { ...seen.layerSources }, widenings: [] };
   }
-  const adoptedFile = writeAdoption(projectRoot, plan.add);
-  const { cache } = ensurePolicyCache(controlPlaneDir(), projectRoot, policySelf, { acceptWidening });
+  const adoption = writeAdoption(
+    projectRoot,
+    plan.add,
+    typeof acceptWidening === 'object' ? { hash: acceptWidening.layerSources[PROJECT_LOCAL_TARGETS_FILE] } : undefined,
+  );
+  // what the person adopts with a flag is their own act: the file they changed is bound by the hash of the text just written
+  if (adoption && typeof acceptWidening === 'object')
+    acceptWidening = { layerSources: { ...acceptWidening.layerSources, [adoption.file]: adoption.sha256 } };
+  const adoptedFile = adoption?.file ?? null;
+  const { cache, acceptanceRefused } = ensurePolicyCache(controlPlaneDir(), projectRoot, policySelf, { acceptWidening });
+  if (acceptanceRefused)
+    notes.push(
+      `policy widening NOT accepted: ${acceptanceRefused}. Nothing in the layer files was applied; run \`ego init\` again and read what is shown`,
+    );
   generated.push(rel(projectRoot, join(projectRoot, POLICY_CACHE_RELATIVE)));
   if (cache.pendingWidening)
     notes.push(
@@ -515,7 +538,19 @@ function ensureGitignore(projectRoot: string): void {
 }
 
 export function readGeneratedManifest(projectRoot: string): GeneratedManifest | null {
-  return readJsonIfExists<GeneratedManifest>(join(projectRoot, GENERATED_MANIFEST_RELATIVE));
+  // (derived state: one that cannot be read is absent, and `ego init` writes it again)
+  const m = readJsonIfReadable<GeneratedManifest>(join(projectRoot, GENERATED_MANIFEST_RELATIVE));
+  const strings = (v: unknown): boolean =>
+    v !== null && typeof v === 'object' && !Array.isArray(v) && Object.values(v as object).every((x) => typeof x === 'string');
+  // (valid JSON of another shape is no more a manifest than an empty file is)
+  return m !== null &&
+    typeof m === 'object' &&
+    m.schema === 'ego.generated-manifest/1' &&
+    typeof m.runtimeSha256 === 'string' &&
+    strings(m.files) &&
+    (m.sources === undefined || strings(m.sources))
+    ? m
+    : null;
 }
 
 const PERMISSIONS_TEMPLATE = `---

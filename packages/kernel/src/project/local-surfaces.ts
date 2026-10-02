@@ -31,6 +31,7 @@ import { loadControlPlane } from '../control-plane/load.ts';
 import type { LocalTargetKind, LocalTargets } from '../control-plane/types.ts';
 import { LAYER_FILES } from '../policy/cache.ts';
 import { readTextIfExists, writeAtomic, ensureDir } from '../util/fs.ts';
+import { sha256Hex } from '../util/hash.ts';
 import { dirname } from 'node:path';
 
 export const PROJECT_LOCAL_TARGETS_FILE = LAYER_FILES.projectLocalTargets;
@@ -586,11 +587,24 @@ export function addToFrontmatterList(source: string, key: string, name: string):
 }
 
 /** Writes the planned declarations into the project's local-targets file, creating it from the template when it does
- *  not exist. Returns the project-relative path. */
-export function writeAdoption(projectRoot: string, add: LocalTargetSpec[]): string | null {
+ *  not exist. Returns the project-relative path and the hash of the text it wrote (the hash the acceptance is bound to).
+ *
+ *  `shown` is the hash of that file as the person was last shown the layer files (undefined: it did not exist): an adoption
+ *  is written on top of THAT text and no other, so a file rewritten while a question was being answered is refused here rather
+ *  than carried into a declaration the person never saw (AUTH-4). */
+export function writeAdoption(
+  projectRoot: string,
+  add: LocalTargetSpec[],
+  shown?: { hash: string | undefined },
+): { file: string; sha256: string } | null {
   if (add.length === 0) return null;
   const path = join(projectRoot, PROJECT_LOCAL_TARGETS_FILE);
-  let text = readTextIfExists(path) ?? LOCAL_TARGETS_TEMPLATE;
+  const had = readTextIfExists(path);
+  if (shown && (had === null ? undefined : sha256Hex(had)) !== shown.hash)
+    throw new Error(
+      `refused: ${PROJECT_LOCAL_TARGETS_FILE} changed after the widenings were shown to you; nothing was written. Run \`ego init\` again and read what is shown`,
+    );
+  let text = had ?? LOCAL_TARGETS_TEMPLATE;
   for (const s of add) text = addToFrontmatterList(text, KEYS[s.kind], s.name);
   // an edit that does not produce the file it meant to is not written
   const written = parseLocalTargetsLayerText(PROJECT_LOCAL_TARGETS_FILE, text, 'project').entries;
@@ -600,8 +614,9 @@ export function writeAdoption(projectRoot: string, add: LocalTargetSpec[]): stri
         `refused: editing ${PROJECT_LOCAL_TARGETS_FILE} would not have produced the declaration ${s.kind}:${s.name}; add it by hand`,
       );
   ensureDir(dirname(path));
-  writeAtomic(path, text.endsWith('\n') ? text : `${text}\n`);
-  return PROJECT_LOCAL_TARGETS_FILE;
+  const out = text.endsWith('\n') ? text : `${text}\n`;
+  writeAtomic(path, out);
+  return { file: PROJECT_LOCAL_TARGETS_FILE, sha256: sha256Hex(out) };
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *

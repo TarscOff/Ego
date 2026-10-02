@@ -36,6 +36,22 @@ export function readJsonIfExists<T = unknown>(path: string): T | null {
   return t === null ? null : (JSON.parse(t) as T);
 }
 
+/**
+ * JSON from a file that is DERIVED STATE - a policy cache, a generated manifest: something `ego init` writes and any run can
+ * write again. Such a file that cannot be read is ABSENT, never fatal: a zero-byte file left by a sync tool or a crash, a
+ * truncated write, a hand edit, a conflict marker, a directory where the file should be. The reader that threw on these made
+ * every hook event, `ego doctor` and `ego init` - the remedy the error itself names - exit 2 until a person deleted a
+ * protected generated file by hand (closure audit 2026-10-02, AUTH-2). Do NOT use it for state that cannot be regenerated (a
+ * session record, the runtime stamp, the trust store): for those a file that does not parse is a refusal, not an absence.
+ */
+export function readJsonIfReadable<T = unknown>(path: string): T | null {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as T;
+  } catch {
+    return null;
+  }
+}
+
 /** Atomic write: temp file in the same directory, fsync, rename. */
 export function writeAtomic(path: string, data: string | Uint8Array): void {
   mkdirSync(dirname(path), { recursive: true });

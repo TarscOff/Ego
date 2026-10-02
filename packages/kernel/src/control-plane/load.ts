@@ -1,6 +1,6 @@
 // Loads and validates the authored control plane. Every problem is collected and reported together; any problem
 // fails the load so a malformed file can never silently weaken enforcement (decision Q10).
-import { join, basename } from 'node:path';
+import { join, basename, relative } from 'node:path';
 import { readdirSync } from 'node:fs';
 import {
   parseMarkdown,
@@ -720,11 +720,14 @@ function parseBoundedCommands(file: string, problems: string[]): BoundedCommands
   };
 }
 
-export function loadControlPlane(root: string): ControlPlane {
+export function loadControlPlane(rootAsGiven: string): ControlPlane {
+  // THE SAME CONTROL PLANE GIVEN AS `/x/control-plane` AND AS `/x/control-plane/` IS THE SAME TABLE: a trailing separator cost the
+  // first character of every source-hash key and changed the table hash (AUTH-11)
+  const root = rootAsGiven.length > 1 ? rootAsGiven.replace(/[\\/]+$/, '') : rootAsGiven;
   const problems: string[] = [];
   const sourceHashes: Record<string, string> = {};
   const rec = (file: string) => {
-    sourceHashes[toPosix(file.slice(root.length + 1))] = sha256Hex(readText(file));
+    sourceHashes[toPosix(relative(root, file))] = sha256Hex(readText(file));
   };
   const req = (rel: string): string => {
     const f = join(root, rel);
