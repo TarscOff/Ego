@@ -7733,10 +7733,16 @@ function resolveScriptCommand(
     const parentCli: Array<[string, string]> = [];
     // the environment this make inherited from the producers above it: variables assigned on the command that started them,
     // the command-line variables of a parent make (MAKEFLAGS carries them), and what a parent makefile exports
+    // ...and what an EARLIER unit of the same command exported (`export CFLAGS='; …'; make`): the environment make starts with holds it, and a
+    // variable the makefile reads is read with it - not as "empty" or "unknown"
+    const inheritedEnv: Array<[string, string]> = [];
     for (const [k, v] of Object.entries(env.envInputs)) {
       if (k.startsWith('\0env:')) makeEnvVars.push([k.slice(5), v]);
       else if (k.startsWith('\0cli:')) parentCli.push([k.slice(5), v]);
+      else if (!k.startsWith('\0') && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) inheritedEnv.push([k, v]);
     }
+    for (const [k, v] of inheritedEnv)
+      store.set(k, [v], { origin: cl.envOverrides ? 'environment-override' : 'environment', simple: false, conditional: false });
     if (makeAt > 0)
       for (const t of allRawMarked.slice(0, makeAt)) {
         const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(t.text);

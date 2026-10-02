@@ -580,6 +580,7 @@ const MAX_BRANCHES = 8;
 const MAX_STEPS = 40_000;
 const MAX_TEXT = 1 << 16;
 const MAX_FOREACH = 128;
+const MAX_DEPTH = 150;
 
 class Capped extends Error {}
 
@@ -611,7 +612,11 @@ function splitArguments(text: string, open: string, close: string, max: number):
   return out;
 }
 
-function parseMakeText(text: string): MNode[] {
+/** how deep references may nest in one text before the rest is unknown: a text of twenty thousand `$(` is an attack on the stack, not a makefile */
+const MAX_NESTING = 100;
+
+function parseMakeText(text: string, depth = 0): MNode[] {
+  if (depth > MAX_NESTING) return [{ k: 'unk' }];
   const nodes: MNode[] = [];
   let lit = '';
   const flush = (): void => {
@@ -653,8 +658,8 @@ function parseMakeText(text: string): MNode[] {
     const spec = f ? FUNCTIONS[f[1]!] : undefined;
     if (f && spec) {
       const args = splitArguments(body.slice(f[0].length), next, close, spec[1]);
-      nodes.push({ k: 'fn', fn: f[1]!, args: args.map((a) => parseMakeText(a)) });
-    } else nodes.push({ k: 'ref', name: parseMakeText(body) });
+      nodes.push({ k: 'fn', fn: f[1]!, args: args.map((a) => parseMakeText(a, depth + 1)) });
+    } else nodes.push({ k: 'ref', name: parseMakeText(body, depth + 1) });
   }
   flush();
   return nodes;
@@ -898,7 +903,22 @@ class Expander {
     return out;
   }
 
+  /** how deep one expansion may recurse (a reference inside the value of a reference inside...): the JavaScript stack is not the bound */
+  private depth = 0;
+
   private node(n: Exclude<MNode, string>, frame: Frame | null): Br[] {
+    if (++this.depth > MAX_DEPTH) {
+      this.depth--;
+      throw new Capped();
+    }
+    try {
+      return this.nodeInner(n, frame);
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private nodeInner(n: Exclude<MNode, string>, frame: Frame | null): Br[] {
     if (n.k === 'unk') return unknown();
     if (n.k === 'ref') {
       const names = this.nodes(n.name, frame);
