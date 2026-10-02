@@ -104,12 +104,15 @@ matchers:
   - capability: git.alias.inline
     tool: Bash
     command: '^git\s+remote-ext\b'
+  # WHICH ENVIRONMENT VARIABLE IS WHICH IS ONE LIST, and it is in the evaluator (authority/env-vars.ts: PROGRAM_NAMES): the word of the marker
+  # says whether the name chooses what runs (refused) or only where a tool looks (asked about). This file held a second copy of the list,
+  # and a third and fourth as patterns over the text of every segment (closure audit wave 5, U-11).
   - capability: command.env-inject
     tool: Bash
-    command: '^\x00ego\x00env-inject\s+(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|BASH_ENV|ENV$|PS4|BASH_XTRACEFD|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_|EGO_|CLAUDE_|CODEX_|SSH_ASKPASS|SUDO_ASKPASS|SWIFT_EXEC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_AUDIT|IFS|SHELL$|XDG_CONFIG_HOME|XDG_DATA_HOME|PERL5LIB|PERLLIB|PYTHONHOME|RUBYLIB|GEM_HOME|GEM_PATH|CLASSPATH|JAVA_HOME|NODE_PATH|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|GOBIN|COMPOSER_HOME|GLIBC_TUNABLES|OBJC_INSERT_LIBRARIES|LUA_PATH|LUA_CPATH)'
+    command: '^\x00ego\x00env-inject\s'
   - capability: command.env-override
     tool: Bash
-    command: '^\x00ego\x00env-inject\s+'
+    command: '^\x00ego\x00env-override\s'
   - capability: git.alias.inline
     tool: Bash
     command: '^git\s+(alias-override|alias-shell|alias-opaque)\b'
@@ -644,6 +647,59 @@ matchers:
   - capability: fs.generated.write
     tool: Write
     path: 'policies/generated/**'
+  # A COMMITTED TEMPLATE IS NOT A SECRET (closure audit wave 5, U-17). `.env.example` is the file the README tells a developer to copy to
+  # `.env`, it is in the repository for everybody to read, and `cat .env.example`, `grep -c . .env.example` and editing it were asked
+  # about (199 of the commands the agents of this repository's owner ran named it). A rule cannot say "except", so the exemption is a rule
+  # of its own that stands FIRST: the first rule of the core that matches a path decides it. `.env.example.local` is not here: the name
+  # says it is somebody's local copy.
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.example'
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.*.example'
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.sample'
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.*.sample'
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.template'
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.*.template'
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.dist'
+  - capability: fs.repo.read
+    tool: Read
+    path: '**/.env.*.dist'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.example'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.*.example'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.sample'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.*.sample'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.template'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.*.template'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.dist'
+  - capability: fs.repo.write
+    tool: Write
+    path: '**/.env.*.dist'
   - capability: fs.env-file.write
     tool: Write
     path: '**/.env'
@@ -724,7 +780,7 @@ matchers:
   # names are built in. Any other value names a program (exit review 10).
   - capability: command.unmodelled-closure
     tool: Bash
-    command: '^git\s+(merge|pull)\b[^|;&]*\s(-s|--strategy)(=|\s+)(?!(ort|recursive|resolve|octopus|ours|subtree)(\s|$))\S'
+    command: '^git\s+(merge|pull)\b[^|;&]*\s((?-i:-s)|--strategy)(=|\s+)(?!(ort|recursive|resolve|octopus|ours|subtree)(\s|$))\S'
   - capability: git.local.merge.network
     tool: Bash
     command: '^git\s+(pull|fetch)\b[^|;&]*\s([a-z][a-z0-9+.-]*://|git@|ssh://|[^\s/]+@[^\s:]+:)'
@@ -1300,33 +1356,22 @@ matchers:
   - capability: command.interpreter-script
     tool: Bash
     command: '^(rg|ripgrep|grep|ag)\b[^|;&]*\s(--pre|--hostname-bin|--pre-glob)(=|\s)'
-  # …EXCEPT when the name IS execution. A standalone `export PATH=/tmp/evil` or `BASH_ENV=/tmp/x` redefines what
-  # every later command in that shell runs, and the `export` form reached the bounded builtin rather than the
-  # binding. Anchored to an assignment-ONLY line, so it can never shadow a command that follows one: those are
-  # stripped by the normalizer into an `env-inject` marker long before this.
-  # The two sets are exactly the ones the `env-inject` marker rules above distinguish, so a standalone binding and
-  # a binding in front of a command get the SAME verdict rather than two different ones.
-  # A SEARCH PATTERN IS DATA. These two rules match a binding ANYWHERE on the line, which is right for a command
-  # they precede and wrong for a word a search tool was asked to look for: `grep -rn 'NODE_OPTIONS=' .` — reading
-  # your own repository for the name of a variable — was refused outright (exit review 7). The head is excluded,
-  # not the word, because the analyzer cannot tell a pattern from a binding once the quoting is gone, and the
-  # tools that take a pattern are exactly the ones where the distinction matters.
-  # `NODE_OPTIONS` is narrowed to the options that LOAD CODE: `--max-old-space-size=4096` raises the V8 heap and
-  # executes nothing, and denying it gated the standard fix for an out-of-memory build.
-  - capability: command.env-inject
-    tool: Bash
-    command: '^(?!(?:grep|rg|ripgrep|egrep|fgrep|ag|ack|sed|gsed|awk|gawk|find|fd|xargs|comm|diff|echo|printf|dirname|basename|seq|expr)\b)[\s\S]*(?:^|\s)(?:LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]*|BASH_ENV|ENV|PS4|BASH_XTRACEFD|PROMPT_COMMAND|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT|GIT_[A-Z_]*|EGO_[A-Z_]*|CLAUDE_[A-Z_]*|CODEX_[A-Z_]*|SSH_ASKPASS|SUDO_ASKPASS|IFS|SHELL)\+?='
-  - capability: command.env-inject
-    tool: Bash
-    command: '^(?!(?:grep|rg|ripgrep|egrep|fgrep|ag|ack|sed|gsed|awk|gawk|find|fd|xargs|comm|diff|echo|printf|dirname|basename|seq|expr)\b)[\s\S]*(?:^|\s)NODE_OPTIONS\+?=\S*(--(require|import|loader|experimental-loader|env-file|conditions)\b|(^|\s)-r\b)'
-  - capability: command.env-override
-    tool: Bash
-    command: '^(?!(?:grep|rg|ripgrep|egrep|fgrep|ag|ack|sed|gsed|awk|gawk|find|fd|xargs|comm|diff|echo|printf|dirname|basename|seq|expr)\b)[\s\S]*(?:^|\s)(?:KUBECONFIG|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_HOST|DOCKER_CONFIG|NPM_CONFIG_[A-Z_]*|HOME|PATH)\+?='
+  # A NAME THAT IS EXECUTION IS REPORTED BY THE NORMALIZER, wherever the binding stands: in front of a command, handed to `env`, exported,
+  # a line of assignments, `printf -v`, `read`, inside a carried string. Three patterns stood here instead, matching `NAME=` ANYWHERE in the
+  # text of a segment (with the search tools left out by name), and they held a net no reader could see through: `subprocess.run(cmd,
+  # shell=True)` was `SHELL=`, a python heredoc that mentioned `IFS=` was an injection, and `ENV=${1:-dev}` on a line of a script refused
+  # the script. DENY cannot be approved, so none of those could be run (closure audit wave 5, U-11). What the net caught that the
+  # normalizer did not - a binding in a string that a carrier hands to a shell (`watch 'export BASH_ENV=/tmp/evil'`) - is read by the
+  # normalizer now, once, and the generated cross-product of the command family holds the floor.
   # `git grep -O<cmd>` / `--open-files-in-pager=<cmd>` hands <cmd> to git's pager machinery, which runs it
   # through a shell with the matching file names appended — a program EGO never read (exit review 8).
+  # EVERY MATCHER IS COMPILED CASE-INSENSITIVELY (a command is found by its name on a case-folding disk), and an option letter is not a
+  # name: `-O` is the pager and `-o` is `--only-matching` of `git grep`, the output of `git archive` and of `git format-patch`, so the
+  # letter says so with `(?-i:…)` and `git archive -o out.tar.gz HEAD` is no longer a pager (closure audit wave 5, U-16). The same
+  # collision stood in the merge strategy rule above: `-S` signs a merge and `-s` names its strategy.
   - capability: command.script-opaque
     tool: Bash
-    command: '^git\b[\s\S]*\s(-O|--open-files-in-pager)(=|\s*)\S'
+    command: '^git\b[\s\S]*\s((?-i:-O)|--open-files-in-pager)(=|\s*)\S'
   # ORDINARY READ-ONLY GIT PLUMBING AND EVERYDAY VERBS. These fell through every matcher to command.unknown and
   # asked: a search of tracked files, a read of an object, a read of configuration, and deleting one tracked file
   # — which `rm src/a.ts` already does without asking (exit review 7). `git config` WITHOUT a value is a read;
@@ -1334,12 +1379,20 @@ matchers:
   - capability: command.read-only
     tool: Bash
     command: '^git\s+(grep|cat-file|ls-tree|ls-files|rev-list|show-ref|show-branch|shortlog|describe|merge-base|name-rev|var|count-objects|verify-pack|diff-tree|diff-index|for-each-ref|check-ignore|check-attr)\b'
+  # `git archive` and `git format-patch` WRITE A FILE OR A DIRECTORY THE COMMAND LINE NAMES (`-o`), and nothing else: the destination
+  # is judged by the option table of each (tools.ts: `output` is a write, `output-directory` a directory written, `--exec` a program),
+  # so the verb itself is an ordinary local mutation. With no matcher at all they asked, and the `-o` of the pager rule above was
+  # what the ask said (closure audit wave 5, U-16). `git archive --remote=URL` is not this: it connects to a server the command
+  # line names, and stays what it was, a command no matcher classifies.
+  - capability: command.local-mutation
+    tool: Bash
+    command: '^git\s+(archive(?![^|;&]*\s--remote(=|\s))|format-patch)\b'
   - capability: command.read-only
     tool: Bash
     # A SCOPE IS NOT A READ. `--local` says WHERE, not WHAT: `git config --local alias.y '!git push …'` sets a
     # shell alias and must never be ALLOW, so the read forms are named explicitly and a bare key is a read only
     # when nothing follows it.
-    command: '^git\s+config\s+(--(global|local|system|worktree|file\s+\S+)\s+)?(--(get|get-all|get-regexp|get-urlmatch|list|name-only|show-origin|show-scope|null|type)\b|-l\s*$|[A-Za-z0-9._-]+\s*$)'
+    command: '^git\s+config\s+(--(global|local|system|worktree|file\s+\S+)\s+)?(--(get|get-all|get-regexp|get-urlmatch|list|name-only|show-origin|show-scope|null|type)\b|-l\s*$|[A-Za-z][A-Za-z0-9._-]*\s*$)'
   - capability: fs.repo.delete
     tool: Bash
     command: '^git\s+rm\b'
@@ -1386,7 +1439,7 @@ matchers:
   # the normalizer and matched by its own rule above, which is why this one can stay narrow rather than clever.
   - capability: command.read-only
     tool: Bash
-    command: '^(?:(?:export|declare|local|readonly|typeset)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=(?:\$ARITH|\$SUBST|\$\{[A-Za-z_][A-Za-z0-9_]*(?:[:#%/^,][^{}]*)?\}|\$[A-Za-z_][A-Za-z0-9_]*|"[^"`]*"|''[^'']*''|[^\s;&|`$<>]*)\s*)+$'
+    command: '^(?:(?:export|declare|local|readonly|typeset)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*(?:\+)?=(?:\$ARITH|\$SUBST|\$\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])(?:[:#%/^,][^{}]*)?\}|\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])|"[^"`]*"|''[^'']*''|[^\s;&|`$<>]*)\s*)+$'
   # A call to a function DEFINED IN THE SAME UNIT runs a body the analyzer already read at the definition, so the
   # call adds no closure of its own. The marker is put on the head by the analyzer, which is the only place that
   # knows which names the unit defined; the rest of the segment — its redirections and path operands — is still

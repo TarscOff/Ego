@@ -22,6 +22,7 @@
 // `K8sHost`, and the evaluator's own option tables are derived from the ones below, so they cannot drift from them.
 import type { TargetClass } from '../control-plane/types.ts';
 import { parseYaml, type YamlValue } from '../util/yaml.ts';
+import { localRead } from './local-reads.ts';
 
 /** A word of the command line as the shell hands it to the tool. `quoted`: some of it was written inside quotes.
  *  `expands`: the shell fills something in (a variable, a substitution), so the tool receives a word nobody has read. */
@@ -838,7 +839,13 @@ export function k8sEffect(input: K8sInput, host: K8sHost): K8sEffect {
       isFlagWord(lastList.at) &&
       (lastList.shape.glued === undefined || /^(true|t|1)$/i.test(lastList.shape.glued));
     const dry = input.written && host.dryRun(input.headWord, words);
-    mutating = acts && !readOnlySub && !listing && !dry;
+    // A HELM FORM THAT NEVER REACHES A CLUSTER HAS NO TARGET TO BE UNCLASSIFIED ABOUT: `helm repo list`, `helm plugin list`, `helm
+    // dependency list` and `helm repo update` read local state or refresh an index, and "the ambient kubeconfig context could not be
+    // resolved" was an answer to a question they do not ask. The table of local reads (local-reads.ts) is the one reader of which
+    // forms those are; the words after the verb are handed over as the tool receives them, and a word a shell fills in is none
+    const clusterFree =
+      head === 'helm' && !p.words.slice(p.verbAt).some(dynamic) && localRead(['helm', ...p.words.slice(p.verbAt).map((w) => w.text)]) !== null;
+    mutating = acts && !readOnlySub && !listing && !dry && !clusterFree;
   }
   if (secret !== null) mutating = true;
 

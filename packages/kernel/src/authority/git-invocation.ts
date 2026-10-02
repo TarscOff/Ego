@@ -524,7 +524,7 @@ const BUILTIN = new Set(GIT_BUILTIN_VERBS);
  */
 export const GIT_HYPHENATED_WITH_RULES: ReadonlySet<string> = new Set([
   'cat-file', 'check-attr', 'check-ignore', 'cherry-pick', 'commit-tree', 'count-objects', 'credential-store', 'diff-files',
-  'diff-index', 'diff-tree', 'for-each-ref', 'ls-files', 'ls-remote', 'ls-tree', 'merge-base', 'merge-file', 'merge-index',
+  'diff-index', 'diff-tree', 'for-each-ref', 'format-patch', 'ls-files', 'ls-remote', 'ls-tree', 'merge-base', 'merge-file', 'merge-index',
   'merge-tree', 'name-rev', 'receive-pack', 'remote-ext', 'rev-list', 'rev-parse', 'send-pack', 'show-branch', 'show-ref',
   'update-ref', 'upload-pack', 'verify-pack',
   // (the three words the evaluator itself writes for an alias a line defines - evaluate.ts, stripToolGlobalOptions - and the rule that

@@ -26,7 +26,7 @@ import {
   substitutionsIn,
 } from './shell-lexer.ts';
 import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
-import { SHELL_GRAMMAR, expandLongOptions, gitConfigAsks, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
+import { SHELL_GRAMMAR, curlWriteOut, expandLongOptions, gitConfigAsks, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
 import {
   PARALLEL_VALUE_OPTS,
   findPredicateValues,
@@ -75,7 +75,10 @@ import {
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import { WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
-import { assignmentWord, bindingsOf } from './bindings.ts';
+import { localRead } from './local-reads.ts';
+import { directorySelector } from './pkg-selectors.ts';
+import { assignmentWord, bindingsOf, type Binding as ShellBinding } from './bindings.ts';
+import { LOCATIONS, PROGRAM_NAMES, SHELL_LOCAL_NAMES, assignedValue, judgeLocation, type Whereabouts } from './env-vars.ts';
 import {
   canonicalGitTokens,
   forcesRefReset,
@@ -237,7 +240,22 @@ const ENV_INJECT_RE =
  *  the standard fix for an out-of-memory build and it executes nothing; denying it while `npm test` on its own is
  *  ALLOW is a gate on ordinary work (exit review 7). The variable stays governed — `--require`, `--import` and
  *  the loaders are exactly why — but a value that cannot name a program is not an injection. */
-const NODE_OPTIONS_EXECUTES = /--(require|import|loader|experimental-loader|experimental-vm-modules|cpu-prof-dir|heap-prof-dir|diagnostic-dir|inspect-publish-uid|env-file|conditions)\b|-r\b/;
+const NODE_OPTIONS_EXECUTES = /--(require|import|loader|experimental-loader|cpu-prof-dir|heap-prof-dir|diagnostic-dir|inspect-publish-uid|env-file|conditions)\b|-r\b/;
+/**
+ * THE MARKER A BINDING OF A WATCHED NAME IS REPORTED BY, or null when it re-points nothing (env-vars.ts says which names choose what
+ * runs - `env-inject`, refused - and which are asked about - `env-override`). One function for the four places a binding is read: the
+ * assignments in front of a command, the ones handed to `env`, what a makefile exports and what a line binds for the rest of its
+ * shell; `how` is the last, and says whether the binding is a bare assignment. A LOCATION variable carries its value, because what it
+ * means is a matter of WHERE it points, which only the evaluator's path reader can say (relaxLocation).
+ */
+function envMarker(name: string, assignment: string, how: ShellBinding['how'] | 'prefix' = 'prefix', exported = true): string | null {
+  if (!ENV_INJECT_RE.test(name) || !envInjects(name, assignment)) return null;
+  // (a bare `IFS=$'\n'` or `ENV=${1:-dev}` on a line of its own, and a `local IFS=,`, set a variable of that shell and export nothing)
+  if (SHELL_LOCAL_NAMES.test(name) && (how === 'assignment' || (how === 'declaration' && !exported))) return null;
+  const word = PROGRAM_NAMES.test(name) ? 'env-inject' : 'env-override';
+  return LOCATIONS[name] === undefined ? `${MARK}${word} ${name}` : `${MARK}${word} ${name} ${MARK}at ${encodeURIComponent(assignedValue(assignment))}`;
+}
+
 /** True when this binding really changes what runs. */
 function envInjects(name: string, assignment: string): boolean {
   const value0 = assignment.slice(assignment.indexOf('=') + 1).trim().replace(/^['"]|['"]$/g, '');
@@ -335,7 +353,7 @@ function npmFlagRuns(token: string): boolean {
 const NPM_RUNS_RC = new RegExp(`^\\s*(${NPM_CONFIG_RUNS.join('|')}|scriptShell|yarnPath|plugins)\\s*[:=]`, 'm');
 /** NODE_OPTIONS members that execute nothing and open nothing */
 const NODE_OPTIONS_INERT =
-  /^--(max-old-space-size|max-semi-space-size|stack-size|stack-trace-limit|enable-source-maps|no-warnings|trace-warnings|trace-deprecation|no-deprecation|throw-deprecation|unhandled-rejections|dns-result-order|openssl-legacy-provider|use-openssl-ca|use-bundled-ca|preserve-symlinks|preserve-symlinks-main|experimental-strip-types|experimental-transform-types|no-experimental-fetch|no-experimental-global-navigator|disable-warning|title|max-http-header-size|abort-on-uncaught-exception|experimental-default-type|no-network-family-autoselection)(=[\w.,:/-]*)?$|^[0-9]+$/;
+  /^--(max-old-space-size|max-semi-space-size|stack-size|stack-trace-limit|enable-source-maps|no-warnings|trace-warnings|trace-deprecation|no-deprecation|throw-deprecation|unhandled-rejections|dns-result-order|openssl-legacy-provider|use-openssl-ca|use-bundled-ca|preserve-symlinks|preserve-symlinks-main|experimental-strip-types|experimental-transform-types|experimental-vm-modules|experimental-json-modules|experimental-wasm-modules|experimental-import-meta-resolve|experimental-require-module|no-experimental-require-module|experimental-detect-module|no-experimental-detect-module|experimental-specifier-resolution|es-module-specifier-resolution|no-addons|trace-uncaught|trace-exit|frozen-intrinsics|no-experimental-fetch|no-experimental-global-navigator|disable-warning|title|max-http-header-size|abort-on-uncaught-exception|experimental-default-type|no-network-family-autoselection)(=[\w.,:/-]*)?$|^[0-9]+$/;
 
 /** THE SENTINEL THAT MAKES A STATE MARKER UNFORGEABLE.
  *
@@ -1695,7 +1713,8 @@ function normalizeSegmentInner(segment: string): string[] {
       // `IFS= read -r line` is the idiom of every line loop: the assignment scopes to the `read` builtin alone, and
       // an IFS that is only ever read by `read` re-points nothing (exit review 10)
       const ifsForRead = m[1] === 'IFS' && /^read\b/.test(s.slice(m[0].length));
-      if (ENV_INJECT_RE.test(m[1]!) && envInjects(m[1]!, m[0]!) && !ifsForRead) extra.push(`${MARK}env-inject ${m[1]}`);
+      const marker = ifsForRead ? null : envMarker(m[1]!, m[0]!);
+      if (marker !== null) extra.push(marker);
       if (TARGET_ENV_RE.test(m[1]!)) targetEnv.push(m[0].trim());
       s = s.slice(m[0].length);
       any = true;
@@ -1760,7 +1779,8 @@ function normalizeSegmentInner(segment: string): string[] {
   // program does not change what runs
   for (const tok of [...leading, ...steps.flatMap((st) => st.assignments)]) {
     const name = tok.slice(0, tok.indexOf('='));
-    if (ENV_INJECT_RE.test(name) && envInjects(name, tok)) extra.push(`${MARK}env-inject ${name}`);
+    const marker = envMarker(name, tok);
+    if (marker !== null) extra.push(marker);
     if (TARGET_ENV_RE.test(name)) targetEnv.push(tok);
   }
   // `env -S '<command>'` / `--split-string=<command>` re-splits its argument into a command line and runs it, exactly like
@@ -1793,6 +1813,14 @@ function normalizeSegmentInner(segment: string): string[] {
   const idx = peeled.at;
   let rest = tokens.slice(idx);
   if (rest.length === 0) return extra;
+  // WHAT THE SEGMENT BINDS FOR THE REST OF ITS SHELL (`export NAME=v`, `declare -x`, a line of assignments, `printf -v`, `read`) is
+  // reported here, once, as the assignment in front of a command is above. It was read only for a segment of the line itself, and the
+  // text matchers that looked for `NAME=` anywhere in a segment stood in for the readers of every segment that was CARRIED
+  // (`watch 'export BASH_ENV=/tmp/evil'`): a net that also caught `shell=True` in a python script (U-11)
+  for (const b of bindingsOf(rest, s).persistent) {
+    const marker = envMarker(b.name, `${b.name}=${b.value ?? '$RUNTIME'}`, b.how, b.exported ?? true);
+    if (marker !== null && !extra.includes(marker)) extra.push(marker);
+  }
   let head = rest[0]!;
   // an absolute path to a well-known tool (`/usr/bin/git`, `/opt/homebrew/bin/gh`) matches like the bare name;
   // relative paths (`./scripts/x.sh`, `./node_modules/.bin/gh`) are kept for effect analysis
@@ -5763,6 +5791,18 @@ function directoryExists(abs: string): boolean {
 /** Destination operands of the write-ish commands, resolved against `cwd`. Feeds the A4 freshness ledger so that
  *  `cp evil.mk Makefile && make build` can no longer be judged from the Makefile that was replaced. */
 const LEDGER_ANY = '\0any';
+/** THE LEDGER'S MARK FOR A NAME THAT WAS ONLY REMOVED (closure audit wave 5, U-14). A deletion is a write for every reader that
+ *  needs the file to still be what it read (a makefile, a manifest, a script), and it is not one for the reader that asks whether a
+ *  NAME STILL MEANS WHAT IT SAYS: removing `dist` leaves a `dist` that says what it always said - nothing - so removing it again
+ *  (`rm -rf dist && npm run build`, where the build removes it once more) cannot make it mean another directory. A later write of
+ *  the name takes the mark away. */
+const LEDGER_REMOVED = '\0removed:';
+/** Whether a segment only removes what it names (`rm`, `unlink`, `rmdir`, a git removal); `shred` overwrites a file that stays. */
+function removesOnly(segment: string): boolean {
+  const t = tokenize(segment);
+  const head = t[commandHeadIndex(t)] ?? '';
+  return /^(rm|unlink|rmdir)$/.test(head) || (head === 'git' && t[commandHeadIndex(t) + 1] === 'rm');
+}
 /** An in-place edit flag: a short cluster holding `i` (`-i`, `-i.bak`, `-pi`, `-Ei`), or a long option that abbreviates
  *  `--in-place` - with or without a suffix (`--in-place=.bak`, `--in`). */
 const IN_PLACE_FLAG_RE = /^-[a-zE]*i|^--i(?:n(?:-(?:p(?:l(?:a(?:ce?)?)?)?)?)?)?(?:=.*)?$/;
@@ -7778,8 +7818,15 @@ const CONFIG_PROGRAM_VERBS: ReadonlyArray<readonly [RegExp, ReadonlySet<string>]
   // helpers and `*.tool`/`*.path` pairs all name a program git runs, and each one missing from the list was a
   // silent ALLOW (exit review 6). The rule is now the SHAPE of the key: git's own naming convention is that a
   // program-valued key ends in one of these words. A key whose last component is not one of them is data.
+  // A DIRECTORY IS NOT A PROGRAM. `core.hooksPath` names the directory the hooks are read from, and every husky repository sets it (`git
+  // config core.hooksPath .husky/_`); read as a program value its text was handed to the analyzer as a command line, and `git status`,
+  // `git diff` and `git config core.hooksPath` itself asked "no matcher: .husky/_" for as long as the repository was set up (U-10). The
+  // hooks that sit IN the directory are read by the hook resolver above (hooksFor/gitHooksDir), per verb, which is the reader of that
+  // dimension; this table never listed the directory because it is the thing the resolver reads. `init.templateDir` is the same kind of
+  // value for the two verbs that copy a template into a new repository, and `git init`/`git clone` are the only places it matters.
+  [/^init\.templatedir$/i, new Set(['init', 'clone'])],
   [
-    /\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|hookspath|templatedir|filter|difffilter)$/i,
+    /\.(command|cmd|driver|program|helper|textconv|clean|smudge|process|editor|pager|askpass|sshcommand|proxy|external|wrapper|exec|filter|difffilter)$/i,
     // the verb scope cannot be narrowed for a key this resolver does not otherwise model, so it applies to every
     // verb: a program named in repository-local configuration is part of the closure of whatever runs next
     new Set<string>(),
@@ -7858,6 +7905,8 @@ function gitLocalProgramValues(root: string, verb: string, failed?: { value: boo
     // `filter.evil.clean = curl …|sh` run under an ALLOW (exit review 7), while the decision that created the
     // exclusion was about `filter.lfs.clean`, which every LFS repository installs as a matter of course. So the
     // DECLARED content filters keep the exemption on the read verbs and an unknown program does not.
+    // a proxy key whose value is a URL names a place to connect, not a program to run (`http.proxy = http://corp:3128`)
+    if (/\.proxy$/i.test(key) && /^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(value)) continue;
     const scope = CONFIG_PROGRAM_VERBS.find(([re]) => re.test(key));
     const isContentFilter = /^filter\.[^.]+\.(clean|smudge|process)$/i.test(key);
     if (isContentFilter && GIT_READ_VERBS.has(verb) && DECLARED_CONTENT_FILTERS.test(value)) continue;
@@ -7990,6 +8039,10 @@ function resolveScriptCommand(
   // asking whether "container-effect" is a bounded command made every one of them an unmodelled closure of its own.
   if (norm.startsWith(CONTAINER_EFFECT_MARK))
     return { kind: 'none', key: 'container-effect', body: null, reason: 'a container effect marker runs nothing', resolution: 'NOT_A_PRODUCER' };
+  // ...AND SO DOES A BINDING'S: `env-inject NAME` says that a name was bound, and was asked "is `ego` a bounded command?" - an unmodelled
+  // closure on top of the verdict of the binding, which made a binding that is ordinary (GOPATH at its default) ask all the same
+  if (norm.startsWith(ENV_INJECT_MARK) || norm.startsWith(ENV_OVERRIDE_MARK))
+    return { kind: 'none', key: 'env-binding', body: null, reason: 'an environment marker names a binding and runs nothing', resolution: 'NOT_A_PRODUCER' };
   /** A4 — FRESHNESS. A source rewritten by an earlier unit of the SAME command can no longer justify a later
    *  ALLOW: `printf 'build:\n\tgit push' > Makefile && make build` was classified from the old contents. */
   //  `\0any` is the wildcard: an EARLIER unit of this command could not be classified, so it may have written
@@ -8231,12 +8284,28 @@ function resolveScriptCommand(
     // is the explicit form — none of which the exact-match list held, so `npm run build --ws` ran the script in
     // EVERY workspace package while EGO resolved only the root manifest (exit review 9). The `=false` forms are
     // the opposite instruction and must NOT select anything.
-    const selector = tokens.find(
-      (t) =>
-        /^(-w|--workspace|--workspaces|--ws|-ws|--include-workspace-root|--filter|-F|--prefix|-C|--dir|--cwd|--scope|--recursive|-r)$/.test(t) ||
-        /^(--workspace|--filter|--prefix|--dir|--cwd|--scope)=/.test(t) ||
-        (/^(--workspaces|--ws|--include-workspace-root)=/.test(t) && !/=(false|0|no)$/i.test(t)),
-    );
+    const isSelector = (t: string): boolean =>
+      /^(-w|--workspace|--workspaces|--ws|-ws|--include-workspace-root|--filter|-F|--prefix|-C|--dir|--cwd|--scope|--recursive|-r)$/.test(t) ||
+      /^(--workspace|--filter|--prefix|--dir|--cwd|--scope)=/.test(t) ||
+      (/^(--workspaces|--ws|--include-workspace-root)=/.test(t) && !/=(false|0|no)$/i.test(t));
+    // A SELECTOR THAT IS ONLY A DIRECTORY IS A `cd` (pkg-selectors.ts): `npm --prefix backend run build` is `cd backend && npm run
+    // build`, which this producer reads like any other. The directory must be a plain word naming a directory inside a registered root,
+    // no other selector may stand beside it, and what is left of the line is resolved FROM THERE - the manifest, its scripts and the
+    // directory those scripts run in are the directory's, as they are for the `cd`.
+    const dirSelector = directorySelector(head, tokens);
+    if (dirSelector !== null && !dirSelector.rest.some(isSelector) && !/[$`*?[{~]/.test(dirSelector.dir)) {
+      const target = chdirPath(cwd, dirSelector.dir);
+      if (target !== null && directoryExists(target) && repoRootFor(ctx, target) !== null) {
+        const inner = resolveScriptCommand(
+          table,
+          ctx,
+          requote(dirSelector.rest),
+          childEnvironment(env, { cwd: target, cwdVerified: env.cwdVerified }),
+        );
+        return { ...inner, key: `${inner.key}@${target}` };
+      }
+    }
+    const selector = tokens.find(isSelector);
     // ...and the same instruction lives in `.npmrc`, which npm reads from the package directory upwards. A flag
     // on the command line was modelled and the FILE that sets the identical key was not — the same gap this
     // producer already closed once for `script-shell`.
@@ -9036,7 +9105,8 @@ function resolveScriptCommand(
       // ./evil.so` in a makefile re-points every program the recipe runs exactly as `LD_AUDIT=./evil.so cmd`
       // does on a command line — and only the command-line spelling emitted the marker, so the makefile form
       // recorded the value on the environment and gated nothing (exit review 9).
-      if (ENV_INJECT_RE.test(k) && envInjects(k, `${k}=${expanded}`)) exportedInjects.push(`${MARK}env-inject ${k}`);
+      const marker = envMarker(k, `${k}=${expanded}`);
+      if (marker !== null) exportedInjects.push(marker);
     }
     // THE KEY'S SEPARATOR MUST NOT BE A LEGAL TARGET NAME CHARACTER. A comma is: `make build test` keyed as
     // `build,test`, byte-identical to the key of `make build,test`, so a recipe that re-entered make with that
@@ -9275,6 +9345,17 @@ function resolveScriptCommand(
     };
   }
   if (head === 'git') return resolveGitAmbient(ctx, tokens, env);
+  // A FORM THE TABLE OF LOCAL READS NAMES RUNS NOTHING THE REPOSITORY WROTE (local-reads.ts says what each row earned), so it is
+  // not a program of unknown closure whatever the vocabulary below says of its head: `gem`, `dotnet` and `ego` are in no list, and
+  // `gem list` was an unmodelled closure on top of the ask for having no matcher
+  if (!env.definedNames?.has(head) && localRead(/[<>]/.test(norm) ? tokenize(stripRedirections(norm)) : tokens) !== null)
+    return {
+      kind: 'none',
+      key: `local-read:${tokens.slice(0, 2).join(' ')}`,
+      body: null,
+      reason: 'a form that only reads local state',
+      resolution: 'NOT_A_PRODUCER',
+    };
   // NO REGISTERED PRODUCER CLAIMS THIS HEAD — which says nothing about whether anything else executes. The
   // AUTHORED vocabulary decides, and THE MOST SPECIFIC ENTRY WINS: an entry may name a head alone (`pytest`) or a
   // head plus the arguments that decide its shape (`go test`, `cmake --version`), so a bounded invocation of a
@@ -9388,7 +9469,7 @@ function resolveScriptCommand(
       resolution: 'NOT_A_PRODUCER',
     };
   const assigned = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(bare);
-  if (assigned && !ENV_INJECT_RE.test(assigned[1]!))
+  if (assigned && (!ENV_INJECT_RE.test(assigned[1]!) || SHELL_LOCAL_NAMES.test(assigned[1]!)))
     return {
       kind: 'none',
       key: `assignment:${bare}`,
@@ -12537,6 +12618,58 @@ function networkWriteHits(
   return [...hits.values()];
 }
 
+const ENV_INJECT_MARK = `${MARK}env-inject `;
+const ENV_OVERRIDE_MARK = `${MARK}env-override `;
+/**
+ * WHERE A LOCATION VARIABLE POINTS DECIDES WHAT IT COSTS (env-vars.ts, U-11). The normalizer reports a binding of a watched name as a
+ * refusal and carries the value of a LOCATION (`PYTHONPATH`, `GOPATH`, `JAVA_HOME`...) beside it; this is the one place the value is read,
+ * with the path reader's own eyes. Every doubt keeps the refusal: a word a shell fills in, a glob, a relative word in a directory nobody
+ * proved, a scratch directory the agent can write, a credential store or a path a rule governs. What is left is a place in the checkout
+ * (asked about, because it holds code the agent could have written) or where the tool already keeps its own files (ordinary).
+ */
+function relaxLocation(table: CompiledAuthorityTable, ctx: EvaluationContext, hit: CapabilityHit, norm: string, env: ExecutionEnvironment): CapabilityHit {
+  // (`NAME`, the sentinel, `at`, the value: the pieces are cut at the sentinel because a regular expression may not hold a NUL)
+  const pieces = norm.slice(ENV_INJECT_MARK.length).trim().split(`${MARK}at `);
+  const at = pieces.length === 2 && /^\S+$/.test(pieces[0]!.trim()) ? [pieces[0]!.trim(), pieces[1]!.trim()] : null;
+  if (at === null) return hit;
+  const name = at[0]!;
+  const home = canonicalPath(homedir()).split(sep).join('/');
+  const where = (element: string): Whereabouts => {
+    // the two names the path reader expands itself are fine; any other expansion, or a glob, is a word nobody here can read
+    if (/[`*?[{]/.test(element) || /\$(?!HOME\b|\{HOME\}|PWD\b|\{PWD\})/.test(element)) return 'unsafe';
+    // (a relative word means nothing when the directory it is relative to was not proved)
+    if (!env.cwdVerified && !isAbsolute(element) && !/^(~|\$\{?HOME)/.test(element)) return 'unsafe';
+    const readings = pathCandidates(env.cwd, element).paths;
+    if (readings.length === 0) return 'unsafe';
+    let found: Whereabouts = 'external';
+    for (const reading of readings) {
+      const abs = canonicalPath(reading);
+      if (isScratchPath(abs) && !insideRoots(abs, ctx)) return 'unsafe';
+      // (the place itself, and a name below it: a rule about a tree - `~/.ssh/**` - matches what is below the directory)
+      for (const probe of [abs, join(abs, GLOB_PROBE)]) {
+        const governed = classifyPath(table, ctx, 'Read', probe);
+        if (governed.via.startsWith('matcher path') || governed.capability.startsWith('fs.credential')) return 'unsafe';
+      }
+      if (insideRoots(abs, ctx)) found = 'workspace';
+      else {
+        const posix = abs.split(sep).join('/');
+        if (found === 'external' && posix.startsWith(home + '/')) found = { home: posix.slice(home.length + 1) };
+      }
+    }
+    return found;
+  };
+  const verdict = judgeLocation(name, decodeURIComponent(at[1]!), where);
+  if (verdict === 'refuse') return hit;
+  const capability = verdict === 'ask' ? 'command.env-override' : 'command.read-only';
+  return {
+    capability,
+    verdict: verdictFor(table, ctx, capability),
+    via: verdict === 'ask' ? `${name} points at a location the runner loads code from (env-vars.ts)` : `${name} points at where the tool already keeps its own files`,
+    segment: norm,
+    absolute: false,
+  };
+}
+
 function classifyNormalized(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -12638,6 +12771,25 @@ function classifyNormalized(
       outer = writes[0]!;
       additive.push(...writes.slice(1));
     }
+  }
+  // A LOCATION VARIABLE IS JUDGED BY WHERE IT POINTS (env-vars.ts): the refusal stands for a scratch directory, a credential store or a word a
+  // shell fills in, and a path inside the checkout, a toolchain somewhere installed or a store at its own default is another question
+  if (outer?.capability === 'command.env-inject' && norm.startsWith(ENV_INJECT_MARK)) outer = relaxLocation(table, ctx, outer, norm, state.env);
+  // A FORM THAT ONLY LOOKS IS NOT "NO MATCHER" (local-reads.ts, the one table). `go list ./...`, `gem list`, `git symbolic-ref --short
+  // HEAD`, `gh run list` and `ego status` named no matcher and so asked as an unknown command, while the same kind of question about
+  // `git status` or `npm ls` never did. The table is asked only when NO matcher decided, so a rule above it - an endpoint override, a
+  // governed path, a case a matcher names stricter - keeps its place; the redirections are taken off first, because where the
+  // output goes is the business of the path rules and is not part of what the program does.
+  if (outer === null) {
+    const read = localRead(tokenize(/[<>]/.test(norm) ? stripRedirections(norm) : norm));
+    if (read !== null && read.capability in table.capabilities)
+      outer = {
+        capability: read.capability,
+        verdict: verdictFor(table, ctx, read.capability),
+        via: `${read.program} ${read.form} only reads (a form in the table of local reads)`,
+        segment: norm,
+        absolute: false,
+      };
   }
   if (!outer && /^["']?\$/.test(norm))
     return [
@@ -12980,6 +13132,96 @@ function patternEntersHome(abs: string, reach: string, home: string): boolean {
 /** Commands whose operands are STRINGS, not paths: they compute a name and never touch the filesystem. */
 const STRING_OPERAND_HEADS = new Set(['dirname', 'basename', 'echo', 'printf', 'expr', 'seq']);
 
+/** A name no rule is written for, used to ask whether a DIRECTORY is governed: a rule about a tree (`secrets/**`) matches every name under it. */
+const GLOB_PROBE = '\u0001ego-probe';
+/** What an entry of a wildcard's match is when the listing did not say (the literal segment after a wildcard): one lstat. */
+function listedKind(path: string): 'directory' | 'link' | 'plain' {
+  chargeWork(30);
+  try {
+    const st = lstatSync(path);
+    return st.isSymbolicLink() ? 'link' : st.isDirectory() ? 'directory' : 'plain';
+  } catch {
+    // (a name that is not there is judged like any other: the rule, not the disk, decides)
+    return 'plain';
+  }
+}
+interface NameRules {
+  /** whether a path rule of the table could name a path whose last segment is `base` (true when it cannot be told) */
+  mayName(base: string): boolean;
+}
+const nameRulesOf = new WeakMap<object, NameRules>();
+/**
+ * THE LAST SEGMENT OF EVERY READ RULE, as a test of a name. A rule that ends in `**` governs a tree and is asked of the tree's
+ * directory; every other rule ends in the shape of the name it governs (`.env`, `.env.*`, `.netrc`, `*.pem`), and a path can match
+ * it only if its last segment does. The test is a NECESSARY condition: a rule whose last segment cannot be read as a plain pattern
+ * (a brace or a class with a slash in it) answers yes for every name, which is the old behaviour, and the case-folded form of the
+ * name is tried as well, because the rules are matched on the folded path too (matchPathPattern).
+ */
+function readNameRules(table: CompiledAuthorityTable): NameRules {
+  const known = nameRulesOf.get(table);
+  if (known !== undefined) return known;
+  const tails: RegExp[] = [];
+  let anything = false;
+  for (const m of table.matchers) {
+    if (m.path === undefined || (m.tool !== 'Read' && m.tool !== 'any')) continue;
+    const tail = m.path.slice(m.path.lastIndexOf('/') + 1);
+    if (tail === '**' || tail === '') continue;
+    // (a choice with a slash inside it - `{a/b,c}` - has no last segment of its own)
+    if (/\{[^}]*\/[^}]*\}/.test(m.path)) {
+      anything = true;
+      continue;
+    }
+    try {
+      tails.push(new RegExp(globToRegExp(tail).source, 'is'));
+    } catch {
+      anything = true;
+    }
+  }
+  const rules: NameRules = {
+    mayName: (base) => anything || tails.some((re) => re.test(base) || re.test(foldName(base))),
+  };
+  nameRulesOf.set(table, rules);
+  return rules;
+}
+
+/** The files a curl command's `-w` format writes, read from the command AS WRITTEN (its quoting intact) and, for `-w @FILE`, from the
+ *  file the format is taken from. `unread` says why a format could not be read: standard input, a file the kernel may not open. */
+function curlFormatWrites(ctx: EvaluationContext, cwd: string, rawSeg: string): { files: string[]; unread: string[] } {
+  const words = commandWords(tokenizeMarked(rawSeg)).map((w) => w.text);
+  const at = words.findIndex((w) => w.replace(/^.*\//, '') === 'curl');
+  const eff = at < 0 ? null : toolEffects('curl', words.slice(at));
+  const out: { files: string[]; unread: string[] } = { files: [], unread: [] };
+  if (eff === null) return out;
+  const scan = (text: string): void => {
+    for (const m of text.matchAll(/%output\{(?:>>)?([^}]*)\}/g)) out.files.push(m[1]!);
+  };
+  for (const f of curlWriteOut(eff.parsed)) {
+    if (!f.startsWith('@')) {
+      scan(f);
+      continue;
+    }
+    // (`-w @-` is standard input: nothing this segment wrote, and not a file)
+    const text = f === '@-' ? null : readWordFile(ctx, cwd, f.slice(1));
+    if (text === null) out.unread.push(`curl -w ${f} takes its format from ${f === '@-' ? 'standard input' : f.slice(1)}, which could not be read, and a format can write any file with %output{}`);
+    else scan(text);
+  }
+  return out;
+}
+
+/** WHETHER A DIRECTORY IS A REGISTERED ROOT OR ABOVE ONE - where "contains a protected path" is true of every checkout and so says nothing
+ *  about this command. The write into a directory and the link to one asked it separately (the write was taught in exit review 8, the
+ *  link never was: `ln -s . self` and `ln -s .. parent` were absolute denies). The trailing slash is normalized away so the FILESYSTEM
+ *  ROOT is an ancestor like any other: `/` folded is `/`, and comparing against `//` excluded the one directory that contains every
+ *  checkout. */
+function atOrAboveRoot(roots: readonly string[], posix: string): boolean {
+  const folded = foldName(posix);
+  const dir = folded === '/' ? '' : folded;
+  return roots.some((r) => {
+    const f = foldName(r);
+    return f === folded || f.startsWith(dir + '/');
+  });
+}
+
 function classifyShellPaths(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -13001,6 +13243,8 @@ function classifyShellPaths(
   shellGlob: { dotfiles: boolean; ignoreCase: boolean; extended: boolean } = { dotfiles: false, ignoreCase: false, extended: false },
 ): CapabilityHit[] {
   const hits: CapabilityHit[] = [];
+  // the operands that are the TEXT of a symbolic link, not a path the command opens (see `lnSymbolic` below)
+  const linkSources = new Set<string>();
   // operands are read with the redirections taken out (`cp x f 2>&1`: the destination is `f`); the regex tests below keep
   // the whole segment, because `mysql < file` is exactly what they look for
   const bare = withoutRedirections(seg);
@@ -13008,6 +13252,8 @@ function classifyShellPaths(
   const head0 = tokens[0] ?? '';
   const head = head0.slice(head0.lastIndexOf('/') + 1);
   if (!head || head.startsWith('$')) return hits;
+  // (one predicate for the writer of a symbolic link and its reader: they must agree on which command is one)
+  const lnSymbolic = head === 'ln' && tokens.some((t) => /^-[a-zA-Z]*s/.test(t));
   // `dirname` and `basename` MANIPULATE A STRING. They never open the path they are handed, so classifying their
   // operand as a filesystem read made `dirname -- "$0"` — the first line of a real husky hook — ask, and with it
   // every commit in that repository (exit review 4).
@@ -13122,7 +13368,13 @@ function classifyShellPaths(
         const local = [`${mod}.py`, `${mod}/__init__.py`, `${mod}.so`, `${mod}.pyd`].find((f) => ((o) => o !== null && fileExists(o))(openedPath(cwd, f)));
         if (local !== undefined) runs(`the module ${mod} is imported from the working directory first, where ${local} is what runs`);
       }
-    for (const w of [...effects.writes, ...effects.writeDirs]) {
+    // curl's `-w` FORMAT NAMES FILES INSIDE ITS VALUE (`%output{FILE}`, `%output{>>FILE}`), and the value is the one place the
+    // segment's own quoting matters: the normalized text lost the quotes around `'%output{>>.git/hooks/x}'`, and the `>>` in it
+    // read as a redirection of a command that has none. The format is read from the words AS WRITTEN, and a format taken from
+    // a file (`-w @fmt`) is read from the file - one the kernel cannot open may name any destination at all (U-18)
+    const formatWrites = effects.key === 'curl' ? curlFormatWrites(ctx, cwd, rawSeg) : { files: [], unread: [] };
+    for (const why of formatWrites.unread) runs(why);
+    for (const w of [...effects.writes, ...effects.writeDirs, ...formatWrites.files]) {
       // (`-` is standard output: `wget -qO- URL`)
       if (!w || w === '-' || /[$`]/.test(w) || discardWord(cwd, w, old)) continue;
       extraDests.add(w);
@@ -13267,7 +13519,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // target against the cwd read it as the parent of the checkout, which is protected by nothing. The link then
   // opened a writable route into the governance tree and `echo x > k/h/runtime/pin.json` was ALLOW
   // (exit review 9). The link is a second NAME for the target, so the target is judged as both.
-  if (head === 'ln' && tokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
+  if (lnSymbolic) {
     // `-t DIR` MOVES THE LINK'S DIRECTORY OFF THE OPERAND LIST: every operand is then a SOURCE and DIR is where
     // the links are made. Taking the last operand as the link swapped the two roles entirely (self-attack).
     const targetDir = optionValue(tokens, 't', ['--target-directory']);
@@ -13303,9 +13555,24 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       const linkRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
         canonicalPath(r).split(sep).join('/'),
       );
+      linkSources.add(src);
       for (const entry of entries) {
         if (entry.abs === null) continue;
         const linkPosix = entry.abs.split(sep).join('/');
+        // A TARGET INSIDE A PROTECTED TREE is the route it always was: the link is a second name for a path a rule governs, and what
+        // the rule says of a WRITE to that path is what it says of a link to it. (A target outside the checkout that no rule names is
+        // not: the name is judged where it is used.)
+        const into = classifyPath(table, ctx, 'Write', entry.abs);
+        if (into.via.startsWith('matcher path') || (into.absolute && into.capability !== 'fs.outside-workspace.write')) {
+          hits.push({ ...into, via: `symlink ${targetDir ?? ops[ops.length - 1]} points at ${src}, which is inside protected ${into.via}`, segment: seg });
+          continue;
+        }
+        // A LINK TO A ROOT, OR TO ONE OF ITS ANCESTORS, IS A LINK TO THE CHECKOUT, not to what the checkout protects (`ln -s . self`,
+        // `ln -s .. parent`): every checkout contains the governance tree, and a route through the link is judged when something
+        // WRITES THROUGH IT - by the path reader, which follows it, and for a name made earlier in this very line by the segments
+        // that follow (segmentThroughLinks). The link to a directory strictly inside the checkout that holds protected paths
+        // (`ln -s ../.harness k`) is still the route it always was.
+        if (atOrAboveRoot(linkRoots, linkPosix)) continue;
         for (const pp of table.protectedPaths) {
           if (pp.tool === 'Read') continue;
           const prefix = pp.path
@@ -13321,7 +13588,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           hits.push({
             capability: pp.capability,
             verdict: verdictFor(table, ctx, pp.capability),
-            via: `symlink ${ops[ops.length - 1]} points at ${src}, which is or contains protected ${pp.path}`,
+            via: `symlink ${targetDir ?? ops[ops.length - 1]} points at ${src}, which is or contains protected ${pp.path}`,
             segment: seg,
             absolute: isAbsoluteCap(table, pp.capability),
           });
@@ -13331,7 +13598,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     };
     if (targetDir !== null && ops.length >= 1) {
       const linkDirs = pathCandidates(cwd, targetDir, old).paths;
-      for (const src of ops) retarget(src, linkDirs.length ? linkDirs : [cwd], false);
+      for (const src of ops) retarget(src, linkDirs.length ? linkDirs : [cwd], true);
     } else if (ops.length >= 2) {
       // ...AND WHEN THE LAST OPERAND IS AN EXISTING DIRECTORY, ln puts the link INSIDE it — its second
       // documented form, on BSD and GNU alike. `ln -s ../.harness k` with `k` a directory creates
@@ -13834,6 +14101,15 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           paths.push(...pathEntries(cwd, w, old));
           if (dest === null) dest = 'ALL';
         }
+    } else if (lnSymbolic) {
+      // A SYMBOLIC LINK WRITES ITS NAME AND NOTHING ELSE (closure audit wave 5, PA-13). `ln -s /usr/local/bin/node node` stores the text
+      // `/usr/local/bin/node` in a file called `node`: it opens, creates and changes nothing at the target, and it was judged as a write
+      // to it - an absolute refusal of a name that points outside the checkout. What the target IS to the rules is asked below, by the
+      // link reader: a target inside a protected tree, or a governed directory, is the route it always was, and a name made through
+      // the link is judged where it is written (the path reader follows a link that exists, segmentThroughLinks one this line makes).
+      const linkDir = optionValue(tokens, 't', ['--target-directory']);
+      const names = bareOperands();
+      dest = linkDir ?? (names.length ? names[names.length - 1]! : null);
     } else if (
       EVERY_OPERAND_WRITERS.has(head) ||
       // `cp -l` makes a HARD LINK: a second name for the same inode, through which a governed file is writable
@@ -13952,7 +14228,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     for (const t of tokens.slice(1)) {
       if (t.startsWith('-')) continue;
       const named = pathCandidates(cwd, t.replace(/\/$/, ''), old).paths.map((q) => canonicalPath(q));
-      if (!named.some((abs) => written.has(abs)) && !written.has('\0any')) continue;
+      if (!named.some((abs) => written.has(abs) && !written.has(LEDGER_REMOVED + abs)) && !written.has('\0any')) continue;
       hits.push({
         capability: 'command.unknown',
         verdict: verdictFor(table, ctx, 'command.unknown'),
@@ -14032,7 +14308,27 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   const judgeGlob = (raw: string): void => {
     if (expandedGlobs.has(raw)) return;
     expandedGlobs.add(raw);
-    const set = globMatches(cwd, raw, old, shellGlob);
+    // THE SET IS JUDGED BY WHAT COULD MAKE A NAME GOVERNED, NOT NAME BY NAME (closure audit wave 5, PA-12). `wc -l logs/*.txt` over two
+    // thousand files asked "matches more names than this kernel enumerates", and the same files with a `cd logs &&` in front did not:
+    // the budget counted every name, and a name no rule can reach was judged at the price of one that is. A name can be reached by a
+    // rule for two reasons only - the DIRECTORY it is in is governed (probed once per directory below), or the rules name names of its
+    // shape (readNameRules) - or because it is a link, whose target the rules may govern, or a directory, whose contents they do.
+    // Everything else is asked about through its directory, and the bound stays for the sets that are really too large to list.
+    const nameRules = readNameRules(table);
+    const set = globMatches(cwd, raw, old, {
+      ...shellGlob,
+      keep: (path, kind) => {
+        const k = kind ?? listedKind(path);
+        return k !== 'plain' || nameRules.mayName(path.slice(path.lastIndexOf('/') + 1));
+      },
+    });
+    for (const parent of set.parents) {
+      const probe = classifyPath(table, ctx, 'Read', join(parent, GLOB_PROBE));
+      if (probe.via.startsWith('matcher path') || probe.capability.startsWith('fs.credential')) {
+        const first = set.paths.find((m) => dirname(m) === parent) ?? join(parent, '*');
+        hits.push({ ...probe, via: `glob ${raw} matches ${first} (${probe.via})`, segment: seg });
+      }
+    }
     if (set.bounded)
       hits.push({
         capability: 'command.unknown',
@@ -14114,7 +14410,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       if (
         r.via.startsWith('matcher path') ||
         r.capability.startsWith('fs.credential') ||
-        (r.capability === 'fs.outside-workspace.read' && !isDevPath(p.abs))
+        // (the text of a symbolic link is read by nothing: where it points is judged by the link reader above)
+        (r.capability === 'fs.outside-workspace.read' && !isDevPath(p.abs) && !linkSources.has(p.raw))
       )
         hits.push({ ...r, via: `path argument ${p.raw} (${r.via})`, segment: seg });
       // a glob whose literal part is an ancestor of HOME (`/U*/me/.ssh/id_rsa`) can expand into a credential store too
@@ -14211,14 +14508,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // directory — was an absolute deny for a write that touches nothing protected (exit review 8). What keeps
       // `rm -rf ..` and `tar -xf a.tar -C ..` denied is the pair of guards below, not this one: a removal and an
       // unenumerable write DO reach the protected subtree, and neither is exempted here.
-      const folded = foldName(posix);
-      // the trailing slash is normalized away so the FILESYSTEM ROOT is an ancestor like any other: `/` folded
-      // is `/`, and comparing against `//` excluded the one directory that contains every checkout
-      const foldedDir = folded === '/' ? '' : folded;
-      const atRoot = roots.some((r) => {
-        const f = foldName(r);
-        return f === folded || f.startsWith(foldedDir + '/');
-      });
+      const atRoot = atOrAboveRoot(roots, posix);
       const unenumerable = isArchive || writesUnenumerably(seg) || recursive;
       // A DELETE IS NOT A WRITE INTO. The `contains` rule exists to catch content PUT somewhere protected; a
       // removal puts nothing there, and its own destructive class already asks. `rm -rf node_modules` — the most
@@ -14871,6 +15161,41 @@ function execCarriedCommand(seg: string): string | null {
   return dd >= 0 && dd + 1 < t.length ? requote(t.slice(dd + 1)) : null;
 }
 
+/**
+ * A LINE THAT MAKES A LINK AND THEN WRITES THROUGH IT (closure audit wave 5, PA-13). `ln -s . self` is no route into anything by
+ * itself - it records a name - and the path reader follows a link that exists: the next command that writes `self/control-plane/x`
+ * is judged as the write to `control-plane/x` it is. The reader cannot follow a link that DOES NOT EXIST YET, and a line that makes
+ * one and uses it is one command: `ln -s . self && echo x > self/control-plane/permissions/matchers.md`. So the segments that
+ * follow a link made in the line are also read with every path word that goes through it spelled through its target, and what that
+ * reading finds is added to what the line itself found. The link is the ledger's own record (`\0link:`), so this asks nothing the
+ * freshness ledger does not already know. Null when no word of the segment goes through a link.
+ */
+function segmentThroughLinks(seg: string, pairs: ReadonlyArray<readonly [string, string]>, cwd: string): string | null {
+  if (pairs.length === 0) return null;
+  const edits: Array<[number, number, string]> = [];
+  for (const w of tokenizeMarked(seg)) {
+    if (w.at < 0 || w.expands) continue;
+    // an operator glued to the front of a word (`>self/x`), and the `--output=` of a long option, are not part of the name
+    const lead = /^((?:\d*|&)(?:>>?|<<?<?|>&|<&|>\||<>))?(--?[A-Za-z][\w-]*=)?([\s\S]*)$/.exec(w.text)!;
+    const name = lead[3]!;
+    if (name === '' || name.startsWith('-') || /[$`*?[{~]/.test(name)) continue;
+    // (every reading of the word is the path reader's: the lexical one and the physical one differ after a link)
+    readings: for (const reading of pathCandidates(cwd, name).paths) {
+      const abs = canonicalPath(reading);
+      for (const [link, target] of pairs) {
+        if (abs !== link && !abs.startsWith(link + '/')) continue;
+        const through = target + abs.slice(link.length);
+        edits.push([w.at, w.end, `${lead[1] ?? ''}${lead[2] ?? ''}'${through.replace(/'/g, `'\\''`)}'`]);
+        break readings;
+      }
+    }
+  }
+  if (edits.length === 0) return null;
+  let out = seg;
+  for (const [from, to, text] of edits.sort((a, b) => b[0] - a[0])) out = out.slice(0, from) + text + out.slice(to);
+  return out;
+}
+
 /** THE canonical semantic-analysis pipeline.
  *
  *  Invariant (product decision, 2026-09-22): the same semantic action receives the same security analysis whether it
@@ -15017,11 +15342,14 @@ function analyzeSegmentsInto(
     /** EVERY write goes through here: the path, the same path reached through a symlink made earlier in this command
      *  (or through a linked ANCESTOR directory), and - since a hard link is a second name the path cannot reveal - a
      *  wildcard when the file being replaced has more than one. */
-    const recordWrite = (raw: string): void => {
+    const recordWrite = (raw: string, removal = false): void => {
       // a write is remembered against every link made so far and asked of the disk twice (its link count): paid for first
       chargeWork(WRITE_COST + linkPairsNow.length * 50);
       const c = canonicalPath(raw);
       written.add(c);
+      // (a removal marks the name as removed; any other write of it takes the mark away - the order of the line decides)
+      if (removal) written.add(LEDGER_REMOVED + c);
+      else written.delete(LEDGER_REMOVED + c);
       for (const [link, target] of linkPairsNow)
         if (target && (c === link || c.startsWith(link + '/'))) written.add(target + c.slice(link.length));
       try {
@@ -15382,6 +15710,13 @@ function analyzeSegmentsInto(
       const head = statementHead(seg);
       analyzeCodeBodies(codeFlow.commands(seg, head.prefix, head.verb, head.args), env);
     }
+    // ...and a name this very line made with `ln -s` is read through the link it made (segmentThroughLinks)
+    {
+      const through = segmentThroughLinks(seg, linkPairsNow, env.cwd);
+      if (through !== null)
+        for (const h of analyzeSegments(table, ctx, compiled, [through], { ...state, depth: state.depth + 1, env }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (through a link made earlier in this command)`.trim() });
+    }
     for (const rawBody of carriedShellBodies(seg)) {
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
@@ -15709,10 +16044,11 @@ function analyzeSegmentsInto(
           }
         }
       }
+      const removal = removesOnly(n);
       for (const dir of ledgerDirs) {
         for (const w of writtenPathOperands(n, dir)) {
           if (w === LEDGER_ANY || where.unknown) written.add('\0any');
-          if (w !== LEDGER_ANY) recordWrite(w);
+          if (w !== LEDGER_ANY) recordWrite(w, removal);
         }
       }
     }
@@ -15764,11 +16100,9 @@ function analyzeSegmentsInto(
       // (a value bound at run time is written as one that cannot be resolved, which is what it is)
       const written1 = `${vn}=${vv ?? '$RUNTIME'}`;
       Object.assign(carriedEnv, segmentEnvInputs(written1 + ' x', true));
-      // A STANDALONE BINDING OF AN INJECTING NAME IS THE SAME INJECTION AS THE LEADING FORM. `LD_AUDIT=./evil.so cmd`
-      // emitted the marker and `export LD_AUDIT=./evil.so; cmd` did not, although it re-points every program
-      // for the rest of the shell rather than for one command (exit review 10).
-      if (ENV_INJECT_RE.test(vn) && envInjects(vn, written1))
-        hits.push(...classifyNormalized(table, ctx, compiled, `${MARK}env-inject ${vn}`, { ...state, env }));
+      // (A STANDALONE BINDING OF AN INJECTING NAME IS THE SAME INJECTION AS THE LEADING FORM - `export LD_AUDIT=./evil.so; cmd` re-points
+      // every program for the rest of the shell, exit review 10 - and the normalizer reports it as it reports the leading form, so a
+      // line that is carried (`watch 'export BASH_ENV=/tmp/x'`) is read the same way as one that is not)
     }
     const decl = /^(?:alias\s+([A-Za-z_][\w.-]*)=|(?:function\s+)?([^\s()<>|&;'"$`]+)\s*\(\s*\)\s*\{)/.exec(seg.trim());
     if (decl && bindingIsProven) definedNames.set(decl[1] ?? decl[2]!, `the body defines ${decl[1] ?? decl[2]} before using it`);

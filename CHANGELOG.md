@@ -57,6 +57,49 @@ discipline of decision Q84 (authority changes are never patch releases).
   and how reversible it is (`authority/approval.ts`). Durable tasks do not exist before phase 2, so the task line says so.
 
 ### Changed (authority — MAJOR under Q84)
+- **Ordinary development, second half of the closure audit** (independent reviews of wave 5: `U-10` .. `U-19`, `PA-12`, `PA-13`,
+  `AUTH-13`). The reviewer who measured 52,825 commands found that the waves had left 62% of typed ordinary commands asking and 45 of
+  6,197 refused outright, and that a refusal is the verdict nobody can approve. Each finding is a cause with ONE reader now:
+  - **The forms that only look are one table** (`authority/local-reads.ts`). `go list|env|doc`, `go mod graph|why|verify`, `cargo
+    tree|metadata|locate-project|pkgid`, `gem list|env|which|…`, `bundle config`, `dotnet --version|--info`, `git symbolic-ref` (one
+    operand), `git submodule status`, `git config` reads, `git notes list|show`, `gh run|workflow|release|repo list`, `gh auth status`,
+    `helm repo list|update`, `helm plugin list`, `helm dependency list`, `pip check|cache|inspect`, `npm root|prefix|pkg get|audit|search`
+    and EGO's own `ego status|doctor|check|help|version|capabilities|explain capability|authority diff|modes|context explain|sources` are
+    read by a positive grammar (the option words the row knows, the operands it takes, nothing else) and are ordinary; an option the row
+    does not list, a second operand, a word a shell fills in and a path to the program are not the row. It is asked only when no matcher
+    decided, and the same table says the form is not an unmodelled closure. `mvn`, `./gradlew`, `bundle show|list` and `dotnet list`
+    stay out: each runs something the repository wrote (shown with the real bundler: a `system` call in the Gemfile runs on `bundle show`).
+    `helm repo add`, `dependency update|build` and `pull` still fetch or record something the kernel has not read, and ask.
+  - **A hooks directory is not a program** (`U-10`). `core.hooksPath` is the directory the hook resolver reads, not a command line: every
+    husky repository asked "no matcher: .husky/_" for `git status`. `init.templateDir` is a directory for `git init`/`git clone` only, and a
+    proxy whose value is a URL is not a program.
+  - **Which variables choose what runs is one list** (`authority/env-vars.ts`, `U-11`). The names, the list copied into `matchers.md` and
+    three patterns that matched `NAME=` anywhere in a segment (and refused `subprocess.run(cmd, shell=True)`, a python heredoc that
+    mentioned `IFS=`, and a script line `ENV=${1:-dev}`) are replaced by the evaluator's own: the marker's word says refused or asked
+    about. A location variable (`PYTHONPATH`, `CLASSPATH`, `JAVA_HOME`, `GOPATH`, `CARGO_HOME`, …) is judged by where it points: a place
+    in the checkout asks, a toolchain outside the checkout and a store at the tool's own default location are ordinary, and a scratch
+    directory, a word a shell fills in and a credential store keep the refusal. A bare `IFS=` or `ENV=` sets a variable of that shell and is
+    not an injection. `--experimental-vm-modules` (what jest asks for) is not a loader. A binding in a string a carrier hands to a shell
+    (`watch 'export BASH_ENV=/tmp/x'`) is reported by the normalizer.
+  - **A directory selector is a `cd`** (`U-12`): `npm --prefix backend run build`, `npm -C`, `pnpm -C|--dir`, `yarn --cwd`, `bun --cwd` name a
+    directory inside a registered root and are resolved like `cd backend &&`; a workspace or filter selector still asks.
+  - **A removal leaves the name what it was** (`U-14`): `rm -rf dist && npm run build`, where the build removes it again, is ordinary; a name
+    that was created or replaced earlier in the line is still not the name it says.
+  - **An option letter is not its other case** (`U-16`): the pager rule of `git grep -O` and the strategy rule of `git merge -s` say so
+    with `(?-i:…)`; `git grep -o`, `git archive -o`, `git format-patch -o` and `git merge -S` are ordinary, `git archive` and `git
+    format-patch` are local mutations whose destination the option table judges.
+  - **A template is not a secret** (`U-17`): `.env.example`, `.env.sample`, `.env.template` and `.env.dist` are read and edited like any
+    file; `fs.env-file.write` is an ASK in STANDARD (the first-run copy of the template) and stays a DENY in STRICT, HIGH_ASSURANCE and
+    PRODUCTION_ADVISORY.
+  - **Every file curl writes** (`U-18`): a complete option table of curl (derived from `curl --help all`) and the `%output{FILE}` of a `-w`
+    format, inline or taken from a file, are read by the one parser; `--libcurl`, `--alt-svc`, `--ssl-sessions` and the format are writes.
+  - **A wildcard is judged by what could govern it** (`PA-12`): the names a rule can reach are asked individually, the directory a set
+    lives in once; `wc -l logs/*.txt` over eight thousand files costs what it costs over a hundred. The bound stays for a set too large to list.
+  - **A link is judged where it is used** (`PA-13`): `ln -s . self`, `ln -s .. parent` and `ln -s /usr/local/bin/node node` record a name and
+    write nothing at the target; a name the same line makes is read through its link, a link into or to a governed tree is the route it
+    always was. The write branch and the link branch now ask the same question of "a root or above it" (`atOrAboveRoot`).
+  - **The gates the corpus accounts for say why** (`U-13`): `GATE_REASONS` ties each reason to the capability the evaluator reports, and a
+    test compares them; the four claims that were false are corrected.
 - **A cluster command is read once** (closure of root cause RC-K8S, independent reviews 7-11: `sa10-33` CRITICAL and
   `r11-68 69 70 71 72 73 74 75 76 77 169 170 186 187 191 206`). `kubectl`, `oc`, `helm` and minikube's own `kubectl`
   were judged by four readers that each knew a slice of the command line — a verb table, a dry-run scanner, the regexes

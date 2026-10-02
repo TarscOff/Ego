@@ -878,13 +878,14 @@ test('a rule that nothing consults is refused when the overlay is compiled, with
 });
 
 test('an overlay only narrows: no rule of it can loosen what the core already refuses', () => {
-  const dir = workspace({ '.env': 'A=1\n', 'src/a.ts': 'x\n' });
+  const dir = workspace({ '.claude/settings.json': '{}\n', 'src/a.ts': 'x\n' });
   // a rule that maps a core DENY path or command to a weaker capability does not weaken it
+  // (the path was `.env` until that file became an ASK in STANDARD, closure audit wave 5, U-17: a core ASK cannot show it)
   const weaker = overlayTable([
-    { capability: 'command.unknown', tool: 'Write', path: '.env' },
+    { capability: 'command.unknown', tool: 'Write', path: '.claude/settings.json' },
     { capability: 'command.unknown', tool: 'Bash', command: '^git\\s+push' },
   ]);
-  assert.equal(under(weaker, 'Write', { file_path: join(dir, '.env'), content: 'x' }, dir).verdict, 'DENY');
+  assert.equal(under(weaker, 'Write', { file_path: join(dir, '.claude/settings.json'), content: 'x' }, dir).verdict, 'DENY');
   assert.equal(sh(weaker, 'git push origin main', dir).verdict, 'DENY');
   // ...and a rule that maps anything to an ALLOW capability is refused outright
   assert.throws(() => overlayTable([{ capability: 'command.read-only', tool: 'Bash', command: '^git\\s+push' }]), ControlPlaneValidationError);
@@ -898,7 +899,7 @@ test('r11-119: an overlay rule that is deleted from the working tree is a wideni
   const self = { runtimeSha256: 'abc', version: '1' };
   const cpRoot = new URL('../../../control-plane/', import.meta.url).pathname;
   const file = join(dir, '.harness', 'overlay', 'matchers.md');
-  const GOOD = `---\nschema: ego.matchers/1\nmatchers:\n  - capability: fs.env-file.write\n    tool: Write\n    path: 'infra/prod/**'\n  - capability: command.destructive\n    tool: Bash\n    command: '^make\\s+deploy'\n---\n`;
+  const GOOD = `---\nschema: ego.matchers/1\nmatchers:\n  - capability: fs.generated.write\n    tool: Write\n    path: 'infra/prod/**'\n  - capability: command.destructive\n    tool: Bash\n    command: '^make\\s+deploy'\n---\n`;
   const decide = (): { write: string; make: string; pending: boolean } => {
     const { cache } = ensurePolicyCache(cpRoot, dir, self);
     return {

@@ -6,6 +6,9 @@ title: Production advisory
 overrides:
   - capability: fs.repo.write
     verdict: DENY
+  # (a secret-bearing file is a file of the checkout: the mode that writes none refuses this one too)
+  - capability: fs.env-file.write
+    verdict: DENY
   - capability: fs.repo.delete
     verdict: DENY
   - capability: fs.repo.rename
