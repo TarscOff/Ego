@@ -58,6 +58,8 @@ export interface DbOptionSpec {
   /** the options whose value may be a whole CONNECTION STRING (a URI, `host=… dbname=…`) where a database name is expected: a value
    *  the shell fills in there is a target nobody can read */
   connection?: readonly string[];
+  /** the options whose value is an ADDRESS - a server when it is written like one (`user@host:port/db`, `host:port`, a dotted name) */
+  address?: readonly string[];
   /** the options that name a connection PROFILE, resolved through a file of the client's own that this kernel never reads */
   profile?: readonly string[];
   /** the option that names the file the client WRITES its output to (a dump tool's `-f`): the path rules judge it */
@@ -222,6 +224,15 @@ export const MYSQL_OPTIONS: DbOptionSpec = {
   operands: ['name'],
   host: ['host'],
   profile: ['login-path', 'defaults-file', 'defaults-extra-file', 'defaults-group-suffix'],
+};
+
+/** MySQL Shell: mysql's connection options, and a first operand that is an address - `mysqlsh user@host:port/schema` or a `mysqlx://` URI -
+ *  with the `--uri` option beside it. (It runs scripts of its own, which is why every use of it asks.) */
+export const MYSQLSH_OPTIONS: DbOptionSpec = {
+  ...MYSQL_OPTIONS,
+  value: [...MYSQL_OPTIONS.value, 'uri', 'file', 'js', 'py', 'sql'],
+  operands: ['address'],
+  address: ['uri'],
 };
 
 /** mysqldump: its short letters are not mysql's (`-r` is the result file, `-T` a directory, `-w` a condition, `-e` extended inserts) */
@@ -481,6 +492,21 @@ export const CREATEUSER_OPTIONS = PG_ADMIN(
 );
 export const DROPUSER_OPTIONS = PG_ADMIN([], ['echo', 'interactive', 'if-exists'], '', 'ei');
 
+// --- sqlite3: no server, a FILE - so its table is not in DB_GRAMMAR below, and the path rules govern the file. Go-style: `-name`, and `--name` is the same ---
+export const SQLITE_OPTIONS: DbOptionSpec = {
+  value: ['cmd', 'init', 'newline', 'separator', 'nullvalue', 'vfs', 'escape', 'hexkey', 'key', 'textkey', 'maxsize', 'nonce', 'screen-width'],
+  flag: [
+    'append', 'ascii', 'bail', 'batch', 'box', 'column', 'csv', 'deserialize', 'echo', 'header', 'noheader', 'html', 'interactive',
+    'json', 'line', 'list', 'markdown', 'quote', 'readonly', 'safe', 'stats', 'table', 'tabs', 'version', 'help', 'zip', 'nofollow',
+    'memtrace', 'pcachetrace', 'vfstrace', 'no-rowid-in-view', 'errorstop',
+  ],
+  shortValue: '',
+  shortFlag: '',
+  singleDash: true,
+  // (the first operand is the database FILE and the rest are statements: no operand is a server)
+  operands: ['name'],
+};
+
 /** THE CLIENT → ITS TABLE. A head that is not here has no grammar of its own in this kernel (the migration runners take their target
  *  from a file or a URL option, and have their own readers); `sqlite3` opens a FILE, which the path rules govern. */
 export const DB_GRAMMAR: Readonly<Record<string, DbOptionSpec>> = {
@@ -488,7 +514,7 @@ export const DB_GRAMMAR: Readonly<Record<string, DbOptionSpec>> = {
   mysql: MYSQL_OPTIONS,
   mariadb: MYSQL_OPTIONS,
   mysqladmin: MYSQL_OPTIONS,
-  mysqlsh: MYSQL_OPTIONS,
+  mysqlsh: MYSQLSH_OPTIONS,
   mysqlpump: MYSQL_OPTIONS,
   mysqldump: MYSQLDUMP_OPTIONS,
   mongosh: MONGO_OPTIONS,
@@ -523,6 +549,8 @@ export interface DbTargetReading {
   first: { word: DbWord; role: DbOperand } | null;
   /** the operands that are an address: a server when they are written like one */
   addresses: DbWord[];
+  /** the values of the options that are an address: the same, wherever on the line they stand */
+  addressValues: DbWord[];
   /** whether an option that names a connection profile was given */
   profile: boolean;
   /** the words this client's table does not know: a text net reads them for what a table cannot place */
@@ -557,10 +585,12 @@ export function isScriptWord(text: string): boolean {
 export function readDbTarget(spec: DbOptionSpec, parsed: DbArgs): DbTargetReading {
   const hosts: string[] = [];
   const connections: DbWord[] = [];
+  const addressValues: DbWord[] = [];
   for (const o of parsed.options) {
     if (o.value === null) continue;
     if (spec.host?.includes(o.name)) hosts.push(o.value.text);
     if (spec.connection?.includes(o.name)) connections.push(o.value);
+    if (spec.address?.includes(o.name)) addressValues.push(o.value);
   }
   const role = (i: number): DbOperand => spec.operands[Math.min(i, spec.operands.length - 1)] ?? 'name';
   const hostOperands: DbWord[] = [];
@@ -580,6 +610,7 @@ export function readDbTarget(spec: DbOptionSpec, parsed: DbArgs): DbTargetReadin
     hostOperands,
     first: first === undefined ? null : { word: first, role: role(0) },
     addresses,
+    addressValues,
     profile,
     unknown: parsed.unknown,
   };

@@ -49,7 +49,8 @@ const isDigit = (c: string | undefined): boolean => c !== undefined && c >= '0' 
 
 /** whether `before` (the text in front of a quote) ends in a LONE `e`/`E`: the one token that makes the quote an escape string.
  *  An `e` that ends a longer name (`a$e'`, `ée'`) or follows a digit (`1e'`) is not one. */
-export const endsWithEscapePrefix = (before: string): boolean => new RegExp(`(^|[^${SQL_IDENT_CONT_SRC}])[eE]$`).test(before);
+export const endsWithEscapePrefix = (before: string): boolean =>
+  new RegExp(`(^|[^${SQL_IDENT_CONT_SRC}])[eE]$`).test(before);
 
 /** `$tag$` or `$$`: the tag is a name without a `$` in it */
 const DOLLAR_QUOTE = new RegExp(`\\$(?:[${SQL_IDENT_START_SRC}][A-Za-z0-9_\\u0080-\\uffff]*)?\\$`, 'y');
@@ -64,7 +65,11 @@ const VARIABLE_NAME = new RegExp(`[A-Za-z0-9_\\u0080-\\uffff]+`, 'y');
  *  string ends - and a scanner that thinks text is inside a literal hides it: a comment of any kind (the engines differ
  *  on what opens one and whether it nests), and a session setting that changes how a backslash or a double quote is
  *  read (`standard_conforming_strings`, `NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`). */
-export function sqlScan(text: string, dialect: SqlDialect, variables: SqlVariables = new Map()): SqlScan | { refused: string } {
+export function sqlScan(
+  text: string,
+  dialect: SqlDialect,
+  variables: SqlVariables = new Map(),
+): SqlScan | { refused: string } {
   if (/--|\/\*/.test(text)) return { refused: 'a comment, which this reader cannot place the end of' };
   if (dialect === 'mysql' && text.includes('#')) return { refused: 'a # comment' };
   if (dialect === 'pg' && /standard_conforming_strings|backslash_quote|escape_string_warning/i.test(text))
@@ -115,7 +120,11 @@ function quotedEnd(text: string, from: number, escapes: boolean): number | null 
 }
 
 /** A psql command at `i` (a backslash outside every string): its name, its arguments to the end of the line, and where the line ends. */
-function backslashCommand(text: string, i: number, dialect: SqlDialect): { name: string; args: string; end: number } | { refused: string } {
+function backslashCommand(
+  text: string,
+  i: number,
+  dialect: SqlDialect,
+): { name: string; args: string; end: number } | { refused: string } {
   const eol = text.indexOf('\n', i);
   const line = text.slice(i + 1, eol < 0 ? text.length : eol);
   const name = dialect === 'pg' ? (/^(?:[A-Za-z0-9_]+\+?|.)/s.exec(line)?.[0] ?? '') : line.slice(0, 1);
@@ -170,8 +179,16 @@ function scanPostgres(input: string, known: SqlVariables): SqlScan | { refused: 
         let j = i + 1;
         while (isIdentCont(text[j])) j++;
         const run = text.slice(i, j);
-        if (/^[eE]\d+\$/.test(run)) return { refused: 'a number with an exponent that runs into a dollar sign, which older and newer clients lex differently' };
-        if (/^[eE]$/.test(run) && text[j] === "'") return { refused: 'a number that runs into a lone e and a quote, which older and newer clients lex differently' };
+        if (/^[eE]\d+\$/.test(run))
+          return {
+            refused:
+              'a number with an exponent that runs into a dollar sign, which older and newer clients lex differently',
+          };
+        if (/^[eE]$/.test(run) && text[j] === "'")
+          return {
+            refused:
+              'a number that runs into a lone e and a quote, which older and newer clients lex differently',
+          };
         code += run;
         i = j;
       }
@@ -217,7 +234,8 @@ function scanPostgres(input: string, known: SqlVariables): SqlScan | { refused: 
         if (typeof value === 'string') {
           // psql puts the variable's TEXT where the reference stood and lexes it as part of the script (as a token of its own, which
           // the spaces keep it): the same is done here, so what the variable holds is read like everything else
-          if (++substitutions > MAX_SUBSTITUTIONS) return { refused: 'variables that expand into one another without end' };
+          if (++substitutions > MAX_SUBSTITUTIONS)
+            return { refused: 'variables that expand into one another without end' };
           text = `${text.slice(0, i)} ${value} ${text.slice(i + 1 + v[0].length)}`;
           n = text.length;
           nameEnd = -1;

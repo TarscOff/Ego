@@ -72,9 +72,10 @@ import {
   wholeTreePathspec,
 } from './git-invocation.ts';
 import { GIT_VERB_OPTIONS } from './git-verb-options.ts';
-import { endsWithEscapePrefix, sqlScan, type SqlDialect, type SqlVariables } from './sql-lex.ts';
+import { SQL_IDENT_CONT_SRC, SQL_IDENT_START_SRC, endsWithEscapePrefix, sqlScan, type SqlDialect, type SqlVariables } from './sql-lex.ts';
 import {
   DB_GRAMMAR,
+  SQLITE_OPTIONS,
   hostNames,
   parseDbArgs,
   readDbTarget,
@@ -10371,6 +10372,14 @@ function looksLikeDbTarget(t: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z0-9-]*(:\d+)?(\/\S*)?$/.test(t) && !/\.(sql|js|py|rb|json|txt)$/i.test(t);
 }
 
+/** The server an ADDRESS names (mongosh's and clickhouse-client's first operand, mysqlsh's `--uri`): what follows `user@`, which is a host
+ *  wherever it stands; otherwise the address itself when it is written like one. Null when it is a database name. */
+function addressHost(text: string): string | null {
+  const userinfo = /^[^@/\s]*@(.+)$/.exec(text);
+  if (userinfo) return userinfo[1]!.split(/[:/]/)[0] || null;
+  return looksLikeDbTarget(text) ? text.split(/[:/]/)[0]! : null;
+}
+
 /** The functions a SELECT may call and still be a read: pure in PostgreSQL and in MySQL alike, named in ONE place.
  *  A function that is not here is refused - `pg_terminate_backend`, `nextval`, `setval`, `lo_import`, `load_file`,
  *  `sleep`, `dblink`, `query_to_xml` and `openrowset` are SELECTs that act, and a list of the ones that do is wrong by
@@ -10690,6 +10699,9 @@ const SQLITE_DOT_OK = new Set(
 
 type SqlTok = { k: 'word' | 'quoted' | 'str' | 'num' | 'sysvar' | 'param' | 'op'; v: string };
 
+/** a name, by the one definition of which characters start and continue one (sql-lex.ts): SQLite's too takes `$` and every non-ASCII character */
+const SQL_NAME = new RegExp(`^[${SQL_IDENT_START_SRC}][${SQL_IDENT_CONT_SRC}]*`);
+
 /** SQLite's lexical set. A comment is refused (it can hide the rest of a statement from this reader and not from the
  *  engine), and so is any character this lexer does not know. */
 function lexSqlite(q: string): SqlTok[] | null {
@@ -10735,7 +10747,7 @@ function lexSqlite(q: string): SqlTok[] | null {
       i += num[0].length;
       continue;
     }
-    const word = /^[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*/.exec(rest);
+    const word = SQL_NAME.exec(rest);
     if (word) {
       toks.push({ k: 'word', v: word[0] });
       i += word[0].length;
@@ -10857,20 +10869,6 @@ function sqliteScriptProblem(text: string): string | null {
   }
   return null;
 }
-
-const SQLITE_OPTIONS: DbOptionSpec = {
-  value: ['cmd', 'init', 'newline', 'separator', 'nullvalue', 'vfs', 'escape', 'hexkey', 'key', 'textkey', 'maxsize', 'nonce', 'screen-width'],
-  flag: [
-    'append', 'ascii', 'bail', 'batch', 'box', 'column', 'csv', 'deserialize', 'echo', 'header', 'noheader', 'html', 'interactive',
-    'json', 'line', 'list', 'markdown', 'quote', 'readonly', 'safe', 'stats', 'table', 'tabs', 'version', 'help', 'zip', 'nofollow',
-    'memtrace', 'pcachetrace', 'vfstrace', 'no-rowid-in-view', 'errorstop',
-  ],
-  shortValue: '',
-  shortFlag: '',
-  singleDash: true,
-  // (the first operand is the database FILE and the rest are statements: no operand is a server)
-  operands: ['name'],
-};
 
 function sqliteEscape(args: readonly DbWord[]): DbEscape {
   const out: DbEscape = newDbEscape();
@@ -11738,6 +11736,12 @@ function resolveDbTarget(
     const named = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(operand)?.[1];
     const assignedHere = named !== undefined && (named in envInputs || tokens.some((t) => t.startsWith(`${named}=`)));
     if (operand !== '' && isOpaqueTarget(operand) && !assignedHere) signals.push({ cls: 'UNCLASSIFIED', target: operand });
+    // an option whose value is an address names the server whenever it is written like one, with or without a user in front of it
+    for (const a of target.addressValues) {
+      const named = addressHost(a.text);
+      if (isOpaqueTarget(a.text)) signals.push({ cls: 'UNCLASSIFIED', target: a.text });
+      else if (named !== null) push(named, 'host');
+    }
     // a connection profile resolves through a file of the client's own, in whatever abbreviation the option was written
     if (target.profile) signals.push({ cls: 'UNCLASSIFIED', target: 'a client connection profile' });
     // WHAT THE TABLE DOES NOT KNOW, THE TEXT NET READS: a word that is no option of this client's table (an option of a later
@@ -11805,8 +11809,8 @@ function resolveDbTarget(
     return { cls: 'UNCLASSIFIED', target: bare, executes };
   // mongosh/psql/mysql accept a bare `host[:port][/db]` with no scheme at all — but a filename is not a host
   const FILE_EXT = /\.(sql|js|mjs|cjs|ts|json|txt|csv|sh|py|rb|dump|bak|gz|zip|db|sqlite3?)$/i;
-  if (signals.length === 0 && address && !FILE_EXT.test(address) && looksLikeDbTarget(address))
-    push(address.split(/[:/]/)[0]!, 'host');
+  const addressNamed = address === undefined || FILE_EXT.test(address) ? null : addressHost(address);
+  if (signals.length === 0 && addressNamed !== null) push(addressNamed, 'host');
   if (signals.length === 0) return { cls: 'LOCAL', target: 'the local socket', executes };
   const worst = signals.reduce((a, b) => (TARGET_SEVERITY[b.cls] > TARGET_SEVERITY[a.cls] ? b : a));
   return { cls: worst.cls, target: worst.target, executes };

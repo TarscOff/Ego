@@ -15,7 +15,14 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DB_GRAMMAR, REDIS_OPTIONS, parseDbArgs, readDbTarget, type DbWord } from '../src/authority/db-options.ts';
+import {
+  DB_GRAMMAR,
+  REDIS_OPTIONS,
+  SQLITE_OPTIONS,
+  parseDbArgs,
+  readDbTarget,
+  type DbWord,
+} from '../src/authority/db-options.ts';
 import { sqlScan } from '../src/authority/sql-lex.ts';
 import { verdict, workspace } from './support/corpus.ts';
 import { PSQL_LEXICAL_CASES, runInLocalImage, startPsqlOracle } from './support/psql-oracle.ts';
@@ -49,9 +56,16 @@ const viaStdin = (script: string): string[] => [
 test('RV-DB-2: a command psql runs is a command the scanner reports, and a line a string swallows is not invented', () => {
   for (const c of PSQL_LEXICAL_CASES) {
     const scan = sqlScan(c.script.replaceAll('@MARK@', '/tmp/x'), 'pg');
-    assert.ok(!('refused' in scan), `${JSON.stringify(c.script)} (${c.why}) was refused: ${'refused' in scan ? scan.refused : ''}`);
+    assert.ok(
+      !('refused' in scan),
+      `${JSON.stringify(c.script)} (${c.why}) was refused: ${'refused' in scan ? scan.refused : ''}`,
+    );
     const reported = scan.metas.some((m) => m.name === 'o' && m.args === '|touch /tmp/x');
-    assert.equal(reported, c.runs, `${JSON.stringify(c.script)}: ${c.why} - psql ${c.runs ? 'runs' : 'does not run'} the \\o line`);
+    assert.equal(
+      reported,
+      c.runs,
+      `${JSON.stringify(c.script)}: ${c.why} - psql ${c.runs ? 'runs' : 'does not run'} the \\o line`,
+    );
   }
 });
 
@@ -60,7 +74,9 @@ test('RV-DB-2: the cases above are what the real psql does (skipped without dock
   if (oracle === null) return t.skip('no docker, or no postgres image on this machine');
   try {
     const got = oracle.runs(PSQL_LEXICAL_CASES.map((c) => c.script));
-    const wrong = PSQL_LEXICAL_CASES.filter((c, i) => got[i] !== c.runs).map((c) => `${JSON.stringify(c.script)} (${c.why})`);
+    const wrong = PSQL_LEXICAL_CASES.filter((c, i) => got[i] !== c.runs).map(
+      (c) => `${JSON.stringify(c.script)} (${c.why})`,
+    );
     assert.deepEqual(wrong, [], `${oracle.version} disagrees with the table of what psql does`);
   } finally {
     oracle.stop();
@@ -77,7 +93,8 @@ test('RV-DB-2: the script reaches the verdict - every spelling of stdin, every s
     ],
     dir,
   );
-  for (const c of PSQL_LEXICAL_CASES.filter((x) => x.runs)) notAllowed(viaStdin(c.script.replaceAll('@MARK@', '/tmp/x')), dir);
+  for (const c of PSQL_LEXICAL_CASES.filter((x) => x.runs))
+    notAllowed(viaStdin(c.script.replaceAll('@MARK@', '/tmp/x')), dir);
   // ...and a line the client never lexes as a command is not made one: a dollar-quoted body keeps its backslash as text
   assert.equal(verdict(`cat <<'EOF' | psql\nselect $$ \\o |touch /tmp/x $$\nEOF`, dir), 'ALLOW');
 });
@@ -150,15 +167,28 @@ test('RV-DB-2 siblings: what the real psql does with a variable, and what the sc
       ["select '\\o |touch @MARK@' as x \\gset\n:x\n", {}, true],
       ["select '\\o |touch @MARK@' as x \\gset\nselect :'x'\n", {}, false],
     ];
-    const got = oracle.runs(cases.map(([script, vars]) => ({ script, args: Object.entries(vars).flatMap(([k, v]) => ['-v', `${k}=${v}`]) })));
+    const got = oracle.runs(
+      cases.map(([script, vars]) => ({
+        script,
+        args: Object.entries(vars).flatMap(([k, v]) => ['-v', `${k}=${v}`]),
+      })),
+    );
     cases.forEach(([script, vars, runs], i) => {
       assert.equal(got[i], runs, `${oracle.version}: ${JSON.stringify(script)} with ${JSON.stringify(vars)}`);
-      const scan = sqlScan(script.replaceAll('@MARK@', '/tmp/x'), 'pg', new Map(Object.entries(vars).map(([k, v]) => [k, v.replaceAll('@MARK@', '/tmp/x')])));
+      const scan = sqlScan(
+        script.replaceAll('@MARK@', '/tmp/x'),
+        'pg',
+        new Map(Object.entries(vars).map(([k, v]) => [k, v.replaceAll('@MARK@', '/tmp/x')])),
+      );
       if ('refused' in scan) return;
       // a command psql runs is reported, or the script asks about a variable whose text it cannot see
       const seen = scan.metas.some((m) => m.name === 'o') || scan.variables.length > 0;
       if (runs) assert.ok(seen, `${JSON.stringify(script)} runs a command the scanner did not see`);
-      else assert.ok(!scan.metas.some((m) => m.name === 'o'), `${JSON.stringify(script)} runs nothing, yet the scanner reports a command`);
+      else
+        assert.ok(
+          !scan.metas.some((m) => m.name === 'o'),
+          `${JSON.stringify(script)} runs nothing, yet the scanner reports a command`,
+        );
     });
   } finally {
     oracle.stop();
@@ -174,7 +204,7 @@ test('RV-DB-2 siblings: a backslash-semicolon is a semicolon, and a backquote is
       ...viaStdin('select `\n\\o |touch /tmp/q\n`\n'),
       // `\;` does not end the line: SQL goes on behind it, and it is read as SQL
       ...viaStdin("select 1 \\; select lo_import('x')\n"),
-      ...viaStdin('select 1 \\; select pg_ls_dir(\'.\')\n'),
+      ...viaStdin("select 1 \\; select pg_ls_dir('.')\n"),
     ],
     dir,
   );
@@ -188,22 +218,183 @@ test('RV-DB-2 siblings: a backslash-semicolon is a semicolon, and a backquote is
 
 /** the fragments the scripts are built from: every seam between two lexers that was found, and the characters around it */
 const POOL = [
-  'select 1', ' as ', 'a', 'x', 'e', 'E', 'a$', 'a$$', 'a$$$', 'x$y', '$$', '$a$', '$a$ q $a$', '$$ q $$', '$$ ', "'", "''", "'x'",
-  "'\\'", "'a\\'b'", "e'x'", "E'\\''", "e'\\\\'", "a$e'x'", "a$E'\\'", "_e'\\''", '"', '"x"', '"\'"', '"\\"', '"a""b"', "U&'x'",
-  'U&"x"', '1$$', '1', '1.', '.5', '1.5', 'é', 'é$$', 'é$a$', ';', '\n', ' ', '\t', '\\\\', ':', ':x', ":'x'", ':"x"', '::', '::int',
-  '`', "b'1'", "x'1'", "n'x'", "1e'x'", "1e'\\'", '1e5', '1e5$$', '1e+5', '0x1F', '0x1F$$', '1_0', '1_0$$', '(', ')', ',', '.', '\\g',
-  '$1', '$1$$', '$1a', '$1a$', '@', '#', '%', '[', ']', '{', '}', '[1:2]', '\r', '\f', '\v', '\\q', 'x$$', 'U&', "$q$'$q$", '$$\\$$',
-  '1.5$$', '.$$', ')$$', ']$$', "'x'$$", '"x"$$', ':$$', '+$$', '1$a$', 'e1$$', '_$$', 'a1$$', 'a_$$', 'é1$$', '$_$', '$é$', '$é$ q $é$',
-  "E'a'$$", '\\\\$$', ' $x$ ', '$X$', '$x$ $X$', 'x$x$', ',$$', '=$$', '*$$', '~$$', '<$$', '>$$', '-$$', '/$$', '|$$', '&$$', '^$$',
-  '!$$', '?$$', '@$$', '#$$', '%$$', '`$$', '\\;', '\\: ', ' \\; ', '\\;\\;', "\\; '", '\\:x', "x'", "'\n", '$$\n', "\n'", 'e ', ' e',
-  '1a', '1a$$', '15$$', '15 $$', '2e', '3e$$', 'éé', '😀$$', '😀', 'z$',
+  'select 1',
+  ' as ',
+  'a',
+  'x',
+  'e',
+  'E',
+  'a$',
+  'a$$',
+  'a$$$',
+  'x$y',
+  '$$',
+  '$a$',
+  '$a$ q $a$',
+  '$$ q $$',
+  '$$ ',
+  "'",
+  "''",
+  "'x'",
+  "'\\'",
+  "'a\\'b'",
+  "e'x'",
+  "E'\\''",
+  "e'\\\\'",
+  "a$e'x'",
+  "a$E'\\'",
+  "_e'\\''",
+  '"',
+  '"x"',
+  '"\'"',
+  '"\\"',
+  '"a""b"',
+  "U&'x'",
+  'U&"x"',
+  '1$$',
+  '1',
+  '1.',
+  '.5',
+  '1.5',
+  'é',
+  'é$$',
+  'é$a$',
+  ';',
+  '\n',
+  ' ',
+  '\t',
+  '\\\\',
+  ':',
+  ':x',
+  ":'x'",
+  ':"x"',
+  '::',
+  '::int',
+  '`',
+  "b'1'",
+  "x'1'",
+  "n'x'",
+  "1e'x'",
+  "1e'\\'",
+  '1e5',
+  '1e5$$',
+  '1e+5',
+  '0x1F',
+  '0x1F$$',
+  '1_0',
+  '1_0$$',
+  '(',
+  ')',
+  ',',
+  '.',
+  '\\g',
+  '$1',
+  '$1$$',
+  '$1a',
+  '$1a$',
+  '@',
+  '#',
+  '%',
+  '[',
+  ']',
+  '{',
+  '}',
+  '[1:2]',
+  '\r',
+  '\f',
+  '\v',
+  '\\q',
+  'x$$',
+  'U&',
+  "$q$'$q$",
+  '$$\\$$',
+  '1.5$$',
+  '.$$',
+  ')$$',
+  ']$$',
+  "'x'$$",
+  '"x"$$',
+  ':$$',
+  '+$$',
+  '1$a$',
+  'e1$$',
+  '_$$',
+  'a1$$',
+  'a_$$',
+  'é1$$',
+  '$_$',
+  '$é$',
+  '$é$ q $é$',
+  "E'a'$$",
+  '\\\\$$',
+  ' $x$ ',
+  '$X$',
+  '$x$ $X$',
+  'x$x$',
+  ',$$',
+  '=$$',
+  '*$$',
+  '~$$',
+  '<$$',
+  '>$$',
+  '-$$',
+  '/$$',
+  '|$$',
+  '&$$',
+  '^$$',
+  '!$$',
+  '?$$',
+  '@$$',
+  '#$$',
+  '%$$',
+  '`$$',
+  '\\;',
+  '\\: ',
+  ' \\; ',
+  '\\;\\;',
+  "\\; '",
+  '\\:x',
+  "x'",
+  "'\n",
+  '$$\n',
+  "\n'",
+  'e ',
+  ' e',
+  '1a',
+  '1a$$',
+  '15$$',
+  '15 $$',
+  '2e',
+  '3e$$',
+  'éé',
+  '😀$$',
+  '😀',
+  'z$',
 ];
-const CLOSERS = ['', '', '$$', "'", '"', '$a$', "$$ '", "$$'", "'$$", '"$$', "e'", 'x$$', "$$\n'", "'\\'", '\n', ' \\; ', '`'];
+const CLOSERS = [
+  '',
+  '',
+  '$$',
+  "'",
+  '"',
+  '$a$',
+  "$$ '",
+  "$$'",
+  "'$$",
+  '"$$',
+  "e'",
+  'x$$',
+  "$$\n'",
+  "'\\'",
+  '\n',
+  ' \\; ',
+  '`',
+];
 
 /** a deterministic generator: the same seed is the same scripts on every machine */
 function generator(seed: number): () => number {
   let s = seed >>> 0;
-  return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296);
+  return () => (s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296;
 }
 function scripts(seed: number, count: number, tail: (i: number) => string): string[] {
   const rnd = generator(seed);
@@ -296,7 +487,8 @@ const ACTS: Record<string, string> = {
 };
 const PROD = 'prod-db.acme.com';
 /** every prefix of a long option name, the name itself last */
-const prefixes = (name: string): string[] => Array.from({ length: name.length }, (_, i) => name.slice(0, i + 1));
+const prefixes = (name: string): string[] =>
+  Array.from({ length: name.length }, (_, i) => name.slice(0, i + 1));
 
 test('RV-DB-1: every client has a case, and every host option of every table is a production host in every spelling the client accepts', () => {
   const dir = workspace();
@@ -312,17 +504,22 @@ test('RV-DB-1: every client has a case, and every host option of every table is 
     const spec = DB_GRAMMAR[head]!;
     for (const name of spec.host ?? []) {
       // a short letter that is its own name (redis-cli `-h`), or a long option: its unambiguous prefixes where the client takes them
-      const spellings = name.length === 1 ? [`-${name}`] : (spec.abbreviate ? prefixes(name) : [name]).map((p) => `--${p}`);
+      const spellings =
+        name.length === 1 ? [`-${name}`] : (spec.abbreviate ? prefixes(name) : [name]).map((p) => `--${p}`);
       // ...and the short letter the table gives it, glued and spaced
       const letter = Object.entries(spec.alias ?? {}).find(([, long]) => long === name)?.[0];
       const forms: string[] = [];
-      for (const sp of spellings) forms.push(sp.startsWith('--') ? `${sp}=${PROD}` : `${sp}${PROD}`, `${sp} ${PROD}`);
+      for (const sp of spellings)
+        forms.push(sp.startsWith('--') ? `${sp}=${PROD}` : `${sp}${PROD}`, `${sp} ${PROD}`);
       if (letter !== undefined) forms.push(`-${letter}${PROD}`, `-${letter} ${PROD}`, `-${letter}=${PROD}`);
       for (const f of forms) {
         checked++;
         // (the host is the whole question, so it goes in front of the statement and behind it - except for a client whose first bare word
         // ends its options: redis-cli's `FLUSHALL -h x` hands `-h x` to the command)
-        for (const cmd of [`${head} ${f} ${ACTS[head]}`, ...(spec.stopAtPositional ? [] : [`${head} ${ACTS[head]} ${f}`])]) {
+        for (const cmd of [
+          `${head} ${f} ${ACTS[head]}`,
+          ...(spec.stopAtPositional ? [] : [`${head} ${ACTS[head]} ${f}`]),
+        ]) {
           const got = verdict(cmd, dir);
           if (got !== 'DENY') failures.push(`${got}: ${cmd}`);
         }
@@ -330,7 +527,11 @@ test('RV-DB-1: every client has a case, and every host option of every table is 
     }
   }
   assert.ok(checked > 150, `the matrix collapsed: only ${checked} spellings`);
-  assert.deepEqual(failures, [], `a spelling of a host option the client accepts was not read as the host:\n  ${failures.join('\n  ')}`);
+  assert.deepEqual(
+    failures,
+    [],
+    `a spelling of a host option the client accepts was not read as the host:\n  ${failures.join('\n  ')}`,
+  );
 });
 
 test("RV-DB-1: the reviewer's three commands, and the same host spelled the way every other tool would", () => {
@@ -381,7 +582,9 @@ test('RV-DB-1: a connection string in the place of a database name is a target, 
     const spec = DB_GRAMMAR[head]!;
     for (const name of spec.connection ?? []) {
       const spellings =
-        name.length === 1 ? [`-${name}`] : (spec.abbreviate ? prefixes(name).filter((p) => p.length >= 3) : [name]).map((p) => `--${p}`);
+        name.length === 1
+          ? [`-${name}`]
+          : (spec.abbreviate ? prefixes(name).filter((p) => p.length >= 3) : [name]).map((p) => `--${p}`);
       for (const sp of spellings) {
         const glue = sp.startsWith('--') ? '=' : ' ';
         cases.push(`${head} ${sp}${glue}"$DATABASE_URL" ${ACTS[head]}`);
@@ -395,8 +598,18 @@ test('RV-DB-1: a connection string in the place of a database name is a target, 
   notAllowed(cases, dir);
   for (const c of cases.filter((x) => x.includes(PROD))) assert.equal(verdict(c, dir), 'DENY', c);
   // the first operand of psql is a database or a connection string, and libpq lets it override -h
-  notAllowed([`psql "$DB" -c 'drop table t'`, `psql -h localhost "$DATABASE_URL" -c 'drop table t'`, `pg_dump "$DATABASE_URL"`], dir);
-  allowed([`psql -d app -c 'drop table t'`, `psql --dbname=app_test -c 'drop table t'`, `pg_dump -d app`], dir);
+  notAllowed(
+    [
+      `psql "$DB" -c 'drop table t'`,
+      `psql -h localhost "$DATABASE_URL" -c 'drop table t'`,
+      `pg_dump "$DATABASE_URL"`,
+    ],
+    dir,
+  );
+  allowed(
+    [`psql -d app -c 'drop table t'`, `psql --dbname=app_test -c 'drop table t'`, `pg_dump -d app`],
+    dir,
+  );
 });
 
 test('RV-DB-1: a connection profile is a target nobody read, in every abbreviation the client takes', () => {
@@ -407,7 +620,9 @@ test('RV-DB-1: a connection profile is a target nobody read, in every abbreviati
     for (const name of (spec.profile ?? []).filter((n) => (spec.value as readonly string[]).includes(n))) {
       // the prefixes that mean this option and no other
       const longs = [...spec.value, ...spec.flag, ...(spec.escaping ?? [])];
-      for (const p of prefixes(name).filter((p) => spec.abbreviate && longs.filter((l) => l.startsWith(p)).every((l) => l === name)))
+      for (const p of prefixes(name).filter(
+        (p) => spec.abbreviate && longs.filter((l) => l.startsWith(p)).every((l) => l === name),
+      ))
         cases.push(`${head} --${p}=prod ${ACTS[head]}`);
       cases.push(`${head} --${name}=prod ${ACTS[head]}`);
     }
@@ -479,7 +694,14 @@ test("RV-DB-3: an option's value is never a host - for every value option of eve
   const skip = (head: string, name: string): boolean => {
     const spec = DB_GRAMMAR[head]!;
     // the values that ARE judged: a host, a connection string, a profile, a statement, a file the client reads or writes, something it runs
-    const judged = [...(spec.host ?? []), ...(spec.connection ?? []), ...(spec.profile ?? []), ...(spec.escaping ?? []), spec.output ?? ''];
+    const judged = [
+      ...(spec.host ?? []),
+      ...(spec.connection ?? []),
+      ...(spec.address ?? []),
+      ...(spec.profile ?? []),
+      ...(spec.escaping ?? []),
+      spec.output ?? '',
+    ];
     return (
       judged.includes(name) ||
       /^(command|execute|eval|query|file|output|log-file|tee|init-command|rdb|functions-rdb|import|cmd|set|variable|pset|config-file|queries-file)$/.test(
@@ -497,7 +719,9 @@ test("RV-DB-3: an option's value is never a host - for every value option of eve
       const spell = (v: string): string[] => [
         `${head} --${name}=${v} ${ACTS[head]}`,
         `${head} --${name} ${v} ${ACTS[head]}`,
-        ...(letter !== undefined && (spec.shortValue.includes(letter) || spec.shortGlued?.includes(letter)) ? [`${head} -${letter}${v} ${ACTS[head]}`] : []),
+        ...(letter !== undefined && (spec.shortValue.includes(letter) || spec.shortGlued?.includes(letter))
+          ? [`${head} -${letter}${v} ${ACTS[head]}`]
+          : []),
       ];
       const dotted = spell('app.user');
       const plain = spell('appuser');
@@ -510,7 +734,11 @@ test("RV-DB-3: an option's value is never a host - for every value option of eve
     }
   }
   assert.ok(checked > 150, `the matrix collapsed: only ${checked} spellings`);
-  assert.deepEqual(failures, [], `a dotted value changed the verdict, so it was read as something other than a value:\n  ${failures.join('\n  ')}`);
+  assert.deepEqual(
+    failures,
+    [],
+    `a dotted value changed the verdict, so it was read as something other than a value:\n  ${failures.join('\n  ')}`,
+  );
 });
 
 test("RV-DB-3: what a client's operand IS decides whether it can be a server", () => {
@@ -524,6 +752,12 @@ test("RV-DB-3: what a client's operand IS decides whether it can be a server", (
     `cqlsh prod-cass -e 'drop table t'`,
     `cqlsh prod-cass 9042 -e 'drop table t'`,
     `clickhouse-client prod-ch.acme.com -q 'alter table t delete where 1'`,
+    // MySQL Shell's operand and `--uri` are an address with a user in front of the host: what follows the `@` is the server
+    `mysqlsh root@prod-db.acme.com`,
+    `mysqlsh root@prod-db`,
+    `mysqlsh --uri=root@prod-db.acme.com -e 'select 1'`,
+    `mysqlsh --uri root@prod-db -e 'select 1'`,
+    `mysqlsh mysqlx://root@prod-db.acme.com/app`,
   ])
     assert.equal(verdict(c, dir), 'DENY', c);
   allowed(
@@ -534,7 +768,11 @@ test("RV-DB-3: what a client's operand IS decides whether it can be a server", (
     dir,
   );
   // (cqlsh is not a bounded tool, so it asks wherever it points - but a local host is not a refusal)
-  for (const c of [`cqlsh localhost -e 'drop table t'`, `cqlsh 127.0.0.1 9042 -e 'drop table t'`, `cqlsh -e 'drop table t'`])
+  for (const c of [
+    `cqlsh localhost -e 'drop table t'`,
+    `cqlsh 127.0.0.1 9042 -e 'drop table t'`,
+    `cqlsh -e 'drop table t'`,
+  ])
     assert.equal(verdict(c, dir), 'ASK', c);
   // a script handed over as an operand (standard input carried onto the command line) is never taken for the operand it sits in
   assert.equal(verdict(`echo 'select * from t' | psql`, dir), 'ALLOW');
@@ -580,7 +818,13 @@ test('the table answers the exception questions too: psql -l lists, redis-cli IN
   const dir = workspace();
   // `-l` is a flag in a cluster, abbreviated, behind another flag; in `-U -l` it is the user's NAME and there is a statement after it
   allowed(
-    [`psql -h ${PROD} -l`, `psql -h ${PROD} -Atl`, `psql -h ${PROD} --list`, `psql -h ${PROD} --lis`, `psql -h ${PROD} -qlX`],
+    [
+      `psql -h ${PROD} -l`,
+      `psql -h ${PROD} -Atl`,
+      `psql -h ${PROD} --list`,
+      `psql -h ${PROD} --lis`,
+      `psql -h ${PROD} -qlX`,
+    ],
     dir,
   );
   assert.equal(verdict(`psql -h ${PROD} -U -l -c 'drop table t'`, dir), 'DENY');
@@ -666,7 +910,13 @@ test('the pipe edge: a flag of any modelled client leaves standard input a scrip
   for (const [head, script] of Object.entries(SCRIPT)) {
     const spec = DB_GRAMMAR[head]!;
     // the flags that take no value and so cannot be the statement; the probes (`--help`, `--version`) are judged apart
-    const flags = [...spec.flag.filter((f) => !/^(help|version)$/.test(f)).map((f) => `--${f}`), ...spec.shortFlag.split('').filter((c) => !'?VvhH'.includes(c)).map((c) => `-${c}`)];
+    const flags = [
+      ...spec.flag.filter((f) => !/^(help|version)$/.test(f)).map((f) => `--${f}`),
+      ...spec.shortFlag
+        .split('')
+        .filter((c) => !'?VvhH'.includes(c))
+        .map((c) => `-${c}`),
+    ];
     for (const f of flags) {
       checked++;
       const cmd = `printf '${script.replace(/\\/g, '\\\\')}\\n' | ${head} ${f}`;
@@ -674,7 +924,11 @@ test('the pipe edge: a flag of any modelled client leaves standard input a scrip
     }
   }
   assert.ok(checked > 100, `the matrix collapsed: only ${checked} flags`);
-  assert.deepEqual(failures, [], 'a flag was read as the statement that replaces standard input:\n  ' + failures.join('\n  '));
+  assert.deepEqual(
+    failures,
+    [],
+    'a flag was read as the statement that replaces standard input:\n  ' + failures.join('\n  '),
+  );
 });
 
 test('the pipe edge, against the real sqlite3: every random spelling in which sqlite3 runs a piped dot-command is one the evaluator does not allow (skipped without sqlite3)', (t) => {
@@ -686,7 +940,29 @@ test('the pipe edge, against the real sqlite3: every random spelling in which sq
     const rnd = generator(20261002);
     const pick = <T>(a: readonly T[]): T => a[Math.floor(rnd() * a.length)]!;
     // options that change nothing about whether standard input is read, and ones that do (a statement operand)
-    const OPTS = ['-header', '-noheader', '-column', '-csv', '-line', '-list', '-json', '-echo', '-bail', '-batch', '-readonly', '-nullvalue X', '-separator ,', "-cmd '.tables'", "--cmd '.tables'", "-cmd 'select 1'", '-init /dev/null', '--init /dev/null', '-safe', '-nofollow', '-interactive'];
+    const OPTS = [
+      '-header',
+      '-noheader',
+      '-column',
+      '-csv',
+      '-line',
+      '-list',
+      '-json',
+      '-echo',
+      '-bail',
+      '-batch',
+      '-readonly',
+      '-nullvalue X',
+      '-separator ,',
+      "-cmd '.tables'",
+      "--cmd '.tables'",
+      "-cmd 'select 1'",
+      '-init /dev/null',
+      '--init /dev/null',
+      '-safe',
+      '-nofollow',
+      '-interactive',
+    ];
     const SQL = ['', '', '', "'select 1'", "'.tables'", "'.headers on'"];
     let ran = 0;
     let allowedAndRan = 0;
@@ -694,7 +970,10 @@ test('the pipe edge, against the real sqlite3: every random spelling in which sq
       const opts: string[] = [];
       for (let k = Math.floor(rnd() * 4); k > 0; k--) opts.push(pick(OPTS));
       const marker = join(work, `m${i}`);
-      const cmd = `echo '.shell touch ${marker}' | sqlite3 ${opts.join(' ')} :memory: ${pick(SQL)}`.replace(/ +/g, ' ');
+      const cmd = `echo '.shell touch ${marker}' | sqlite3 ${opts.join(' ')} :memory: ${pick(SQL)}`.replace(
+        / +/g,
+        ' ',
+      );
       spawnSync('sh', ['-c', cmd], { cwd: work, encoding: 'utf8', timeout: 20000 });
       const didRun = existsSync(marker);
       if (didRun) ran++;
@@ -732,13 +1011,19 @@ test('the PostgreSQL tools: every prefix of --host that a real binary takes for 
   };
   const PREFIXES = ['h', 'ho', 'hos', 'host'];
   const script = Object.entries(TOOLS)
-    .flatMap(([tool, tail]) => PREFIXES.map((p) => `echo "@@ ${tool} ${p}"; ${tool} --${p}=127.0.0.2 ${tail} 2>&1 | head -2`))
+    .flatMap(([tool, tail]) =>
+      PREFIXES.map((p) => `echo "@@ ${tool} ${p}"; ${tool} --${p}=127.0.0.2 ${tail} 2>&1 | head -2`),
+    )
     .join('; ');
   const out = runInLocalImage(/^postgres:\d+(-alpine)?$/, script);
   if (out === null) return t.skip('no docker, or no postgres image on this machine');
   const blocks = new Map<string, string>();
   for (const b of out.split('@@ ').slice(1)) blocks.set(b.split('\n')[0]!.trim(), b);
-  assert.equal(blocks.size, Object.keys(TOOLS).length * PREFIXES.length, 'the container printed less than it was asked');
+  assert.equal(
+    blocks.size,
+    Object.keys(TOOLS).length * PREFIXES.length,
+    'the container printed less than it was asked',
+  );
   for (const tool of Object.keys(TOOLS))
     for (const p of PREFIXES) {
       const real = blocks.get(`${tool} ${p}`)!;
@@ -746,17 +1031,30 @@ test('the PostgreSQL tools: every prefix of --host that a real binary takes for 
       const spec = DB_GRAMMAR[tool]!;
       const read = readDbTarget(spec, parseDbArgs([word(`--${p}=127.0.0.2`)], spec)).hosts.length > 0;
       // what the real tool takes for the host, the table must; an ambiguous prefix the tool refuses may be read as the host too
-      if (takenForHost) assert.ok(read, `${tool} --${p}= is the host to the real tool and not to the table\n${real}`);
-      else assert.match(real, /ambiguous|unrecognized|invalid option/i, `${tool} --${p}=: neither the host nor a refusal\n${real}`);
+      if (takenForHost)
+        assert.ok(read, `${tool} --${p}= is the host to the real tool and not to the table\n${real}`);
+      else
+        assert.match(
+          real,
+          /ambiguous|unrecognized|invalid option/i,
+          `${tool} --${p}=: neither the host nor a refusal\n${real}`,
+        );
     }
   // ...and the full name is the host to every one of them
-  for (const tool of Object.keys(TOOLS)) assert.match(blocks.get(`${tool} host`)!, /server at "127\.0\.0\.2"/, tool);
+  for (const tool of Object.keys(TOOLS))
+    assert.match(blocks.get(`${tool} host`)!, /server at "127\.0\.0\.2"/, tool);
 });
 
-test('redis-cli: -h is the host, --host is no option, and an option after the command is the command\'s argument (skipped without docker)', (t) => {
+test("redis-cli: -h is the host, --host is no option, and an option after the command is the command's argument (skipped without docker)", (t) => {
   const run = (args: string): string => `echo "@@ ${args}"; redis-cli ${args} 2>&1 | head -1`;
   const body = (key: string): string => blocks.get(key)!.split('\n').slice(1).join('\n');
-  const cases = ['-h 127.0.0.2 ping', '-h127.0.0.2 ping', '--host=127.0.0.2 ping', '--ho=127.0.0.2 ping', 'ping -h 127.0.0.2'];
+  const cases = [
+    '-h 127.0.0.2 ping',
+    '-h127.0.0.2 ping',
+    '--host=127.0.0.2 ping',
+    '--ho=127.0.0.2 ping',
+    'ping -h 127.0.0.2',
+  ];
   const out = runInLocalImage(/^redis:\d+(-alpine)?$/, cases.map(run).join('; '));
   if (out === null) return t.skip('no docker, or no redis image on this machine');
   const blocks = new Map<string, string>();
@@ -781,8 +1079,20 @@ test('redis-cli: -h is the host, --host is no option, and an option after the co
 });
 
 test("the PostgreSQL tools' tables list every long option of the real binary's --help, with its arity (skipped without docker)", (t) => {
-  const TOOLS = ['psql', 'pg_dump', 'pg_dumpall', 'pg_restore', 'createdb', 'dropdb', 'createuser', 'dropuser', 'pgbench'];
-  const script = TOOLS.map((tool) => `echo "@@ ${tool}"; ${tool} ${tool === 'psql' ? '--help=options' : '--help'} 2>&1`).join('; ');
+  const TOOLS = [
+    'psql',
+    'pg_dump',
+    'pg_dumpall',
+    'pg_restore',
+    'createdb',
+    'dropdb',
+    'createuser',
+    'dropuser',
+    'pgbench',
+  ];
+  const script = TOOLS.map(
+    (tool) => `echo "@@ ${tool}"; ${tool} ${tool === 'psql' ? '--help=options' : '--help'} 2>&1`,
+  ).join('; ');
   const out = runInLocalImage(/^postgres:\d+(-alpine)?$/, script);
   if (out === null) return t.skip('no docker, or no postgres image on this machine');
   const problems: string[] = [];
@@ -792,17 +1102,28 @@ test("the PostgreSQL tools' tables list every long option of the real binary's -
     const takes = new Set(spec.value);
     const none = new Set([...spec.flag, ...(spec.escaping ?? [])]);
     // the options column: a line that begins with an option, `-x, --name=ARG` or `--name`, several names on one line (`--set=, --variable=`)
-    for (const line of block.split('\n').slice(1).filter((l) => /^\s+-/.test(l))) {
+    for (const line of block
+      .split('\n')
+      .slice(1)
+      .filter((l) => /^\s+-/.test(l))) {
       // (the options end where the description's column begins: two spaces)
-      for (const m of line.trim().split(/\s{2,}/)[0]!.matchAll(/--([a-z][a-z0-9-]*)(\[?=)?/g)) {
+      for (const m of line
+        .trim()
+        .split(/\s{2,}/)[0]!
+        .matchAll(/--([a-z][a-z0-9-]*)(\[?=)?/g)) {
         const name = m[1]!;
         // (`--help=commands` and `--help=variables` are topics of a flag that takes none)
         if (name === 'help') continue;
         // a `--name=` the help shows with a value takes one; a bare name takes none
         const valued = m[2] !== undefined && m[2] !== '[=';
-        if (!takes.has(name) && !none.has(name)) problems.push(`${tool}: --${name} is in the real --help and not in the table`);
-        else if (valued && !takes.has(name)) problems.push(`${tool}: --${name} takes a value in the real --help and the table says it takes none`);
-        else if (!valued && m[2] === undefined && takes.has(name)) problems.push(`${tool}: --${name} takes no value in the real --help and the table says it does`);
+        if (!takes.has(name) && !none.has(name))
+          problems.push(`${tool}: --${name} is in the real --help and not in the table`);
+        else if (valued && !takes.has(name))
+          problems.push(
+            `${tool}: --${name} takes a value in the real --help and the table says it takes none`,
+          );
+        else if (!valued && m[2] === undefined && takes.has(name))
+          problems.push(`${tool}: --${name} takes no value in the real --help and the table says it does`);
       }
     }
   }
@@ -810,8 +1131,20 @@ test("the PostgreSQL tools' tables list every long option of the real binary's -
 });
 
 test("the PostgreSQL tools' tables give every short option of the real binary's --help the right arity (skipped without docker)", (t) => {
-  const TOOLS = ['psql', 'pg_dump', 'pg_dumpall', 'pg_restore', 'createdb', 'dropdb', 'createuser', 'dropuser', 'pgbench'];
-  const script = TOOLS.map((tool) => `echo "@@ ${tool}"; ${tool} ${tool === 'psql' ? '--help=options' : '--help'} 2>&1`).join('; ');
+  const TOOLS = [
+    'psql',
+    'pg_dump',
+    'pg_dumpall',
+    'pg_restore',
+    'createdb',
+    'dropdb',
+    'createuser',
+    'dropuser',
+    'pgbench',
+  ];
+  const script = TOOLS.map(
+    (tool) => `echo "@@ ${tool}"; ${tool} ${tool === 'psql' ? '--help=options' : '--help'} 2>&1`,
+  ).join('; ');
   const out = runInLocalImage(/^postgres:\d+(-alpine)?$/, script);
   if (out === null) return t.skip('no docker, or no postgres image on this machine');
   const problems: string[] = [];
@@ -819,7 +1152,10 @@ test("the PostgreSQL tools' tables give every short option of the real binary's 
   for (const block of out.split('@@ ').slice(1)) {
     const tool = block.split('\n')[0]!.trim();
     const spec = DB_GRAMMAR[tool]!;
-    for (const line of block.split('\n').slice(1).filter((l) => /^\s+-/.test(l))) {
+    for (const line of block
+      .split('\n')
+      .slice(1)
+      .filter((l) => /^\s+-/.test(l))) {
       const text = line.trim().split(/\s{2,}/)[0]!;
       // `-x, --name=ARG` takes a value; `-x, --name` takes none; `-x ARG` (no long name) takes one; `-1 ("one")` is a digit with a note
       if (text.startsWith('--')) continue;
@@ -831,9 +1167,14 @@ test("the PostgreSQL tools' tables give every short option of the real binary's 
       if (letter === '?' || (letter === 'h' && tool === 'psql' && false)) continue;
       const inValue = spec.shortValue.includes(letter);
       const inFlag = spec.shortFlag.includes(letter);
-      if (!inValue && !inFlag) problems.push(`${tool}: -${letter} is in the real --help and not in the table`);
-      else if (valued && !inValue) problems.push(`${tool}: -${letter} takes a value in the real --help and the table says it takes none`);
-      else if (!valued && inValue) problems.push(`${tool}: -${letter} takes no value in the real --help and the table says it does`);
+      if (!inValue && !inFlag)
+        problems.push(`${tool}: -${letter} is in the real --help and not in the table`);
+      else if (valued && !inValue)
+        problems.push(
+          `${tool}: -${letter} takes a value in the real --help and the table says it takes none`,
+        );
+      else if (!valued && inValue)
+        problems.push(`${tool}: -${letter} takes no value in the real --help and the table says it does`);
     }
   }
   assert.ok(seen > 100, `the help parse collapsed (${seen} short options)`);
@@ -844,7 +1185,15 @@ test("redis-cli's table lists every option of the real binary's --help, with its
   const out = runInLocalImage(/^redis:\d+(-alpine)?$/, 'redis-cli --help 2>&1');
   if (out === null) return t.skip('no docker, or no redis image on this machine');
   // the options the table leaves out ON PURPOSE, so that they stay a question: they act on the server or the cluster
-  const ASKED = new Set(['--cluster', '--replica', '--lru-test', '--vset-recall', '--vset-recall-count', '--vset-recall-ef', '--vset-recall-ele']);
+  const ASKED = new Set([
+    '--cluster',
+    '--replica',
+    '--lru-test',
+    '--vset-recall',
+    '--vset-recall-count',
+    '--vset-recall-ef',
+    '--vset-recall-ele',
+  ]);
   const problems: string[] = [];
   let seen = 0;
   for (const line of out.split('\n')) {
@@ -857,10 +1206,14 @@ test("redis-cli's table lists every option of the real binary's --help, with its
     const short = !name.startsWith('--');
     const bare = name.replace(/^-+/, '');
     const inValue = short ? REDIS_OPTIONS.shortValue.includes(bare) : REDIS_OPTIONS.value.includes(bare);
-    const inFlag = short ? REDIS_OPTIONS.shortFlag.includes(bare) : [...REDIS_OPTIONS.flag, ...(REDIS_OPTIONS.escaping ?? [])].includes(bare);
+    const inFlag = short
+      ? REDIS_OPTIONS.shortFlag.includes(bare)
+      : [...REDIS_OPTIONS.flag, ...(REDIS_OPTIONS.escaping ?? [])].includes(bare);
     if (!inValue && !inFlag) problems.push(`${name} is in the real --help and not in the table`);
-    else if (valued && !inValue) problems.push(`${name} takes a value in the real --help and the table says it takes none`);
-    else if (!valued && inValue && !(REDIS_OPTIONS.escaping ?? []).includes(bare)) problems.push(`${name} takes no value in the real --help and the table says it does`);
+    else if (valued && !inValue)
+      problems.push(`${name} takes a value in the real --help and the table says it takes none`);
+    else if (!valued && inValue && !(REDIS_OPTIONS.escaping ?? []).includes(bare))
+      problems.push(`${name} takes no value in the real --help and the table says it does`);
   }
   assert.ok(seen > 40, `the help parse collapsed (${seen} options)`);
   assert.deepEqual(problems, [], 'the table disagrees with the real tool:\n  ' + problems.join('\n  '));
@@ -879,4 +1232,33 @@ test('a word the table does not know leaves the arity around it unproven, so the
     assert.equal(verdict(c, dir), 'DENY', c);
   // ...and a table that was not surprised does not read a user named henry as a host
   assert.equal(verdict(`psql -Uhenry -c 'update t set a=1'`, dir), 'ALLOW');
+});
+
+test("sqlite3's table lists every option of the real binary's -help, with its arity (skipped without sqlite3)", (t) => {
+  const help = spawnSync('sqlite3', ['-help'], { encoding: 'utf8' });
+  const text = `${help.stdout ?? ''}${help.stderr ?? ''}`;
+  if (!/^Usage: sqlite3/m.test(text)) return t.skip('no sqlite3 on this machine');
+  // the options the table does not model on purpose: they take several words or run an archive command, and are opaque (sqliteEscape)
+  const SPECIAL = new Set(['A', 'lookaside', 'pagecache', 'unsafe-testing']);
+  const known = new Set([...SQLITE_OPTIONS.value, ...SQLITE_OPTIONS.flag]);
+  const problems: string[] = [];
+  let seen = 0;
+  for (const line of text.split('\n')) {
+    const m = /^ {3}-(\[no\])?([A-Za-z][A-Za-z-]*)(?: ([A-Z][A-Z.]*))?(?:\s|$)/.exec(line);
+    if (!m || SPECIAL.has(m[2]!)) continue;
+    seen++;
+    const names = m[1] !== undefined ? [m[2]!, `no${m[2]!}`] : [m[2]!];
+    for (const name of names) {
+      if (!known.has(name)) problems.push(`-${name} is in the real -help and not in the table`);
+      else if (m[3] !== undefined && !SQLITE_OPTIONS.value.includes(name))
+        problems.push(`-${name} takes a value in the real -help and the table says it takes none`);
+      else if (m[3] === undefined && SQLITE_OPTIONS.value.includes(name))
+        problems.push(`-${name} takes no value in the real -help and the table says it does`);
+    }
+  }
+  assert.ok(seen > 30, `the help parse collapsed (${seen} options)`);
+  assert.deepEqual(problems, [], 'the table disagrees with the real tool:\n  ' + problems.join('\n  '));
+  // sqlite3 takes `--name` for `-name`, and nothing shorter: `-hea` is not `-header`
+  const abbreviated = spawnSync('sqlite3', ['-hea', ':memory:', 'select 1'], { encoding: 'utf8' });
+  assert.notEqual(abbreviated.status, 0, 'sqlite3 takes an abbreviation of an option');
 });
