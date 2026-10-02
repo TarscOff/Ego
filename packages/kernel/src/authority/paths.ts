@@ -579,8 +579,13 @@ export function directoryCandidates(base: string, word: string, physicalOnly = f
   if (r === null || r.glob || r.lexical.length === 0) return null;
   const logical = canonicalPath(r.lexical[0]!);
   const physical = r.physical[0] ?? logical;
-  if (physicalOnly) return [physical];
-  return physical === logical ? [logical] : [logical, physical];
+  // THE WORD AS TYPED is another place the shell may be left: `cd '~+'/..` is the directory called `~+` and then its parent, where an unquoted
+  // `~+` is the working directory (PA-03; found by the filesystem oracle, which `cd`'d through such a link into the hooks). It counts where the
+  // directory exists - a `cd` into a name that is not there leaves the shell where it was, and `cd ~/proj` is not also the directory `~`.
+  const typed = r.typed.length > 0 && isDirectory(isAbsolute(word) ? word : join(base, word)) ? r.typed.map(canonicalPath) : [];
+  const out = new Set<string>(physicalOnly ? [physical] : [logical, physical]);
+  for (const t of typed) out.add(t);
+  return [...out];
 }
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -757,7 +762,15 @@ function expandGlobText(
     const seg = segments[idx]!;
     const last = idx === segments.length - 1;
     if (seg === '..') {
-      frontier = frontier.map((p) => dirname(p));
+      // THE PARENT OF THE DIRECTORY REACHED, which is not the parent of its name when the name is a link: `./ls*/../.ssh/` matches the link `lssh`,
+      // and the shell opens the home directory's `.ssh` (found by the filesystem oracle). Both parents stay: the text's, and the disk's.
+      const up = new Set<string>();
+      for (const p of frontier) {
+        up.add(dirname(p));
+        const real = canonicalPath(p);
+        if (real !== p) up.add(dirname(real));
+      }
+      frontier = [...up];
       continue;
     }
     if (seg === '**') {

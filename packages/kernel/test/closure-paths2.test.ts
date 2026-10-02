@@ -187,6 +187,54 @@ test('B: a link named like an expansion is a link: `~+`, `$PWD`, `${PWD}`, `{a,b
   assert.deepEqual(failures.slice(0, 20), [], `${failures.length} writes through a link named like an expansion were not refused`);
 });
 
+test('B: a name with a blank AND an angle bracket in one word is one name, whichever operand of the command it is', () => {
+  // found by the filesystem oracle: `cp src/a.ts live/repo/'a b'/../../'a<b'/x` - the blank splits the text the destination is read from, and the
+  // angle bracket makes the second half a redirection, so the destination was `b/../../a`
+  const dir = workspace({
+    payload: 'x\n',
+    'a b': link('.git/hooks'),
+    'a<b': link('.harness/generated'),
+    'a>b': link('.claude'),
+    '.harness/generated/x': 'g',
+    '.claude/settings.json': '{}',
+  });
+  refused(dir, [
+    "cp payload 'a b'/../../'a<b'/x",
+    "cp payload 'a b'/../'a<b'/x",
+    "cp payload ./'a b'/../'a<b'/x",
+    "mv payload 'a b'/../../'a<b'/x",
+    "ln -f payload 'a b'/../../'a>b'/settings.json",
+    "install payload 'a b'/../../'a<b'/x",
+    "rsync payload 'a b'/../../'a<b'/x",
+    "cp -f payload 'a b'/../'a>b'/settings.json",
+    "cp -t 'a b'/../../'a<b' payload",
+    "cp payload \"a b\"/../\"a<b\"/x",
+  ]);
+  ordinary(dir, ["cp payload 'my dir'/../out.txt", "cp 'a b'/../payload copy.txt", "mv payload 'a<>b.txt'"]);
+});
+
+test('B: a `cd` into a directory named like an expansion goes where that directory leads', () => {
+  // found by the filesystem oracle: `cd '~+'/../../repo/cd3 && touch zz-new` - the directory called `~+` is a link, and the directory word was read
+  // as the text the normalizer left of it (`~+` is $PWD there), so the shell was somewhere else than the evaluator thought
+  const dir = workspace({ '~+': link('.git/hooks'), '~': link('.claude'), 'a*': link('.harness/generated'), 'sub/x': 'x\n', 'lhd': link('.git/hooks'), '.claude/settings.json': '{}', '.harness/generated/x': 'g' });
+  refused(dir, [
+    "cd '~+' && touch zz-new",
+    "cd '~+'/.. && cd hooks && touch zz-new",
+    "(cd '~+'/.. && cd hooks && touch zz-new)",
+    'cd "~+"/.. && cd hooks && touch zz-new',
+    "pushd '~+'/.. && cd hooks && touch zz-new",
+    'cd \\~+/.. && cd hooks && touch zz-new',
+    "cd -P '~+'/.. && cd hooks && touch zz-new",
+    "cd '~+'/../lhd && touch zz-new",
+    "cd '~+'/../sub/../lhd && echo x > zz-new",
+    "cd '~' && echo x > settings.json",
+    "cd '~'/../.claude && echo x > settings.json",
+  ]);
+  // (a wildcard in a directory word is a set nobody here can enumerate: that asks)
+  gated(dir, ["cd 'a*' && echo x > x"]);
+  ordinary(dir, ['cd sub && touch zz-new', 'cd sub && cd .. && ls', 'cd sub/.. && touch zz-new', 'cd ./sub && echo x > zz-new']);
+});
+
 test('B: a name that begins with a dash is an operand after `--`, and after the first operand for a parser that does not permute (BSD)', () => {
   const dir = workspace({ payload: 'x\n', '-dash': link('.git/hooks') });
   refused(dir, [
@@ -409,6 +457,31 @@ test('C: an overlay that declares a credential file by a NON-DOT name is matched
   assert.notEqual(under(t, dir, 'cat lot*').verdict, 'ALLOW');
   for (const c of ['cat src/*.ts', 'cat *.md', 'echo *.pem', 'ls src/*.ts', 'wc -l README.*', 'grep -rn foo src', 'cat [a-c]*.nomatch'])
     assert.equal(under(t, dir, c).verdict, 'ALLOW', c);
+});
+
+test('C: `..` after a wildcard component goes up from where the matched name leads', () => {
+  // found by the filesystem oracle: `mv src/m.txt ./ls*/../.ssh/` - `ls*` matches the link `lssh`, whose parent is the home directory, and the
+  // expansion took the parent of the NAME (the workspace)
+  const dir = workspace({
+    lsh: link(join(HOME, '.ssh')),
+    lh: link('.git/hooks'),
+    'src/m.txt': 'x\n',
+    'src/a.ts': 'x\n',
+    '.claude/settings.json': '{}',
+  });
+  refused(dir, [
+    'mv src/m.txt ./ls*/../.ssh/',
+    'mv src/m.txt ./ls*/../.ssh/m.txt',
+    'cp src/m.txt ./l?h/../.ssh/',
+    'touch ./ls*/../.ssh/x',
+    'echo x > ./l*/../.ssh/x',
+    'tee ./ls*/../.ssh/authorized_keys <<< x',
+    'cp src/m.txt ./lh*/../hooks/zz-new',
+    'rm ./ls*/../.ssh/id_rsa',
+    'cat ./ls*/../.ssh/id_rsa',
+    'cp ./ls*/../.ssh/id_rsa /tmp/k',
+  ]);
+  ordinary(dir, ['cp src/m.txt ./sr*/../out.txt', 'touch ./s*/../zz', 'mv src/m.txt ./sr?/../moved.txt']);
 });
 
 test('C: a wildcard in a protected directory COMPONENT of a destination is the destination it matches', () => {

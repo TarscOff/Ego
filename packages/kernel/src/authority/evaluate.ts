@@ -61,7 +61,7 @@ import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } f
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
 import { WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
 import { assignmentWord, bindingsOf } from './bindings.ts';
-import { restoreQuoting } from './words.ts';
+import { restoreQuoting, textPieces } from './words.ts';
 import { aliasesOf } from './aliases.ts';
 import { unreadShellFields } from './host-fields.ts';
 import { copiesLinks, linksUnder } from './links.ts';
@@ -14446,7 +14446,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     return words;
   };
   const wholeIsDest = (value: string): boolean => {
-    const pieces = value.split(/[ \t\n]+/).filter(Boolean);
+    const pieces = textPieces(value);
     if (dest === 'ALL') return true;
     if (dest === 'AFTER_DASHDASH') {
       const after = tokens.slice(tokens.indexOf('--') + 1);

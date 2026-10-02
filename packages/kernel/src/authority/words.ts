@@ -36,3 +36,10 @@ export function restoreQuoting(text: string, values: readonly string[]): string 
   const re = new RegExp(hostile.map(escapeRe).join('|'), 'g');
   return text.replace(re, (m) => singleQuoted(m));
 }
+
+/** THE PIECES THE TEXT READERS MAKE OF ONE WORD'S VALUE: they split the text at its blanks, and an angle bracket in it begins a redirection whose
+ *  target is what follows. `cp x 'a b'/../'a<b'/f` is the words `a`, `b/../a` and (a source) `b/f` to the reader that found the destination, so the
+ *  destination it names is one of these and the word is the destination as a whole (found by the filesystem oracle). */
+export function textPieces(value: string): string[] {
+  return value.split(/[ \t\n<>]+/).filter(Boolean);
+}
