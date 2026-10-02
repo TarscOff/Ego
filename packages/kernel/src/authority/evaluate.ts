@@ -72,6 +72,7 @@ import {
   wholeTreePathspec,
 } from './git-invocation.ts';
 import { GIT_VERB_OPTIONS } from './git-verb-options.ts';
+import { endsWithEscapePrefix, sqlScan, type SqlDialect, type SqlVariables } from './sql-lex.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
 import { VERDICT_RANK } from '../control-plane/types.ts';
 import {
@@ -10546,7 +10547,8 @@ function literalBackslashesBlanked(s: string): string | null {
     if (c !== "'") continue;
     // `E'...'` is PostgreSQL's ESCAPE string: a backslash in it is an escape (`E'\x27'` is a quote the lexer never saw), not
     // a character - the one literal whose backslashes are not data
-    const escapeString = /(^|[^A-Za-z0-9_$])[Ee]'$/.test(out);
+    // (the one test of which `e` that is: sql-lex.ts, which the scanner that finds the client's commands asks as well)
+    const escapeString = endsWithEscapePrefix(out.slice(0, -1));
     let j = i + 1;
     for (; ; j++) {
       if (j >= s.length) return null; // an unterminated literal: not a statement to read
@@ -11022,90 +11024,6 @@ function statementProblem(w: DbWord, judge: (text: string) => string | null): st
   return judge(w.text);
 }
 
-type SqlDialect = 'pg' | 'mysql' | 'plain';
-/** A character that can end an identifier. PostgreSQL treats every non-ASCII character as one, and a `$` after one is part
- *  of the name, not the opening of a dollar-quoted body - a scanner that disagrees reads a real backslash command as the
- *  inside of a string. */
-const IDENT_CHAR_END = /[A-Za-z0-9_\u0080-\uffff]$/;
-interface SqlScan {
-  /** the text with every string literal blanked and every dollar-quoted body kept as code */
-  code: string;
-  /** the client's own commands (psql `\name args`, mysql `\c`), which the server never sees */
-  metas: Array<{ name: string; args: string }>;
-}
-
-/** Splits SQL text into what the SERVER reads (code) and what the CLIENT reads (backslash commands), with the strings
- *  taken out so a word inside a literal is not mistaken for one outside it.
- *
- *  Three things are refused rather than guessed, because each makes this scanner and the engine disagree about where a
- *  string ends - and a scanner that thinks text is inside a literal hides it: a comment of any kind (the engines differ
- *  on what opens one and whether it nests), and a session setting that changes how a backslash or a double quote is
- *  read (`standard_conforming_strings`, `NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`). */
-function sqlScan(text: string, dialect: SqlDialect): SqlScan | { refused: string } {
-  if (/--|\/\*/.test(text)) return { refused: 'a comment, which this reader cannot place the end of' };
-  if (dialect === 'mysql' && text.includes('#')) return { refused: 'a # comment' };
-  if (dialect === 'pg' && /standard_conforming_strings|backslash_quote|escape_string_warning/i.test(text))
-    return { refused: 'a setting that changes how a backslash is read' };
-  if (dialect === 'mysql' && /sql_mode|no_backslash_escapes|ansi_quotes/i.test(text))
-    return { refused: 'a setting that changes how a quote is read' };
-  let code = '';
-  const metas: SqlScan['metas'] = [];
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (c === "'" || c === '"' || c === '`') {
-      // a backslash escapes inside a MySQL string and a PostgreSQL E'' string, and nowhere else
-      const prefixE = dialect === 'pg' && c === "'" && /[eE]$/.test(code) && !IDENT_CHAR_END.test(code.slice(0, -1));
-      const escapes = (dialect === 'mysql' && c !== '`') || prefixE;
-      let j = i + 1;
-      for (;;) {
-        if (j >= text.length) return { refused: 'a quote that is never closed' };
-        if (escapes && text[j] === '\\') {
-          j += 2;
-          continue;
-        }
-        if (text[j] === c) {
-          if (text[j + 1] === c) {
-            j += 2;
-            continue;
-          }
-          break;
-        }
-        j++;
-      }
-      // an identifier is a NAME and stays visible (`"pg_read_file"(…)` is still that call); a literal is blanked
-      const isName = c === '`' || (c === '"' && dialect !== 'mysql');
-      code += isName ? ` ${text.slice(i + 1, j)} ` : "''";
-      i = j;
-      continue;
-    }
-    if (c === '$' && dialect === 'pg' && !IDENT_CHAR_END.test(code)) {
-      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(text.slice(i));
-      if (tag) {
-        const end = text.indexOf(tag[0], i + tag[0].length);
-        if (end < 0) return { refused: 'a dollar-quoted body that is never closed' };
-        // a body is CODE as often as it is text (`DO $$ … $$`), so it is read as code
-        code += ` ${text.slice(i + tag[0].length, end)} `;
-        i = end + tag[0].length - 1;
-        continue;
-      }
-    }
-    if (c === '\\' && dialect !== 'plain') {
-      const eol = text.indexOf('\n', i);
-      const line = text.slice(i + 1, eol < 0 ? text.length : eol);
-      const name = dialect === 'pg' ? (/^(?:[A-Za-z0-9_]+\+?|.)/s.exec(line)?.[0] ?? '') : line.slice(0, 1);
-      const args = line.slice(name.length).trim();
-      // `\\` ends a meta-command and the line goes on as new input; this reader does not follow it
-      if (args.includes('\\\\')) return { refused: 'a second backslash command on the same line' };
-      metas.push({ name, args });
-      i = eol < 0 ? text.length : eol;
-      code += '\n';
-      continue;
-    }
-    code += c;
-  }
-  return { code, metas };
-}
-
 /** Functions that reach outside the database wherever they are called: a file on the machine the server runs on, a URL,
  *  another server, a program. A name not on a list of the pure ones cannot be proven to stay inside, but a statement
  *  is not a SELECT, so what is refused here is what is KNOWN to leave: the server of a local development database runs
@@ -11218,10 +11136,14 @@ function psqlMeta(out: DbEscape, name: string, args: string): void {
   out.opaque.push(`the psql command \\${name} runs a program, includes a script or writes outside the database, or is not on the read-only list`);
 }
 
-function psqlScript(out: DbEscape, text: string): void {
-  const scan = sqlScan(text, 'pg');
+function psqlScript(out: DbEscape, text: string, variables: SqlVariables): void {
+  const scan = sqlScan(text, 'pg', variables);
   if ('refused' in scan) return void out.opaque.push(`the SQL carries ${scan.refused}`);
   for (const m of scan.metas) psqlMeta(out, m.name, m.args);
+  // psql lexes the TEXT OF A VARIABLE in place of its reference (`-v x='\\o |cmd'` and then `:x`), so a reference whose value the
+  // command line does not show is a script nobody read; the ones that are shown were read as part of the text (sql-lex.ts)
+  for (const name of new Set(scan.variables))
+    out.opaque.push(`the SQL interpolates the psql variable :${name}, whose text psql lexes as part of the script and this line does not show`);
   const why = isReadStatement(text) ? null : sqlReachProblem(scan.code);
   if (why !== null) out.opaque.push(why);
 }
@@ -11230,10 +11152,18 @@ function psqlEscape(args: readonly DbWord[]): DbEscape {
   const out: DbEscape = newDbEscape();
   const parsed = parseDbArgs(args, PSQL_OPTIONS);
   for (const u of parsed.unknown) out.unproven.push(`the option ${u} is not one this reader knows`);
+  // the variables the command line sets (`-v NAME=VALUE`, however it is spelled), in the order psql applies them
+  const variables = new Map<string, string | null>();
+  for (const o of parsed.options)
+    if ((o.name === 'set' || o.name === 'variable') && o.value !== null) {
+      const eq = o.value.text.indexOf('=');
+      // (a value the shell fills in is a value nobody here can see)
+      variables.set(eq < 0 ? o.value.text : o.value.text.slice(0, eq), o.value.expands ? null : eq < 0 ? '' : o.value.text.slice(eq + 1));
+    }
   const statement = (w: DbWord): void => {
     out.statements.push(w.text);
     if (w.expands) out.opaque.push('the statement is built at run time, so the text the client runs is not the text on the command line');
-    else psqlScript(out, w.text);
+    else psqlScript(out, w.text, variables);
   };
   for (const o of parsed.options) {
     if (o.value === null) continue;
@@ -11244,10 +11174,16 @@ function psqlEscape(args: readonly DbWord[]): DbEscape {
       else fileOrProgram(out, o.value.text, `--${o.name}`, 'write');
     }
   }
-  // the positional operands are a database and a user; one that is a script is standard input handed over as a word
+  // the positional operands are a database and a user; one that is a script is standard input handed over as a word - and a word
+  // that is only a variable reference (`:x`) is a script as well, the shortest there is
   const conninfo = /^\s*(\w+\s*=\s*('[^']*'|\S+)\s*)+$/;
   for (const w of parsed.positional)
-    if (/[\s;\\]/.test(w.text) && !conninfo.test(w.text) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(w.text)) statement(w);
+    if (
+      (/[\s;\\]/.test(w.text) || /(^|[^:]):[A-Za-z0-9_\u0080-￿]/.test(w.text)) &&
+      !conninfo.test(w.text) &&
+      !/^[a-z][a-z0-9+.-]*:\/\//i.test(w.text)
+    )
+      statement(w);
   return out;
 }
 
