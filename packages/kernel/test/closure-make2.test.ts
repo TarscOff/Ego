@@ -18,12 +18,13 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { workspace, verdict, ORDINARY_MAKEFILES } from './support/corpus.ts';
-import { generateCases, implicitCases, oracleRoot, realMakeAvailable, runReal } from './support/make-oracle.ts';
+import { generateCases, implicitCases, oracleRoot, realMakeAvailable, runReal, siteCases } from './support/make-oracle.ts';
 import {
   MakeStore,
   continues,
   cutMakeComment,
   encodeMakeParts,
+  flagDefinitions,
   makeLogicalLines,
   parseMakeCommandLine,
   readAssignment,
@@ -33,6 +34,13 @@ import { BUILTIN_RULES, BUILTIN_SUFFIXES, BUILTIN_VARIABLES, builtinRulesFor } f
 
 const T = '\t';
 const ACT = 'git push origin main';
+
+/** a store whose variables are the makefile's, as recursive text */
+function storeWith(vars: Record<string, string>): MakeStore {
+  const s = new MakeStore();
+  for (const [k, v] of Object.entries(vars)) s.set(k, [v], { origin: 'file', simple: false, conditional: false });
+  return s;
+}
 
 type Want = 'ALLOW' | 'ASK' | 'DENY' | 'GATED';
 type Row = [label: string, command: string, files: Record<string, string>, want: Want];
@@ -441,6 +449,28 @@ test('what the recipes are run with: export, .EXPORT_ALL_VARIABLES and the varia
   ]);
 });
 
+test('a variable a makefile puts in the flags is a variable of the make below it', () => {
+  // the sub-makefile declines with ?= whatever the environment holds; the flags that reach it are the environment, or the command line
+  const sub = { 'sub.mk': 'CMD ?= echo safe\nshow:\n\t$(CMD)\n' };
+  const parent = (line: string): Record<string, string> => ({ Makefile: `${line}\nall:\n${T}$(MAKE) -f sub.mk show\n`, ...sub });
+  const word = 'CMD=git\\ push\\ origin\\ main';
+  check([
+    ['MAKEFLAGS +=', 'make all', parent(`MAKEFLAGS += ${word}`), 'DENY'],
+    ['MAKEFLAGS :=', 'make all', parent(`MAKEFLAGS := ${word}`), 'DENY'],
+    ['export MAKEFLAGS :=', 'make all', parent(`export MAKEFLAGS := ${word}`), 'DENY'],
+    ['after the -- that ends the options', 'make all', parent(`MAKEFLAGS += -- ${word}`), 'DENY'],
+    ['GNUMAKEFLAGS (GNU make 4)', 'make all', parent(`GNUMAKEFLAGS += ${word}`), 'DENY'],
+    ['MAKEOVERRIDES, which has the precedence of the command line', 'make all OTHER=1', parent(`MAKEOVERRIDES += ${word}`), 'DENY'],
+    ['override MAKEOVERRIDES', 'make all OTHER=1', parent(`override MAKEOVERRIDES := ${word}`), 'DENY'],
+    ['through $(MAKE) -C', 'make all', { Makefile: `MAKEFLAGS += ${word}\nall:\n${T}$(MAKE) -C d show\n`, 'd/Makefile': 'CMD ?= echo safe\nshow:\n\t$(CMD)\n' }, 'DENY'],
+    ['text nobody can determine', 'make all', parent('MAKEFLAGS += $(shell echo hi)'), 'GATED'],
+    ['an option is not a definition (control)', 'make all', parent('MAKEFLAGS += --no-print-directory'), 'ALLOW'],
+    ['a harmless definition (control)', 'make all', parent('MAKEFLAGS += CMD=true'), 'ALLOW'],
+  ]);
+  // MAKEFLAGS as the command line made it
+  assert.deepEqual(flagDefinitions(storeWith({ MAKEFLAGS: 'k -- A=1 B=a\\ b -j4 --eval=x' })).definitions, [['A', '1'], ['B', 'a b']]);
+});
+
 test('what an earlier unit of the same command exported is the environment make starts with', () => {
   const cc = { 'foo.c': 'int main(void) { return 0; }\n', 'Makefile': 'run:\n\t$(CC) -c foo.c\n' };
   check([
@@ -598,7 +628,7 @@ test('the built-in table is the table of the make that is installed', { skip: !r
   const start = lines.indexOf('# Implicit Rules');
   for (let i = start + 1; i < lines.length && !/^# \d+ implicit rules/.test(lines[i]!); i++) {
     const m = /^(\S[^:]*):(:?)\s*(.*)$/.exec(lines[i]!);
-    if (m && lines[i + 1]?.startsWith('#  commands to execute') && m[1] !== '(%)' && !have.has(`${m[1]}: ${m[3]!.trim()}`)) missing.push(`rule ${lines[i]}`);
+    if (m && lines[i + 1]?.startsWith('#  commands to execute') && !have.has(`${m[1]}: ${m[3]!.trim()}`)) missing.push(`rule ${lines[i]}`);
   }
   const suffixes = / ([^\n]*)\n/.exec(`\n${(/^SUFFIXES\s*:?=\s*(.*)$/m.exec(db) ?? [])[1] ?? ''}\n`)?.[1]?.split(/\s+/).filter(Boolean) ?? [];
   for (const sfx of suffixes) if (!BUILTIN_SUFFIXES.includes(sfx)) missing.push(`suffix ${sfx}`);
@@ -656,6 +686,25 @@ test('REAL MAKE. nothing the logging git was run with was allowed - the cases th
     }
     assert.deepEqual(bad, []);
     assert.ok(ran >= 10, `the oracle has no teeth: only ${ran} of ${cases.length} cases ran the act under this make`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('REAL MAKE. every place make expands text while it reads the makefile runs a $(shell), and the verdict says so', { skip: !realMakeAvailable() }, () => {
+  const root = oracleRoot();
+  try {
+    const cases = siteCases();
+    const bad: string[] = [];
+    let ran = 0;
+    for (const c of cases) {
+      const real = runReal(root, c).filter((l) => l.includes(c.tag));
+      if (real.length > 0) ran++;
+      const got = verdict(c.cmd, workspace({ ...c.files }));
+      if (real.length > 0 && got === 'ALLOW') bad.push(`${c.name}: make ran "git ${real[0]}" and the verdict was ALLOW\n${c.files['Makefile']}`);
+    }
+    assert.deepEqual(bad, []);
+    assert.ok(ran >= cases.length * 0.7, `the sites have no teeth: only ${ran} of ${cases.length} ran the act under this make`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -208,6 +208,55 @@ export function generateCases(seed: number, count: number): OracleCase[] {
   return out;
 }
 
+/**
+ * EVERY PLACE MAKE EXPANDS TEXT WHILE IT READS THE MAKEFILE, with `$(shell P)` in it: the command runs whichever goal is asked for, and under
+ * `make -n`. The sites are the cross-product of the reader's classification of a line (an assignment of each flavour, a conditional, a directive,
+ * a rule head, a function line, a define) and where the shell function stands in it.
+ */
+export function siteCases(): OracleCase[] {
+  const P = (t: string): string => `git push origin ${t}`;
+  const sites: Array<[string, (S: string) => string]> = [
+    ['simple assignment', (S) => `X := ${S}\n`],
+    ['POSIX simple assignment', (S) => `X ::= ${S}\n`],
+    ['an override of a simple assignment', (S) => `override X := ${S}\n`],
+    ['an export of a simple assignment', (S) => `export X := ${S}\n`],
+    ['an appended value of a simple variable', (S) => `X := a\nX += ${S}\n`],
+    ['an ifeq', (S) => `ifeq (${S},x)\nendif\n`],
+    ['an ifneq', (S) => `ifneq (,${S})\nendif\n`],
+    ['an ifdef', (S) => `ifdef ${S}\nendif\n`],
+    ['an include', (S) => `include ${S}\n`],
+    ['an optional include', (S) => `-include ${S}\n`],
+    ['a vpath', (S) => `vpath %.c ${S}\n`],
+    ['an export list', (S) => `export ${S}\n`],
+    ['an unexport list', (S) => `unexport ${S}\n`],
+    ['an undefine', (S) => `undefine ${S}\n`],
+    ['a prerequisite list', (S) => `all: ${S}\n`],
+    ['a target list', (S) => `${S}: ;\n`],
+    ['a target-specific simple assignment', (S) => `all: X := ${S}\n`],
+    ['a line of its own', (S) => `$(info ${S})\n`],
+    ['a line that is a foreach', (S) => `$(foreach i,1,${S})\n`],
+    ['a default goal', (S) => `.DEFAULT_GOAL := ${S}\n`],
+    ['a PHONY list', (S) => `.PHONY: ${S}\n`],
+    ['an if function', (S) => `X := $(if ${S},a,b)\n`],
+    ['an and function', (S) => `X := $(and ${S},x)\n`],
+    ['a define that is simply expanded', (S) => `define X :=\n${S}\nendef\n`],
+    ['a name that is computed', (S) => `${S} = 1\n`],
+    ['a call', (S) => `f = $(1)\nX := $(call f,${S})\n`],
+    ['a subst', (S) => `X := $(subst a,b,${S})\n`],
+    ['a deferred value that is used by a simple one', (S) => `A = ${S}\nX := $(A)\n`],
+    ['a deferred value used by an ifeq', (S) => `A = ${S}\nifeq ($(A),x)\nendif\n`],
+    ['a recipe line', (S) => `all:\n${T}echo ${S}\n`],
+    ['a one-line recipe', (S) => `all: ; echo ${S}\n`],
+    ['a prerequisite of the goal', (S) => `all: dep\ndep:\n${T}echo ${S}\n`],
+  ];
+  return sites.map(([name, make], i) => {
+    const tag = `site${i}`;
+    const text = make(`$(shell ${P(tag)})`);
+    // (a makefile that does not give `all` a rule of its own is given one that does nothing)
+    return { name, tag, files: { Makefile: /^all:/m.test(text) ? text : `${text}all: ; @echo\n` }, cmd: 'make all' };
+  });
+}
+
 /** The cases that put the act where make's OWN rules run it: a built-in rule whose program a variable names, a recipe-less rule, a default
  *  goal behind a pattern rule, a `.DEFAULT`. */
 export function implicitCases(): OracleCase[] {
@@ -236,5 +285,8 @@ export function implicitCases(): OracleCase[] {
     mk('a command whose text comes from the environment', 'i20', { Makefile: 'X := $(shell $(NOPE))\nall: ; @echo\n' }, `NOPE='${P('i20')}' make all`),
     mk('the default goal named on the command line', 'i21', { Makefile: `safe: ; @echo\ndeploy:\n${T}${P('i21')}\n` }, 'make .DEFAULT_GOAL=deploy'),
     mk('a definition that is not a goal', 'i22', { Makefile: `all:\n${T}${P('i22')}\n` }, "make 'A B=c'"),
+    mk('MAKEFLAGS hands a definition to the make below', 'i24', { Makefile: `MAKEFLAGS += CMD=${P('i24').replace(/ /g, '\\ ')}\nall:\n${T}$(MAKE) -f sub.mk show\n`, 'sub.mk': `CMD ?= echo safe\nshow:\n${T}$(CMD)\n` }, 'make all'),
+    mk('MAKEOVERRIDES hands one with the precedence of the command line', 'i25', { Makefile: `MAKEOVERRIDES += CMD=${P('i25').replace(/ /g, '\\ ')}\nall:\n${T}$(MAKE) -f sub.mk show\n`, 'sub.mk': `CMD = echo safe\nshow:\n${T}$(CMD)\n` }, 'make all OTHER=1'),
+    mk('an archive member is put in its archive by $(AR)', 'i23', { Makefile: `AR = ${P('i23')} ;\n`, 'foo.c': 'x' }, "make 'lib.a(foo.o)'"),
   ];
 }
