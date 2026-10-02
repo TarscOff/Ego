@@ -16,9 +16,9 @@
 //   I  a bounded, seeded filesystem oracle over a sandbox of canaries and links (macOS and Linux) - the reviewer's method, kept
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { compileAuthority, type CompiledAuthorityTable } from '../src/authority/compile.ts';
 import { evaluate, type Evaluation } from '../src/authority/evaluate.ts';
@@ -28,6 +28,7 @@ import { writePin, readPin } from '../src/launcher/pin.ts';
 import { selfIdentity, selfVersion } from '../src/launcher/self.ts';
 import { runCommand, type ProjectContext } from '../../cli/src/commands.ts';
 import { RANK, ctx, link, table, workspace } from './support/corpus.ts';
+import { SandboxUnusable, available as oracleAvailable, runOracle } from './support/path-oracle.ts';
 
 // A HOME THAT HAS WHAT A HOME HAS. A wildcard denotes the names that exist, so a test of `~/.ss?/authorized_keys` needs a `.ssh` to match -
 // and the real one is not this suite's to read or to depend on. Every evaluation below reads the home directory from $HOME as it is called.
@@ -510,8 +511,17 @@ test('D: a recursive read of a credential directory is a read of the credentials
     'cd lssh && cat id_*',
     'cd laws && grep -r . .',
     'cp -r laws /tmp/x',
+    // a search whose pattern is the same text as its root: the root is a root (the oracle: `cd ~/../home && grep -r . .` printed every key)
+    'cd ~ && grep -r . .',
+    'cd $HOME && grep -r . .',
+    `cd ~/../${basename(FAKE_HOME)} && grep -r . .`,
+    'cd ~/.ssh && grep -r . .',
+    'grep -r . ~',
+    'grep -rn ~ ~',
+    'rg . ~',
+    'cd ~ && rg . .',
   ]);
-  ordinary(dir, ['cp -r src /tmp/x', 'grep -r foo src', 'ls src', 'du -sh src', 'find src -type f', 'tar -cf o.tar src']);
+  ordinary(dir, ['cp -r src /tmp/x', 'grep -r foo src', 'ls src', 'du -sh src', 'find src -type f', 'tar -cf o.tar src', 'grep -r . .', 'grep -rn foo .', 'cd src && grep -r . .']);
 });
 
 test('D: the credential directories are compared the way the volume compares names', () => {
@@ -561,6 +571,11 @@ const GOVERNED_LINKS: Record<string, string> = {
   'sub/up': link('../.git/hooks'),
   'sub/ok': link('../src'),
   'plain/file': 'p',
+  // a link to a FILE in a protected tree, and a chain that ends in one
+  lh: link('.git/hooks/pre-commit'),
+  c1: link('c2'),
+  c2: link('c3'),
+  c3: link('.git/hooks/pre-commit'),
 };
 
 test('E: a copy that KEEPS a link to a governed tree makes a link to it: the writes through the copy are the refusal the original name is', () => {
@@ -579,6 +594,10 @@ test('E: a copy that KEEPS a link to a governed tree makes a link to it: the wri
     'cp -R lhd nl && touch nl/pre-commit',
     'cp --archive lgen nl',
     'cp -a sub newcopy',
+    'cp -R lh nl && echo x > nl',
+    'cp -a lh nl; echo x > nl',
+    'cp -R c1 nl1 && echo x > nl1',
+    'cp -P c1 nl1 && echo x > nl1',
     'rsync -l lgen nl && echo x > nl/x',
     'rsync --links lhd nl',
     'ditto lgen nl && echo x > nl/x',
@@ -765,11 +784,28 @@ test('G: a compiler option and mktemp name the files they create', () => {
     'mktemp -t foo',
     'mktemp -u .git/hooks/zz.XXXX',
     'mktemp --dry-run .git/hooks/zz.XXXX',
+    'mktemp -u -p .git/hooks',
     'cc -c x.c -o x.o',
     'clang --serialize-diagnostics out.dia -c x.c',
     'cc -Wl,-Map=out.map x.c',
     'gcc -O2 -Wall -Wl,--gc-sections -c x.c',
   ]);
+});
+
+test('G: a destination the tool table finds is judged whole when its name holds a blank', () => {
+  // the directory called `a b` leads into the hooks; the table finds `a b` (an option value, a template), and the normalized text the operand
+  // readers have says `a` and `b` (found by the filesystem oracle: `mktemp -p 'A B'`, on a volume that folds case, was ALLOW and made a file in .git/hooks)
+  const dir = workspace({ 'a b': link('.git/hooks'), 'x.c': 'int main(void){return 0;}\n', 'in.txt': 'x\n' });
+  refused(dir, [
+    "mktemp -p 'a b'",
+    "mktemp -p 'a b' zz.XXXX",
+    "mktemp 'a b'/zz.XXXX",
+    "mktemp --tmpdir='a b'",
+    "sort -o 'a b'/zz in.txt",
+    "cc --serialize-diagnostics 'a b'/zz -c x.c",
+    "tar -C 'a b' -xf arc.tar",
+  ]);
+  ordinary(dir, ["mktemp -u -p 'a b'", "sort -o 'out file.txt' in.txt", "mktemp -p 'some dir'"]);
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -939,4 +975,68 @@ test('H: a JSON text that is also a script is judged as both (PA-15)', async () 
   assert.equal((await hook(p, 'codex-cli', { tool_name: 'shell', tool_input: { command: ['echo', '$(git push origin main)'] } })).action, 'allow');
   assert.equal((await hook(p, 'codex-cli', { tool_name: 'shell', arguments: JSON.stringify({ command: ['echo', '$(git push origin main)'] }) })).action, 'allow');
   assert.equal((await hook(p, 'codex-cli', { tool_name: 'shell', arguments: '[ -f x ] && ls' })).action, 'allow');
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * I. THE FILESYSTEM ORACLE (the reviewer's method, kept): the commands are RUN, in a sandbox, and the disk is the judge
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const SANDBOX = oracleAvailable();
+test(
+  'I: a seeded sample of commands, run for real in a sandbox of canaries and links, changes no governed file and prints no secret at ALLOW',
+  { skip: SANDBOX.ok ? false : SANDBOX.why, timeout: 900_000 },
+  (t) => {
+    const seed = Number(process.env['RV_SEED'] ?? 20261002);
+    const count = Number(process.env['RV_COUNT'] ?? 300);
+    let r;
+    try {
+      r = runOracle(seed, count);
+    } catch (e) {
+      // a sandbox that is there and cannot be used is not a pass: it skips, and says why
+      if (e instanceof SandboxUnusable) return t.skip(e.message);
+      throw e;
+    }
+    assert.equal(r.checked, count);
+    // (what a human can approve is reported by the oracle and is not this test's claim: the claim is the unauthorized ALLOW)
+    assert.deepEqual(r.misses, [], `${r.misses.length} of ${count} commands (seed ${seed}) changed a governed file or printed a secret at ALLOW`);
+  },
+);
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * J. THE PREMISES, against the real tools (skipped where the tool is not there or behaves another way)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+const hasBash = spawnSync('bash', ['-c', 'true']).status === 0;
+test('J: a JSON text that is also a script runs the substitution in it: the premise of PA-15', { skip: hasBash ? false : 'bash is not installed' }, () => {
+  const r = spawnSync('bash', ['-c', '["echo","$(echo SUBST_RAN >&2)"]'], { encoding: 'utf8' });
+  assert.match(r.stderr, /SUBST_RAN/, 'a shell given the text runs the substitution first');
+  // ...while the argv reading of the same elements runs nothing
+  const argv = spawnSync('echo', ['$(echo SUBST_RAN >&2)'], { encoding: 'utf8' });
+  assert.doesNotMatch(argv.stderr, /SUBST_RAN/);
+  assert.equal(argv.stdout.trim(), '$(echo SUBST_RAN >&2)');
+});
+
+test('J: on Linux a write to the standard input reopens the file it was read from: the premise of PA-06', { skip: process.platform === 'linux' && hasBash ? false : "the descriptor semantics are Linux's" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-paths2-stdin-'));
+  writeFileSync(join(dir, 'f'), 'original\n');
+  spawnSync('bash', ['-c', 'echo x < f > /dev/stdin'], { cwd: dir });
+  assert.equal(readFileSync(join(dir, 'f'), 'utf8'), 'x\n');
+});
+
+test('J: bash opens the link a quoted name names: the premise of PA-03', { skip: hasBash ? false : 'bash is not installed' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ego-paths2-name-'));
+  mkdirSync(join(dir, 'real'));
+  for (const [name, quoting] of [
+    ['a"b', `'a"b'`],
+    ["a'b", `"a'b"`],
+    ['a<b', `'a<b'`],
+    [' lead', `' lead'`],
+    ['a\\b', `'a\\b'`],
+  ] as const) {
+    spawnSync('ln', ['-s', 'real', join(dir, name)]);
+    const r = spawnSync('bash', ['-c', `touch ${quoting}/made`], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, 'real', 'made'), 'utf8'), '', name);
+    rmSync(join(dir, 'real', 'made'));
+  }
 });

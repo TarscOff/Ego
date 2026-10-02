@@ -16,7 +16,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
-import { canonicalPath, memoPerEvaluation } from './paths.ts';
+import { canonicalPath, gitDirOf, memoPerEvaluation } from './paths.ts';
 
 export interface Alias {
   /** where the protected name really is (canonical, posix separators) */
@@ -49,27 +49,25 @@ function headOf(pattern: string): { anchor: 'root' | 'home' | 'fs'; head: string
   return { anchor, head };
 }
 
-/** `gitdir: PATH` of a `.git` file, the git directory it names (canonical), and the common directory of a linked worktree
- *  (`<gitdir>/commondir`, relative to it). Null when `.git` is not a file that names a directory. */
+/** The git directory a `.git` FILE names (the one reader of that, `gitDirOf`), and the common directory of a linked worktree (`<gitdir>/commondir`,
+ *  relative to it). Empty when `.git` is not a file that names a directory. */
 function separateGitDirs(root: string): string[] {
-  const dotGit = join(root, '.git');
   try {
-    const st = statSync(dotGit);
-    if (!st.isFile() || st.size > 4096) return [];
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
-    if (!m) return [];
-    const gitdir = canonicalPath(isAbsolute(m[1]!) ? m[1]! : resolve(root, m[1]!));
-    const out = [gitdir];
-    try {
-      const common = readFileSync(join(gitdir, 'commondir'), 'utf8').trim();
-      if (common !== '') out.push(canonicalPath(isAbsolute(common) ? common : resolve(gitdir, common)));
-    } catch {
-      /* not a linked worktree */
-    }
-    return out;
+    if (!statSync(join(root, '.git')).isFile()) return [];
   } catch {
     return [];
   }
+  const named = gitDirOf(root);
+  if (named === null) return [];
+  const gitdir = canonicalPath(named);
+  const out = [gitdir];
+  try {
+    const common = readFileSync(join(gitdir, 'commondir'), 'utf8').trim();
+    if (common !== '') out.push(canonicalPath(isAbsolute(common) ? common : resolve(gitdir, common)));
+  } catch {
+    /* not a linked worktree */
+  }
+  return out;
 }
 
 /**

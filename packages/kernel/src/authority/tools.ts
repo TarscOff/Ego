@@ -512,6 +512,8 @@ export function toolEffects(head: string, argv: readonly string[]): ToolEffects 
       if ((o.name === 'Wl,' || o.name === 'Wa,') && o.value !== null) out.writes.push(...passThroughWrites(o.name, o.value));
   // `mktemp TEMPLATE` creates the template (unless it only prints a name, or the file goes to the temporary directory)
   if (found.key === 'mktemp' && !has(parsed, 'dry-run') && !has(parsed, 't')) out.writes.push(...parsed.operands.map((o) => o.text));
+  // ...and `-u` creates nothing anywhere, in the directory `-p` names as much as at the template
+  if (found.key === 'mktemp' && has(parsed, 'dry-run')) out.writeDirs = [];
   // `git config --file F --get KEY` (and --list, --get-all...) READS F; only a setting, an unsetting or an edit writes it
   if (found.key === 'git config' && gitConfigAsks(parsed)) {
     out.reads.push(...out.writes);

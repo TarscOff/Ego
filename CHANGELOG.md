@@ -404,3 +404,27 @@ discipline of decision Q84 (authority changes are never patch releases).
   command, and the guard against `make -E` / `--eval` scanned the normalised words, in which `V="gawk -Eevil.awk d.txt"` holds a word
   spelled like make's option: the command line was called "supplied on stdin", the makefile unreadable, and the program file the override
   names was never read (`grep -E` in an override asked too). make's command line has one reader, which reads the words make is handed.
+- **One reader of the path a word denotes, and the operands that are not words** (closure audit 2026-10-02, wave 6, "paths": findings PA-01
+  to PA-17 of the seven independent reviewers). `pathCandidates` was asked about the words of a command and not about what it does not model,
+  and the reviewers' filesystem oracle (a sandbox of canaries and links, every command run for real) found each of those. (1) The operand of
+  `xargs`, of a read loop and of `$(...)` is another command's output: `echo ~/.ssh/id_rsa | xargs cat` printed a key at ALLOW once the words
+  `echo` prints were masked as data. A producer whose output is known (`echo`, `printf`, a here-string, `cat` of a file the line may read)
+  hands its words to the consumer, which is judged as the command it is with them in place; one that lists paths (`find`, `ls`, `git ls-files`)
+  adds nothing; any other feeding a command that opens its operands as files asks (`dataflow.ts`, `flow.ts`). (2) The normalizer joins word
+  VALUES back into text that the path readers tokenize again, so `touch 'a"b/pre-commit'` was read as `ab/pre-commit` while the shell opened
+  a link called `a"b` into `.git/hooks`: the path readers get the words the shell passed (`words.ts`), a name as typed (`$PWD`, `~+`, `{a,b}`
+  quoted) is one more reading of a word, a dashed word is a name after `--` or when it exists, and a quoted `&` or `$` begins a name. (3)
+  A wildcard is the names it matches: a bare one is an operand when it matches (`cat *.pem` over an overlay's `*.pem`), one in a protected
+  directory component of a destination is that destination (`touch .har?ess/generated/x` was an ASK where the spelled-out path is an absolute
+  refusal), and `rm *.log` is an ordinary write (it asked); one that matches nothing is the name it spells, and asks where the line makes names
+  or the pattern could be a protected one. (4) A directory is its contents for the rules that describe contents (`cp -R ~/./.aws out`, `grep -r .
+  $HOME//.ssh`, `ls lssh` over a link), and the credential directories are compared the way the volume compares names (`Grep ~/.SSH`). (5) A
+  protected directory that is itself a link is the place it leads to (`.claude -> shared/claude`, a dotfile manager's `~/.ssh`), a `.git`
+  that is a file has its hooks and configuration where it says (`aliases.ts`), and a copy that keeps a link to a governed tree makes one
+  (`cp -a lgen nl && echo x > nl/x`; `links.ts`). (6) The standard input under another name is the file the line opened for input.
+  (7) `--serialize-diagnostics`, `-Wl,-Map=`, `mktemp` and the other options that create files are in the option tables. (8) The codex
+  adapter: only the host's own shell (a bare name or a system path) is its wrapper, the `shell`, `login`, `env` and directory fields of a
+  call are folded into the line, a JSON text that is also a script is judged as both, and a shell call carrying a field nobody read - an
+  escalation request among them - asks (`host-fields.ts`). Visible changes: `rm *.log`, `chmod +x scripts/*.sh` and `mv *.log logs/` no longer
+  ask; a substitution whose output is known (`touch "$(echo .harness/runtime/pin.json)"`) is the refusal the path it prints is; `xargs`
+  and `$(...)` fed by a command that is neither listed nor readable ask where they were ALLOW; a seeded filesystem oracle is a permanent test.

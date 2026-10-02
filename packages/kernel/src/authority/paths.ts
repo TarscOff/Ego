@@ -28,7 +28,7 @@
 // than it must — a word with no `..` has no physical reading of its own (the classifier canonicalises the lexical one),
 // so ordinary work pays for no filesystem call it did not already make.
 import { homedir, userInfo } from 'node:os';
-import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { chargeWork } from './work-bound.ts';
 
@@ -910,5 +910,21 @@ export function namesADashedEntry(dir: string, word: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** THE GIT DIRECTORY OF A WORK TREE: its `.git` when that is a directory, or the directory a `.git` FILE names (`gitdir: PATH` - a linked worktree,
+ *  a submodule, `git init --separate-git-dir`, a bare checkout's `.bare`), read as the file that will be opened. Null when there is none. The one
+ *  reader of where a repository's git directory is: the index reader, and the places the protected `.git/hooks` and `.git/config` really are (PA-07). */
+export function gitDirOf(root: string): string | null {
+  const dotGit = join(root, '.git');
+  try {
+    const st = statSync(dotGit);
+    if (st.isDirectory()) return dotGit;
+    if (!st.isFile() || st.size > 4096) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
+    return m ? openedPath(root, m[1]!) : null;
+  } catch {
+    return null;
   }
 }

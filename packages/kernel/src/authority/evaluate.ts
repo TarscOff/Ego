@@ -26,6 +26,7 @@ import {
   isDirectory,
   namesAnEntry,
   namesADashedEntry,
+  gitDirOf,
   directoryCandidates,
   hostTrim,
   isDevPath,
@@ -1424,6 +1425,20 @@ function literalWord(word: string): string | null {
   const double = /^"([^"]*)"$/.exec(word);
   const body = double ? double[1]! : word;
   if (/[$`]/.test(body)) return null; // it expands: the real output is not this text
+  // A WORD WITH QUOTING INSIDE IT is the value the shell makes of it - `"$HOME"/.aws` or `'~+'/id_rsa` - and not its text: the quote characters
+  // are not printed. A `$` or a backtick outside single quotes expands, so the real output is not known.
+  if (double === null && /['"\\]/.test(body)) {
+    let inSingle = false;
+    let inDouble = false;
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i]!;
+      if (c === '\\' && !inSingle) i++;
+      else if (c === "'" && !inDouble) inSingle = !inSingle;
+      else if (c === '"' && !inSingle) inDouble = !inDouble;
+      else if ((c === '$' || c === '`') && !inSingle) return null;
+    }
+    return unquoteShellWord(body);
+  }
   return body;
 }
 
@@ -2052,7 +2067,11 @@ function normalizeSegmentInner(segment: string): string[] {
  *  `psql -c '\e'` carried through `kubectl exec` came back as `psql -c e`: psql's editor command read as the word `e`,
  *  at ALLOW (found by the generated cross-product of the database-client class). */
 function requote(tokens: string[]): string {
-  return tokens.map((t) => (t === '' ? "''" : /[\s;&|<>$`"'\\]/.test(t) ? `'${t.replace(/'/g, `'\\''`)}'` : t)).join(' ');
+  // (a value whose braces still EXPAND was quoted or escaped when it was typed - the text it came from had its unquoted braces expanded already -
+  // and the line this rebuilds is read once more, by readers that expand them: PA-03)
+  return tokens
+    .map((t) => (t === '' ? "''" : /[\s;&|<>$`"'\\]/.test(t) || (/[{}]/.test(t) && expandBraces(t) !== t) ? `'${t.replace(/'/g, `'\\''`)}'` : t))
+    .join(' ');
 }
 
 /** A command line with its REDIRECTIONS taken out. `cp x control-plane/permissions/matchers.md 2>&1` has three operands
@@ -4509,7 +4528,8 @@ function wildcardLeavesOpen(
   written: ReadonlySet<string>,
 ): boolean {
   if (names.open !== null) return true;
-  if (names.matched > 0) return false;
+  // (a word with braces and no pattern characters is a NAME - the directory with the braces in it - and there is nothing for a later name to match)
+  if (names.matched > 0 || !/[*?[]/.test(word)) return false;
   return written.size > 0 || pathCandidates(cwds, word, old, { whole: true }).paths.some((q) => wildcardCouldReachProtected(table, ctx, q));
 }
 
@@ -5134,20 +5154,6 @@ function parseIndexEntries(buf: Buffer, version: number, count: number, hash: nu
   if (split) return { problem: 'the git index is a split index, whose entries are in another file' };
   if (sparse) return { problem: 'the git index is sparse, so it does not list every tracked file' };
   return { paths };
-}
-
-/** The git directory of a work tree whose `.git` is a directory, or a file that points to one (a worktree, a submodule). */
-function gitDirOf(root: string): string | null {
-  const dotGit = join(root, '.git');
-  try {
-    const st = statSync(dotGit);
-    if (st.isDirectory()) return dotGit;
-    if (!st.isFile() || st.size > 4096) return null;
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
-    return m ? openedPath(root, m[1]!) : null;
-  } catch {
-    return null;
-  }
 }
 
 /** git's own test for "this directory is another repository, and is listed as one entry": a git directory of its own. */
@@ -13238,6 +13244,7 @@ function pathTokens(
   cwd: string,
   old?: readonly string[],
   shellGlob: { dotfiles: boolean; ignoreCase: boolean; extended: boolean } = { dotfiles: false, ignoreCase: false, extended: false },
+  patternWords: readonly string[] = [],
 ): PathEntry[] {
   const out: PathEntry[] = [];
   // (compared the way the volume compares names - PA-11, `foldName`: `~/.SSH` is `~/.ssh` on the disk this kernel runs on, and the
@@ -13260,8 +13267,23 @@ function pathTokens(
   // `--` ends the options for every parser, and a BSD one ends them at the first operand: a word that begins with a dash is then a name
   // (PA-03) - provided something of that name is there, so that an option stays one
   const ddAt = allTokens.indexOf('--');
+  // THE WORDS OF A SEARCH PATTERN ARE DATA - as many times as the pattern holds them, not wherever the same text stands. `grep -r . .` has a pattern
+  // `.` and a root `.`, and dropping every word equal to a pattern word dropped the root: a recursive read of the home directory was ALLOW
+  // (found by the filesystem oracle, `cd ~/../home && grep -r . .`). The pattern's own word is skipped by its place; its other words, which the
+  // normalizer has split apart, are skipped once each.
+  // (only when the pattern is still IN the text: once the normalizer has masked it as data there is nothing of it left to skip, and the same text
+  // further on is a root)
+  const spare = new Map<string, number>();
+  if (patternIndex >= 0 && patternWords.includes(allTokens[patternIndex] ?? '')) {
+    for (const w of patternWords) spare.set(w, (spare.get(w) ?? 0) + 1);
+    spare.set(allTokens[patternIndex]!, spare.get(allTokens[patternIndex]!)! - 1);
+  }
   for (const [idx, raw] of allTokens.entries()) {
     if (idx === 0 || idx === patternIndex) continue;
+    if ((spare.get(raw) ?? 0) > 0) {
+      spare.set(raw, spare.get(raw)! - 1);
+      continue;
+    }
     const dashed = raw.startsWith('-') && raw.length > 1 && ((ddAt > 0 && idx > ddAt) || (cwd !== CWD_UNKNOWN && namesADashedEntry(cwd, raw)));
     const tok = dashed ? raw : pathValueOf(raw);
     if (!tok || tok === '{}') continue;
@@ -13340,9 +13362,11 @@ function patternEntersHome(abs: string, reach: string, home: string): boolean {
  *  hold a brace the normalizer's last step expands (`'{a,b}/pre-commit'` is a directory called `{a,b}`, and the text says `a/pre-commit
  *  b/pre-commit`). The segment as written is read, where the quoting still exists, and so is every command it carries (`sh -c 'touch
  *  "a\"b/x"'`). */
-function literalWords(rawSeg: string, depth = 0): { hostile: string[]; braces: string[] } {
-  const out = { hostile: [] as string[], braces: [] as string[] };
+function literalWords(rawSeg: string, depth = 0): { hostile: string[]; braces: string[]; dollars: string[] } {
+  const out = { hostile: [] as string[], braces: [] as string[], dollars: [] as string[] };
   for (const w of tokenizeMarked(rawSeg)) {
+    // (a `$` the shell does not expand - single-quoted, or escaped - is a character of a name: `mktemp -p '$PWD'` is the directory called `$PWD`)
+    if (/[$`]/.test(w.text) && !w.expands) out.dollars.push(w.text);
     // (a word with a blank in it is a STRING more often than a name - a statement, a program, a message - and its pieces are scanned as the
     // words they are; a name with a blank is read whole by the loop over the words as written, below)
     if ((/['"\\]/.test(w.text) || (w.shape !== 'none' && w.shape !== 'real')) && !/\s/.test(w.text)) out.hostile.push(w.text);
@@ -13354,6 +13378,7 @@ function literalWords(rawSeg: string, depth = 0): { hostile: string[]; braces: s
       const inner = literalWords(expandBraces(body), depth + 1);
       out.hostile.push(...inner.hostile);
       out.braces.push(...inner.braces);
+      out.dollars.push(...inner.dollars);
     }
   return out;
 }
@@ -13391,7 +13416,7 @@ function classifyShellPaths(
   const literal = literalWords(rawSeg);
   const text = restoreQuoting(seg, literal.hostile);
   // the files this line opens for input: the standard input is one of them, and `/dev/stdin` names it (PA-06)
-  const stdinFiles = redirectionSources(rawSeg).filter((f) => !/[$`]/.test(f));
+  const stdinFiles = [...new Set([...redirectionSources(rawSeg), ...redirectionSources(text)])].filter((f) => !/[$`]/.test(f));
   const writeThroughStdin = (word: string, hitsInto: CapabilityHit[]): boolean => {
     if (!throughStdin(cwd, word, old, stdinFiles)) return false;
     for (const f of stdinFiles)
@@ -13417,7 +13442,7 @@ function classifyShellPaths(
   const statementWords = new Set(
     (dbEscape?.statements ?? []).flatMap((s) => tokenize(s)).filter((w) => !w.includes('/')),
   );
-  const paths = pathTokens(bare, cwd, old, shellGlob).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw));
+  const paths = pathTokens(bare, cwd, old, shellGlob, patternWords).filter((p) => !statementWords.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
   // approvable question, never a silent yes.
@@ -13514,7 +13539,7 @@ function classifyShellPaths(
       }
     for (const w of [...effects.writes, ...effects.writeDirs]) {
       // (`-` is standard output: `wget -qO- URL`)
-      if (!w || w === '-' || /[$`]/.test(w)) continue;
+      if (!w || w === '-' || (/[$`]/.test(w) && !literal.dollars.includes(w))) continue;
       if (writeThroughStdin(w, hits)) continue;
       if (discardWord(cwd, w, old)) continue;
       extraDests.add(w);
@@ -13905,7 +13930,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         ...[...ownShorts].flatMap((letter) => optionValues(tokenize(text), letter, [])),
       ];
   for (const extra of outputValues) {
-    if (!extra || extra.startsWith('-') || /[$`]/.test(extra)) continue;
+    if (!extra || extra.startsWith('-') || (/[$`]/.test(extra) && !literal.dollars.includes(extra))) continue;
     // `curl -o /dev/null` DISCARDS: the same reader a redirection asks (isDiscardDevice) says so for an option's value too
     if (writeThroughStdin(extra, hits)) continue;
     if (discardWord(cwd, extra)) continue;
@@ -14231,14 +14256,20 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           if (seenTargets.has(target)) continue;
           seenTargets.add(target);
           const pp = protectedReachOf(table, ctx, target);
-          if (pp === null) continue;
-          hits.push({
-            capability: pp.capability,
-            verdict: verdictFor(table, ctx, pp.capability),
-            via: `the copy of ${src} keeps a link to ${target}, which is or contains protected ${pp.path}`,
-            segment: seg,
-            absolute: isAbsoluteCap(table, pp.capability),
-          });
+          if (pp !== null)
+            hits.push({
+              capability: pp.capability,
+              verdict: verdictFor(table, ctx, pp.capability),
+              via: `the copy of ${src} keeps a link to ${target}, which is or contains protected ${pp.path}`,
+              segment: seg,
+              absolute: isAbsoluteCap(table, pp.capability),
+            });
+          // ...and a link to a FILE in a protected tree (`lh -> .git/hooks/pre-commit`, a chain that ends there) is the protected path itself
+          else {
+            const inside = classifyPath(table, ctx, 'Write', target);
+            if (inside.via.startsWith('matcher path') || inside.capability.startsWith('fs.credential'))
+              hits.push({ ...inside, via: `the copy of ${src} keeps a link to ${target} (${inside.via})`, segment: seg });
+          }
         }
         if (found.bounded)
           hits.push({
@@ -14294,8 +14325,17 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         ? tokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
         : -1;
     const searched: string[] = [];
+    const spareWords = new Map<string, number>();
+    if (patternAt >= 0 && patternWords.includes(tokens[patternAt] ?? '')) {
+      for (const w of patternWords) spareWords.set(w, (spareWords.get(w) ?? 0) + 1);
+      spareWords.set(tokens[patternAt]!, spareWords.get(tokens[patternAt]!)! - 1);
+    }
     for (const [ti, t] of tokens.entries()) {
-      if (ti === 0 || ti === patternAt || patternWords.includes(t)) continue;
+      if (ti === 0 || ti === patternAt) continue;
+      if ((spareWords.get(t) ?? 0) > 0) {
+        spareWords.set(t, spareWords.get(t)! - 1);
+        continue;
+      }
       if (t.startsWith('-')) continue;
       const roots = pathEntries(cwd, t, old);
       if (roots.some((e) => e.glob || (e.abs === null && e.why === undefined))) continue;
@@ -14414,7 +14454,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     }
     // (a brace name is judged as written wherever the command writes: the destination the readers above found is one of the names its text
     // was expanded to)
-    return literal.braces.includes(value) || ddOutputs.has(value) || (dest !== null && pieces.includes(dest));
+    // (and so is a name whose pieces include one the TOOL'S TABLE found: `mktemp -p 'a b'` has the directory `a b`, which the table read as `a` and `b`)
+    return literal.braces.includes(value) || ddOutputs.has(value) || (dest !== null && pieces.includes(dest)) || pieces.some((piece) => extraDests.has(piece));
   };
   if (!containerPaths)
     for (const word of wordsAsWritten(rawSeg)) {
@@ -14478,7 +14519,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // what the names do not settle: the set is not the whole answer; the pattern is the VALUE of an option (`--file=ev*.mk`, `of=*.img`), which the
       // shell does not expand and nobody here can say what the program does with; or nothing matches now and something may by the time it runs - a
       // name an earlier part of this line makes, or a protected tree that does not exist yet and that the pattern could name
-      if (!tokens.includes(p.raw) || wildcardLeavesOpen(table, ctx, cwd, p.raw, old, names, written)) expanded.push(p);
+      if ((!tokens.includes(p.raw) && !wholeWords.has(p.raw)) || wildcardLeavesOpen(table, ctx, cwd, p.raw, old, names, written)) expanded.push(p);
     }
     paths.length = 0;
     paths.push(...expanded);
@@ -15339,6 +15380,28 @@ function execCarriedCommand(seg: string): string | null {
  *
  *  Recursion is bounded by `state.depth` (truncation is opaque, never the parent's class) and by `state.seen`, which
  *  keys on execution identity (directory + target), not on a bare name. */
+/** The command whose OUTPUT a stage's output is, for the wrappers that hand it on unchanged: `sudo echo X` prints X, `xargs echo X` prints X once
+ *  per input, and `kubectl exec pod -- echo X` / `docker exec box -- echo X` print what the command in the container prints (PA-01: a producer behind
+ *  a wrapper is the producer it wraps). The text of the stage when there is no such wrapper. */
+function printsLike(text: string): string {
+  const marked = tokenizeMarked(emitterTail(text));
+  const words = marked.map((t) => t.text);
+  const peeled = peelCarriers(words, 0, { stopAt: (_n: string, spec: Carrier) => spec.payload === true });
+  const at = peeled.steps.length > 0 && peeled.at < marked.length && peeled.shellString === null ? peeled.at : 0;
+  const head = (words[at] ?? '').replace(/^.*\//, '');
+  const tail = emitterTail(text).slice(marked[at]?.at ?? 0);
+  if (head === 'xargs') {
+    const x = peelCarriers(words.slice(at), 0, { maxSteps: 1 });
+    const from = marked[at + x.at];
+    if (from !== undefined && x.at < words.length - at) return emitterTail(text).slice(from.at);
+  }
+  if (/^(kubectl|oc|docker|podman|nerdctl)$/.test(head) && words.includes('exec')) {
+    const dd = words.indexOf('--', at);
+    if (dd >= 0 && dd + 1 < marked.length) return emitterTail(text).slice(marked[dd + 1]!.at);
+  }
+  return tail;
+}
+
 /** THE READERS THE DATAFLOW PLAN ASKS OF THE ANALYZER (dataflow.ts, PA-01), bound to the directory a stage runs in and to the writes the line
  *  has made so far: a file is content the line may rely on only if nothing earlier on the line writes it. */
 function flowReadersFor(ctx: EvaluationContext, cwd: string, written: ReadonlySet<string>): FlowReaders {
@@ -15351,14 +15414,14 @@ function flowReadersFor(ctx: EvaluationContext, cwd: string, written: ReadonlySe
     return text !== null && text.length <= 65_536 ? { text, stale: writtenEarlier(written, abs) } : null;
   };
   const firstWords = (text: string): string[] => {
-    const n = normalizeSegment(text).find((x) => !x.startsWith(MARK)) ?? text;
+    const n = normalizeSegment(printsLike(text)).find((x) => !x.startsWith(MARK)) ?? text;
     return tokenize(n);
   };
   return {
     // (`$HOME` and `$PWD` are plain variables the producer's words may hold: the text the shell prints is the directory they name)
-    literal: (text, heredoc) => literalStdout(substituteKnownVars(text, new Map([['HOME', homedir()], ['PWD', cwd]])), heredoc),
+    literal: (text, heredoc) => literalStdout(substituteKnownVars(printsLike(text), new Map([['HOME', homedir()], ['PWD', cwd]])), heredoc),
     fileContent: (text) => {
-      const w = tokenize(emitterTail(text));
+      const w = tokenize(emitterTail(printsLike(text)));
       if ((w[0] ?? '').replace(/^.*\//, '') !== 'cat' || w.length < 2) return null;
       let out = '';
       let stale = false;
@@ -16319,10 +16382,12 @@ function analyzeSegmentsInto(
         )
     )
       written.add('\0any');
-    {
+    // (what this stage hands on is worked out only for a stage that something is piped from - the next one, or the rest of its group - since a
+    // file may be read to know it)
+    if (stages[stageIndex + 1]?.pipedFromPrevious === true || stage.groupId !== undefined) {
       const mine = producedBy(flowReadersFor(ctx, env.cwd, written), seg, stdinProduced, stageHeredoc);
       upstreamProduced = stage.groupId !== undefined && stage.groupId === upstreamGroup ? combineProduced(upstreamProduced, mine) : mine;
-    }
+    } else upstreamProduced = NO_OUTPUT;
     // A PASS-THROUGH COPIES ITS INPUT TO ITS OUTPUT, so the literal survives it: `echo 'rm -rf /' | cat | bash`
     // runs the rm, and one identity stage was enough to defeat the edge entirely (exit review 5).
     if (!(stdinFrom !== null && PASS_THROUGH_RE.test(seg.trim()))) {

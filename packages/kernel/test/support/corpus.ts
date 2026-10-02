@@ -2707,6 +2707,164 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'yarn info @acme/x --@acme:registry=https://evil.example',
     ],
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-02, WAVE 6, "paths": the inputs the one reader of a path (pathCandidates) did not model, and the operand that is
+   * not a word at all. Each is a class of cause, and every spelling of it below is carried by every transformation and every producer.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    // PA-03: the normalizer joins word VALUES back into text that the path readers tokenize again, and a quote, a backslash or an angle bracket
+    // in a value is syntax the second time. A hostile repository chooses the name of a link it ships, and git clones links.
+    family: 'fs',
+    id: 'a write through a link whose NAME holds a character a reader of the text takes for syntax',
+    floor: 'DENY',
+    cases: [
+      `touch 'qa"b/pre-commit'`,
+      `cp payload 'qa"b/pre-commit'`,
+      `tee 'qa"b/pre-commit' < payload`,
+      `chmod +x 'qa"b/pre-commit'`,
+      `rm 'qa"b/pre-commit'`,
+      `touch "qa'b/pre-commit"`,
+      `cp payload "qa'b/pre-commit"`,
+      `touch 'qa<b/pre-commit'`,
+      `touch 'qa>b/pre-commit'`,
+      `cp payload 'qa\\b/pre-commit'`,
+      `touch ' qlead/pre-commit'`,
+      `cp payload -- '-qdash/pre-commit'`,
+      `echo x > '&qamp/pre-commit'`,
+      `touch '~+/pre-commit'`,
+      `touch '$PWD/pre-commit'`,
+      `cp payload 'q{a,b}/pre-commit'`,
+    ],
+    files: {
+      payload: 'x\n',
+      'qa"b': link('.git/hooks'),
+      "qa'b": link('.git/hooks'),
+      'qa<b': link('.git/hooks'),
+      'qa>b': link('.git/hooks'),
+      'qa\\b': link('.git/hooks'),
+      ' qlead': link('.git/hooks'),
+      '-qdash': link('.git/hooks'),
+      '&qamp': link('.git/hooks'),
+      '~+': link('.git/hooks'),
+      $PWD: link('.git/hooks'),
+      'q{a,b}': link('.git/hooks'),
+    },
+  },
+  {
+    // PA-09: a wildcard is the names it matches; in a directory COMPONENT of a destination it was an ASK, where the spelled-out path is an absolute refusal
+    family: 'fs',
+    id: 'a destination whose protected directory is spelled with a wildcard',
+    floor: 'DENY',
+    cases: [
+      'touch .har?ess/generated/x',
+      'echo x > .cla[u]de/settings.json',
+      'echo x > .claud?/settings.json',
+      'sed -i s/a/b/ control-pl?ne/y.md',
+      'cp package.json .harn?ss/runtime/state.json',
+      'tee .cla[u]de/settings.json < package.json',
+      'rm .cla[u]de/settings.json',
+    ],
+    files: {
+      '.harness/generated/x': 'g',
+      '.harness/runtime/state.json': '{}',
+      '.claude/settings.json': '{}',
+      'control-plane/y.md': 'y',
+    },
+  },
+  {
+    // PA-02: a bare wildcard is an operand when it matches; a link shipped in the repository leads out of it
+    family: 'fs',
+    id: 'a bare wildcard over a link to a credential',
+    floor: 'DENY',
+    cases: ['cat lke*', 'cat l?ey', 'head -1 lk[e]y', 'cp lke* /tmp/x', 'cat l?sh/id_rsa', 'wc -c lke?', 'tar -cf o.tar lke*'],
+    files: { lkey: link(`${homedir()}/.ssh/id_rsa`), lssh: link(`${homedir()}/.ssh`) },
+  },
+  {
+    // PA-05: a copy that keeps a link makes one; the write through the copy was judged as the ordinary path it spells
+    family: 'fs',
+    id: 'a copy of a link to a governed tree, written through',
+    floor: 'DENY',
+    cases: [
+      'cp -a lgen nl && echo x > nl/x',
+      'cp -P lhd nl && touch nl/pre-commit',
+      'cp -R lc nl; echo x > nl/settings.json',
+      'cp -R lcp nl && cp package.json nl/y.md',
+      'cp -R sub newcopy && echo x > newcopy/up/pre-commit',
+      'rsync -l lgen nl && echo x > nl/x',
+      'cp --no-dereference lhd nl && touch nl/pre-commit',
+    ],
+    files: {
+      lgen: link('.harness/generated'),
+      lhd: link('.git/hooks'),
+      lc: link('.claude'),
+      lcp: link('control-plane'),
+      '.harness/generated/x': 'g',
+      '.claude/settings.json': '{}',
+      'control-plane/y.md': 'y',
+      'sub/up': link('../.git/hooks'),
+    },
+  },
+  {
+    // PA-08: protection is attached to the PLACE, not to the name under which a command spells it
+    family: 'fs',
+    id: 'a write to the real location of a protected directory that is a link',
+    floor: 'DENY',
+    cases: [
+      'echo x > shared/claude/settings.json',
+      'cp package.json shared/claude/hooks/h.sh',
+      'rm shared/claude/settings.json',
+      'chmod +x shared/claude/hooks/h.sh',
+      'tee shared/claude/settings.json < package.json',
+    ],
+    files: { '.claude': link('shared/claude'), 'shared/claude/settings.json': '{}', 'shared/claude/hooks/h.sh': 'x' },
+  },
+  {
+    // PA-06: on Linux a write to the descriptor of the standard input reopens the file the line opened for input
+    family: 'fs',
+    id: 'a write through the standard input under another name, when the line opened a file for it',
+    floor: 'DENY',
+    cases: [
+      'echo x < .claude/settings.json > /dev/stdin',
+      'echo x < .claude/settings.json > /dev/fd/0',
+      'echo x < .claude/settings.json > /proc/self/fd/0',
+      'echo x < .git/hooks/pre-commit >> /dev/stdin',
+      'tee /dev/stdin < .claude/settings.json',
+    ],
+    files: { '.claude/settings.json': '{}', '.harness/generated/x': 'g', '.git/hooks/pre-commit': '#!/bin/sh\n' },
+  },
+  {
+    // PA-14: the files an option creates, besides the one it was asked for
+    family: 'fs',
+    id: 'a file created by a compiler option or by mktemp, in a governed tree',
+    floor: 'DENY',
+    cases: [
+      'cc --serialize-diagnostics .git/hooks/zz-new -c x.c',
+      'clang -serialize-diagnostics .claude/settings.json -c x.c',
+      'cc -Wl,-Map=.git/hooks/zz x.c',
+      'mktemp .git/hooks/zz.XXXX',
+      'mktemp -d .harness/generated/zz.XXXX',
+      'mktemp -p .harness/runtime',
+      'mktemp --tmpdir=.git/hooks',
+    ],
+    files: { 'x.c': 'int main(void){return 0;}\n' },
+  },
+  {
+    // PA-01: the operand is another command's output, and the path readers read words
+    family: 'fs',
+    id: 'a credential or governed path another command prints, opened by the next',
+    floor: 'DENY',
+    cases: [
+      'echo ~/.ssh/id_rsa | xargs cat',
+      "printf '%s\\n' ~/.aws/credentials | xargs cat",
+      'echo ~/.ssh/id_rsa | while read f; do cat "$f"; done',
+      'cat $(echo ~/.ssh/id_rsa)',
+      'echo .git/hooks/pre-commit | xargs rm',
+      'rm $(echo .harness/generated/x)',
+      'echo x > $(echo .claude/settings.json)',
+      'cat creds.txt | xargs cat',
+    ],
+    files: { 'creds.txt': `${homedir()}/.ssh/id_rsa\n`, '.harness/generated/x': 'g', '.claude/settings.json': '{}' },
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *
@@ -3291,6 +3449,27 @@ export const ORDINARY: Readonly<Record<string, readonly string[]>> = {
   ],
   // the shapes exit review 4 found gated for no reason; each is now proven to execute nothing it is not named for
   pipelines: ['ls -la | grep x', 'git diff | head -20', 'cat package.json | jq .name', 'echo hi | wc -l'],
+  // CLOSURE AUDIT 2026-10-02, WAVE 6 ("paths"): what the operand-flow, wildcard-destination, link-copy and option-table readers must leave alone.
+  // A list of paths that a producer LISTS (or prints, and that is ordinary) is the consumer's ordinary work; a wildcard that names ordinary files
+  // is an ordinary write (it was an interruption); a copy of a tree keeps ordinary links; a compiler and mktemp write where they are told to
+  paths2: [
+    'git ls-files | xargs grep foo',
+    'find . -name "*.ts" | xargs wc -l',
+    'git diff --name-only | xargs cat',
+    'ls | xargs cat',
+    'echo src/a.ts | xargs cat',
+    'cat $(git ls-files)',
+    'head -1 $(ls -t | head -1)',
+    'echo $(date)',
+    'rm *.log',
+    'chmod +x scripts/*.sh',
+    'mv *.log logs/',
+    'cp -a src backup',
+    'cp -R src dist',
+    'mktemp -d',
+    'cc --serialize-diagnostics out.dia -c x.c',
+    'cc -Wl,-Map=out.map -o app x.o',
+  ],
   structure: [
     'dirname /a/b/c',
     'basename /a/b',
