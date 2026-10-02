@@ -15,6 +15,7 @@
 import { isAbsolute } from 'node:path';
 import { parseRemote } from '../project/detect.ts';
 import { gitConfigGet } from '../util/git.ts';
+import { decodeUriComponentOrRaw } from '../util/uri.ts';
 import type { CompiledAuthorityTable } from './compile.ts';
 import type { CapabilityHit, EvaluationContext, ToolRequest } from './evaluate.ts';
 
@@ -266,7 +267,7 @@ function resolveWhere(
       const m = endpoint
         ? (/(?:^|\/)repos\/([^/]+\/[^/]+)/.exec(endpoint) ?? /(?:^|\/)projects\/([^/]+)/.exec(endpoint))
         : null;
-      if (m) repo = decodeURIComponent(m[1]!);
+      if (m) repo = decodeUriComponentOrRaw(m[1]!);
     }
     let target = repo
       ? `${provider} repository ${bounded(oneLine(repo), 60)}`

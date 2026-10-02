@@ -1483,7 +1483,8 @@ test('D1 `ego authority diff` prints the classified changes and marks every wide
   assert.match(preview.out, /WIDENING/);
   assert.match(preview.out, /forge\.pr\.create/);
   assert.match(preview.out, /DENY -> ASK/);
-  assert.match(preview.out, /STANDARD 4\/4/, 'it says in which profile and in how many of its modes');
+  // (two of the four modes - BENCHMARK and PRODUCTION_ADVISORY - deny every administrable write even once an organization enables it: AUTH-9)
+  assert.match(preview.out, /STANDARD 2\/4/, 'it says in which profile and in how many of its modes');
   assert.match(preview.out, /1 widening/);
   const failing = await cli(p, ['authority', 'diff', 'current', 'proposed', '--fail-on-widening']);
   assert.equal(failing.code, 1, 'a CI step can refuse an unreviewed widening');

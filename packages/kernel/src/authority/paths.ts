@@ -27,7 +27,7 @@
 // WHAT THIS MODULE DOES NOT DO is judge: it knows nothing of capabilities. It also never throws and never walks more
 // than it must — a word with no `..` has no physical reading of its own (the classifier canonicalises the lexical one),
 // so ordinary work pays for no filesystem call it did not already make.
-import { homedir, userInfo } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { chargeWork } from './work-bound.ts';
@@ -47,17 +47,80 @@ let cache: Map<string, string> | null = null;
  *  names it, and by every reading of every word (as written and trimmed, lexical and physical, in each directory the shell may be in) */
 let listings: Map<string, Array<{ name: string; directory: boolean }> | null> | null = null;
 
-export function withPathCache<T>(body: () => T): T {
-  if (cache !== null) return body(); // nested: the outer evaluation owns it
+/**
+ * Runs `body` against a FRESH view of the filesystem and puts the decision's own view back afterwards. A value that is remembered across
+ * decisions (`DecisionMemo`) is priced by what computing it cost, and that must be what it costs ALONE: computed in the middle of a
+ * decision whose view already held half of its walks, it cost thirty units less, and the price of the memo - and so the units of every
+ * later decision that uses it - depended on which command happened to compute it first (RB-7).
+ */
+export function isolatedPathView<T>(body: () => T): T {
+  if (cache === null) return body();
+  const outer = { cache, listings };
   cache = new Map();
   listings = new Map();
   try {
     return body();
   } finally {
-    cache = null;
-    listings = null;
+    cache = outer.cache;
+    listings = outer.listings;
   }
 }
+
+/** where the MACHINE keeps things the command did not name (HOME, the temporary directory) and where the HOST put the command (the
+ *  working directory, the workspace roots, EGO_HOME), as written and as the disk resolves them. Fixed for one evaluation. */
+let machineDirs: string[] = [];
+
+export function withPathCache<T>(body: () => T, registered: ReadonlyArray<string | undefined> = []): T {
+  if (cache !== null) return body(); // nested: the outer evaluation owns it
+  cache = new Map();
+  listings = new Map();
+  machineDirs = machineDirectories(registered);
+  try {
+    return body();
+  } finally {
+    cache = null;
+    listings = null;
+    machineDirs = [];
+  }
+}
+
+function machineDirectories(registered: ReadonlyArray<string | undefined>): string[] {
+  const out = new Set<string>();
+  for (const d of [homedir(), process.env['HOME'], tmpdir(), process.env['TMPDIR'], ...registered]) {
+    if (!d) continue;
+    const abs = resolve(d);
+    out.add(abs);
+    try {
+      out.add(realpathSync(abs));
+    } catch {
+      /* a HOME that is not there is still where the machine keeps it */
+    }
+  }
+  return [...out];
+}
+
+/**
+ * THE PART OF AN ABSOLUTE PATH THAT THE COMMAND IS RESPONSIBLE FOR. Work is priced in text and in path components, and a path includes
+ * where the machine keeps HOME and its temporary files and where the checkout sits: the same command cost thirty more units when HOME
+ * was a directory that did not exist, and a different number in a checkout one directory deeper (closure audit 2026-10-02, RB-7). The
+ * longest directory the machine or the host registered as its own - HOME, the temporary directory, the working directory, the
+ * workspace roots, EGO_HOME - is taken off the front; what is left is what the command named. `registered` is the host's part.
+ */
+export function commandPart(abs: string, registered: ReadonlyArray<string | undefined> = []): string {
+  let off = 0;
+  for (const d of [...machineDirs, ...registered]) {
+    if (!d || d === sep) continue;
+    const r = d.endsWith(sep) ? d.slice(0, -1) : d;
+    if ((abs === r || abs.startsWith(r + sep)) && r.length > off) off = r.length;
+  }
+  return abs.slice(off);
+}
+
+export const commandLength = (abs: string, registered: ReadonlyArray<string | undefined> = []): number => commandPart(abs, registered).length;
+
+/** The number of components a walk to `path` takes: the price of the walk is the TEXT it follows, not what the disk happens to hold
+ *  (a missing level took one more step than an existing one, so the units a decision spent depended on the machine it ran on). */
+const componentsOf = (path: string): number => path.split('/').filter((p) => p !== '' && p !== '.').length;
 
 /**
  * Canonical absolute path: symlinks resolved on the deepest existing ancestor so a not-yet-created file compares
@@ -80,6 +143,15 @@ export function canonicalPath(p: string): string {
   // find, and the walk below recurses once per component and asks the disk at each: a twenty-thousand-component word took
   // seconds and blew the stack - an exception in the hook is a refusal, but a hook that outlives its host's patience is not
   if (abs.length > PATH_MAX) return abs;
+  // The walk is paid for here, by the components of the path it follows, ONCE per path per decision: it asks the disk once per level it
+  // finds missing, and the number of levels that are missing is the machine's, not the command's. (Whether a path is already in the
+  // cache is not the question: a walk that ends in a missing HOME has put every level above it in the cache as a by-product, and the
+  // next path above it was free on that machine and not on another.)
+  const paid = `\0walked\0${abs}`;
+  if (cache !== null && !cache.has(paid)) {
+    cache.set(paid, '1');
+    chargeWork(WALK_STEP_COST * (1 + componentsOf(commandPart(abs))));
+  }
   const known = cache?.get(abs);
   if (known !== undefined) return known;
   const out = canonicalWalk(abs, { left: MAX_LINK_HOPS });
@@ -105,7 +177,6 @@ function canonicalWalk(abs: string, budget: { left: number }): string {
 }
 
 function canonicalWalkUncached(abs: string, budget: { left: number }): string {
-  chargeWork(WALK_STEP_COST);
   try {
     return realpathSync(abs);
   } catch {
@@ -138,6 +209,7 @@ const PATH_READ_COST = 200;
  * names `/elsewhere/x`, not `x` beside `d`.
  */
 function walkComponents(from: string, path: string, budget: { left: number }): string {
+  chargeWork(WALK_STEP_COST * componentsOf(path));
   let cur = from;
   for (const part of path.split('/')) {
     if (part === '' || part === '.') continue;

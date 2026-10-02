@@ -92,6 +92,11 @@ export interface CompiledAuthorityTable {
   effective: Record<string, Verdict>;
   /** provenance per capability: which layer set the effective verdict */
   provenance: Record<string, LayerTrace[]>;
+  /** WHO MOVED A PROFILE × MODE CELL away from the layered verdict, for the cells that something moved: `mode` when the mode's override
+   *  changed what the profile left, `profile` when the profile's narrowing did. Not derivable from the cells (a profile's ASK that one mode
+   *  turns into DENY looks, from the other modes, like the mode's doing), so the compiler, which applies both, writes it down - and
+   *  `verdictSource` reads it: a refusal names the rule that is really the source (AUTH-8). */
+  cellOrigins: Record<string, Record<string, Record<string, 'profile' | 'mode'>>>;
   /** per profile × mode → capability → verdict */
   profiles: Record<
     string,
@@ -239,6 +244,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
   }
 
   const profiles: CompiledAuthorityTable['profiles'] = {};
+  const cellOrigins: CompiledAuthorityTable['cellOrigins'] = {};
   const modeIds = cp.modes.map((m) => m.id);
   const defaultMode = cp.modes.find((m) => m.isDefault)?.id ?? modeIds[0] ?? 'NORMAL_DELIVERY';
   for (const p of [...cp.profiles].sort((a, b) => a.id.localeCompare(b.id))) {
@@ -256,13 +262,17 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     const modes: Record<string, Record<string, Verdict>> = {};
     for (const m of [...cp.modes].sort((a, b) => a.id.localeCompare(b.id))) {
       const table: Record<string, Verdict> = { ...afterProfile };
+      const moved: Record<string, 'profile' | 'mode'> = {};
+      for (const [id, v] of Object.entries(afterProfile)) if (v !== effective[id]) moved[id] = 'profile';
       for (const o of m.overrides) {
         if (capabilities[o.capability]?.absolute) continue; // validated at load; never widen absolute
+        if (table[o.capability] !== o.verdict) moved[o.capability] = 'mode';
         table[o.capability] = o.verdict;
       }
       // absolute denies are DENY in every mode regardless of anything
       for (const id of absoluteDenies) table[id] = 'DENY';
       modes[m.id] = sortRecord(table);
+      if (Object.keys(moved).length > 0) ((cellOrigins[p.id] ??= {})[m.id] = sortRecord(moved));
     }
     profiles[p.id] = {
       budgetTokens: p.contextBudgetTokens,
@@ -384,6 +394,7 @@ export function compileAuthority(cp: ControlPlane, opts: CompileOptions = {}): C
     adminGoverned: [...adminGoverned].sort(),
     effective: sortRecord(effective),
     provenance: sortRecord(provenance),
+    cellOrigins: sortRecord(cellOrigins),
     profiles: sortRecord(profiles),
     defaultMode,
     matchers,

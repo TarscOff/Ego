@@ -40,6 +40,51 @@ overrides:
     verdict: DENY
   - capability: k8s.local.apply
     verdict: DENY
+  # ...AND EVERY ADMINISTRABLE WRITE (ADMIN_GOVERNED). "Nothing executes" has to hold for the pushes and the forge writes an organization has
+  # enabled too: a mode may narrow an ADMIN_GOVERNED capability and may never widen one, and with no organization policy these are a no-op
+  # (they are DENY already). The test of this file derives the list from the ADMIN_GOVERNED capabilities.
+  - capability: git.remote.push
+    verdict: DENY
+  - capability: git.remote.push.force
+    verdict: DENY
+  - capability: git.remote.tag.push
+    verdict: DENY
+  - capability: git.remote.branch.delete
+    verdict: DENY
+  - capability: git.remote.tag.delete
+    verdict: DENY
+  - capability: forge.pr.create
+    verdict: DENY
+  - capability: forge.pr.modify
+    verdict: DENY
+  - capability: forge.pr.close
+    verdict: DENY
+  - capability: forge.pr.merge
+    verdict: DENY
+  - capability: forge.pr.approve
+    verdict: DENY
+  - capability: forge.release.publish
+    verdict: DENY
+  - capability: forge.release.delete
+    verdict: DENY
+  - capability: forge.repo.delete
+    verdict: DENY
+  - capability: forge.branch.protection.modify
+    verdict: DENY
+  - capability: forge.repo.permissions.modify
+    verdict: DENY
+  - capability: forge.issue.create
+    verdict: DENY
+  - capability: forge.issue.edit
+    verdict: DENY
+  - capability: forge.issue.transition
+    verdict: DENY
+  - capability: forge.issue.close
+    verdict: DENY
+  - capability: forge.issue.delete
+    verdict: DENY
+  - capability: forge.api.mutate
+    verdict: DENY
 ---
 # PRODUCTION_ADVISORY
 

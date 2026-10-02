@@ -77,6 +77,20 @@ matchers:
     # `harness` is the kernel's other name for itself, and a consumer repository may install it under either;
     # both are the BINARY, which is the distinction that matters here.
     command: '^((\S*/)?(ego|harness)(\.js)?|node\s+\S*(ego|harness)\.js|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+(decision\s+answer|budget\s+extend|modes\s+set|sources\s+(add|remove))(\s|$)'
+  # THE SELF-CHANGES A HUMAN PHRASE CAN LIFT, AND THE ACCEPTANCE THEY ARE NOT. grants.md has rows for "upgrade ego" and "install the skill" and
+  # these two commands matched nothing: the hook answered the phrase "granted" and `ego upgrade` stayed an unknown command (AUTH-7). Anchored at
+  # the binary, like the rule above: reading a document that mentions the command is not the command.
+  - capability: ego.pin.change
+    tool: Bash
+    command: '^((\S*/)?(ego|harness)(\.js)?|node\s+\S*(ego|harness)\.js|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+(upgrade|rollback)(\s|$)'
+  - capability: ego.skills.install
+    tool: Bash
+    command: '^((\S*/)?(ego|harness)(\.js)?|node\s+\S*(ego|harness)\.js|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+skills\s+(install|update|add)(\s|$)'
+  # `init` and `sync` (which runs init) ACCEPT whatever widenings the layer files hold when no agent shell is recognised. A person who is asked
+  # to approve them as an unknown command has no way to know that; no phrase lifts this one (it is not a row of grants.md).
+  - capability: ego.policy.accept
+    tool: Bash
+    command: '^((\S*/)?(ego|harness)(\.js)?|node\s+\S*(ego|harness)\.js|npx\s+(?:--\S+\s+)*(?:@[\w.-]+/)?(ego|harness)|(pnpm|yarn)\s+(?:exec\s+)?(ego|harness)|bunx\s+(ego|harness))\s+(init|sync)(\s|$)'
   # AUTHORSHIP IS GOVERNED ON EVERY SPELLING OR ON NONE. `GIT_AUTHOR_NAME=X git commit` reached ASK through the
   # GIT_* env-inject rule, while `git -c user.name=X -c user.email=Y commit` and `git commit --author=X` are the
   # identical act and were not matched at all: a commit attributed to a named human who did not write it

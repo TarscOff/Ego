@@ -410,6 +410,7 @@ export const AUTHORITY_TABLE_FIELDS: { readonly [K in TableField]: FieldReader }
   schema: { role: 'provenance', note: 'the format of the table: a table of another schema is not comparable' },
   sourceHashes: { role: 'provenance', note: 'the hashes of the authored files the table was compiled from' },
   provenance: { role: 'provenance', note: 'which layer set each verdict, and in which file' },
+  cellOrigins: { role: 'provenance', note: 'whether a profile or a mode moved each profile x mode cell: the source a refusal names' },
   capabilities: { role: 'authority', diff: diffCapabilities, note: 'the lock tier and whether the effect leaves the machine (what a grant may lift)' },
   absoluteDenies: { role: 'authority', diff: diffTier('absolute', 'absoluteDenies'), note: 'the HARD_LOCK members' },
   adminGoverned: { role: 'authority', diff: diffTier('admin-governed', 'adminGoverned'), note: 'the ADMIN_GOVERNED members' },

@@ -6,7 +6,7 @@ import { shimScript, gitHooksDir, resolveHooksPath } from '../project/githooks.t
 import { packageRoot } from '../launcher/self.ts';
 import { git as spawnGit, gitConfigGet as spawnGitConfigGet } from '../util/git.ts';
 import { argvToCommandLine } from '../util/shell-quote.ts';
-import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
+import { payloadClauseEndsAt, payloadOpener, payloadSpans, peelCarriers, privilegeCarriesReadCommand, stepValues, type Carrier, type Peeled, type PeelStep } from './carriers.ts';
 import { scanSedScript } from './sed.ts';
 import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
 import { SHELL_GRAMMAR, expandLongOptions, gitConfigAsks, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
@@ -21,9 +21,11 @@ import {
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
   canonicalPath,
+  commandLength,
   descriptorAlias,
   chargeListing,
   isDirectory,
+  isolatedPathView,
   namesAnEntry,
   directoryCandidates,
   hostTrim,
@@ -55,7 +57,7 @@ import {
 } from './k8s.ts';
 import { explainOutcome, renderReason, type ReasonCode, type RuleExplanation } from './reasons.ts';
 import { LOCK_TIER_LABEL } from './vocabulary.ts';
-import { WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
+import { DecisionMemo, WorkBoundExceeded, chargeWork, withWorkBound } from './work-bound.ts';
 import { assignmentWord, bindingsOf } from './bindings.ts';
 import {
   canonicalGitTokens,
@@ -3694,7 +3696,7 @@ export function cwdTimeline(
     };
     // every stage carries a copy of the set of directories it may run in, and every later reader walks it: the set and the
     // length of its members are what this stage costs, so a command that keeps moving somewhere new pays for it
-    chargeWork(STAGE_COST + point.dirs.reduce((n, d) => n + d.length, 0));
+    chargeWork(STAGE_COST + point.dirs.reduce((n, d) => n + commandLength(d, [start]), 0));
     out.push(point);
 
     // a stage that FEEDS a pipe, runs in the background or sits in a subshell cannot reach the caller - and that is a
@@ -4271,7 +4273,8 @@ const copyValueOpts = (head: string): RegExp | undefined => VALUE_OPTS_BY_HEAD[h
 const GIT_HOOK_FILE_RE =
   /^(?:applypatch-msg|pre-applypatch|post-applypatch|pre-commit|pre-merge-commit|prepare-commit-msg|commit-msg|post-commit|pre-rebase|post-checkout|post-merge|pre-push|pre-receive|update|proc-receive|post-receive|post-update|reference-transaction|push-to-checkout|pre-auto-gc|post-rewrite|sendemail-validate|fsmonitor-watchman|p4-changelist|p4-prepare-changelist|p4-post-changelist|p4-pre-submit|post-index-change)$/;
 
-const hooksDirCache = new WeakMap<object, { dirs: string[]; files: string[] }>();
+// (a MEMO ACROSS DECISIONS that pays, once per decision, what computing the value cost: see DecisionMemo in work-bound.ts)
+const hooksDirCache = new DecisionMemo<object, { dirs: string[]; files: string[] }>(true);
 
 /** THE HOOKS DIRECTORIES THIS REPOSITORY CONFIGURES, apart from `.git/hooks`, and the files that decide where they
  *  are. EGO's shims live wherever `core.hooksPath` points, and a path rule can name only the conventional places
@@ -4281,8 +4284,6 @@ const hooksDirCache = new WeakMap<object, { dirs: string[]; files: string[] }>()
  *  live. Also protected: a file the config INCLUDES (it can set `core.hooksPath` itself) and the TARGET of a hook that
  *  is a symlink (writing the target rewrites the hook). */
 function configuredHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: string[] } {
-  const cached = hooksDirCache.get(ctx);
-  if (cached) return cached;
   const dirs = new Set<string>();
   const files = new Set<string>();
   for (const root of ctx.repoRoots) {
@@ -4329,9 +4330,11 @@ function configuredHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: s
       }
     }
   }
-  const out = { dirs: [...dirs], files: [...files] };
-  hooksDirCache.set(ctx, out);
-  return out;
+  return { dirs: [...dirs], files: [...files] };
+}
+/** (what the evaluator asks: the answer is remembered for the context, and its first use in each decision pays what reading it cost) */
+function cachedHooksDirs(ctx: EvaluationContext): { dirs: string[]; files: string[] } {
+  return hooksDirCache.get(ctx, () => isolatedPathView(() => configuredHooksDirs(ctx)));
 }
 
 /** The names a credential file is given. A wildcard cannot be classified as a path, so it is asked of these. */
@@ -4429,7 +4432,7 @@ function classifyResolved(
   abs: string,
 ): CapabilityHit {
   // a path is tested against every path rule of the table (a few hundred globs): that is the work, and it is paid first
-  chargeWork(PATH_JUDGE_COST + abs.length);
+  chargeWork(PATH_JUDGE_COST + commandLength(abs));
   if (tool !== 'Read' && ctx.egoHome && 'ego.trust.tamper' in table.capabilities) {
     const home = canonicalPath(ctx.egoHome).split(sep).join('/');
     const posix = canonicalPath(abs).split(sep).join('/');
@@ -4476,7 +4479,7 @@ function classifyResolved(
   if (tool !== 'Read' && 'fs.hook-config.write' in table.capabilities) {
     const posix = canonicalPath(abs).split(sep).join('/');
     const folded = foldName(posix);
-    const hooks = configuredHooksDirs(ctx);
+    const hooks = cachedHooksDirs(ctx);
     const roots = ctx.repoRoots.map((r) => canonicalPath(r).split(sep).join('/'));
     const hit = (via: string): CapabilityHit => ({
       capability: 'fs.hook-config.write',
@@ -7925,28 +7928,31 @@ function chainedHookFiles(dir: string, name: string): string[] {
   return out;
 }
 
-const gitCommonDirCache = new Map<string, string | null>();
+// THE MEMOS SAVE THE PROCESS, NOT THE BOUND: the first use of an entry in each decision pays the spawn it saved (DecisionMemo). A process
+// that has already met a directory is not a cheaper process to decide in - a cold and a warm one spent 100,000 units apart (RB-7).
+const gitCommonDirMemo = new DecisionMemo<string, string | null>();
 /** The MAIN worktree of a linked worktree: the parent of the shared git common dir. Memoised like the toplevel. */
 function gitCommonDir(dir: string): string | null {
   const key = canonicalPath(dir);
-  const hit = gitCommonDirCache.get(key);
-  if (hit !== undefined) return hit;
-  const r = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir);
-  const main = r.ok && r.stdout ? canonicalPath(dirname(r.stdout.trim())) : null;
-  gitCommonDirCache.set(key, main === key ? null : main);
-  return gitCommonDirCache.get(key) ?? null;
+  return gitCommonDirMemo.get(key, () =>
+    isolatedPathView(() => {
+      const r = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir);
+      const main = r.ok && r.stdout ? canonicalPath(dirname(r.stdout.trim())) : null;
+      return main === key ? null : main;
+    }),
+  );
 }
 
-const gitToplevelCache = new Map<string, string | null>();
+const gitToplevelMemo = new DecisionMemo<string, string | null>();
 /** `git rev-parse --show-toplevel` for a directory, memoised for the life of the process. */
 function gitToplevel(dir: string): string | null {
   const key = canonicalPath(dir);
-  const hit = gitToplevelCache.get(key);
-  if (hit !== undefined) return hit;
-  const r = git(['rev-parse', '--show-toplevel'], dir);
-  const top = r.ok && r.stdout ? canonicalPath(r.stdout.trim()) : null;
-  gitToplevelCache.set(key, top);
-  return top;
+  return gitToplevelMemo.get(key, () =>
+    isolatedPathView(() => {
+      const r = git(['rev-parse', '--show-toplevel'], dir);
+      return r.ok && r.stdout ? canonicalPath(r.stdout.trim()) : null;
+    }),
+  );
 }
 
 /** The repository `git` will actually act on: resolved from the effective directory the way git resolves it, and
@@ -9287,6 +9293,16 @@ function resolveScriptCommand(
   // head plus the arguments that decide its shape (`go test`, `cmake --version`), so a bounded invocation of a
   // discovering tool stays frictionless without weakening that tool's default.
   const bare = head.replace(/\.(exe|cmd|bat)$/i, '');
+  // A PRIVILEGE CARRIER'S CLOSURE IS THE COMMAND IT CARRIES, when that command is located and the carrier's own options run nothing of
+  // their own (AUTH-7): the command behind it is classified on its own, so `sudo` itself adds no unread program
+  if ((bare === 'sudo' || bare === 'doas') && privilegeCarriesReadCommand(tokens))
+    return {
+      kind: 'none',
+      key: `carrier:${bare}`,
+      body: null,
+      reason: `${bare} runs the command behind it, which is analysed on its own`,
+      resolution: 'NOT_A_PRODUCER',
+    };
   const normTokens = tokens.join(' ');
   const match = (list: readonly string[]): string | null => {
     let best: string | null = null;
@@ -16368,6 +16384,8 @@ export function evaluate(table: CompiledAuthorityTable, ctx: EvaluationContext, 
         return { verdict: hit.verdict, hits: [hit], reason: renderReason(base, outcome), decisive: hit, code: outcome.code, rule: outcome.rule };
       }
     }),
+    // (what the host registered is not what the command named: the units a decision spends do not depend on where the checkout sits)
+    [ctx.cwd, ctx.egoHome, ...ctx.repoRoots],
   );
 }
 

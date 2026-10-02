@@ -246,6 +246,36 @@ export interface PeelOptions {
   leadingAssignments?: boolean;
 }
 
+/**
+ * THE OWN OPTIONS OF A PRIVILEGE CARRIER THAT RUN NOTHING OF THEIR OWN: another user or group, no prompt, the home directory or the
+ * environment passed on, the password from standard input, a background job. Any other option of `sudo` or `doas` starts a shell
+ * (`-i`, `-s`), an editor (`-e`), a program the environment names (`-A`), another root (`-R`), or asks something that is not
+ * a command (`-l`, `-v`): with one of those the closure of `sudo` is NOT the command behind it.
+ */
+const PLAIN_PRIVILEGE_OPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  sudo: new Set(['non-interactive', 'set-home', 'user', 'group', 'preserve-env', 'stdin', 'background', 'bell', 'preserve-groups', 'no-update']),
+  doas: new Set(['n', 'u']),
+};
+
+/**
+ * WHETHER `sudo` / `doas` CARRIES A COMMAND THIS KERNEL READS ON ITS OWN (closure audit 2026-10-02, AUTH-7). The carrier keeps its head so
+ * that `command.privileged` fires, and the unclaimed-head closure then asked what ELSE `sudo` executes - the answer to which is the
+ * command behind it, which the carrier reader locates and the rest of the evaluator classifies like any other. The vocabulary could
+ * not say "bounded" (an entry names a head, and `sudo -i` is a root shell), so every `sudo ls` carried a second ASK that no grant
+ * lifts, and "you can use sudo" was answered "granted" and changed nothing. A POSITIVE GRAMMAR: the closure is the carried command's only when
+ * the carrier's own options are all ones that run nothing, no option is unknown to the table, no command string is involved and a command
+ * is actually behind it. Everything else keeps asking.
+ */
+export function privilegeCarriesReadCommand(words: readonly string[]): boolean {
+  const p = peelCarriers(words, 0, { maxSteps: 1, leadingAssignments: false });
+  const step = p.steps[0];
+  const plain = step ? PLAIN_PRIVILEGE_OPTIONS[step.carrier] : undefined;
+  if (!step || !plain || step.at !== 0) return false;
+  if (p.partial !== null || step.unknown.length > 0 || p.strings.length > 0 || p.shellString !== null || p.lookup) return false;
+  if (!step.options.every((o) => plain.has(o.name))) return false;
+  return p.at < words.length;
+}
+
 /** The values of an own option of one step (`env -C DIR`, `timeout -s SIG`), whatever the spelling. */
 export function stepValues(step: PeelStep, name: string): string[] {
   return valuesOf({ options: step.options, operands: [], unknown: [], end: 0, dashDashAt: -1 }, name);

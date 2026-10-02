@@ -86,7 +86,35 @@ function commandLine(argv: unknown): string | null {
  * as the script it runs; a `workdir` becomes the `cd` it is, so relative paths are judged against the directory the
  * command really runs in. Anything this does not recognise is left exactly as it arrived, and the kernel asks about a
  * call it cannot read.
+ *
+ * ONE READER OF "WHAT IS THE COMMAND" (closure audit 2026-10-02, RB-6). The `local_shell` tool is the Responses API's
+ * `local_shell_call` item, and there the command is NOT a field of the input: it is one level down, in `action`
+ * (`{type: 'exec', command: [...], working_directory, env, user, timeout_ms}`). The flat reader found no `command` in it, so
+ * the same argv was ALLOW sent flat and ASK - an exit 2 on this host - sent the way the API sends it, and every `local_shell`
+ * call would have been refused if that is the real payload. The action is now unwrapped first, and everything it carries
+ * that changes what runs is part of the line: the working directory is the `cd`, an `env` is the assignments it is
+ * (judged like any other), and a `user` - another program with another authority - is NOT read, so the call asks.
  */
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** The fields of a `local_shell` action merged over the input that carries it, or null when the action is not an exec. */
+function unwrapAction(obj: Record<string, unknown>): Record<string, unknown> | null {
+  if (!('action' in obj)) return obj;
+  let action = obj['action'];
+  if (typeof action === 'string') {
+    try {
+      action = JSON.parse(action);
+    } catch {
+      return null;
+    }
+  }
+  if (!action || typeof action !== 'object' || Array.isArray(action)) return null;
+  const a = action as Record<string, unknown>;
+  if (a['type'] !== undefined && a['type'] !== 'exec') return null;
+  const { action: _carried, ...rest } = obj;
+  return { ...rest, ...a };
+}
+
 function shellInput(raw: unknown): Record<string, unknown> {
   let value = raw;
   if (typeof value === 'string' && /^\s*[[{]/.test(value)) {
@@ -102,16 +130,32 @@ function shellInput(raw: unknown): Record<string, unknown> {
     return line === null ? {} : { command: line };
   }
   if (!value || typeof value !== 'object') return {};
-  const obj = { ...(value as Record<string, unknown>) };
+  const original = { ...(value as Record<string, unknown>) };
+  const obj = unwrapAction(original);
+  if (obj === null) return original;
   for (const key of ['command', 'cmd', 'argv']) {
     if (!(key in obj)) continue;
     const v = obj[key];
     const line = typeof v === 'string' ? v : commandLine(v);
-    const workdir = obj['workdir'];
-    if (line === null || (workdir !== undefined && (typeof workdir !== 'string' || workdir === ''))) return obj;
-    delete obj[key];
-    delete obj['workdir'];
-    return { ...obj, command: typeof workdir === 'string' ? `cd ${shellQuote(workdir)} && ${line}` : line };
+    // (the same fact under two names: the Responses API says `working_directory`, the function-call tools say `workdir`)
+    const dirs = ['workdir', 'working_directory'].filter((k) => obj[k] !== undefined);
+    const workdir = dirs.length ? obj[dirs[0]!] : undefined;
+    const user = obj['user'];
+    const env = obj['env'];
+    const envEntries = env === undefined || env === null ? [] : typeof env === 'object' && !Array.isArray(env) ? Object.entries(env) : null;
+    if (
+      line === null ||
+      dirs.some((k) => typeof obj[k] !== 'string' || obj[k] === '' || obj[k] !== workdir) ||
+      (user !== undefined && user !== null && user !== '') ||
+      envEntries === null ||
+      !envEntries.every(([k, x]) => IDENTIFIER.test(k) && typeof x === 'string')
+    )
+      return original;
+    // (ONLY the key that was read: a second operand-shaped key is left in the input, and the evaluator refuses an input that names
+    // its operand twice - deleting it here turned `{command: 'ls', cmd: 'git push'}` into `ls`)
+    for (const k of [key, 'workdir', 'working_directory', 'env', 'user']) delete obj[k];
+    const assigned = envEntries.map(([k, x]) => `${k}=${shellQuote(x as string)} `).join('');
+    return { ...obj, command: `${typeof workdir === 'string' ? `cd ${shellQuote(workdir)} && ` : ''}${assigned}${line}` };
   }
   return obj;
 }

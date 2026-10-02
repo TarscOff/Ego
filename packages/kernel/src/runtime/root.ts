@@ -160,6 +160,9 @@ export interface SessionRecord {
   pid?: number;
   startedAt: string;
   heartbeatAt: string;
+  /** minutes of ACTIVITY: each event adds the time since the one before it, and a gap longer than the idle limit adds the limit.
+   *  The duration budget reads this, not the wall clock since `startedAt` (RB-3: a session that sat idle overnight was over its time). */
+  activeMinutes?: number;
   endedAt?: string;
   mode: string;
   profile: string;
@@ -242,8 +245,12 @@ export function withSessionLock<T>(
   opts: { timeoutMs?: number; staleMs?: number } = {},
 ): T {
   const lock = `${sessionPath(root, sessionId)}.lock`;
-  const timeout = opts.timeoutMs ?? 3000;
-  const stale = opts.staleMs ?? 30000;
+  // WHAT IS HELD IS MILLISECONDS (the read-modify-write of one record; the decision is made before the lock is taken), so a waiter
+  // that has waited this long is waiting for a holder that is gone or stuck, and a holder that has held it for a minute is not alive in
+  // any sense the host would wait for (its own hook budget is thirty seconds). Three seconds and thirty seconds refused twenty
+  // parallel hooks of one session and could displace a live holder (RB-2).
+  const timeout = opts.timeoutMs ?? 8000;
+  const stale = opts.staleMs ?? 60000;
   const deadline = Date.now() + timeout;
   for (;;) {
     if (writeExclusive(lock, `${process.pid} ${new Date().toISOString()}\n`)) break;

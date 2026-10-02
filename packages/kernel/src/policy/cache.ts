@@ -20,6 +20,7 @@ import { parseMarkdown, optionalString } from '../util/markdown.ts';
 import { isFile, readJsonIfReadable, readText, writeJsonAtomic } from '../util/fs.ts';
 import { sha256Hex, sha256Canonical } from '../util/hash.ts';
 import { ControlPlaneValidationError, VERDICT_RANK } from '../control-plane/types.ts';
+import { PENDING_LAYER } from '../authority/vocabulary.ts';
 import { isLegacyTable, upgradeLegacyTable } from '../control-plane/legacy-names.ts';
 import { POLICY_INVALID_RULE, POLICY_STALE_RULE, renderFailure } from '../authority/reasons.ts';
 import {
@@ -212,6 +213,9 @@ const isRecordOfStrings = (v: unknown): v is Record<string, string> =>
 export function readAsCurrentTable(candidate: unknown, lenient = false): CompiledAuthorityTable | null {
   if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
   const t = { ...((isLegacyTable(candidate) ? upgradeLegacyTable(candidate) : candidate) as unknown as Record<string, unknown>) };
+  // (a field that only says where a verdict came from, and that a table of an earlier build did not record, is empty in it: a refusal
+  // then names its source the way it always did)
+  t['cellOrigins'] ??= {};
   // (a table to DIFF against - not one to serve - may predate the registry and the vocabulary: they are empty in it, which is
   // what the diff reads a table that never had them as)
   if (lenient) {
@@ -363,7 +367,16 @@ export function clampToBaseline(
   }
   for (const [cap, v] of Object.entries(t.effective)) {
     const b = baseline.effective[cap];
-    if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) t.effective[cap] = b;
+    if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) {
+      t.effective[cap] = b;
+      // THE SOURCE IS THE BASELINE'S, AND THE TRACE SAYS A WIDENING IS WAITING: the verdict that stays in force is the core's, and
+      // citing the organization's file as its source (it is not in force) sent a reader to the wrong rule (AUTH-8)
+      const was = t.provenance[cap]?.at(-1);
+      t.provenance[cap] = [
+        ...structuredClone(baseline.provenance[cap] ?? []),
+        { layer: `${PENDING_LAYER} \`ego init\`)`, file: was?.file ?? '', verdict: b },
+      ];
+    }
   }
   for (const [p, prof] of Object.entries(t.profiles))
     for (const [m, cells] of Object.entries(prof.modes)) {
@@ -371,7 +384,14 @@ export function clampToBaseline(
       if (!base) continue;
       for (const [cap, v] of Object.entries(cells)) {
         const b = base[cap];
-        if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) cells[cap] = b;
+        if (b && VERDICT_RANK[v] < VERDICT_RANK[b]) {
+          cells[cap] = b;
+          // (and the cell's origin is the baseline's: whatever moved it there, the unaccepted layer did not)
+          const origin = baseline.cellOrigins?.[p]?.[m]?.[cap];
+          const mine = ((t.cellOrigins[p] ??= {})[m] ??= {});
+          if (origin) mine[cap] = origin;
+          else delete mine[cap];
+        }
       }
     }
   // a removed overlay narrowing is put back, and the views derived from the matchers with it
