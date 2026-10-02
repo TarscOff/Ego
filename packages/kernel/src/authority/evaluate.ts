@@ -594,6 +594,22 @@ export function splitShellPipeline(command: string): ShellStage[] {
       i += 2;
       continue;
     }
+    // ...ALSO BETWEEN THE TWO CHARACTERS OF AN OPENER. The pair is deleted before the shell reads `$(`, `<(`, `>(` or `((`, so `echo
+    // $\<newline>(git push origin main)` IS `echo $(git push origin main)` - bash and zsh both ran the push - and this scanner, which looks
+    // one character ahead and had not yet skipped the pair, saw a `$` followed by a backslash and read no substitution at all (the cross-product
+    // of the arithmetic cases found it: the lookahead and the skip were two readers of the same rule). The pair is taken out HERE, so every
+    // look at the next character is a look at the real one.
+    if ((ch === '$' || ch === '<' || ch === '>' || ch === '(') && next === '\\' && command[i + 2] === '\n' && !inSingle) {
+      chargeWork(command.length - i);
+      command = command.slice(0, i + 1) + command.slice(i + 3);
+      continue;
+    }
+    // (`$(` + pair + `(` is `$((`, and the second parenthesis is read by the same look as the first)
+    if (ch === '$' && next === '(' && command[i + 2] === '\\' && command[i + 3] === '\n' && !inSingle) {
+      chargeWork(command.length - i);
+      command = command.slice(0, i + 2) + command.slice(i + 4);
+      continue;
+    }
     if (ch === '\\' && !inSingle) {
       cur += ch + (next ?? '');
       i += 2;

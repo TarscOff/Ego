@@ -2816,7 +2816,9 @@ const noDouble = (c: string): boolean => !c.includes('"');
  *  shell keyword, a carried body and a pipeline all start a fresh simple command, so those stay in. Gating a
  *  command the shell would refuse to run is not a safety property. */
 const noLeadingAssignment = (c: string): boolean =>
-  !/^(export\s+)?['"]?[A-Za-z_][A-Za-z0-9_]*=|^(declare|typeset|local|readonly|read|mapfile|readarray|getopts|let|for|:)\s|^printf\s+-v/.test(c);
+  // (...nor one that is shell SYNTAX: `((`, `[[` and an assignment to an array element are not programs a wrapper can execute, so `env [[ … ]]` is
+  // not the evaluation the class is about - the evaluator reads a word it was given, and `env` hands the next word to exec)
+  !/^(export\s+)?['"]?[A-Za-z_][A-Za-z0-9_]*=|^(declare|typeset|local|readonly|read|mapfile|readarray|getopts|let|for|:)\s|^printf\s+-v|^\(\(|^\[\[|^[A-Za-z_][A-Za-z0-9_]*\[/.test(c);
 const noSingle = (c: string): boolean => !c.includes("'");
 /** a command whose LAST word an operator can be glued to: it ends in a word or a closing quote, on one line, with no
  *  operator already there and no here-document that the text appended would end up inside */

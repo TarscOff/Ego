@@ -211,6 +211,21 @@ test('SH-4: a variable the line filled with code, and that the shell then evalua
     assert.notEqual(verdict(c, dir), 'DENY', c);
 });
 
+test('SH-1: a backslash-newline inside an opener is deleted before the opener is read', () => {
+  // bash and zsh ran the push in each of the first three (the differential below repeats them); the look-ahead had not yet skipped the pair
+  assertDenied([
+    'echo $\\\n({C})',
+    'echo <\\\n({C})',
+    'echo "$\\\n({C})"',
+    'echo $\\\n[$({C})]',
+    'echo $[\\\n$({C})]',
+    "x='a[$({C})]'; echo $(\\\n(x))",
+    "x='a[$({C})]'; echo $\\\n((x))",
+    "declare 'a[$({C})]=\\\n1'",
+    "decl\\\nare 'a[$({C})]=1'",
+  ]);
+});
+
 test('the lexer reads where an expression ends, and what it runs', () => {
   assert.deepEqual(arithmeticSpanAt('$[a[1]+2]', 0), { body: 'a[1]+2', end: 9 });
   assert.deepEqual(arithmeticSpanAt('$[$(echo ])]x', 0), { body: '$(echo ])', end: 12 });
@@ -576,6 +591,10 @@ const SHELLS = (['bash', 'zsh'] as const).map((n) => ({ name: n, path: findShell
 
 /** every way the review and this file found to make a shell run `{C}` while the line looks like data */
 const EXECUTING_SITES: readonly string[] = [
+  'echo $\\\n({C})',
+  'echo <\\\n({C})',
+  'echo "$\\\n({C})"',
+  "x='a[$({C})]'; echo $(\\\n(x))",
   'echo $[$({C})]',
   'echo $[`{C}`]',
   'echo $[ 1 + $({C}) ]',
