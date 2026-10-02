@@ -5446,6 +5446,27 @@ function withPositionals(text: string, args: readonly string[]): string {
   return out + text.slice(from);
 }
 
+/** A function body with the call's words put where its OWN parameters stand: a function defined inside it has parameters of its own, and its
+ *  statements are left alone. `used` says whether the body names any. */
+function bodyWithPositionals(body: readonly ShellStage[], args: readonly string[]): { stages: readonly ShellStage[]; used: boolean } {
+  let depth = 0;
+  let used = false;
+  const stages = body.map((st) => {
+    if (st.text.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
+      depth++;
+      return st;
+    }
+    if (st.text === FUNCTION_BODY_END) {
+      depth = Math.max(0, depth - 1);
+      return st;
+    }
+    if (depth > 0 || st.text.startsWith(MARK) || !POSITIONAL_RE.test(st.text)) return st;
+    used = true;
+    return { ...st, text: withPositionals(st.text, args) };
+  });
+  return { stages, used };
+}
+
 interface FunctionDef {
   body: readonly ShellStage[];
   ledger: number;
@@ -9524,7 +9545,7 @@ interface DryRunGrammar {
    *  there is data (`git push -n origin $(git branch --show-current)`). Beyond them, and in an option's name, it may be a flag - the one
    *  that undoes the dry run - so the dry run is not proved. Absent for the tools whose own reader keeps its own (kubectl and helm:
    *  flagFilledInAfter, by verb). */
-  slots?: number;
+  slots?: number | ((words: readonly string[]) => number);
 }
 /** the values of `--dry-run=VALUE` that mean "do not act": kubectl's and helm's `client` and `server`, and the
  *  spellings of true that a boolean flag accepts. Anything else - `none`, `false`, an empty value, a word nobody
@@ -9587,6 +9608,7 @@ function dryRunDecision(words: readonly string[], g: DryRunGrammar): { state: 'd
   // `git push --dry-run origin main $(echo --no-dry-run)` is a push. The question is asked once, for every tool that has such a flag
   // (kubectl and helm ask it by verb: flagFilledInAfter). What is not proved is not a dry run: the line is the act.
   if (last === 'dry' && g.slots !== undefined) {
+    const slots = typeof g.slots === 'function' ? g.slots(w) : g.slots;
     let bare = 0;
     for (let i = 0; i < w.length; i++) {
       const word = w[i]!;
@@ -9596,7 +9618,7 @@ function dryRunDecision(words: readonly string[], g: DryRunGrammar): { state: 'd
         if (takesValue(word)) i++; // its value is data
         continue;
       }
-      if (i > at && bare >= g.slots && buildsFlags(word)) return { state: 'act', at: -1 };
+      if (i > at && bare >= slots && buildsFlags(word)) return { state: 'act', at: -1 };
       bare++;
     }
   }
@@ -9694,8 +9716,11 @@ const k8sDryRunGrammar = (head: string): DryRunGrammar => ({
 /** the tools whose whole option set is known: every option not listed as taking a value takes none, so what stands
  *  after it is an operand. `-n` is the dry run of `git rm`, `git mv` and `rsync`; for `patch` it is `--normal`. */
 const GIT_PATH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: gitValuedOptions('rm'), slots: 0 };
+/** the NAME SLOTS of `git push`: the verb, the remote and one refspec - and `--all` / `--mirror` take no refspec, so a word the shell builds after
+ *  the remote can only be a flag */
+const pushSlots = (words: readonly string[]): number => (words.some((x) => x === '--all' || x === '--mirror') ? 2 : 3);
 /** `git push` and `git send-pack`: `-o` is a push option and the others name a program or a repository */
-const GIT_PUSH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: gitValuedOptions('push', ['-o', '--push-option', '--receive-pack', '--exec', '--repo']), slots: 3 };
+const GIT_PUSH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: gitValuedOptions('push', ['-o', '--push-option', '--receive-pack', '--exec', '--repo']), slots: pushSlots };
 /** the cloud CLIs, argocd and flux: long options only. A `--no-…` flag is a switch by convention (the aws CLI's all are) */
 const CLOUD_DRY_RUN: DryRunGrammar = {
   longs: ['dry-run', 'dryrun', 'server-dry-run', 'what-if', 'no-act'],
@@ -9782,6 +9807,7 @@ function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolea
   }
   if (verbAt < 0) return false;
   const limit = k8sPositionalLimit(head, text[verbAt]!, text);
+  const bySelector = text.some((t) => /^(--selector|--all|--field-selector)(=|$)|^-l($|=|\S)/.test(t));
   let bare = 0;
   for (let i = verbAt + 1; i < end; i++) {
     const t = text[i]!;
@@ -9799,7 +9825,8 @@ function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolea
     // ...and a verb that names any number of objects still has only so many NAME SLOTS: a plain variable in one is a name, but a word
     // the shell BUILDS - a command's output, a default, every argument - past them may be the flag that undoes the dry run
     // (`delete pod x --dry-run $(echo --dry-run=none)`; closure audit 2026-10-02, SH-3)
-    if (i > at && limit === null && bare >= (head === 'helm' ? 1 : 2) && buildsFlags(t)) return true;
+    // (a selector or `--all` leaves the name slot EMPTY: `kubectl delete pod -l app=x --dry-run=client $(…)` has nothing there but a flag)
+    if (i > at && limit === null && bare >= (head === 'helm' || bySelector ? 1 : 2) && buildsFlags(t)) return true;
     bare++;
   }
   return false;
@@ -15447,12 +15474,11 @@ function analyzeSegmentsInto(
         // `git push origin main`, and the body read at its definition has only `git "$@"`, a word nobody can read. A body that names its
         // parameters is therefore read again at every call, with the words of the call put where they stand (closure audit 2026-10-02, SH-2)
         const argv = callArguments(seg);
-        for (const def of lastSure > 0 ? standing.slice(lastSure) : standing) {
-          const positional = def.body.some((st) => !st.text.startsWith(MARK) && POSITIONAL_RE.test(st.text));
+        // (a definition made INSIDE a body is made when that body runs, which is after the definition that holds it was made - and it ends
+        // before it in the text - so the later one is not always the one that stands: every definition that may not have run is a candidate)
+        for (const def of lastSure > 0 ? standing.filter((d, k) => k >= lastSure || !d.unconditional) : standing) {
+          const { stages: body, used: positional } = bodyWithPositionals(def.body, argv);
           if (!positional && written.size === def.ledger && dirsNow === def.dirs) continue;
-          const body = positional
-            ? def.body.map((st) => (st.text.startsWith(MARK) ? st : { ...st, text: withPositionals(st.text, argv) }))
-            : def.body;
           const runIn = point.dirs.filter((d) => d !== CWD_UNKNOWN);
           for (const dir of runIn.length ? runIn : [env.cwd]) {
             const callEnv: ExecutionEnvironment = {

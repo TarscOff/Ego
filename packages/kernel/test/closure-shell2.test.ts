@@ -278,6 +278,11 @@ test('SH-2: a function that removes its own binding runs the real program from i
     'git() { true; }; f() { unset -f git; git push origin main; }; trap f EXIT',
     'git() { true; }; f() { unset -f git; git push origin main; }; alias h=f; h',
     'g() { git "$@"; }; git() { unset -f git; g "$@"; }; git push origin main',
+    // a function that DEFINES a forwarder: the definition is made when the body runs, and the forwarder's parameters are its own
+    'git() { git() { command git "$@"; }; }; git; git push origin main',
+    'git() { true; }; f() { git() { command git "$@"; }; }; f; git push origin main',
+    'git() { true; }; f() { git() { command git "$@"; }; }; f | cat; git push origin main',
+    'git() { true; }; f() { git() { command git "$@"; }; }; (f); git push origin main',
   ]);
 });
 
@@ -322,6 +327,11 @@ test('SH-3: a word the shell builds after a dry-run flag may be the flag that un
     'kubectl --context production delete pod x --dry-run $@',
     'kubectl --context production delete pod x y --dry-run $(cat flags)',
     'kubectl --context production delete pod x --dry-run=client --$(echo dry-run)=none',
+    'kubectl --context production delete pod -l app=x --dry-run=client $(echo --dry-run=none)', // a selector leaves the name slot empty
+    'kubectl --context production delete pod --all --dry-run=client $(echo --dry-run=none)',
+    'kubectl --context production scale deploy x --replicas=0 --dry-run=client $(echo --dry-run=none)',
+    'kubectl --context production label pod x k=v --dry-run=client $(echo --dry-run=none)',
+    'kubectl --context production set image deploy/x c=img --dry-run=client $(echo --dry-run=none)',
     'oc --context production delete pod x --dry-run $(echo --dry-run=none)',
     'helm --kube-context production uninstall app --dry-run $(echo --dry-run=false)',
     'helm --kube-context production uninstall app --dry-run ${X:---dry-run=false}',
@@ -329,6 +339,8 @@ test('SH-3: a word the shell builds after a dry-run flag may be the flag that un
     // the same reader serves every tool that has such a flag
     'git push --dry-run origin main $(echo --no-dry-run)',
     'git push -n origin main $(echo --no-dry-run)',
+    'git push --dry-run --all origin $(echo --no-dry-run)', // --all takes no refspec: the word after the remote is a flag
+    'git push --dry-run --mirror origin $(echo --no-dry-run)',
     'git push --dry-run origin main "$@"',
     'git push --dry-run origin main --$OPT',
     'git push -n --$OPT origin main',
@@ -392,6 +404,30 @@ test('SH-5: a verb and the value of an option are not file names under the match
     if (got !== 'DENY') wrong.push(`${got}  ${c}`);
   }
   assert.deepEqual(wrong, []);
+});
+
+test('SH-6 (judged: not a defect): what `xargs` carries is followed by words from standard input, which can be options - `find -exec` is followed by the match', () => {
+  const dir = workspace();
+  // the carried command asks, as it did: only the heads whose every option reads (the read-only matcher's list) are released
+  for (const c of ['echo x | xargs kubectl get pods', 'echo x | xargs docker ps', 'echo x | xargs git status', 'git ls-files | xargs git log -1'])
+    assert.equal(verdict(c, dir), 'ASK', c);
+  for (const c of ['git ls-files | xargs grep foo', 'git ls-files | xargs wc -l', 'git ls-files | xargs cat'])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+  // ...because the words are the tool's arguments: a word read from standard input is parsed as an option by a tool that permutes them
+  // (the real `ls` given `-l` on standard input lists in the long format), and `find -exec` appends only the path it matched
+  const sh = findShell('bash') ?? findShell('zsh');
+  if (sh !== null) {
+    const d = mkdtempSync(join(tmpdir(), 'ego-xargs-'));
+    try {
+      writeFileSync(join(d, 'f'), 'x');
+      const plain = spawnSync('/bin/sh', ['-c', 'ls'], { cwd: d, encoding: 'utf8' }).stdout;
+      const fed = spawnSync('/bin/sh', ['-c', "printf -- '-l\\n' | xargs ls"], { cwd: d, encoding: 'utf8' }).stdout;
+      if (fed !== '') assert.notEqual(fed, plain, 'a word from standard input changed the options the tool saw');
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  }
+  assert.equal(verdict('find . -maxdepth 0 -exec kubectl get pods \\;', dir), 'ALLOW');
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *
