@@ -449,4 +449,4 @@ discipline of decision Q84 (authority changes are never patch releases).
   - Tests: `closure-make2.test.ts` (every row fails on the unfixed tree), the real GNU make as an oracle (`support/make-oracle.ts`: a logging
     `git` on the PATH, the makefile run for real, the verdict compared with what ran - over the reviewers' cases and a seeded cross-product of
     setters, users and noise), a work-bound property test, `ORDINARY_MAKEFILES` (realistic content for the producer, which the empty ORDINARY
-    workspace could not give) and nine corpus classes.
+    workspace could not give) and eight corpus classes.
