@@ -33,7 +33,8 @@ export function startPsqlOracle(): PsqlOracle | null {
     .find(Boolean);
   if (image === undefined) return null;
   const name = `ego-psql-oracle-${process.pid}-${Date.now() % 100000}`;
-  // --network none: the server answers on its own socket and can reach nothing; --rm: the container is gone when it stops
+  // --network none: the server answers on its own socket and can reach nothing; --rm: the container is gone when it stops - and it
+  // stops by itself after fifteen minutes (`timeout`), so a test process that is killed before it can clean up leaves nothing running
   if (
     !docker([
       'run',
@@ -45,7 +46,12 @@ export function startPsqlOracle(): PsqlOracle | null {
       'none',
       '-e',
       'POSTGRES_HOST_AUTH_METHOD=trust',
+      '--entrypoint',
+      'timeout',
       image,
+      '900',
+      'docker-entrypoint.sh',
+      'postgres',
     ]).ok
   )
     return null;
@@ -243,7 +249,7 @@ export function runInLocalImage(image: RegExp, script: string): string | null {
   if (found === undefined) return null;
   const r = spawnSync(
     'docker',
-    ['run', '--rm', '--network', 'none', '--entrypoint', 'sh', found, '-c', script],
+    ['run', '--rm', '--network', 'none', '--entrypoint', 'timeout', found, '110', 'sh', '-c', script],
     { encoding: 'utf8', timeout: 120_000 },
   );
   return r.status === null ? null : `${r.stdout ?? ''}`;
