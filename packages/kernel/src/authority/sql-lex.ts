@@ -16,7 +16,8 @@
 //   - a lone `e` in front of a quote makes an ESCAPE string, where a backslash escapes the next character;
 //   - a backslash outside a string starts a command, except `\;` and `\:`, which are a plain `;` and `:` and leave the line
 //     going on as SQL;
-//   - a backquote is no quote at all; and `:name` interpolates a variable's text into the script, which is then lexed again.
+//   - a backquote is no quote at all; and `:name` interpolates a variable's text into the script - and into the arguments of a
+//     command - which is then lexed again.
 // Where two clients of one engine read a form differently, the form is REFUSED rather than guessed.
 
 export type SqlDialect = 'pg' | 'mysql' | 'plain';
@@ -259,12 +260,43 @@ function scanPostgres(input: string, known: SqlVariables): SqlScan | { refused: 
       }
       const cmd = backslashCommand(text, i, 'pg');
       if ('refused' in cmd) return cmd;
-      metas.push({ name: cmd.name, args: cmd.args });
+      // THE ARGUMENTS OF A COMMAND ARE INTERPOLATED TOO (`\o :x` with `-v x='|cmd'` runs the program): a reference outside a quote is
+      // replaced by the variable's text, as in the statements, and one whose text is not known is reported
+      let args = cmd.args;
+      for (let round = 0; round < 5 && /:[A-Za-z0-9_\u0080-\uffff]/.test(args); round++) {
+        let next = '';
+        for (let k = 0; k < args.length; k++) {
+          const ch = args[k]!;
+          if (ch === "'") {
+            const end = quotedEnd(args, k, false) ?? args.length - 1;
+            next += args.slice(k, end + 1);
+            k = end;
+            continue;
+          }
+          if (ch === ':' && args[k + 1] !== ':' && args[k - 1] !== ':') {
+            VARIABLE_NAME.lastIndex = k + 1;
+            const v = VARIABLE_NAME.exec(args);
+            if (v && !/^\d+$/.test(v[0])) {
+              const value = values.get(v[0]);
+              if (typeof value === 'string' && ++substitutions <= MAX_SUBSTITUTIONS) {
+                next += value;
+                k += v[0].length;
+                continue;
+              }
+              if (typeof value !== 'string') variables.push(v[0]);
+            }
+          }
+          next += ch;
+        }
+        if (next === args) break;
+        args = next;
+      }
+      metas.push({ name: cmd.name, args });
       // what the command does to the variables that later references read
       if (cmd.name === 'set') {
-        const set = setCommand(cmd.args);
+        const set = setCommand(args);
         if (set) values.set(set.name, set.value);
-      } else if (cmd.name === 'unset') values.delete(cmd.args.trim());
+      } else if (cmd.name === 'unset') values.delete(args.trim());
       else if (SETS_VARIABLES_UNSEEN.test(cmd.name)) values.clear();
       // (the line break that ends the command is consumed with it)
       i = cmd.end + 1;

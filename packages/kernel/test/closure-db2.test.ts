@@ -166,6 +166,11 @@ test('RV-DB-2 siblings: what the real psql does with a variable, and what the sc
       ["\\set x '\\\\o |touch @MARK@'\n:x\n", {}, true],
       ["select '\\o |touch @MARK@' as x \\gset\n:x\n", {}, true],
       ["select '\\o |touch @MARK@' as x \\gset\nselect :'x'\n", {}, false],
+      // the arguments of a command are interpolated as well: `\o :x` is the program the variable holds, `\o :'x'` and `\o ':x'` are not
+      ['\\o :x\n', { x: '|touch @MARK@' }, true],
+      ['\\set y :x\n\\o :y\n', { x: '|touch @MARK@' }, true],
+      ["\\o :'x'\n", { x: '|touch @MARK@' }, false],
+      ["\\o ':x'\n", { x: '|touch @MARK@' }, false],
     ];
     const got = oracle.runs(
       cases.map(([script, vars]) => ({
@@ -181,14 +186,12 @@ test('RV-DB-2 siblings: what the real psql does with a variable, and what the sc
         new Map(Object.entries(vars).map(([k, v]) => [k, v.replaceAll('@MARK@', '/tmp/x')])),
       );
       if ('refused' in scan) return;
-      // a command psql runs is reported, or the script asks about a variable whose text it cannot see
-      const seen = scan.metas.some((m) => m.name === 'o') || scan.variables.length > 0;
+      // a program psql runs is reported (a `\o` whose target is a pipe), or the script asks about a variable whose text it cannot see
+      const program = scan.metas.some((m) => m.name === 'o' && m.args.startsWith('|'));
+      const seen =
+        program || scan.metas.some((m) => m.name === 'o' && m.args === '') || scan.variables.length > 0;
       if (runs) assert.ok(seen, `${JSON.stringify(script)} runs a command the scanner did not see`);
-      else
-        assert.ok(
-          !scan.metas.some((m) => m.name === 'o'),
-          `${JSON.stringify(script)} runs nothing, yet the scanner reports a command`,
-        );
+      else assert.ok(!program, `${JSON.stringify(script)} runs nothing, yet the scanner reports a program`);
     });
   } finally {
     oracle.stop();
@@ -471,6 +474,10 @@ const ACTS: Record<string, string> = {
   mysqlpump: 'app',
   mongosh: "--eval 'db.users.deleteMany({})'",
   mongo: "--eval 'db.users.deleteMany({})'",
+  mongodump: '--db app --out dump',
+  mongorestore: '--db app dump/app',
+  mongoexport: '--db app --collection users',
+  mongoimport: '--db app --collection users --file users.json',
   'redis-cli': 'FLUSHALL',
   'valkey-cli': 'FLUSHALL',
   'clickhouse-client': "-q 'alter table t delete where 1'",

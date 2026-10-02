@@ -289,6 +289,34 @@ export const MONGO_OPTIONS: DbOptionSpec = {
   host: ['host'],
 };
 
+// --- MongoDB's database tools (mongodump, mongorestore, mongoexport, mongoimport): Go's go-flags, so an option is its exact name -----
+// (from their documentation: there is no binary of them to ask here)
+export const MONGO_TOOLS_OPTIONS: DbOptionSpec = {
+  value: [
+    'host', 'port', 'uri', 'config', 'username', 'password', 'authenticationDatabase', 'authenticationMechanism', 'awsSessionToken',
+    'gssapiServiceName', 'gssapiHostName', 'db', 'collection', 'query', 'queryFile', 'readPreference', 'out', 'archive',
+    'excludeCollection', 'excludeCollectionsWithPrefix', 'numParallelCollections', 'numInsertionWorkersPerCollection',
+    'numInsertionWorkers', 'oplogLimit', 'oplogFile', 'dir', 'writeConcern', 'nsExclude', 'nsInclude', 'nsFrom', 'nsTo', 'fields',
+    'fieldFile', 'type', 'jsonFormat', 'skip', 'limit', 'sort', 'file', 'mode', 'upsertFields', 'parseGrace', 'sslCAFile',
+    'sslPEMKeyFile', 'sslPEMKeyPassword', 'sslCRLFile', 'tlsCAFile', 'tlsCertificateKeyFile', 'tlsCertificateKeyFilePassword',
+    'tlsCRLFile', 'tlsCertificateSelector', 'tlsDisabledProtocols',
+  ],
+  flag: [
+    'help', 'version', 'quiet', 'verbose', 'ssl', 'tls', 'sslAllowInvalidCertificates', 'sslAllowInvalidHostnames', 'sslFIPSMode',
+    'tlsInsecure', 'forceTableScan', 'gzip', 'oplog', 'dumpDbUsersAndRoles', 'viewsAsCollections', 'objcheck', 'oplogReplay',
+    'restoreDbUsersAndRoles', 'drop', 'dryRun', 'noIndexRestore', 'noOptionsRestore', 'keepIndexVersion', 'maintainInsertionOrder',
+    'stopOnError', 'bypassDocumentValidation', 'preserveUUID', 'convertLegacyIndexes', 'fixDottedHashIndex', 'jsonArray', 'pretty',
+    'noHeaderLine', 'slaveOk', 'assertExists', 'ignoreBlanks', 'headerline', 'useArrayIndexFields', 'columnsHaveTypes', 'legacy',
+  ],
+  shortValue: 'hupdcqofj',
+  shortFlag: 'v',
+  alias: { h: 'host', u: 'username', p: 'password', d: 'db', c: 'collection', q: 'query', o: 'out', f: 'fields', j: 'numParallelCollections' },
+  operands: ['name'],
+  host: ['host'],
+  connection: ['uri'],
+  profile: ['config'],
+};
+
 // (written from redis-cli 8's own --help. NOT in it on purpose: --cluster, --replica, --lru-test and --vset-recall*, which act on the
 // server or the cluster - an option the table does not know is a question, so they stay one)
 export const REDIS_OPTIONS: DbOptionSpec = {
@@ -519,6 +547,10 @@ export const DB_GRAMMAR: Readonly<Record<string, DbOptionSpec>> = {
   mysqldump: MYSQLDUMP_OPTIONS,
   mongosh: MONGO_OPTIONS,
   mongo: MONGO_OPTIONS,
+  mongodump: MONGO_TOOLS_OPTIONS,
+  mongorestore: MONGO_TOOLS_OPTIONS,
+  mongoexport: MONGO_TOOLS_OPTIONS,
+  mongoimport: MONGO_TOOLS_OPTIONS,
   'redis-cli': REDIS_OPTIONS,
   'valkey-cli': REDIS_OPTIONS,
   'clickhouse-client': CLICKHOUSE_OPTIONS,
