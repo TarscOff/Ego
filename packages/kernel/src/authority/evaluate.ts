@@ -5334,6 +5334,25 @@ const RELEVANT_ENV_INPUTS: Record<ProducerResult['kind'], readonly RegExp[]> = {
   none: [PROGRAM_NAMING_ENV, /^(PATH|CDPATH)$/],
 };
 
+/** THE ENVIRONMENT A PASS RUNS IN IS PART OF WHICH PASS IT IS. The cycle guard identifies an invocation by what it resolves to, and for a
+ *  git hook that is `the hooks directory + the verb`: `env 'EDITOR=/tmp/x' git commit` inside the pre-commit hook of `git commit` was therefore
+ *  "the same execution" as the commit that fired the hook, was cut off as a repeat, and was never asked about the environment it hands the
+ *  command - ASK on a command line, ALLOW in a hook, in lint-staged, and in anything else that re-enters its own producer (integration
+ *  audit 2026-10-02). It is not only the names that select a program: a hook that runs `make run` and then `CMD='git push origin main' git
+ *  commit` fires itself again with a `CMD` that its own recipe expands, and that second pass is read from the same text.
+ *
+ *  make's key has always carried the environment (`envKey`); this is the same rule for every producer, at the one place that knows which one
+ *  ran. EVERY process input the pass inherits is in it (what a body's readers consult is not only what `environmentGaps` reports), and a
+ *  second pass whose inputs are the first pass's inputs is still a repeat, so the recursion still ends: a body inherits the inputs of the
+ *  invocation that produced it and a command in it adds only what its own text assigns, so the passes down one path differ by assignments
+ *  written in the text, a pass that adds none is a repeat of the pass above it, and the depth is bounded (MAX_EFFECT_DEPTH). */
+function environmentIdentity(env: ExecutionEnvironment): string {
+  return Object.entries(env.envInputs)
+    .map(([name, value]) => `${name}=${value}`)
+    .sort()
+    .join('\u0000');
+}
+
 /** ENVIRONMENT-INPUT CLOSURE and TREE-STATE PROVENANCE, applied at the ONE place that knows which producer ran —
  *  so every producer, current and future, is covered without having to remember. */
 function environmentGaps(kind: ProducerResult['kind'], env: ExecutionEnvironment): Unresolved[] {
@@ -5542,8 +5561,9 @@ export function segmentEnvInputs(segment: string, allAssignments = false): Recor
 
 interface EffectState {
   depth: number;
-  /** the producer invocations on the way down to here (their `key`), each with the size of the write ledger when it was
-   *  entered: a cycle is only a REPEAT if nothing was written since (see classifyNormalized) */
+  /** the producer invocations on the way down to here (their `key` and the environment they ran in), each with the size of
+   *  the write ledger when it was entered: a cycle is only a REPEAT if nothing was written since and the environment is the
+   *  same (see classifyNormalized) */
   seen: ReadonlyMap<string, number>;
   env: ExecutionEnvironment;
 }
@@ -8635,6 +8655,10 @@ function resolveScriptCommand(
     // a recipe an attacker supplies (exit review 2).
     // `-E'deploy: ; CMD'` is GLUED, like every other short option, and the guard matched only the detached and
     // `=` forms (exit review 8)
+    // ...AND THAT RULE HAS ONE READER, parseMakeCommandLine, which reads the words make is HANDED (the raw tokens, where an assignment's
+    // value is still ONE word). A second scan of the NORMALISED words saw the values taken apart: `make V="gawk -Eevil.awk d.txt" run`
+    // has an override whose value contains a word spelled like make's `-E`, so the command line was called injected, the makefile
+    // "unreadable", and the override - which holds the command that reads `evil.awk` - never reached the readers of the command it holds.
     if (cl.unknown !== null)
       return {
         kind: 'make-target',
@@ -8644,7 +8668,7 @@ function resolveScriptCommand(
         resolution: 'DYNAMIC',
         unresolved: [{ what: 'body', where: 'make command line', why: `unknown option ${cl.unknown}` }],
       };
-    if (cl.injected || makeFiles.includes('-') || tokens.some((t) => /^(-E|--eval)(=|$)/.test(t) || /^-E./.test(t)))
+    if (cl.injected || makeFiles.includes('-'))
       return {
         kind: 'make-target',
         key: `make:injected:${norm}`,
@@ -12862,7 +12886,10 @@ function classifyNormalized(
   // the ladder, because "no producer matched" is not itself a conclusion about execution. An early return here
   // short-circuited the ladder and restored the very defect the typed dispatch was introduced to remove
   // (challenge 7, finding 20).
-  const enteredAt = state.seen.get(effect.key);
+  // ...AND A PASS IS IDENTIFIED BY THE ENVIRONMENT IT RUNS IN as well as by what it resolves to (environmentIdentity): the same hook entered again
+  // with `EDITOR=/tmp/x` in the environment is another pass, and is asked about that environment like any other
+  const passKey = `${effect.key}\u0000${environmentIdentity(state.env)}`;
+  const enteredAt = state.seen.get(passKey);
   if (enteredAt !== undefined) {
     // A RE-ENTRY IS A SECOND PASS, NOT A REPEAT. The guard exists so a recipe that runs its own make again does not recurse
     // for ever, and it answers "this was already analysed" - which holds only if the second pass reads what the first one
@@ -12883,7 +12910,7 @@ function classifyNormalized(
       ];
     return hits;
   }
-  const seen = new Map(state.seen).set(effect.key, state.env.written.size);
+  const seen = new Map(state.seen).set(passKey, state.env.written.size);
   // THE WHOLE RULE, total over ResolutionOutcome (product decision, 2026-09-22 — "positive security claims must be
   // earned"). Exactly two outcomes carry a positive claim; every other value — including any added later — is
   // opacity, because `resolutionEffect` names the proven ones rather than enumerating the unproven ones.
