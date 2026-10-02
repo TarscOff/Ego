@@ -345,6 +345,13 @@ const HEREDOC_UNTERMINATED = `${MARK}heredoc-unterminated`;
 const PROGRAM_TEXT = `${MARK}program-text`;
 /** a program's text as the stage that carries it */
 const programTextStage = (text: string): string => `${PROGRAM_TEXT} ${requote([text])}`;
+/** A path inside an image: absolute, and not the user's home written as `~` (which names the image user's home, but is judged as this
+ *  machine's, as it always was). */
+const isImagePath = (word: string): boolean => word.startsWith('/');
+/** A line with every absolute path set aside, for the rules that read a PLACE named in text when the line runs in an image. */
+function withoutImagePaths(line: string): string {
+  return line.replace(/(^|[\s='":,])\/[^\s'";&|<>()]*/g, `$1${MARK}path`);
+}
 /** The capabilities whose rules name a PLACE on this machine's disk: a credential store, a git hook, git's own directory, EGO's state. */
 const HOST_PLACE_CAPABILITY = /^(?:fs\.(?:credential-store|hook-config|git-internals)\.|ego\.(?:runtime|trust)\.)/;
 /** the text a program-text stage carries, or null when the stage is not one */
@@ -5316,6 +5323,10 @@ export interface ExecutionEnvironment {
    *  proportionality defect introduced by the Dockerfile producer itself (exit review 8). The COMMANDS are still
    *  classified: a `git push` or a `curl … | sh` inside a RUN is as real as anywhere else. */
   containerPaths?: boolean;
+  /** True when the body being analysed is the argv of a command that runs in a RUNNING container (`docker exec C sh -c BODY`, `kubectl exec P --
+   *  BODY`, `docker run IMG sh -c BODY`). Unlike an image being built, a container may have the workspace mounted, so its names are still
+   *  judged as this machine's - except that an absolute redirection target outside every repository is a question, not a refusal (U-04). */
+  inContainer?: boolean;
   /** THE TEXT THIS SEGMENT READS ON STANDARD INPUT, when the kernel can see it: a heredoc body. A producer that
    *  takes its own input from stdin — `docker build -f -` is the one that matters — can then read what it will
    *  actually build instead of reporting the stream as unreadable (exit review 8). Absent when the stream comes
@@ -12864,17 +12875,20 @@ function classifyNormalized(
   // still tested, and each adds its hit beside the core's; the strictest decides.
   const firstMatch = (text: string, collect: boolean): CapabilityHit | null => {
     const subject = matcherSubject(ctx, text, state.env);
+    const imageSubject = state.env.containerPaths === true ? withoutImagePaths(subject) : subject;
     // every matcher is an unanchored-or-anchored scan of the subject: the price is paid per TEST, before it runs (work-bound.ts)
     const testCost = 2 + (subject.length >> 3);
     let decided: CapabilityHit | null = null;
     for (const { m, re } of compiled) {
       if (decided !== null && m.layer !== 'overlay') continue;
-      // A PLACE NAMED INSIDE AN IMAGE IS THE IMAGE'S: `RUN mkdir -p /home/app/.ssh` and `RUN ssh-keyscan github.com >> /root/.ssh/known_hosts`
-      // name a credential directory of the image being built, and the rules that read text for a credential store, a hook or EGO's
-      // own state cannot tell it from the host's. A body that runs in a container is judged by every other rule (U-04)
-      if (state.env.containerPaths === true && HOST_PLACE_CAPABILITY.test(m.capability)) continue;
       chargeWork(testCost);
-      if (!re.test(subject)) continue;
+      // A PLACE NAMED BY AN ABSOLUTE PATH INSIDE AN IMAGE IS THE IMAGE'S: `RUN mkdir -p /home/app/.ssh` and `RUN ssh-keyscan github.com >>
+      // /root/.ssh/known_hosts` name a credential directory of the image being built, and the rules that read text for a place (a
+      // credential store, a hook, EGO's own state - the ones not anchored at a command) cannot tell it from the host's. They are asked of
+      // the line with its absolute paths set aside; a relative name and a `~` are as they were, and every rule anchored at a command
+      // reads the line whole (U-04)
+      const readAs = imageSubject !== subject && m.command !== undefined && !m.command.startsWith('^') && HOST_PLACE_CAPABILITY.test(m.capability) ? imageSubject : subject;
+      if (!re.test(readAs)) continue;
       // An ADDITIVE matcher describes something the segment ALSO does — a write destination — not what it IS.
       // Letting one win first-match terminated classification of the rest: `git clone --template=evil -o up URL`
       // matched the `--output|-o` write matcher, which sits above the `--template` hook-install deny, and a
@@ -15166,8 +15180,7 @@ function execCarriedCommand(seg: string): { text: string; container: boolean } |
 }
 
 /** THE SHELL BODIES THAT RUN INSIDE A CONTAINER: the `sh -c BODY` that stands where a container's own argv begins (`docker run IMG sh -c
- *  BODY`, `docker exec C sh -c BODY`, `docker compose run S sh -c BODY`, `kubectl exec P -- sh -c BODY`). The commands of such a body
- *  are judged as commands like any other, and its PATHS are the container's (U-04). */
+ *  BODY`, `docker exec C sh -c BODY`, `docker compose run S sh -c BODY`, `kubectl exec P -- sh -c BODY`). */
 function containerShellBodies(seg: string): Set<string> {
   const out = new Set<string>();
   const t = tokenize(seg);
@@ -15640,7 +15653,7 @@ function analyzeSegmentsInto(
     for (const c of [seg, ...normalizeSegment(seg)].map(execCarriedCommand))
       if (c !== null) carriedByExec.set(c.text, (carriedByExec.get(c.text) ?? true) && c.container);
     for (const [carried, container] of carriedByExec)
-      for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env: container ? { ...env, containerPaths: true } : env }, true))
+      for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env: container ? { ...env, inContainer: true } : env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
     // A CARRIER WHOSE OWN OPTION THIS KERNEL CANNOT PLACE HAS NO KNOWN COMMAND. `timeout --future-flag 5 sed ...` reads one
     // way if the flag takes a value and another if it does not, so the position of the carried command is unknown and
@@ -15704,7 +15717,7 @@ function analyzeSegmentsInto(
         // (a nest deeper than the walk goes is re-entered whole - more analysis, never less - rather than assumed to end)
         carriedShellBodies(b).some((x) => depth >= 4 || needsReentry(expandBraces(x), depth + 1));
       if (needsReentry(body))
-        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env: insideContainer.has(rawBody) ? { ...env, containerPaths: true } : env }, true))
+        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env: insideContainer.has(rawBody) ? { ...env, inContainer: true } : env }, true))
           hits.push({ ...h, via: `${h.via ?? ''} (carried by a shell carrier)`.trim() });
     }
     // A PIPE INTO AN INTERPRETER IS AN EXECUTION EDGE. `echo 'rm -rf /' | bash` runs the first stage's output as
@@ -15937,15 +15950,29 @@ function analyzeSegmentsInto(
         });
         continue;
       }
-      // A REDIRECTION INSIDE A CONTAINER NAMES THE CONTAINER'S PATH. A Dockerfile `RUN echo ... > /etc/nginx/conf.d/default.conf` and
-      // `docker exec app sh -c 'echo x > /app/out.txt'` write inside an image or a container; judged against the host's workspace they
-      // were outside it, and an absolute refusal fell on the most ordinary line of a Dockerfile (U-04). What the analyzer cannot NAME
-      // (above) is unnameable wherever it runs, and what a bind mount hands over is the mount's own business: its SOURCE is a path
-      // on the command line, judged as the host path it is.
-      if (env.containerPaths === true) continue;
+      // AN ABSOLUTE REDIRECTION TARGET IN AN IMAGE IS THE IMAGE'S PATH. A Dockerfile `RUN echo ... > /etc/nginx/conf.d/default.conf` writes
+      // inside the image being built; judged against the host it was "outside the workspace", and an absolute refusal fell on the most
+      // ordinary line of a Dockerfile (U-04). What the analyzer cannot NAME (above) is unnameable wherever it runs, and a RELATIVE name or
+      // a `~` is still judged as the place it would be on this machine (the corpus holds `.harness/...` in a RUN line to its floor).
+      if (env.containerPaths === true && isImagePath(target)) continue;
       for (const q of cand.paths) recordWrite(q); // A4: a later unit resolving THIS file is now stale
-      for (const h of judgeCandidates(table, ctx, 'Write', cand))
+      for (const h of judgeCandidates(table, ctx, 'Write', cand)) {
+        // AN ABSOLUTE PATH OUTSIDE EVERY REPOSITORY, WRITTEN BY THE COMMAND A CONTAINER RUNS, IS A QUESTION AND NOT A REFUSAL: `docker exec app sh -c
+        // 'echo x > /app/out.txt'` writes the container's /app, which the host's lock on "outside the workspace" does not describe (U-04). The
+        // places that ARE this machine's - a credential store, a hook, EGO's state, reached by a name the text rules read - keep their verdicts,
+        // and a container's own commands are still asked about as the commands they are.
+        if (env.inContainer === true && isImagePath(target) && h.capability === 'fs.outside-workspace.write') {
+          hits.push({
+            capability: 'command.unknown',
+            verdict: verdictFor(table, ctx, 'command.unknown'),
+            via: `redirection > ${target}: a path inside the container, which the container decides (${h.via})`,
+            segment: seg,
+            absolute: false,
+          });
+          continue;
+        }
         hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
+      }
     }
     // ...and what an input redirection READS is judged like any file the command names: `mysql < /tmp/payload` feeds the
     // client a script, `cat < ~/.ssh/id_rsa` prints a key
@@ -15961,7 +15988,7 @@ function analyzeSegmentsInto(
         });
         continue;
       }
-      if (env.containerPaths === true) continue; // (the container's path, as above)
+      if (env.containerPaths === true && isImagePath(src)) continue; // (the image's path, as above)
       for (const r of judgeCandidates(table, ctx, 'Read', cand))
         if (r.via.startsWith('matcher path') || r.capability.startsWith('fs.credential') || r.capability === 'fs.outside-workspace.read' || r.capability === 'command.unknown')
           hits.push({ ...r, via: `input redirection < ${src} (${r.via})`, segment: seg });

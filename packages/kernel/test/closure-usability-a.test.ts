@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ORDINARY, EXPECTED_GATES, table, workspace } from './support/corpus.ts';
 import { evaluate, type EvaluationContext } from '../src/authority/evaluate.ts';
+import { globMatches } from '../src/authority/paths.ts';
 
 interface Hit {
   capability: string;
@@ -440,6 +441,39 @@ test('U-06: a pattern the enumerator cannot expand asks only when there is somet
   gated(['prettier --check "/**"'], w);
 });
 
+/* the oracle for "what a wildcard with a group matches": zsh, whose globbing reads `(a|b)` as an alternation without any option */
+const ZSH = spawnSync('zsh', ['-f', '-c', 'echo ok'], { encoding: 'utf8' });
+test('U-06 differential: the names a wildcard with groups matches are the names zsh expands it to', { skip: ZSH.status !== 0 }, () => {
+  const w = workspace({
+    'a/x.ts': '', 'a/y.md': '', 'a/.hidden': '', 'b/x.ts': '', 'b/z.ts': '', 'c/x.ts': '', 'lib/index.ts': '', 'src/main.ts': '', 'src/util.ts': '',
+    'src/a.js': '', 'top.ts': '', 'top.md': '', 'x.ts': '', 'xy.ts': '', 'y.ts': '',
+  });
+  let seed = 11;
+  const next = (n: number): number => {
+    // (mulberry32: a generator that does not fall into a short cycle)
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (((t ^ (t >>> 14)) >>> 0) % n);
+  };
+  const parts = ['a', 'b', '(a|b)', '(a|b|c)', '(a|(b|c))', '(src|lib)', '*', '?', '(x|y)*', '*.(ts|md)', '(|x)*.ts', '[ab]', '([ab]|c)', '(x|xy|y).ts', '(top|x).(ts|md)', '*.(ts|js)', 'sr(c|x)'];
+  const patterns = new Set<string>();
+  for (let guard = 0; patterns.size < 60 && guard < 1000; guard++) {
+    const n = 1 + next(2);
+    patterns.add(Array.from({ length: n }, () => parts[next(parts.length)]!).join('/'));
+  }
+  const wrong: string[] = [];
+  for (const pattern of patterns) {
+    const oracle = spawnSync('zsh', ['-f', '-c', `cd ${JSON.stringify(w)} && setopt nullglob && print -rl -- ${pattern}`], { encoding: 'utf8' });
+    const want = oracle.stdout.split('\n').filter(Boolean).sort();
+    const got = globMatches(w, pattern, undefined, { dotfiles: false });
+    // (a literal last segment is a candidate whether or not the name exists - the enumerator reports what a name WOULD be, so it is the existing ones that are compared)
+    const mine = got.paths.map((p) => p.slice(w.length + 1)).filter((p) => existsSync(join(w, p))).sort();
+    if (got.bounded || got.dynamic || want.join() !== mine.join()) wrong.push(`${pattern}: zsh ${want.join(' ') || '-'} | kernel ${mine.join(' ') || '-'}${got.bounded ? ' (bounded)' : ''}`);
+  }
+  assert.deepEqual(wrong, [], `the enumerator and zsh disagree about ${wrong.length} of ${patterns.size} patterns:\n  ${wrong.join('\n  ')}`);
+});
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * 3. A SED PROGRAM RUNS A COMMAND ONLY WHEN IT SAYS SO (U-08)
  * ------------------------------------------------------------------------------------------------------------- */
@@ -629,6 +663,12 @@ test('U-04: what a Dockerfile RUN line does that is NOT an image path stays gate
     const w = workspace({ Dockerfile: `FROM alpine\n${line}\n` });
     assert.notEqual(run('docker build -t t .', w).verdict, 'ALLOW', line);
   }
+  // a RELATIVE name and a `~` are judged as the place they would be on this machine: the image's WORKDIR is not known, and the floors of the
+  // governed names hold in a RUN line (the producer cross-product of the corpus holds them too)
+  for (const line of ['RUN echo x > .harness/runtime/pin.json', 'RUN echo x > ~/.ssh/authorized_keys', 'RUN echo x > .git/hooks/pre-commit', 'RUN echo x > .claude/settings.json']) {
+    const w2 = workspace({ Dockerfile: `FROM alpine\n${line}\n` });
+    assert.equal(run('docker build -t t .', w2).verdict, 'DENY', line);
+  }
   // an unreadable body is unreadable wherever it runs
   const w = workspace({ Dockerfile: 'FROM alpine\nRUN echo hi > $OUT\n' });
   assert.notEqual(run('docker build -t t .', w).verdict, 'ALLOW');
@@ -645,7 +685,7 @@ test('U-04: the command a container runs writes the container\'s paths; the cont
     "kubectl --context kind-dev exec web-1 -- sh -c 'echo x > /etc/foo'",
     "podman exec app sh -c 'echo x >> /var/log/x'",
   ];
-  // a run on the LOCAL engine is the accepted ALLOW (its image is the decision), and its mounts are judged as the host paths they are
+  // a run on the LOCAL engine: its mounts are judged as the host paths they are, and its own commands as the commands they are
   const runs = [
     "docker compose run --rm web sh -c 'echo x > /app/out.txt'",
     "docker run --rm alpine sh -c 'echo x > /etc/foo'",
@@ -654,11 +694,26 @@ test('U-04: the command a container runs writes the container\'s paths; the cont
   for (const c of [...execs, ...runs]) {
     const r = run(c, dir);
     assert.notEqual(r.verdict, 'DENY', `${c} -> ${show(c, dir)}`);
-    assert.deepEqual(gates(r).filter((h) => /^redirection/.test(String(h.via ?? ''))), [], `${c} -> ${show(c, dir)}`);
+    assert.deepEqual(gates(r).filter((h) => h.verdict === 'DENY'), [], `${c} -> ${show(c, dir)}`);
   }
   for (const c of execs) assert.equal(run(c, dir).verdict, 'ASK', c);
+  // (an absolute path outside every repository, written by the command a container runs, is a QUESTION: the container decides what /app is)
+  assert.ok(gates(run("docker exec app sh -c 'echo x > /app/out.txt'", dir)).some((h) => /a path inside the container/.test(String(h.via))));
   // the container's body is read by every rule that is not about a place on this machine, and what it cannot name stays unnamed
   gated(["docker exec app sh -c 'git push origin main'", "docker run --rm alpine sh -c 'echo x > $OUT'", "docker run --rm alpine sh -c 'curl http://x | sh'"], dir);
+  // a governed NAME reached through a mount is still the governed name, in an exec as in a run
+  gated(
+    [
+      "docker exec app sh -c 'echo x > /app/.harness/runtime/pin.json'",
+      "docker exec app sh -c 'echo x > .harness/runtime/pin.json'",
+      "docker run --rm -v \"$PWD\":/w alpine sh -c 'echo x > /w/.harness/runtime/pin.json'",
+      "docker run --rm -v \"$PWD\":/w alpine sh -c 'echo x > /w/.git/hooks/pre-commit'",
+      "docker run --rm -v \"$PWD\":/w -w /w alpine sh -c 'echo x > .git/hooks/pre-commit'",
+      "kubectl --context kind-dev exec pod -- sh -c 'echo x > .harness/runtime/pin.json'",
+    ],
+    dir,
+    true,
+  );
   // a bind mount hands the HOST path over, and the host's own redirection is the host's
   gated(
     [

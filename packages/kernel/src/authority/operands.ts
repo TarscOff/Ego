@@ -485,8 +485,15 @@ export function scanLine(
   }
   const own = wordRoles(line, at, shape, lenient);
   if (own !== null) into(own, 0);
+  // A HERESTRING IS A STRING FED TO THE COMMAND: it names no file and no option, and it is text in the command's own language - unless the
+  // command is a shell, whose standard input is a script (the carried body is read as the shell words it is)
+  if (head === null || !SHELL_STDIN.test(head))
+    for (let i = at + 1; i < line.length; i++)
+      if (/^\d*<<<$/.test(line[i - 1]!) && (shape === undefined || shape[i - 1] === 'real') && !(shape !== undefined && shape[i] === 'real')) out.roles[i] = 'program';
   return out;
 }
+/** the commands whose standard input is a script of shell words */
+const SHELL_STDIN = /^(?:(?:ba|z|da|k|a|c|tc)?sh|fish|source|\.|busybox|eval)$/;
 
 /** The words of `line` with every DATA word replaced by `placeholder`: what the text matchers read (a search pattern, a commit message
  *  and a printed string are neither the act nor the place it is done). A word glued to its option keeps the option: `--grep=hook`
@@ -526,9 +533,7 @@ export function nonShellWords(
   const shellPieces = new Set<string>();
   line.forEach((w, i) => {
     const role = s.roles[i];
-    // a HERESTRING is a string fed to the command, whatever the command is: it names no file and no option
-    const herestring = i > 0 && /^\d*<<<$/.test(line[i - 1]!) && (shape === undefined || shape[i - 1] === 'real');
-    const isText = (role === 'data' || role === 'program' || herestring) && !(shape !== undefined && shape[i] === 'real');
+    const isText = (role === 'data' || role === 'program') && !(shape !== undefined && shape[i] === 'real');
     const cut = s.glued.get(i);
     for (const v of isText && cut !== undefined ? [w.slice(cut), w] : [w]) {
       (isText ? textWholes : shellWholes).add(v);
