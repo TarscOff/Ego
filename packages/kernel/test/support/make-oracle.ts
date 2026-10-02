@@ -138,6 +138,23 @@ function setters(P: string): Array<{ name: string; make: (decoy: boolean) => Par
     { name: 'target-specific', make: (d) => ({ head: [...dec(d), `run: CMD = ${P}`] }) },
     { name: 'a second makefile', make: (d) => ({ head: [...dec(d), 'include a.mk'], files: { 'a.mk': 'include b.mk\n', 'b.mk': `CMD = ${P}\n` } }) },
     { name: 'a variable that says which file to include', make: (d) => ({ head: [...dec(d), 'F = inc.mk', 'include $(F)'], files: { 'inc.mk': `CMD = ${P}\n` } }) },
+    { name: 'no blanks around the operator', make: (d) => ({ head: [...dec(d), `CMD=${P}`] }) },
+    { name: 'a tab around the operator', make: (d) => ({ head: [...dec(d), `CMD${T}=${T}${P}`] }) },
+    { name: 'indented with blanks', make: (d) => ({ head: [...dec(d), `   CMD = ${P}`] }) },
+    { name: 'a chain of three recursive variables', make: (d) => ({ head: [...dec(d), 'A1 = $(A2)', 'A2 = $(A3)', `A3 = ${P}`, 'CMD = $(A1)'] }) },
+    { name: 'the output of a command is the command', make: (d) => ({ head: [...dec(d), `CMD := $(shell echo ${P})`] }) },
+    { name: 'a pattern-specific variable', make: (d) => ({ head: [...dec(d), `r%: CMD = ${P}`] }) },
+    { name: 'a conditional on the goal', make: (d) => ({ head: [...dec(d), 'ifeq ($(MAKECMDGOALS),run)', `CMD = ${P}`, 'endif'] }) },
+    { name: 'a conditional on a variable of the command line', make: (d) => ({ head: [...dec(d), 'ifeq ($(MODE),go)', `CMD = ${P}`, 'endif'], args: ['MODE=go'] }) },
+    { name: 'a second makefile on the command line', make: () => ({ head: ['CMD = echo safe'], files: { 'b.mk': `CMD = ${P}\n` }, args: ['-f', 'Makefile', '-f', 'b.mk'] }) },
+    { name: 'a second makefile that only declines', make: () => ({ head: [`CMD = ${P}`], files: { 'b.mk': 'CMD ?= echo safe\n' }, args: ['-f', 'Makefile', '-f', 'b.mk'] }) },
+    { name: 'a prerequisite that carries the variable', make: (d) => ({ head: [...dec(d), `dep: CMD = ${P}`, 'run: dep'] }) },
+    { name: 'second expansion of the prerequisites', make: (d) => ({ head: [...dec(d), '.SECONDEXPANSION:', 'DEPS = dep', 'run: $$(DEPS)', 'dep:', `${T}${P}`] }) },
+    { name: 'the target named by a variable', make: (d) => ({ head: [...dec(d), 'T = run', `$(T): ; ${P}`] }) },
+    { name: 'export on its own, then the variable', make: (d) => ({ head: [...dec(d), 'export', `CMD = ${P}`] }) },
+    { name: 'undefine and define again', make: (d) => ({ head: [...dec(d), 'undefine CMD', `CMD = ${P}`] }) },
+    { name: 'private', make: (d) => ({ head: [...dec(d), `private CMD = ${P}`] }) },
+    { name: 'a name with a dot and a dash', make: (d) => ({ head: [...dec(d), `C-M.D = ${P}`, 'CMD = $(C-M.D)'] }) },
   ];
 }
 
@@ -163,6 +180,12 @@ const users: Array<{ name: string; line: string; head?: string[] }> = [
   { name: 'inside a loop', line: 'for i in 1; do $(CMD); done' },
   { name: 'with a continuation', line: 'true && \\\n\t$(CMD)' },
   { name: 'through a computed name', line: '$($(NAME))', head: ['NAME = CMD'] },
+  { name: 'through a function name from a variable', line: '$(call $(F))', head: ['F = exec', 'exec = $(CMD)'] },
+  { name: 'in the text of a foreach over the words of a variable', line: '$(foreach w,$(WORDS),$(CMD))', head: ['WORDS = a b'] },
+  { name: 'after a conditional inside the recipe', line: '$(CMD)', head: [] },
+  { name: 'two commands, the second', line: 'true\n\t$(CMD)' },
+  { name: 'quoted for the shell', line: 'sh -c "$(CMD)"' },
+  { name: 'with a prefix character after blanks', line: '@ -$(CMD)' },
 ];
 
 export function generateCases(seed: number, count: number): OracleCase[] {

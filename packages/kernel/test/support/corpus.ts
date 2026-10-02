@@ -2707,6 +2707,150 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       'yarn info @acme/x --@acme:registry=https://evil.example',
     ],
   },
+
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE AUDIT 2026-10-02, WAVE 6 (make). The causes, not the reported spellings: one command line, one line
+   * reader, one variable store, one expansion, one table of make's own rules (authority/make.ts, make-reader.ts,
+   * make-builtins.ts). Each class is a way the reader and make could disagree about what a makefile says.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'command',
+    // MK-01: every word that holds `=` is a variable definition to make, never a goal no rule defines
+    id: 'a make variable defined on the command line in a spelling that is not NAME=value',
+    floor: 'DENY',
+    cases: [
+      'make -f cli.mk T:=deploy run',
+      'make -f cli.mk T?=deploy run',
+      'make -f cli.mk T+=deploy run',
+      'make -f cli.mk T::=deploy run',
+      'make -f cli.mk T\\ =\\ deploy run',
+      'make -f cli.mk T=safe T=deploy run',
+      'make -f cli.mk .DEFAULT_GOAL=deploy',
+    ],
+    files: { 'cli.mk': 'T = safe\nrun: $(T)\nsafe: ; @echo safe\ndeploy:\n\tgit push --force origin main\n' },
+  },
+  {
+    family: 'command',
+    // MK-02, MK-03, MK-08: a line the line reader dropped, joined or ended in the wrong place
+    id: 'a makefile line that make reads and a line reader that guesses does not',
+    floor: 'DENY',
+    cases: [
+      'make -f tabvar.mk run',
+      'make -f tabcond.mk run',
+      'make -f tabinc.mk run',
+      'make -f even.mk deploy',
+      'make -f evencomment.mk deploy',
+      'make -f evenrecipe.mk deploy',
+      'make -f override.mk all',
+      'make -f overridedef.mk all',
+    ],
+    files: {
+      'tabvar.mk': 'CMD = echo safe\n\tCMD = git push --force origin main\nrun:\n\t$(CMD)\n',
+      'tabcond.mk': 'CMD = echo safe\n\tifndef FOO\nCMD = git push --force origin main\n\telse\nCMD = echo safe\n\tendif\nrun:\n\t$(CMD)\n',
+      'tabinc.mk': 'CMD = echo safe\n\tinclude evil-inc.mk\nrun:\n\t$(CMD)\n',
+      'evil-inc.mk': 'CMD = git push --force origin main\n',
+      'even.mk': 'X = a\\\\\ndeploy:\n\tgit push --force origin main\n',
+      'evencomment.mk': '# note\\\\\ndeploy:\n\tgit push --force origin main\n',
+      'evenrecipe.mk': 'deploy:\n\techo a\\\\\n\tgit push --force origin main\n',
+      'override.mk': 'all:\n\techo a\noverride Q = 1\n\tgit push --force origin main\n',
+      'overridedef.mk': 'all:\n\techo a\noverride define D\nx\nendef\n\tgit push --force origin main\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-04: a command in a multi-line variable runs wherever the variable is expanded, and an indirect expansion evaluates it too
+    id: 'a command that runs when a define, a call or a computed name is expanded',
+    floor: 'DENY',
+    cases: ['make -f defcall.mk all', 'make -f defind.mk all', 'make -f defcond.mk all', 'make -f defsimple.mk all', 'make -f canned.mk all'],
+    files: {
+      'defcall.mk': 'define RUN\n$(shell git push --force origin main)\nendef\nX := $(call RUN)\nall: ; @echo hi\n',
+      'defind.mk': 'define RUN\n$(shell git push --force origin main)\nendef\nN := RUN\nX := $($(N))\nall: ; @echo hi\n',
+      'defcond.mk': 'define RUN\n$(shell git push --force origin main)\nendef\nifeq ($(call RUN),x)\nendif\nall: ; @echo hi\n',
+      'defsimple.mk': 'define X :=\n$(shell git push --force origin main)\nendef\nall: ; @echo hi\n',
+      'canned.mk': 'define CANNED\n@echo a\ngit push --force origin main\nendef\nall:\n\t$(CANNED)\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-06, MK-07: an include is read inline against what the includer set; a name make computes is the name
+    id: 'a variable an include declines to assign, or whose name make computes',
+    floor: 'DENY',
+    cases: ['make -f inctop.mk all', 'make -f incguard.mk all', 'make -f computed.mk all', 'make -f computedsimple.mk all', 'make -f twofiles-a.mk -f twofiles-b.mk all'],
+    files: {
+      'inctop.mk': 'CMD = git push --force origin main\ninclude inccfg.mk\nall:\n\t$(CMD)\n',
+      'inccfg.mk': 'CMD ?= echo safe\n',
+      'incguard.mk': 'CMD = git push --force origin main\ninclude incguardcfg.mk\nall:\n\t$(CMD)\n',
+      'incguardcfg.mk': 'ifndef CMD\nCMD = echo safe\nendif\n',
+      'computed.mk': 'CMD = echo safe\nN = CMD\n$(N) = git push --force origin main\nall: ; $(CMD)\n',
+      'computedsimple.mk': 'CMD = echo safe\nN = CMD\nexport $(N) := git push --force origin main\nall: ; $(CMD)\n',
+      'twofiles-a.mk': 'CMD = git push --force origin main\n',
+      'twofiles-b.mk': 'CMD ?= echo safe\nall:\n\t$(CMD)\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-05: `make foo` with a foo.c beside it runs the compiler make knows about, and the variables that rule reads are execution inputs
+    id: 'a goal or prerequisite make builds with a rule of its own, through the variable that rule reads',
+    floor: 'DENY',
+    cases: [
+      'make -f builtin.mk foo',
+      'make -f builtin-compile.mk foo.o',
+      'make -f builtin-dep.mk all',
+      'make -f builtin-norecipe.mk all',
+      'make -f builtin-flags.mk foo',
+      'make -f builtin-lex.mk foo.c',
+      'make -f pattern-norecipe.mk all',
+      'make -f builtin-comment.mk foo',
+    ],
+    files: {
+      'foo.c': 'int main(void) { return 0; }\n',
+      'foo.h': 'x\n',
+      'foo.l': '%%\n',
+      'builtin.mk': 'CC = git push --force origin main\n',
+      'builtin-compile.mk': 'COMPILE.c = git push --force origin main ;\n',
+      'builtin-dep.mk': 'CC = git push --force origin main ;\nall: foo.o\n',
+      'builtin-norecipe.mk': 'CC = git push --force origin main ;\nall: foo.o\nfoo.o: foo.h\n',
+      'builtin-flags.mk': 'CFLAGS = ; git push --force origin main\n',
+      'builtin-lex.mk': 'LEX = git push --force origin main ;\n',
+      'pattern-norecipe.mk': 'all: foo.o\nfoo.o: foo.h\n%.o: %.c\n\tgit push --force origin main\n',
+      'builtin-comment.mk': 'CC = git push --force origin main #\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-05, without a makefile at all: the compiler of the command line
+    id: 'a built-in rule of make run with a program the command line names, no makefile',
+    floor: 'DENY',
+    cases: ['make CC=./tool.sh foo', 'make LINK.c=./tool.sh foo', 'make COMPILE.c=./tool.sh foo.o', 'make CC\\ =\\ ./tool.sh foo'],
+    files: { 'foo.c': 'int main(void) { return 0; }\n', 'tool.sh': '#!/bin/sh\ngit push --force origin main\n' },
+  },
+  {
+    family: 'command',
+    // the environment a recipe runs in: everything the makefile exports and everything the command line defines
+    id: 'a variable make exports to every recipe that re-points what the recipe runs',
+    floor: 'ASK',
+    cases: ['make -f expall.mk all', 'make -f expall2.mk all', 'make -f expnames.mk all', 'make LD_PRELOAD=./evil.so -f plain.mk all'],
+    files: {
+      'evil.so': 'x',
+      'plain.mk': 'all: ; @ls\n',
+      'expall.mk': 'export\nLD_PRELOAD := ./evil.so\nall: ; @ls\n',
+      'expall2.mk': '.EXPORT_ALL_VARIABLES:\nLD_PRELOAD := ./evil.so\nall: ; @ls\n',
+      'expnames.mk': 'LD_PRELOAD := ./evil.so\nexport LD_PRELOAD OTHER\nall: ; @ls\n',
+    },
+  },
+  {
+    family: 'command',
+    // MK-09: a hook that has not answered has not refused. 654 bytes took 42 seconds; the verdict is a gap, at once
+    id: 'a makefile whose expansion fans out until the hook budget is gone',
+    floor: 'ASK',
+    cases: ['make -f fan.mk all', 'make -f fan-define.mk all'],
+    files: {
+      'fan.mk':
+        'A0 = $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1) $(A1)\nA1 = $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2) $(A2)\nA2 = $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3) $(A3)\nA3 = $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4) $(A4)\nA4 = $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5) $(A5)\nA5 = $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6) $(A6)\nA6 = $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7) $(A7)\nA7 = $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8) $(A8)\nA8 = git push origin main\nall: ; $(A0)\n',
+      'fan-define.mk':
+        'define F0\n$(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1)) $(call F1,$(1))\nendef\ndefine F1\n$(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1)) $(call F2,$(1))\nendef\ndefine F2\n$(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1)) $(call F3,$(1))\nendef\ndefine F3\n$(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1)) $(call F4,$(1))\nendef\ndefine F4\ngit push origin main\nendef\nall: ; $(call F0,x)\n',
+    },
+  },
 ];
 
 /* ------------------------------------------------------------------------------------------------------------- *

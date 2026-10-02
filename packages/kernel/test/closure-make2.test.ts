@@ -441,6 +441,17 @@ test('what the recipes are run with: export, .EXPORT_ALL_VARIABLES and the varia
   ]);
 });
 
+test('what an earlier unit of the same command exported is the environment make starts with', () => {
+  const cc = { 'foo.c': 'int main(void) { return 0; }\n', 'Makefile': 'run:\n\t$(CC) -c foo.c\n' };
+  check([
+    ['an exported compiler that is the act', `export CC='${ACT} #'; make run`, cc, 'GATED'],
+    // (a name the kernel does not track as an input is not seen by make's store: the export is judged where it is made, and asks)
+    ['an exported variable the recipe reads', `export CMD='${ACT}'; make run`, { Makefile: 'CMD ?= echo safe\nrun:\n\t$(CMD)\n' }, 'GATED'],
+    ['a flag of an implicit rule, exported', `export CFLAGS='; ${ACT}'; make foo`, { 'foo.c': 'int main(void) { return 0; }\n' }, 'GATED'],
+    ['a harmless export (control)', 'export GREETING=hello; make run', { Makefile: 'run:\n\techo $(GREETING)\n' }, 'ALLOW'],
+  ]);
+});
+
 test('the pieces of make that run something without a recipe saying so', () => {
   check([
     ['a default goal behind a pattern rule', 'make', { Makefile: `%.o: %.c\n${T}@echo c\nall:\n${T}${ACT}\n` }, 'DENY'],
