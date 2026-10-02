@@ -1,6 +1,7 @@
 // THE ONE LEXER FOR TEXT THE SHELL EXPANDS: where a quote, a `${ }`, a `$( )`, a backtick span or a word ends, and which spans of a
 // text are COMMANDS the shell runs. Moved out of evaluate.ts so that the splitter, the redirection scanner and the readers of
 // "which words does a builtin evaluate" (evaluated-words.ts) ask one reader and cannot drift (closure audit 2026-10-02, SH-1/SH-4).
+import { chargeWork } from './work-bound.ts';
 
 /* ------------------------------------------------------------------------------------------------------------- *
  * ONE LEXER FOR THE BODY OF `$( … )`.
@@ -296,6 +297,14 @@ export interface ArithmeticSpan {
  *  The extent is found the way the shell finds it: brackets and parentheses nest, and a quote, a `${ }`, a `$( )` or a backtick inside
  *  is read whole, so a `]` or a `)` in one of them closes nothing. A span that never closes is not one. */
 export function arithmeticSpanAt(t: string, i: number): ArithmeticSpan | null {
+  const span = arithmeticSpanScan(t, i);
+  // (paid for by what was read: an opener inside an opener reads the rest of the line again)
+  if (span !== undefined) chargeWork((span === null ? t.length : span.end) - i);
+  return span ?? null;
+}
+
+/** undefined when nothing that opens an arithmetic span stands at `i`; null when one does and never closes properly */
+function arithmeticSpanScan(t: string, i: number): ArithmeticSpan | null | undefined {
   let from: number;
   let old = false;
   if (t[i] === '$' && t[i + 1] === '[') {
@@ -303,7 +312,7 @@ export function arithmeticSpanAt(t: string, i: number): ArithmeticSpan | null {
     from = i + 2;
   } else if (t[i] === '$' && t[i + 1] === '(' && t[i + 2] === '(') from = i + 3;
   else if (t[i] === '(' && t[i + 1] === '(') from = i + 2;
-  else return null;
+  else return undefined;
   let depth = old ? 1 : 2;
   let j = from;
   while (j < t.length) {
@@ -346,17 +355,24 @@ export function arithmeticSpanAt(t: string, i: number): ArithmeticSpan | null {
  *  other parts (`${x:-$(cmd)}`) are found by the ordinary scan and are not repeated here. */
 export function parameterExpansionCommands(t: string, i: number): string[] {
   const end = skipParameterExpansion(t, i + 2);
+  // (an expansion is read to its end for every `${` that opens one: nested ones are paid for, and a line built of them ends at the bound)
+  chargeWork((end < 0 ? t.length : end) - i);
   if (end < 0) return [];
   const body = t.slice(i + 2, end - 1);
   if (!/[$`]/.test(body)) return [];
-  if (/^\([A-Za-z0-9@%:]*[e%][A-Za-z0-9@%:]*\)/.test(body)) return expressionCommands(body);
+  const flags = /^\(([A-Za-z0-9@%:]*)\)/.exec(body);
+  if (flags !== null && /[e%]/.test(flags[1]!)) return expressionCommands(body);
+  // the OFFSET and the LENGTH of `${x:OFFSET:LENGTH}` are arithmetic too (the operators `:-` `:=` `:+` `:?` are not)
+  const substring = (from: number): string[] => (body[from] === ':' && !/[-=+?]/.test(body[from + 1] ?? '') ? expressionCommands(body.slice(from + 1)) : []);
+  const plain = /^(?:\([^)]*\))?[!#]?[A-Za-z_][A-Za-z0-9_]*/.exec(body);
+  if (plain === null) return [];
   const name = /^(?:\([^)]*\))?[!#]?[A-Za-z_][A-Za-z0-9_]*\[/.exec(body);
-  if (name === null) return [];
+  if (name === null) return substring(plain[0].length);
   let depth = 1;
   let j = name[0].length;
   for (; j < body.length; j++) {
     if (body[j] === '[') depth++;
     else if (body[j] === ']' && --depth === 0) break;
   }
-  return expressionCommands(body.slice(name[0].length, j));
+  return [...expressionCommands(body.slice(name[0].length, j)), ...substring(j + 1)];
 }

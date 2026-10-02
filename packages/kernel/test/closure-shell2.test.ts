@@ -145,6 +145,8 @@ test('SH-4: a word a builtin EVALUATES runs its commands whatever quote it wears
     "echo ${a['$({C})']}",
     "echo ${#a['$({C})']}",
     "echo ${(e)${:-'$({C})'}}",
+    "echo ${a[@]:'$({C})'}", // the offset and the length of a substring expansion are arithmetic
+    "echo ${x:'$({C})':1}",
     "mapfile -C '{C}' -c 1 a <<< x",
     "readarray -C '{C}' -c 1 a <<< x",
     "complete -C '{C}' foo",
@@ -193,6 +195,8 @@ test('SH-4: a variable the line filled with code, and that the shell then evalua
     "x='$({C})'; echo ${(e)x}",
     "x='$({C})'; eval \"$x\"",
     "x='$({C})'; trap \"$x\" EXIT",
+    "x='$({C})'; bash -c \"$x\"",
+    "x='$({C})'; sh -c \"$x\"",
     "x=$'\\x24({C})'; eval $x",
     "x='a[$({C})]'; for ((i=0; i<x; i++)); do :; done",
   ]);
@@ -219,6 +223,8 @@ test('the lexer reads where an expression ends, and what it runs', () => {
   assert.deepEqual(expressionCommands('plain + 1'), []);
   assert.deepEqual(parameterExpansionCommands("${a['$(x)']}", 0), ['x']);
   assert.deepEqual(parameterExpansionCommands('${a:-$(x)}', 0), [], 'a default is an ordinary substitution, found by the ordinary scan');
+  assert.deepEqual(parameterExpansionCommands("${a:'$(x)':1}", 0), ['x'], 'an offset is arithmetic');
+  assert.deepEqual(parameterExpansionCommands("${a[0]:'$(x)'}", 0), ['x']);
   assert.deepEqual(parameterExpansionCommands("${(e)${:-'$(y)'}}", 0), ["y"]);
   // the commands a statement runs by evaluating its operands
   assert.deepEqual(evaluatedCommands([], 'declare', ['-a', 'a[$(c)]=1']), ['c']);
@@ -563,6 +569,7 @@ const EXECUTING_SITES: readonly string[] = [
   "declare -a a=(['$({C})']=1)",
   "a=(1 2); echo ${a['$({C})']}",
   "echo ${(e)${:-'$({C})'}}",
+  "echo ${a[@]:'$({C})'}",
   "x='a[$({C})]'; echo $((x))",
   "x='a[$({C})]'; (( x ))",
   "x='a[$({C})]'; [[ x -eq 1 ]]",

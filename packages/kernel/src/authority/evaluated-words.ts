@@ -82,8 +82,14 @@ function splitAssignment(word: string): { name: string; value: string | null } {
 
 /** the subscripts a compound assignment names: `([k]=v [$(cmd)]=w)` */
 export function compoundSubscripts(value: string): string[] {
+  // (one forward pass: a pattern with a class that runs to the next `]` from every `[` is quadratic on a thousand of them)
   const out: string[] = [];
-  for (const m of value.matchAll(/\[([^\]]*)\]\+?=/g)) out.push(m[1]!);
+  for (let at = value.indexOf('['); at >= 0; ) {
+    const close = value.indexOf(']', at + 1);
+    if (close < 0) break;
+    if (value[close + 1] === '=' || (value[close + 1] === '+' && value[close + 2] === '=')) out.push(value.slice(at + 1, close));
+    at = value.indexOf('[', close + 1);
+  }
   return out;
 }
 
@@ -224,13 +230,16 @@ export class CodeFlow {
       const a = arithmeticSpanAt(raw, i);
       if (a !== null) names(a.body);
     }
-    // the expansions that evaluate a variable's VALUE: `${!x}`, `${x@P}`, `${(e)x}`, `${(%)x}`
-    for (const m of raw.matchAll(/\$\{(?:!([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)@[Pp]|\([^)]*[e%][^)]*\)[~=]*([A-Za-z_][A-Za-z0-9_]*))/g)) {
-      const v = this.code.get((m[1] ?? m[2] ?? m[3])!);
+    // the expansions that evaluate a variable's VALUE: `${!x}`, `${x@P}`, `${(e)x}`, `${(%)x}` (each read in a window of its own: the
+    // expansions of a long line are not searched from one to the end of the line)
+    for (let at = raw.indexOf('${'); at >= 0; at = raw.indexOf('${', at + 2)) {
+      const m = /^(?:!([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)@[Pp]|\(([^)]{0,16})\)[~=]*([A-Za-z_][A-Za-z0-9_]*))/.exec(raw.slice(at + 2, at + 2 + 96));
+      if (m === null || (m[3] !== undefined && !/[e%]/.test(m[3]))) continue;
+      const v = this.code.get((m[1] ?? m[2] ?? m[4])!);
       if (v !== undefined) out.push(...expressionCommands(v));
     }
-    // a value handed to \`eval\` or \`trap\` IS the command: \`eval "$x"\`, \`trap "$x" EXIT\`
-    if (base === 'eval' || base === 'trap')
+    // a value handed to `eval`, `trap` or a shell IS the command: `eval "$x"`, `trap "$x" EXIT`, `bash -c "$x"`
+    if (base === 'eval' || base === 'trap' || /^(?:ba|z|da|k|a)?sh$/.test(base))
       for (const m of args.join(' ').matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {
         const v = this.code.get((m[1] ?? m[2])!);
         if (v !== undefined) out.push(v);
