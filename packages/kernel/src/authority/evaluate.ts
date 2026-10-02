@@ -20,7 +20,7 @@ import {
   wordRoles,
   type OperatorShape,
 } from './operands.ts';
-import { languageOf, readsLanguageFromStdin, sedExecutes } from './program-words.ts';
+import { awkProgramAt, languageOf, readsLanguageFromStdin, sedExecutes } from './program-words.ts';
 export { canonicalPath, physicalPath } from './paths.ts';
 import {
   canonicalPath,
@@ -1905,9 +1905,14 @@ function normalizeSegmentInner(segment: string): string[] {
     // of awk's file options and not by a test for the word `-E` - review 11 #205)
     // (and any of them is a program in a FILE, which has always asked - the matcher for the spaced `-f` says so - whichever way it is spelled)
     if (/^(awk|gawk|mawk|nawk)$/.test(h0) && awkFileOptions(t0).length > 0) extra.push(`${MARK}awk-program-file`);
+    // ...AND A PROGRAM THE SHELL BUILDS (`awk "$PROG" f`) IS A PROGRAM NOBODY HAS READ, as one in a file is
+    else if (/^(awk|gawk|mawk|nawk)$/.test(h0)) {
+      const at = awkProgramAt(t0, 0);
+      if (at !== null && lead0[chain0.at + at]?.expands === true) extra.push(`${MARK}awk-program-file`);
+    }
     // WHETHER A SED PROGRAM RUNS A COMMAND is the answer of the scanner that reads a sed script the way sed does (program-words.ts), asked
     // of the script sed's option parser finds - not of a regex over the line, which found the letter `e` in a file called `service.ts`
-    if (/^(sed|gsed)$/.test(h0) && sedExecutes(t0, 0)) extra.push(`${MARK}sed-executes`);
+    if (/^(sed|gsed)$/.test(h0) && sedExecutes(t0, 0, new Set(lead0.slice(chain0.at).filter((x) => x.expands).map((x) => x.text)))) extra.push(`${MARK}sed-executes`);
   }
   // A REDIRECTION TO `/dev/tcp` OR `/dev/udp` IS A NETWORK CONNECTION, and it needs no network binary. Both
   // directions matter: `> /dev/tcp/h/p` sends whatever the command produces, and `< /dev/tcp/h/p` makes the
@@ -13342,7 +13347,7 @@ function classifyShellPaths(
   // filter, a separator, a request body - found by the one role reader (operands.ts / program-words.ts), and set aside by every scan
   // of shell words below: the path scan, the wildcard scans, the destination scans. Their texts are compared with the words of the
   // normalized segment, which has lost the quoting, and a text counts only if EVERY occurrence of it is such a word.
-  const nonShell = nonShellWords(rawWords.map((t) => t.text), rawWords.map((t) => t.shape), asScanned, HEAD_PREFIXES);
+  const nonShell = nonShellWords(rawWords.map((t) => t.text), rawWords.map((t) => t.shape), asScanned, HEAD_PREFIXES, rawWords.map((t) => t.expands));
   const paths = pathTokens(bare, cwd, old, nonShell.pieces).filter((p) => !statementWords.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
@@ -14288,7 +14293,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     const words = tokenize(text);
     if (depth > 0) {
       const marked = tokenizeMarked(text);
-      for (const w of nonShellWords(marked.map((t) => t.text), marked.map((t) => t.shape), asScanned, HEAD_PREFIXES).wholes) carriedNonShell.add(w);
+      for (const w of nonShellWords(marked.map((t) => t.text), marked.map((t) => t.shape), asScanned, HEAD_PREFIXES, marked.map((t) => t.expands)).wholes) carriedNonShell.add(w);
     }
     if (depth >= CARRIER_NEST) {
       // a carrier below the cap was not read: the words it holds are unproved, not absent
@@ -14790,7 +14795,7 @@ function carrierCommandValues(seg: string): string[] {
   // for an arrow (the pickaxe's `-S` is not env's), and `grep -c "a; b" f` counts. One reader says which words those are (operands.ts)
   // - and the code after `python3 -c` is not a command string either: it is Python (U-01)
   const roleScan = scanLine(words, m.map((x) => x.shape), false, HEAD_PREFIXES);
-  const dataAt = roleScan.roles.map((r, k) => (r === 'data' || r === 'program') && m[k]!.shape !== 'real');
+  const dataAt = roleScan.roles.map((r, k) => (r === 'data' || (r === 'program' && !m[k]!.expands)) && m[k]!.shape !== 'real');
   for (let i = 0; i < m.length; i++) {
     const t = m[i]!.text;
     if (dataAt[i] === true || dataAt[i + 1] === true) continue;

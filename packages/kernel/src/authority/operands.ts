@@ -525,6 +525,9 @@ export function nonShellWords(
    *  blanks or quotes (`x = "/**"`) reaches the scan as the pieces that second tokenization makes of it, not as the word */
   pieces: (word: string) => string[] = (word) => word.split(/\s+/),
   prefixes?: ReadonlySet<string>,
+  /** the words the shell fills in at run time (`"$PROG"`, `$(cat f)`): a program the shell builds is a program nobody has read, and it is not
+   *  claimed as text - the matchers cannot judge it and the path scan keeps asking about the word */
+  dynamic?: readonly boolean[],
 ): NonShellWords {
   const s = scanLine(line, shape, true, prefixes);
   const textWholes = new Set<string>();
@@ -533,7 +536,7 @@ export function nonShellWords(
   const shellPieces = new Set<string>();
   line.forEach((w, i) => {
     const role = s.roles[i];
-    const isText = (role === 'data' || role === 'program') && !(shape !== undefined && shape[i] === 'real');
+    const isText = (role === 'data' || (role === 'program' && dynamic?.[i] !== true)) && !(shape !== undefined && shape[i] === 'real');
     const cut = s.glued.get(i);
     for (const v of isText && cut !== undefined ? [w.slice(cut), w] : [w]) {
       (isText ? textWholes : shellWholes).add(v);

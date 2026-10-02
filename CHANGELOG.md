@@ -423,12 +423,17 @@ discipline of decision Q84 (authority changes are never patch releases).
   agents' commands - and missed `s/a/b/2e`); **`-B` is the compiler driver's program prefix by the driver's table**, and
   before-context / block size / ignore-blank-lines for the tools that have it (1,090 commands); an awk `-F` is the field separator, not
   `-f` (the matchers are case-blind; the case-sensitive reader of awk's file options already existed); **`command -v NAME` keeps its
-  redirections** (the carrier re-quoted `>/dev/null` into two literal arguments), for any number of names; **a Dockerfile `RUN` line and a
-  container's own argv write the container's paths** - a redirection, a credential-store name, a hook - while a bind mount is still the
-  host path it is and the host's own redirection stays the host's; **a wildcard group `(src|examples)/**` is enumerated**, and a pattern
-  nobody can enumerate matches nothing where the directory in front of it is not there. Visible changes: a program on standard input
-  asks (it was DENY for a line that held `/**`, `// a -o b`, `expect(`, `script`, `>/dev/null`) and, if it names a credential store,
-  hook or git directory, is refused as `python3 -c` is; `awk 'getline < "FILE"'` asks; `sed 's/a/b/2e'` asks; `docker compose build`
-  over a Dockerfile that writes a file in the image asks nothing it did not (it was an absolute DENY). Not changed: a quoted wildcard
-  given to a program nobody modelled is still judged as the wildcard it would be (the program may expand it), and `docker exec`
-  still names a credential store it is handed in the text of its own line.
+  redirections** (the carrier re-quoted `>/dev/null` into two literal arguments), for any number of names; **a Dockerfile `RUN` line writes the image**: an
+  absolute redirection target in it, and an absolute credential-store name in its text (`/root/.ssh`, `/home/app/.ssh`, `/app/.env`), are the
+  image's and no longer a host refusal - a relative name and a `~` are judged as the places they would be here, and the floors of the governed
+  names (`.harness/…`, `.git/hooks/…`) hold in a RUN line as before; and the redirection of the command a container runs - `docker exec C sh -c
+  'echo x > /app/out.txt'` - to an absolute path outside every repository is a question and no longer an absolute refusal (a governed name
+  reached through a mount keeps its floor, and the host's own redirection stays the host's); **a wildcard group `(src|examples)/**` is
+  enumerated** (checked against zsh), and a pattern nobody can enumerate matches nothing where the directory in front of it is not there.
+  Visible changes: a program on standard input asks (it was DENY for a line that held `/**`, `// a -o b`, `expect(`, `script`,
+  `>/dev/null`) and, if it names a credential store by a path, is refused as `python3 -c` is; `awk 'getline < "FILE"'` asks (it was ALLOW);
+  `sed 's/a/b/2e'` asks; `docker compose build` and `docker build` over a Dockerfile that writes a file in the image are what they are over one
+  that does not (they were an absolute DENY since the compose reader began to read the Dockerfile). Not changed: a quoted wildcard given to a program
+  nobody modelled is still judged as the wildcard it would be (the program may expand it); a `docker exec` that names a credential store
+  by an absolute path in the text of its own line is still refused; a program fed to an interpreter that names a git hook or `.claude/`
+  file is still a question (the `-c` form of the same text is refused, and the heredoc form has always been a question).

@@ -531,6 +531,16 @@ test('U-08: a sed program that RUNS something is gated in every spelling its par
   );
 });
 
+test('U-08: a program the shell BUILDS is a program nobody has read - and an expansion among a script\'s own characters is a number', () => {
+  gated(['sed "$S" f.txt', 'sed $S f.txt', 'sed -e "$S" f.txt', 'awk "$PROG" f.txt', 'awk $PROG f.txt', 'python3 -c "$CODE"', 'node -e "$CODE"', 'perl -e "$CODE"', 'ruby -e $CODE'], dir);
+  // (the expansion is the whole script: it can say anything; in `${A},${B}p` it stands where a number does, which is the idiom)
+  allowed(['sed -n "${A},${B}p" f.txt', 'sed -n "${A}p" f.txt', "sed -n '$p' f.txt", "sed -n '$!d' f.txt"], dir);
+  // an expansion in the place of a COMMAND or a flag is one the scanner cannot follow
+  gated(['sed "s/a/b/$FLAGS" f.txt', 'sed "1${CMD}" f.txt'], dir);
+  // and a value that is known on the same line is read as what it is
+  gated(["S='1e id'; sed \"$S\" f.txt"], dir);
+});
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * 4. AN OPTION MEANS WHAT THE TOOL THAT READS IT SAYS (U-09)
  * ------------------------------------------------------------------------------------------------------------- */

@@ -235,6 +235,17 @@ function awkRoles(r: Roles): Scan | null {
   return r.done();
 }
 
+/** Where the PROGRAM of the awk command whose head stands at `at` is in `line` - the first operand, unless an option supplies it - or null when
+ *  an option supplies it (`-f`, `-e`, `--source`) or the line has an option the table cannot place. */
+export function awkProgramAt(line: readonly string[], at: number): number | null {
+  const r = new Roles(line, at, new Set());
+  const parsed = parseKept(AWK_GRAMMAR, r);
+  if (parsed === null) return null;
+  for (const o of parsed.p.options) if (o.name === 'file' || o.name === 'exec' || o.name === 'source') return null;
+  const first = parsed.p.operands[0];
+  return first === undefined ? null : (parsed.map[first.at] ?? null);
+}
+
 const JQ_FLAGS = /^--(?:null-input|raw-input|slurp|compact-output|raw-output0?|join-output|ascii-output|sort-keys|color-output|monochrome-output|tab|unbuffered|stream|stream-errors|seq|exit-status|binary|version|help|build-configuration)$|^-[nRsrjacSCMebhV]+$/;
 /** jq: the filter is the first operand unless `-f FILE` names it; `--arg NAME VALUE` and the words after `--args` are strings */
 function jqRoles(r: Roles): Scan | null {
@@ -468,12 +479,33 @@ export function programRoles(head: string, line: readonly string[], at: number, 
  *  (tools.ts), and it is read the way sed reads it (sed.ts) - the regexes this replaces looked for the letter `e` after three of the
  *  same character anywhere in the line, which a file called `service.ts` has, and missed `s/a/b/2e`, which sed accepts. An option the
  *  table cannot place leaves the script unknown, and every word is then tried as one. */
-export function sedExecutes(line: readonly string[], at: number): boolean {
+export function sedExecutes(line: readonly string[], at: number, dynamic: ReadonlySet<string> = new Set()): boolean {
   const prog = sedProgram(line, at + 1);
   const scripts = prog.unknown.length > 0 ? line.slice(at + 1).filter((w) => !w.startsWith('-')) : prog.scripts;
   for (const script of scripts) {
-    const eff = scanSedScript(script);
+    let text = script;
+    // A SCRIPT THE SHELL BUILDS: one that is nothing but an expansion (`sed "$S"`) is a program nobody has read; one that holds expansions
+    // among its own characters (`sed -n "${A},${B}p"`) is read with each of them as a number - the shape of the idiom - and an expansion in
+    // the place of a command (`s/a/b/$FLAGS`) makes the script one the scanner cannot follow
+    if (dynamic.has(script)) {
+      if (EXPANSION.test(script) && script.replace(EXPANSION_G, '').trim() === '') return true;
+      for (const m of script.matchAll(EXPANSION_G)) {
+        const before = script[m.index - 1];
+        const after = script[m.index + m[0].length];
+        if (!(before === undefined || DATA_BEFORE.includes(before)) || !(after !== undefined && DATA_AFTER.includes(after))) return true;
+      }
+      text = script.replace(EXPANSION_G, '1');
+    }
+    const eff = scanSedScript(text);
     if (eff.executesPatternSpace || eff.commands.length > 0 || eff.confused) return true;
   }
   return false;
 }
+/** WHERE AN EXPANSION IS A NUMBER OR A PATTERN AND NOT A COMMAND: between the separators of an address and the command letters that take no
+ *  argument (`${A},${B}p`), inside the delimiters of a regular expression or of the parts of `s` (`/$RE/p`, `s/$A/$B/g`). Anywhere else - right
+ *  after a number, at the end - it can be the command or the flag. */
+const DATA_BEFORE = ',;{} +~/|#:!\n';
+const DATA_AFTER = ',~/|#:!;} pdqn=\n';
+/** one expansion of the shell: `${…}`, `$(…)`, `$NAME`, a special parameter, or a backtick span */
+const EXPANSION_G = /\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]|`[^`]*`/g;
+const EXPANSION = new RegExp(EXPANSION_G.source);
