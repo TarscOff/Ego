@@ -468,6 +468,20 @@ fourth reader per dimension keeps the repairs from drifting apart:
   an assignment, `export` and its kin, `printf -v`, `read`, `mapfile`, `getopts`, a loop's variable, `let`, `${NAME:=default}`. The
   environment reader peels the chain of carriers with `peelCarriers` (a `find -exec` or `fd -x` clause included) and takes each
   assignment word apart with the same recorder.
+- [`authority/shell-lexer.ts`](../../packages/kernel/src/authority/shell-lexer.ts) and
+  [`authority/evaluated-words.ts`](../../packages/kernel/src/authority/evaluated-words.ts) are the **one reader of where a command runs
+  while the shell evaluates text**. Quoting protects a word from splitting and globbing, not from a builtin that evaluates what it
+  receives: `declare 'a[$(CMD)]=1'`, `read 'a[$(CMD)]'`, `unset 'a[$(CMD)]'`, `let 'a[$(CMD)]=1'`, `[[ 'a[$(CMD)]' -eq 1 ]]`, `printf -v`, a
+  subscript in `a['$(CMD)']=1`, `${a['$(CMD)']}` and zsh's `${(e)…}`, the old arithmetic form `$[ … ]`, `(( … ))` and `for (( … ))`, and
+  a variable the line itself filled with code and then evaluated (`x='a[$(CMD)]'; echo $((x))`, `eval "$x"`) each ran CMD while the
+  splitter read the word as inert text. The lexer finds where an arithmetic expression ends (brackets and parentheses nest, a quote or a
+  substitution inside is read whole) and which spans of a text are commands; the table of builtins that evaluate their operands was
+  derived by running every builtin of bash 3.2, GNU bash 5.2 and zsh 5.9 with a subscript in every operand position, and
+  `closure-shell2.test.ts` repeats that sweep for the shells it finds, with a seeded differential of 400 scripts against real bash and zsh
+  and fake executables that log what ran. A word an ordinary tool receives (`grep`, `echo`, `git commit -m`, the value of a declaration)
+  is still data. A function body is read in the table of functions at its CALL, not at its definition: a name that anything in the unit
+  removes is not proved bound inside any body, and a body that names its parameters is read again with the call's words. A word the
+  shell builds after a dry-run flag may be the flag that undoes it, for every tool that has one; a plain variable in a name slot is a name.
 
 A project's overlay (`.harness/overlay/matchers.md`) may only narrow, and it does not compete with the core for first place: a
 `command` rule adds its capability beside the core's, a `path` or `url` rule is combined with the core's the same way (the strictest

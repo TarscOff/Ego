@@ -395,6 +395,27 @@ discipline of decision Q84 (authority changes are never patch releases).
   `yarn version` are no longer read-only. A flag that selects the program npm runs scripts in asks whether or not the script is in the
   manifest, npm's scoped registry flag (`--@scope:registry`) is an endpoint like `--registry`, and awk's file options are read as getopt
   reads them (`gawk -Eevil.awk`, `-nievil.awk`).
+- **One reader of where a command runs while the shell evaluates text; function bodies run at their call; a word the shell builds can undo a
+  dry run; every exception is a coded verdict** (closure audit 2026-10-02, wave 6, shell structure: SH-1 … SH-6, RB-1, RB-4, RB-5).
+  `echo $[$(git push origin main)]` ran the push at ALLOW: the splitter read the old arithmetic form `$[ … ]` up to its first `]` and
+  swallowed it as inert text, while `$(( … ))` beside it had been given its commands. The same text ran in every place a builtin or the
+  shell evaluates a word - `declare 'a[$(CMD)]=1'` (and `typeset`, `local`, `let`, `read`, `unset`, `printf -v`, `[[ … -eq … ]]`, `test -v`), a
+  quoted subscript in an assignment or a `${a[…]}`, `(( … ))`, `for (( … ))`, zsh's `${(e)…}`, `mapfile -C CMD`, a variable the line filled
+  with code and then evaluated (`x='a[$(CMD)]'; echo $((x))`, `eval "$x"`) - because a quote was read as protection from evaluation. One
+  lexer (`shell-lexer.ts`) now finds where an expression ends and which spans are commands, one table (`evaluated-words.ts`, derived from
+  the builtins of bash 3.2, bash 5.2 and zsh 5.9) says which words a builtin evaluates, and the splitter hands the commands over as
+  segments of a subshell; the script reader's heredoc delimiter scan uses the same extent. A function body is read in the table of
+  functions at its call: `git() { unset -f git; git "$@"; }; git push origin main` runs the real push (a name that anything in the unit
+  removes is not proved bound inside a body; a body that names its parameters is read again with the call's words). A word the shell builds
+  after the last dry-run flag - a command's output, a default, every argument - may be the flag that undoes it, so the dry run is not
+  proved, for kubectl, oc, helm, git push / rm / mv, rsync, patch and the cloud CLIs; a plain variable in a name slot is still a name.
+  A verb or an option's value of `git`, `kubectl`, `docker`, `psql` … is not a file name under the match directory of `find -execdir`.
+  `evaluate()` never throws: any exception ends in an ASK with a typed code that keeps what was found before it, a glob component too long
+  to compile is a gap, and the hook refuses a payload that is not an object, that names another event than the one registered
+  (`"hook_event_name":"Stop"` on a PreToolUse hook answered `{}` with exit 0 and evaluated nothing), that nests past the stack or whose
+  session id no file name holds, with `TARGET_UNCLASSIFIED` and exit 2. Visible change: a declaration, `read`, `unset`, `let` or
+  `[[ -eq ]]` whose operand holds a command substitution in a subscript is read as the command; `find -execdir git status` and the like no
+  longer ask; `xargs` is unchanged (it appends words from standard input, which can be options).
 - **A project's overlay narrows, and is read as its author meant it** (closure audit 2026-10-01, wave 3, "overlay"). An overlay `command`
   rule is added beside the core's answer and the strictest wins (it was appended after every core rule under first-match-wins, so a rule
   for `make deploy` or `*.pem` never ran); a `path` or `url` rule is combined with the core's the same way. A `path` is read as a

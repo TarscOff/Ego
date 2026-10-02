@@ -2,7 +2,7 @@
 // hook output. UX only: no policy, permission, task, decision or secret logic lives here.
 import { join } from 'node:path';
 import type { HookEvent, HookDecision, HookEventName } from '../../kernel/src/hooks/events.ts';
-import { decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
+import { checkPayloadEvent, decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
 import { readJsonIfExists, writeAtomic, ensureDir } from '../../kernel/src/util/fs.ts';
 
 export const HOST_ID = 'claude-code' as const;
@@ -13,7 +13,9 @@ export function parseClaudeCodeEvent(
   env: NodeJS.ProcessEnv,
   cwdFallback: string,
 ): HookEvent {
-  const name = typeof payload['hook_event_name'] === 'string' ? payload['hook_event_name'] : eventName;
+  // THE REGISTERED EVENT STANDS: a payload that names a different one is refused, not obeyed (events.ts: checkPayloadEvent)
+  checkPayloadEvent(eventName, payload['hook_event_name']);
+  const name = eventName;
   if (!isHookEventName(name)) throw new Error(`unknown hook event "${name}"`);
   const ev: HookEvent = {
     host: HOST_ID,

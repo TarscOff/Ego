@@ -12,6 +12,19 @@ import { HELM_PRODUCTION, TARGET_KINDS, productionCapabilityFor } from './target
 import { copyOutDestinations } from './copy-writes.ts';
 import { canonicalHost } from './hosts.ts';
 import { programOperand } from './program-operands.ts';
+import { CodeFlow, evaluatedCommands } from './evaluated-words.ts';
+import {
+  arithmeticSpanAt,
+  expressionCommands,
+  parameterExpansionCommands,
+  scanSubstitutionBody,
+  skipAnsiC,
+  skipBacktickSpan,
+  skipDoubleQuoted,
+  skipParameterExpansion,
+  skipSingleQuoted,
+  substitutionsIn,
+} from './shell-lexer.ts';
 import { has, isOn, lastOf, parseOptions, valueReadings, valuesOf } from './options.ts';
 import { SHELL_GRAMMAR, expandLongOptions, gitConfigAsks, sedProgram, shellSyntaxOnly, tarShape, toolEffects } from './tools.ts';
 import {
@@ -381,6 +394,10 @@ const FUNCTION_BODY_END = `${MARK}end-function`;
  *  The definition now carries `inSubshell` itself, so the binding reader no longer needs the marker (and must not use it
  *  to forget an EARLIER definition that does stand); what still reads it is the "defined before use" ledger. */
 const FUNCTION_UNBIND = `${MARK}unbind-function`;
+/** The BODY of an arithmetic expansion or command the splitter consumed (`$(( x + 1 ))`, `$[ x ]`, `(( x ))`): the commands substituted into it are
+ *  segments of their own, and the text that is left is a number in the line - but a bare NAME in it is evaluated by evaluating what it holds, and
+ *  only the reader that knows what the line gave a variable can say whether that is code (evaluated-words.ts: CodeFlow). It carries nothing else. */
+const ARITHMETIC_BODY = `${MARK}arithmetic`;
 /** a segment that is only redirections — the tail of a group or subshell whose delimiters were consumed */
 const REDIRECT_ONLY_RE = /^(?:(?:\d*(?:>>?|<>?)\|?|&>>?)\s*(?:"[^"]*"|'[^']*'|\S+)\s*)+$/;
 /** shell keywords that may precede a command WITHOUT being one: after them, the next word is still a command */
@@ -529,6 +546,25 @@ export function splitShellPipeline(command: string): ShellStage[] {
   const groupStack: number[] = [];
   // heredocs opened on the line being scanned; their BODIES are consumed when that line ends
   const pendingHeredocs: Array<{ delim: string; quoted: boolean; strip: boolean; openerIndex?: number }> = [];
+  /** COMMANDS THE SHELL RUNS WHILE IT EVALUATES TEXT (an arithmetic word, a subscript): each is a segment of a subshell of its own,
+   *  exactly as the body of a `$( )` is. ONE place makes them, for every syntax that evaluates text (shell-lexer.ts). */
+  const pushSubshellCommands = (commands: readonly string[]): void => {
+    for (const command of commands) {
+      const inner = splitShellPipeline(command);
+      const id = ++SUBSHELL_SEQ;
+      for (const s of inner)
+        segments.push({ ...s, inSubshell: true, subshellPath: [...subshellIds, id, ...(s.subshellPath ?? [])] });
+      if (inner.some((sg) => directoryChange(sg.text) !== null)) segments.push({ text: SUBSHELL_CWD_RESTORE, pipedFromPrevious: false });
+      for (const sg of inner)
+        if (sg.text.startsWith(`${FUNCTION_DEF_PREFIX} `))
+          segments.push({ text: `${FUNCTION_UNBIND} ${sg.text.slice(FUNCTION_DEF_PREFIX.length + 1)}`, pipedFromPrevious: false });
+    }
+  };
+  /** an arithmetic body the splitter consumed: its substituted commands, and the body for the reader of variables */
+  const pushArithmetic = (body: string): void => {
+    pushSubshellCommands(expressionCommands(body));
+    if (/[A-Za-z_]/.test(body)) segments.push({ text: `${ARITHMETIC_BODY} ${body}`, pipedFromPrevious: false });
+  };
   const push = () => {
     const t = cur.trim();
     // A REDIRECTION IS NOT A COMMAND. Consuming a group's braces leaves `{ echo a; echo b; } > out.txt` with a
@@ -558,6 +594,11 @@ export function splitShellPipeline(command: string): ShellStage[] {
       for (const hd of pendingHeredocs)
         if (hd.openerIndex === undefined && new RegExp(`<<-?\\s*['"\\\\]?${reEscape(hd.delim)}`).test(t))
           hd.openerIndex = segments.length - 1;
+      // THE WORDS THIS COMMAND EVALUATES RUN COMMANDS TOO: `declare 'a[$(…)]=1'`, `read 'a[$(…)]'`, `[[ 'a[$(…)]' -eq 1 ]]`, `a['$(…)']=1`.
+      // A quote kept them out of the scan above, and the builtin evaluates what it receives (evaluated-words.ts). They are read
+      // after the segment is placed, so nothing that records where it stands (the heredoc opener above) is moved by them.
+      // (every segment is asked: the head that evaluates may be spelled in a way no pattern over the text finds, and a callback has no `$` in it)
+      if (t.length <= MAX_STAGE_CHARS) pushSubshellCommands(evaluatedWordCommands(t));
     }
     cur = '';
   };
@@ -582,6 +623,22 @@ export function splitShellPipeline(command: string): ShellStage[] {
     // escape at all, so the pair stays literal there.
     if (ch === '\\' && next === '\n' && !inSingle) {
       i += 2;
+      continue;
+    }
+    // ...ALSO BETWEEN THE TWO CHARACTERS OF AN OPENER. The pair is deleted before the shell reads `$(`, `<(`, `>(` or `((`, so `echo
+    // $\<newline>(git push origin main)` IS `echo $(git push origin main)` - bash and zsh both ran the push - and this scanner, which looks
+    // one character ahead and had not yet skipped the pair, saw a `$` followed by a backslash and read no substitution at all (the cross-product
+    // of the arithmetic cases found it: the lookahead and the skip were two readers of the same rule). The pair is taken out HERE, so every
+    // look at the next character is a look at the real one.
+    if ((ch === '$' || ch === '<' || ch === '>' || ch === '(') && next === '\\' && command[i + 2] === '\n' && !inSingle) {
+      chargeWork(command.length - i);
+      command = command.slice(0, i + 1) + command.slice(i + 3);
+      continue;
+    }
+    // (`$(` + pair + `(` is `$((`, and the second parenthesis is read by the same look as the first)
+    if (ch === '$' && next === '(' && command[i + 2] === '\\' && command[i + 3] === '\n' && !inSingle) {
+      chargeWork(command.length - i);
+      command = command.slice(0, i + 2) + command.slice(i + 4);
       continue;
     }
     if (ch === '\\' && !inSingle) {
@@ -630,11 +687,16 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // recognised here, so `echo $[1<<true]` opened a heredoc named `true` — and a later line saying `true`
       // terminated it, making every line between them the body and hiding a `git push origin main` completely
       // (exit review 8). The whole expression is consumed as the one word it is.
+      // ...BUT THE EXPRESSION IS EVALUATED, so a command substituted into it runs (`echo $[$(git push origin main)]`): the first `]`
+      // is not its end (brackets nest and a substitution holds its own), and the span is read by the one reader of arithmetic
+      // (shell-lexer.ts), the same one `$(( … ))` and `(( … ))` use. A body with a shell operator in it is not arithmetic in dash,
+      // which reads `$[` as text and the rest as words - so it is left to the ordinary scan, the reading that sees more.
       if (ch === '$' && next === '[') {
-        const close = command.indexOf(']', i + 2);
-        if (close > 0) {
-          cur += command.slice(i, close + 1);
-          i = close + 1;
+        const arith = arithmeticSpanAt(command, i);
+        if (arith !== null && !/[;&|\n]/.test(arith.body)) {
+          pushArithmetic(arith.body);
+          cur += '$ARITH';
+          i = arith.end;
           continue;
         }
       }
@@ -779,6 +841,13 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // executes nothing. Reading it as subshells is therefore right where it runs and harmless where it does not;
       // leaving it alone was a floor crossing (exit review 4). Standalone bash arithmetic `(( i++ ))` asked before
       // this and asks after it.
+      // ...BUT `((` IS ALSO WHERE BASH AND ZSH EVALUATE AN EXPRESSION - the arithmetic command, and the header of `for ((;;))` - and a
+      // quote in it keeps nothing from running: `(( 'a[$(git push origin main)]' ))` runs the push. Read by the one reader of arithmetic
+      // (shell-lexer.ts), in addition to the subshell reading below, which is the one that sees more where dash is the shell.
+      if (ch === '(' && next === '(' && (atCommandStart() || /^(?:(?:if|then|else|elif|while|until|do|!|time|coproc)\s+)*for\s*$/.test(cur.trim()))) {
+        const arith = arithmeticSpanAt(command, i);
+        if (arith !== null) pushArithmetic(arith.body);
+      }
       if (ch === '(' && atCommandStart()) {
         if (subshell === 0) subshellStart = segments.length;
         subshell++;
@@ -903,32 +972,21 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // this is a command substitution containing subshells, which is what `$((:) && (git push …))` is
         !/[;&|]/.test(command.slice(i + 3, (command.indexOf('))', i + 3) + 2) || command.length))
       ) {
-        let depth = 0;
-        let j = i + 1;
-        let inner = '';
-        let prevClose = false; // true when the character before the closing paren was itself `)`
-        while (j < command.length) {
-          const c = command[j]!;
-          if (c === '(') depth++;
-          else if (c === ')') depth--;
-          if (depth === 0) {
-            prevClose = command[j - 1] === ')';
-            break;
-          }
-          if (!(depth === 1 && c === '(')) inner += c;
-          j++;
-        }
-        if (prevClose) {
+        // (the extent is the one reader's too - arithmeticSpanAt - and not a count of parentheses that a quoted `)` would end early)
+        const arith = arithmeticSpanAt(command, i);
+        if (arith !== null) {
           // the expression itself is never executed, so only the commands SUBSTITUTED INTO it are segments: the
           // arithmetic remainder that carries their output (`$SUBST + 1`) is a number here, not a command
-          if (/\$\(|`/.test(inner))
-            for (const sg of splitShellPipeline(inner)) if (!/^\$SUBST\b/.test(sg.text)) segments.push(sg);
+          pushArithmetic(arith.body);
           cur += '$ARITH';
-          i = j + 1;
+          i = arith.end;
           continue;
         }
         // not arithmetic: fall through to the command-substitution branch below, which reads `$( … )`
       }
+      // A SUBSCRIPT IN A PARAMETER EXPANSION IS EVALUATED, quoted or not, and zsh's `(e)` flag expands the value again: `${a['$(…)']}`,
+      // `${(e)${:-'$(…)'}}`. The expansion itself stays in the word (it is a value, not a command); the commands inside are segments.
+      if (ch === '$' && next === '{') pushSubshellCommands(parameterExpansionCommands(command, i));
       if ((ch === '$' || ch === '<' || ch === '>') && next === '(') {
         if (ch === '<' || ch === '>') sawProcessSubstitution = true;
         // command or process substitution: capture the inner command as its own segment and keep scanning. Where it
@@ -1010,263 +1068,6 @@ export function splitShellPipeline(command: string): ShellStage[] {
   // a group the line never closed leaves its scopes open: the last element of each is still an element
   while (scopes.length > 0) closeScope();
   return segments;
-}
-
-/* ------------------------------------------------------------------------------------------------------------- *
- * ONE LEXER FOR THE BODY OF `$( … )`.
- *
- * Three scanners counted parentheses for three callers, each with its own idea of what hides one: the splitter knew
- * quotes and `case`, the heredoc extractor knew neither, and none knew that a `)` can sit inside a comment, a `${…}`
- * expansion, an ANSI-C string, a nested substitution's own quoting, or a `case` pattern after a subject that contains a
- * space (exit review 10, self-attack: five findings, one cause). A substitution that ends early leaves the rest of its
- * body as TEXT, which is how `git push origin main` inside one became invisible. This reads the body the way the
- * shell does and returns where it really ends.
- * ------------------------------------------------------------------------------------------------------------- */
-function skipSingleQuoted(t: string, i: number): number {
-  const e = t.indexOf("'", i);
-  return e < 0 ? -1 : e + 1;
-}
-function skipAnsiC(t: string, i: number): number {
-  for (; i < t.length; i++) {
-    if (t[i] === '\\') i++;
-    else if (t[i] === "'") return i + 1;
-  }
-  return -1;
-}
-function skipBacktickSpan(t: string, i: number): number {
-  for (; i < t.length; i++) {
-    if (t[i] === '\\') i++;
-    else if (t[i] === '`') return i + 1;
-  }
-  return -1;
-}
-function skipDoubleQuoted(t: string, i: number): number {
-  while (i < t.length) {
-    const c = t[i]!;
-    if (c === '\\') i += 2;
-    else if (c === '"') return i + 1;
-    else if (c === '`') {
-      i = skipBacktickSpan(t, i + 1);
-      if (i < 0) return -1;
-    } else if (c === '$' && t[i + 1] === '(') {
-      const e = scanSubstitutionBody(t, i + 2);
-      if (e < 0) return -1;
-      i = e + 1;
-    } else if (c === '$' && t[i + 1] === '{') {
-      i = skipParameterExpansion(t, i + 2);
-      if (i < 0) return -1;
-    } else i++;
-  }
-  return -1;
-}
-/** after `${`: to just past the matching `}` */
-function skipParameterExpansion(t: string, i: number): number {
-  while (i < t.length) {
-    const c = t[i]!;
-    if (c === '\\') i += 2;
-    else if (c === '}') return i + 1;
-    else if (c === "'") {
-      i = skipSingleQuoted(t, i + 1);
-      if (i < 0) return -1;
-    } else if (c === '"') {
-      i = skipDoubleQuoted(t, i + 1);
-      if (i < 0) return -1;
-    } else if (c === '`') {
-      i = skipBacktickSpan(t, i + 1);
-      if (i < 0) return -1;
-    } else if (c === '$' && t[i + 1] === '(') {
-      const e = scanSubstitutionBody(t, i + 2);
-      if (e < 0) return -1;
-      i = e + 1;
-    } else if (c === '$' && t[i + 1] === '{') {
-      i = skipParameterExpansion(t, i + 2);
-      if (i < 0) return -1;
-    } else i++;
-  }
-  return -1;
-}
-/** One shell WORD starting at `i`: quotes and expansions inside it are part of it. Returns its end (exclusive). */
-function skipWordAt(t: string, i: number): number {
-  while (i < t.length) {
-    const c = t[i]!;
-    if (/[\s;&|()<>]/.test(c)) return i;
-    if (c === '\\') i += 2;
-    else if (c === "'") {
-      i = skipSingleQuoted(t, i + 1);
-      if (i < 0) return t.length;
-    } else if (c === '"') {
-      i = skipDoubleQuoted(t, i + 1);
-      if (i < 0) return t.length;
-    } else if (c === '`') {
-      i = skipBacktickSpan(t, i + 1);
-      if (i < 0) return t.length;
-    } else if (c === '$' && t[i + 1] === "'") {
-      i = skipAnsiC(t, i + 2);
-      if (i < 0) return t.length;
-    } else if (c === '$' && t[i + 1] === '(') {
-      const e = scanSubstitutionBody(t, i + 2);
-      if (e < 0) return t.length;
-      i = e + 1;
-    } else if (c === '$' && t[i + 1] === '{') {
-      i = skipParameterExpansion(t, i + 2);
-      if (i < 0) return t.length;
-    } else i++;
-  }
-  return i;
-}
-/** `i` is just after `$(`. Returns the index of the `)` that ends the substitution, or -1 when it never does. */
-function scanSubstitutionBody(t: string, i: number): number {
-  let depth = 1;
-  /** open `case`s: the paren depth each opened at, and whether a PATTERN is what the scanner is reading */
-  const cases: Array<{ depth: number; pattern: boolean }> = [];
-  let cmdStart = true;
-  while (i < t.length) {
-    const c = t[i]!;
-    if (c === '\\') {
-      i += 2;
-      cmdStart = false;
-      continue;
-    }
-    if (c === "'" || c === '"' || c === '`' || c === '$') {
-      // any word that begins with a quote or an expansion is read whole, so nothing inside it is structure
-      const e = skipWordAt(t, i);
-      if (e === i) {
-        i++;
-        continue;
-      }
-      i = e;
-      cmdStart = false;
-      continue;
-    }
-    if (c === '#' && (i === 0 || /[\s;&|(]/.test(t[i - 1]!))) {
-      const nl = t.indexOf('\n', i);
-      i = nl < 0 ? t.length : nl;
-      continue;
-    }
-    const top = cases[cases.length - 1];
-    if (c === '(') {
-      // a pattern may be written `(a|b)`: that paren opens nothing
-      if (top && top.depth === depth && top.pattern) {
-        i++;
-        continue;
-      }
-      depth++;
-      i++;
-      cmdStart = true;
-      continue;
-    }
-    if (c === ')') {
-      if (top && top.depth === depth && top.pattern) {
-        top.pattern = false;
-        i++;
-        cmdStart = true;
-        continue;
-      }
-      depth--;
-      if (depth === 0) return i;
-      i++;
-      cmdStart = false;
-      continue;
-    }
-    if (c === ';') {
-      if ((t[i + 1] === ';' || t[i + 1] === '&') && top && top.depth === depth) {
-        top.pattern = true;
-        i += t[i + 1] === ';' && t[i + 2] === '&' ? 3 : 2;
-      } else i++;
-      cmdStart = true;
-      continue;
-    }
-    if (c === '&' || c === '|' || c === '\n') {
-      i++;
-      cmdStart = true;
-      continue;
-    }
-    if (/\s/.test(c)) {
-      i++;
-      continue;
-    }
-    const e = skipWordAt(t, i);
-    const w = t.slice(i, e);
-    const inPattern = top !== undefined && top.depth === depth && top.pattern;
-    if (cmdStart && !inPattern && w === 'case') {
-      // `case SUBJECT in` - the subject is any word, spaces inside its quotes and expansions included
-      let j = e;
-      while (j < t.length && /\s/.test(t[j]!)) j++;
-      const subjectEnd = skipWordAt(t, j);
-      let k = subjectEnd;
-      while (k < t.length && /\s/.test(t[k]!)) k++;
-      const kwEnd = skipWordAt(t, k);
-      if (subjectEnd > j && t.slice(k, kwEnd) === 'in') {
-        cases.push({ depth, pattern: true });
-        i = kwEnd;
-        cmdStart = false;
-        continue;
-      }
-    }
-    if (cmdStart && !inPattern && w === 'esac' && top && top.depth === depth) {
-      cases.pop();
-      i = e;
-      cmdStart = false;
-      continue;
-    }
-    i = Math.max(e, i + 1);
-    cmdStart = !inPattern && /^(do|then|else|elif|if|while|until|time|!|\{|\})$/.test(w);
-  }
-  return -1;
-}
-
-/** The commands SUBSTITUTED into a text: the inner command of every `$( )` and backtick span outside single
- *  quotes. Used for an UNQUOTED heredoc body, where the shell expands substitutions but the prose around them is
- *  data — `git push origin main` written in a release note is not a push. */
-function substitutionsIn(text: string): string[] {
-  const out: string[] = [];
-  // THERE IS NO QUOTING INSIDE A HEREDOC BODY. `'` and `"` are ordinary characters there, so a scanner that
-  // tracked them skipped the substitutions that the shell does expand (exit review 4). Only the backslash escape
-  // survives, and only before `$`, `` ` `` and `\`.
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!;
-    if (ch === '\\') {
-      i++;
-      continue;
-    }
-    if (ch === '$' && text[i + 1] === '(' && text[i + 2] === '(') {
-      // `$((…))` closing with ADJACENT parens is arithmetic and runs nothing; anything else is `$( (…) …)`
-      let d = 0;
-      let j = i + 1;
-      let prevClose = false;
-      for (; j < text.length; j++) {
-        if (text[j] === '(') d++;
-        else if (text[j] === ')' && --d === 0) {
-          prevClose = text[j - 1] === ')';
-          break;
-        }
-      }
-      if (prevClose) {
-        for (const nested of substitutionsIn(text.slice(i + 3, j - 1))) out.push(nested);
-        i = j;
-        continue;
-      }
-      out.push(text.slice(i + 2, j));
-      i = j;
-      continue;
-    }
-    if (ch === '$' && text[i + 1] === '(') {
-      const close = scanSubstitutionBody(text, i + 2);
-      const end = close < 0 ? text.length : close;
-      out.push(text.slice(i + 2, end));
-      i = end;
-      continue;
-    }
-    if (ch === '`') {
-      // POSIX nests backticks by escaping the inner pair, so the closing one is the first UNESCAPED backtick
-      const after = skipBacktickSpan(text, i + 1);
-      if (after > i) {
-        out.push(text.slice(i + 1, after - 1).replace(/\\([`$\\])/g, '$1'));
-        i = after - 1;
-      }
-    }
-  }
-  return out;
 }
 
 /** Heads that take their SCRIPT from standard input when nothing else names one. */
@@ -2134,6 +1935,11 @@ function matchPayloads(cmd: readonly string[], roots: readonly string[], named: 
   // fd puts the match last when the command has no placeholder, as `xargs` does
   const words = implicitMatch && !cmd.some(isMatch) ? [...cmd, '{}'] : [...cmd];
   const placed = words.some(isMatch);
+  // A TOOL WITH VERBS TAKES ITS BARE WORDS AS VERBS AND OPTION VALUES, not as file names: the second word of `psql -h localhost`, `kubectl
+  // --context kind-dev get pods` and `git status` is not a path under the match directory, and reading it as one made a local read
+  // a call to a host called `a/localhost` (closure audit 2026-10-02, SH-5). What they name as a file has a slash, a leading dot or a tilde.
+  const base = (cmd[0] ?? '').replace(/^.*\//, '');
+  const verbs = HELP_FIRST_CLIS.test(base) || DB_CLIENT_HEADS.has(base);
   for (const root of roots) {
     const r = root.replace(/(.)\/+$/, '$1');
     // (the root stands for the matches: a search root that is itself governed is a deny whatever the matches are, and a root that
@@ -2153,7 +1959,7 @@ function matchPayloads(cmd: readonly string[], roots: readonly string[], named: 
         words.map((c, k) =>
           isMatch(c) && writes ? '$FIND_MATCH'
           : isMatch(c) ? root
-          : inMatchDir && k > 0 && !c.startsWith('-') && !c.startsWith('/') && !c.includes('=') ? `${r}/${c}`
+          : inMatchDir && k > 0 && !c.startsWith('-') && !c.startsWith('/') && !c.includes('=') && (!verbs || /\/|^[.~]/.test(c)) ? `${r}/${c}`
           : c,
         ),
       ),
@@ -3308,6 +3114,8 @@ interface StatementHead {
   /** `builtin X` / `command X`: the shell looks X up as a builtin or a program, never as a function */
   bypassesFunctions: boolean;
   viaCommand: boolean;
+  /** the words in front of the verb that are not commands: assignments, shell keywords, `builtin`, `command` */
+  prefix: string[];
 }
 function statementHead(text: string): StatementHead {
   const t = commandWords(tokenizeMarked(separateGluedRedirections(expandBraces(text)))).map((x) => x.text);
@@ -3316,7 +3124,7 @@ function statementHead(text: string): StatementHead {
   let viaCommand = false;
   for (;;) {
     const w = t[i];
-    if (w === undefined) return { verb: undefined, args: [], bypassesFunctions: bypass, viaCommand };
+    if (w === undefined) return { verb: undefined, args: [], bypassesFunctions: bypass, viaCommand, prefix: t.slice(0, i) };
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_KEYWORDS.has(w) || w === 'noglob' || w === 'nocorrect') i++;
     else if (w === 'builtin') {
       bypass = true;
@@ -3331,7 +3139,13 @@ function statementHead(text: string): StatementHead {
       while (t[i] === '-p' || t[i] === '--') i++;
     } else break;
   }
-  return { verb: t[i], args: t.slice(i + 1), bypassesFunctions: bypass, viaCommand };
+  return { verb: t[i], args: t.slice(i + 1), bypassesFunctions: bypass, viaCommand, prefix: t.slice(0, i) };
+}
+
+/** The commands a statement runs by EVALUATING a word it was given (evaluated-words.ts). */
+function evaluatedWordCommands(text: string): string[] {
+  const h = statementHead(text);
+  return evaluatedCommands(h.prefix, h.verb, h.args);
 }
 
 /** WHICH DIRECTORY CHANGE THIS SEGMENT IS, however its head is spelled. `'cd' control-plane`, `c\d control-plane`,
@@ -3492,11 +3306,16 @@ function statementEffect(text: string, readSourced: SourceReader | undefined, cw
   }
 }
 
-/** For every stage of a unit, which function names are bound before it runs. */
-export function functionBindingTimeline(stages: readonly ShellStage[], readSourced?: SourceReader): BindingPoint[] {
+/** For every stage of a unit, which function names are bound before it runs. `initial` is what is already bound where the unit
+ *  starts: the names of the caller, when the unit is the body of a function run again at its call. */
+export function functionBindingTimeline(
+  stages: readonly ShellStage[],
+  readSourced?: SourceReader,
+  initial: ReadonlySet<string> = new Set(),
+): BindingPoint[] {
   const points: BindingPoint[] = [];
-  let must: ReadonlySet<string> = new Set();
-  let may: ReadonlySet<string> = new Set();
+  let must: ReadonlySet<string> = initial;
+  let may: ReadonlySet<string> = initial;
   const NONE: ReadonlySet<string> = new Set();
   const withName = (s: ReadonlySet<string>, n: string): ReadonlySet<string> => (s.has(n) ? s : new Set([...s, n]));
   const withoutName = (s: ReadonlySet<string>, n: string): ReadonlySet<string> => (s.has(n) ? new Set([...s].filter((x) => x !== n)) : s);
@@ -3508,9 +3327,51 @@ export function functionBindingTimeline(stages: readonly ShellStage[], readSourc
   const bodyStack: Array<{ name: string; effect: BindingEffect }> = [];
   // WITHOUT A DEFINITION THERE IS NOTHING TO TRACK: a unit that never defines a function costs one scan, not a parse of
   // every statement
-  const hasDefinitions = stages.some((st) => st.text.startsWith(FUNCTION_DEF_PREFIX));
+  const hasDefinitions = initial.size > 0 || stages.some((st) => st.text.startsWith(FUNCTION_DEF_PREFIX));
   let condDepth = 0;
   let cwdMoved = false;
+  // WHAT A BODY CAN UNDO IS KNOWN BEFORE ITS FIRST STATEMENT IS READ. A body's statements are read where the definition stands, and
+  // they run when the function is CALLED - at any later point, from a pipeline, a trap, another function - so the table of
+  // functions they see is the one at the call and not the one at the definition. `git() { unset -f git; git "$@"; }` calls the
+  // REAL program from its second statement, and `f() { git push origin main; }; unset -f git; f` from its first. A name that
+  // anything in the unit removes, redefines as an alias, or may remove (an `eval`, a sourced file that cannot be read, a name built
+  // at run time) is therefore not proved bound inside ANY body (closure audit 2026-10-02, SH-2). The top level is exact: its
+  // statements run in the order they are written, and the sequence below tracks it.
+  const unboundAnywhere = new Set<string>();
+  let anythingMayUnbind = false;
+  const effects: Array<BindingEffect | undefined> = [];
+  if (hasDefinitions) {
+    let moved = false;
+    for (const stage of stages) {
+      if (stage.text.startsWith(MARK)) {
+        effects.push(undefined);
+        continue;
+      }
+      const text = expandBraces(stage.text).trim();
+      const aliasHead = statementHead(text);
+      if (aliasHead.verb === 'alias')
+        for (const a of aliasHead.args) {
+          const eq = a.indexOf('=');
+          if (eq <= 0) continue;
+          unboundAnywhere.add(a.slice(0, eq));
+          const value = statementEffect(a.slice(eq + 1), readSourced, moved, 1);
+          for (const n of value.unbinds) unboundAnywhere.add(n);
+          if (value.all) anythingMayUnbind = true;
+        }
+      const effect = statementEffect(text, readSourced, moved, 0);
+      effects.push(effect);
+      for (const n of effect.unbinds) unboundAnywhere.add(n);
+      if (effect.all) anythingMayUnbind = true;
+      if (directoryChange(text) !== null) moved = true;
+    }
+  }
+  /** the names proved bound where a BODY statement runs */
+  const bodyMust = (): ReadonlySet<string> => {
+    const seen = visibleMust();
+    if (anythingMayUnbind) return NONE;
+    return [...seen].some((n) => unboundAnywhere.has(n)) ? new Set([...seen].filter((n) => !unboundAnywhere.has(n))) : seen;
+  };
+  let stageIndex = -1;
   const resolve = (eff: BindingEffect, seen: Set<string> = new Set()): { unbinds: Set<string>; defines: Set<string>; all: boolean; sticky: boolean } => {
     const out = { unbinds: new Set(eff.unbinds), defines: new Set(eff.defines), all: eff.all, sticky: eff.sticky };
     for (const c of eff.calls) {
@@ -3532,6 +3393,7 @@ export function functionBindingTimeline(stages: readonly ShellStage[], readSourc
     return [...must].some((n) => r.unbinds.has(n)) ? new Set([...must].filter((n) => !r.unbinds.has(n))) : must;
   };
   for (const stage of stages) {
+    stageIndex++;
     const isMarker = stage.text.startsWith(MARK);
     const text = isMarker ? stage.text : expandBraces(stage.text).trim();
     const inPipeline = stage.pipedFromPrevious === true || stage.feedsPipe === true || stage.lastOfPipe === true;
@@ -3545,7 +3407,7 @@ export function functionBindingTimeline(stages: readonly ShellStage[], readSourc
       stage.conditional !== true &&
       stage.sepBefore !== '&&' &&
       stage.sepBefore !== '||';
-    points.push({ must: visibleMust(), may, unconditional });
+    points.push({ must: bodyStack.length > 0 ? bodyMust() : visibleMust(), may, unconditional });
 
     if (isMarker) {
       if (text.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
@@ -3594,7 +3456,7 @@ export function functionBindingTimeline(stages: readonly ShellStage[], readSourc
         must = withoutName(must, name);
       }
     }
-    const effect = statementEffect(text, readSourced, cwdMoved, 0);
+    const effect = effects[stageIndex] ?? statementEffect(text, readSourced, cwdMoved, 0);
     if (directoryChange(text) !== null) cwdMoved = true;
     if (bodyStack.length > 0) {
       // inside a body the statement is a promise, not an act: it happens when the function is CALLED
@@ -5621,6 +5483,54 @@ interface EffectState {
  *  call: `f() { make -C sub all; }; cp evil.mk sub/Makefile; f` runs the replaced makefile. `ledger` and `dirs` are what the write
  *  ledger and the working directory were when the body was last analysed; a call that finds either changed reads the body again
  *  (closure audit wave 2, RC-MK). */
+/** a body's mention of its positional parameters: `$1`…`$9`, `$@`, `$*`, in the braced spellings too */
+const POSITIONAL_RE = /\$(?:[@*1-9]|\{[@*1-9]\})/;
+
+/** The words of a call after the callee, as they were written (quoting kept) - redirections are not arguments. */
+function callArguments(seg: string): string[] {
+  const text = separateGluedRedirections(seg);
+  const words = commandWords(tokenizeMarked(text)) as Array<{ text: string; at?: number; end?: number }>;
+  const at = commandHeadIndex(words.map((w) => w.text));
+  return words.slice(at + 1).map((w) => (w.at !== undefined && w.end !== undefined ? text.slice(w.at, w.end) : w.text));
+}
+
+/** A statement of a function body with its parameters put where they stand: `"$@"` and `$@` become the call's words, `$1` the first. Only a
+ *  WHOLE word is replaced - a parameter inside a longer word (`"x$1"`) keeps the quoting around it, and a word nobody can read stays one. */
+function withPositionals(text: string, args: readonly string[]): string {
+  let out = '';
+  let from = 0;
+  for (const w of tokenizeMarked(text)) {
+    const m = /^"?\$(?:([@*])|\{([@*])\}|([1-9])|\{([1-9])\})"?$/.exec(text.slice(w.at, w.end));
+    if (m === null) continue;
+    const digit = m[3] ?? m[4];
+    const quoted = text[w.at] === '"';
+    out += text.slice(from, w.at) + (digit !== undefined ? (args[Number(digit) - 1] ?? (quoted ? "''" : '')) : args.join(' '));
+    from = w.end;
+  }
+  return out + text.slice(from);
+}
+
+/** A function body with the call's words put where its OWN parameters stand: a function defined inside it has parameters of its own, and its
+ *  statements are left alone. `used` says whether the body names any. */
+function bodyWithPositionals(body: readonly ShellStage[], args: readonly string[]): { stages: readonly ShellStage[]; used: boolean } {
+  let depth = 0;
+  let used = false;
+  const stages = body.map((st) => {
+    if (st.text.startsWith(`${FUNCTION_DEF_PREFIX} `)) {
+      depth++;
+      return st;
+    }
+    if (st.text === FUNCTION_BODY_END) {
+      depth = Math.max(0, depth - 1);
+      return st;
+    }
+    if (depth > 0 || st.text.startsWith(MARK) || !POSITIONAL_RE.test(st.text)) return st;
+    used = true;
+    return { ...st, text: withPositionals(st.text, args) };
+  });
+  return { stages, used };
+}
+
 interface FunctionDef {
   body: readonly ShellStage[];
   ledger: number;
@@ -5680,8 +5590,23 @@ function stripComment(line: string): string {
 
 /** `$[ … ]` is the OLD arithmetic form, still accepted by bash: its `<<` is a left shift, exactly as inside
  *  `$(( … ))`. Leaving it alone let `echo $[1<<true]` open a heredoc whose delimiter never arrived, so every
- *  remaining line of the script was read as its body (exit review 8). */
-const OLD_ARITH_RE = /\$\[[^\]]*\]/g;
+ *  remaining line of the script was read as its body (exit review 8). The extent of one is the lexer's (arithmeticSpanAt), the reader the
+ *  splitter uses: the pattern this was blanked with ended at the FIRST `]`, so `$[a[1]<<true]` left `<<true]` to open the same heredoc. */
+function blankArithmetic(line: string): string {
+  let out = '';
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '$' && (line[i + 1] === '[' || line[i + 1] === '(')) {
+      const a = arithmeticSpanAt(line, i);
+      if (a !== null) {
+        out += '$ARITH';
+        i = a.end - 1;
+        continue;
+      }
+    }
+    out += line[i];
+  }
+  return out;
+}
 
 /** The heredoc delimiter a line opens, or null. A `<<` only opens one when it is UNQUOTED, is not the `<<<`
  *  herestring, and is not the left-shift operator inside an arithmetic expansion. Matching `<<` anywhere on the
@@ -5692,7 +5617,7 @@ const OLD_ARITH_RE = /\$\[[^\]]*\]/g;
 function heredocDelimiter(line: string): string | null {
   // `$[ … ]` and `$(( … ))` both hold ARITHMETIC, where `<<` is a left shift. Blanking the old form here is what
   // keeps `echo $[1<<true]` from opening a heredoc whose delimiter never arrives (exit review 8).
-  line = line.replace(OLD_ARITH_RE, '$ARITH');
+  line = blankArithmetic(line);
   let quote: string | null = null;
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!;
@@ -6413,7 +6338,12 @@ function listDirectory(dir: string): string[] | null {
 
 /** One component of a glob as a regular expression: `*`, `?` and a bracket expression (`[a-c]`, `[!x]`, `[^x]`, `[[:digit:]]`).
  *  A `[` that never closes is an ordinary character, as it is for the shell. */
-function globComponentRe(part: string): RegExp {
+function globComponentRe(part: string): RegExp | null {
+  // A COMPONENT THAT IS TOO LONG TO COMPILE IS NOT ONE THAT MATCHES NOTHING. Sixteen thousand wildcards, or `a*` that many times, make
+  // V8 refuse the expression with a stack overflow, and the exception left the evaluator with no verdict at all (closure audit
+  // 2026-10-02, RB-1). A run of stars is one star, a component past the bound is not read, and the caller treats null as a GAP.
+  if (part.length > MAX_GLOB_COMPONENT) return null;
+  part = part.replace(/\*{2,}/g, '*');
   const CLASSES: Record<string, string> = { alpha: 'A-Za-z', digit: '0-9', alnum: 'A-Za-z0-9', upper: 'A-Z', lower: 'a-z', space: ' \\t', punct: '!-\\/:-@\\[-`{-~', xdigit: '0-9A-Fa-f' };
   let re = '';
   for (let i = 0; i < part.length; i++) {
@@ -6450,8 +6380,14 @@ function globComponentRe(part: string): RegExp {
       }
     } else re += c.replace(/[.+^${}()|\\]/g, '\\$&');
   }
-  return new RegExp(`^${re}$`);
+  try {
+    return new RegExp(`^${re}$`);
+  } catch {
+    return null;
+  }
 }
+/** the longest glob component this reader compiles: far past any name a file system allows (255), well under what the engine takes */
+const MAX_GLOB_COMPONENT = 1024;
 
 /**
  * THE NAMES A GLOB WORD DENOTES, read the way the shell (and make's own `wildcard`, `include` and prerequisite lists) read it
@@ -6497,6 +6433,10 @@ function expandNamePattern(baseDir: string, word: string, limit = 512): { names:
       return;
     }
     const re = globComponentRe(part);
+    if (re === null) {
+      incomplete = true;
+      return;
+    }
     for (const entry of listed.sort()) {
       if (!re.test(entry)) continue;
       const next = join(physical, entry);
@@ -7503,6 +7443,8 @@ function remadeBy(
     }
     if (MAKE_WILDCARD.test(t)) {
       const re = globComponentRe(t);
+      // (a target too long to compile is a rule that may well remake the file: the reading that asks)
+      if (re === null) return `the wildcard target ${t}`;
       return bare.some((n) => re.test(n)) && allThere(prereqs) ? `the wildcard target ${t}` : null;
     }
     return bare.includes(t) ? `a rule for ${t}` : null;
@@ -9653,6 +9595,11 @@ interface DryRunGrammar {
   /** the tool's own reader of "may the word after this option be its value" - for a tool whose options are read by ONE
    *  table elsewhere (kubectl, oc, helm: k8s.ts), so that this scan and every other agree on what an option is */
   mayTakeValue?: (opt: string) => boolean;
+  /** How many bare words (verb and operands, counted from the first word given) are NAME SLOTS: a word the shell builds at run time
+   *  there is data (`git push -n origin $(git branch --show-current)`). Beyond them, and in an option's name, it may be a flag - the one
+   *  that undoes the dry run - so the dry run is not proved. Absent for the tools whose own reader keeps its own (kubectl and helm:
+   *  flagFilledInAfter, by verb). */
+  slots?: number | ((words: readonly string[]) => number);
 }
 /** the values of `--dry-run=VALUE` that mean "do not act": kubectl's and helm's `client` and `server`, and the
  *  spellings of true that a boolean flag accepts. Anything else - `none`, `false`, an empty value, a word nobody
@@ -9711,7 +9658,33 @@ function dryRunDecision(words: readonly string[], g: DryRunGrammar): { state: 'd
       at = i;
     }
   });
+  // A WORD THE SHELL BUILDS AFTER THE LAST DRY-RUN FLAG MAY BE THE FLAG THAT UNDOES IT. The tool reads the line after expansion, and
+  // `git push --dry-run origin main $(echo --no-dry-run)` is a push. The question is asked once, for every tool that has such a flag
+  // (kubectl and helm ask it by verb: flagFilledInAfter). What is not proved is not a dry run: the line is the act.
+  if (last === 'dry' && g.slots !== undefined) {
+    const slots = typeof g.slots === 'function' ? g.slots(w) : g.slots;
+    let bare = 0;
+    for (let i = 0; i < w.length; i++) {
+      const word = w[i]!;
+      if (word.startsWith('-') && word !== '-') {
+        // the NAME of an option the shell builds can be any flag at all; its glued value (`--out=$FILE`) cannot
+        if (i > at && /[$`]/.test(word.split('=')[0]!)) return { state: 'act', at: -1 };
+        if (takesValue(word)) i++; // its value is data
+        continue;
+      }
+      if (i > at && bare >= slots && buildsFlags(word)) return { state: 'act', at: -1 };
+      bare++;
+    }
+  }
   return { state: last, at };
+}
+
+/** A word the shell BUILDS at run time rather than one that names ONE variable: a command's output (`$SUBST` is what the splitter leaves
+ *  of `$(…)`), a default (`${X:-y}`), every argument (`$@`). A plain `$NAME` in a name slot is a name by convention, and is taken as one;
+ *  a word whose literal start is not a `$` or a backtick cannot be a flag whatever follows it. */
+function buildsFlags(word: string): boolean {
+  if (!/^[$`]/.test(word) || word === '$ARITH') return false;
+  return word.startsWith('$SUBST') || !/^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/.test(word);
 }
 function dryRunOf(words: readonly string[], g: DryRunGrammar): 'dry' | 'act' | null {
   return dryRunDecision(words, g).state;
@@ -9796,22 +9769,30 @@ const k8sDryRunGrammar = (head: string): DryRunGrammar => ({
 });
 /** the tools whose whole option set is known: every option not listed as taking a value takes none, so what stands
  *  after it is an operand. `-n` is the dry run of `git rm`, `git mv` and `rsync`; for `patch` it is `--normal`. */
-const GIT_PATH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: gitValuedOptions('rm') };
+const GIT_PATH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: gitValuedOptions('rm'), slots: 0 };
+/** the NAME SLOTS of `git push`: the verb, the remote and one refspec - and `--all` / `--mirror` take no refspec, so a word the shell builds after
+ *  the remote can only be a flag */
+const pushSlots = (words: readonly string[]): number => (words.some((x) => x === '--all' || x === '--mirror') ? 2 : 3);
 /** `git push` and `git send-pack`: `-o` is a push option and the others name a program or a repository */
-const GIT_PUSH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: gitValuedOptions('push', ['-o', '--push-option', '--receive-pack', '--exec', '--repo']) };
+const GIT_PUSH_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: '', valued: gitValuedOptions('push', ['-o', '--push-option', '--receive-pack', '--exec', '--repo']), slots: pushSlots };
 /** the cloud CLIs, argocd and flux: long options only. A `--no-…` flag is a switch by convention (the aws CLI's all are) */
 const CLOUD_DRY_RUN: DryRunGrammar = {
   longs: ['dry-run', 'dryrun', 'server-dry-run', 'what-if', 'no-act'],
   short: '',
   shortValued: '',
   boolean: /^(--no-[a-z-]+|--recursive|--delete|--quiet|--debug|--force|--yes|--only-show-errors|--wait|--auto-approve|--follow-symlinks)$/,
+  // (the service and its verb: whatever stands after them AND after the flag may be the flag that undoes it - an operand of the verb is
+  // written before the options, `aws s3 cp SRC DEST --dryrun`, and the one that is not asks like the act it then is)
+  slots: 2,
 };
-const RSYNC_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: 'eBTfM@', valued: VALUE_OPTS_BY_HEAD['rsync']! };
+const RSYNC_DRY_RUN: DryRunGrammar = { longs: ['dry-run'], short: 'n', shortValued: 'eBTfM@', valued: VALUE_OPTS_BY_HEAD['rsync']!, slots: 2 };
 const PATCH_DRY_RUN: DryRunGrammar = {
   longs: ['dry-run', 'check'],
   short: '',
   shortValued: '',
   valued: /^(-p|-d|-i|-o|-r|-F|-B|-Y|-z|-V|-g|-D|--strip|--directory|--input|--output|--reject-file|--fuzz|--prefix|--suffix|--basename-prefix|--version-control|--get|--ifdef)$/,
+  // (the file to patch and the patch file)
+  slots: 2,
 };
 
 /** THE LINE'S WORDS - the head included, assignments and wrappers in front of it allowed - are a dry run that was PROVED.
@@ -9880,6 +9861,7 @@ function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolea
   }
   if (verbAt < 0) return false;
   const limit = k8sPositionalLimit(head, text[verbAt]!, text);
+  const bySelector = text.some((t) => /^(--selector|--all|--field-selector)(=|$)|^-l($|=|\S)/.test(t));
   let bare = 0;
   for (let i = verbAt + 1; i < end; i++) {
     const t = text[i]!;
@@ -9894,6 +9876,11 @@ function flagFilledInAfter(words: ReadonlyArray<{ text: string; expands?: boolea
     // `$` that the OUTER shell fills in - so a `$` or a backtick at the start of the word is a word made at run time
     const filledIn = /^[$`]/.test(t);
     if (i > at && filledIn && limit !== null && bare >= limit) return true;
+    // ...and a verb that names any number of objects still has only so many NAME SLOTS: a plain variable in one is a name, but a word
+    // the shell BUILDS - a command's output, a default, every argument - past them may be the flag that undoes the dry run
+    // (`delete pod x --dry-run $(echo --dry-run=none)`; closure audit 2026-10-02, SH-3)
+    // (a selector or `--all` leaves the name slot EMPTY: `kubectl delete pod -l app=x --dry-run=client $(…)` has nothing there but a flag)
+    if (i > at && limit === null && bare >= (head === 'helm' || bySelector ? 1 : 2) && buildsFlags(t)) return true;
     bare++;
   }
   return false;
@@ -14919,9 +14906,18 @@ function analyzeSegments(
   try {
     return analyzeSegmentsInto(hits, table, ctx, compiled, segments, state, isolatedShells, inherited, concurrent);
   } catch (e) {
-    if (!(e instanceof WorkBoundExceeded)) throw e;
-    return [...hits, unknownHit(table, ctx, e.message)];
+    return [...hits, unknownHit(table, ctx, failureReason(e))];
   }
+}
+
+/** WHY AN EXCEPTION ENDED A CLASSIFICATION, as a reason a person can act on. EVERY exception ends in a verdict, because the contract of this
+ *  evaluator is that every tool call does (closure audit 2026-10-02, RB-1: a wildcard word of sixteen thousand characters made the engine
+ *  refuse a regular expression with a SyntaxError, which left as an uncoded message of ninety kilobytes). What was found before it stays
+ *  found - the callers keep their hits - and what was not read asks. The exception's own text is NEVER carried: it can be anything. */
+function failureReason(e: unknown): string {
+  if (e instanceof WorkBoundExceeded) return e.message;
+  if (e instanceof RangeError) return 'too deeply nested to classify within the bound';
+  return `could not classify: the evaluator met an internal limit (${e instanceof Error ? e.name : typeof e})`;
 }
 
 function analyzeSegmentsInto(
@@ -14988,6 +14984,14 @@ function analyzeSegmentsInto(
     }
     /** the literal values assigned earlier in this command line, where the assignment is proven to have happened */
     const shellVars = new Map<string, string>();
+    /** the variables this line gave a value that is CODE if it is evaluated (evaluated-words.ts) */
+    const codeFlow = new CodeFlow();
+    /** the commands such a variable holds, analysed as the commands they are (the one place this unit hands them back to the analyzer) */
+    const analyzeCodeBodies = (bodies: readonly string[], inEnv: ExecutionEnvironment): void => {
+      for (const body of bodies)
+        for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env: inEnv }, true))
+          hits.push({ ...h, via: `${h.via ?? ''} (a variable whose value is evaluated as code)`.trim() });
+    };
     const stages = unit;
     // A DEFINITION THE SHELL MAY NEVER EXECUTE BINDS NOTHING. `if false; then git() { echo hi; }; fi` does not
     // define `git`, and neither does a definition inside a `while`/`until`/`for`/`case` branch or one that is a
@@ -14998,10 +15002,15 @@ function analyzeSegmentsInto(
     // for the analyzer and for the working-directory model alike (functionBindingTimeline).
     // a file the line SOURCES runs in this shell, so what it does to the function table is part of the line; it is read
     // from the directory the unit started in, and only until the first `cd` (after which it names another file)
-    const bindings = functionBindingTimeline(stages, (file, cwdMoved) => {
-      if (cwdMoved && !isAbsolute(file)) return null;
-      return readWordFile(ctx, state.env.cwd, file);
-    });
+    const bindings = functionBindingTimeline(
+      stages,
+      (file, cwdMoved) => {
+        if (cwdMoved && !isAbsolute(file)) return null;
+        return readWordFile(ctx, state.env.cwd, file);
+      },
+      // (a body run again at a call starts with the names its caller had bound - and takes the ones its own statements remove)
+      inherited?.names,
+    );
     const timeline = cwdTimeline(stages, state.env.cwd, state.env.cwdVerified, (abs) => readInsideWorkspace(ctx, abs));
     /** the symlink pairs earlier segments recorded, refreshed at each stage */
     let linkPairsNow: Array<[string, string]> = [];
@@ -15117,8 +15126,7 @@ function analyzeSegmentsInto(
     // its header), either side of a pipe - a definition is the stage after the whole BODY of `git() { echo hi; } | cat` -,
     // a background job, or after `&&`/`||` (`false && git() { true; }` never defines it) - all read by the timeline
     const binding = bindings[stageIndex]!;
-    // (a body run again at a call knows the names its caller had bound: its own timeline starts at the body)
-    const functionNames = inherited ? new Set([...binding.must, ...inherited.names]) : binding.must;
+    const functionNames = binding.must;
     const bindingIsProven = binding.unconditional;
     const stdinFrom = stage.pipedFromPrevious ? upstream : null;
     const stdinParts = stage.pipedFromPrevious ? upstreamParts : [];
@@ -15196,6 +15204,12 @@ function analyzeSegmentsInto(
     }
     if (cdTrimmed.startsWith(`${FUNCTION_UNBIND} `)) {
       definedNames.delete(cdTrimmed.slice(FUNCTION_UNBIND.length + 1));
+      continue;
+    }
+    // the body of an arithmetic expansion: a bare name in it is evaluated by evaluating what it holds (the splitter keeps the body
+    // for exactly this question; the commands substituted into it are segments of their own)
+    if (cdTrimmed.startsWith(`${ARITHMETIC_BODY} `)) {
+      analyzeCodeBodies(codeFlow.inExpression(cdTrimmed.slice(ARITHMETIC_BODY.length + 1)), state.env);
       continue;
     }
     // `unset NAME` of a VARIABLE forgets what this line knew of it (what it does to FUNCTIONS is the timeline's business:
@@ -15298,8 +15312,15 @@ function analyzeSegmentsInto(
         // the definition that stands: the last one that certainly ran, and any later one that may have (which of them is bound is not known)
         const standing = defs.slice(-4);
         const lastSure = standing.map((d) => d.unconditional).lastIndexOf(true);
-        for (const def of lastSure > 0 ? standing.slice(lastSure) : standing) {
-          if (written.size === def.ledger && dirsNow === def.dirs) continue;
+        // THE BODY'S POSITIONAL PARAMETERS ARE THE CALL'S ARGUMENTS. `git() { unset -f git; git "$@"; }; git push origin main` runs the real
+        // `git push origin main`, and the body read at its definition has only `git "$@"`, a word nobody can read. A body that names its
+        // parameters is therefore read again at every call, with the words of the call put where they stand (closure audit 2026-10-02, SH-2)
+        const argv = callArguments(seg);
+        // (a definition made INSIDE a body is made when that body runs, which is after the definition that holds it was made - and it ends
+        // before it in the text - so the later one is not always the one that stands: every definition that may not have run is a candidate)
+        for (const def of lastSure > 0 ? standing.filter((d, k) => k >= lastSure || !d.unconditional) : standing) {
+          const { stages: body, used: positional } = bodyWithPositionals(def.body, argv);
+          if (!positional && written.size === def.ledger && dirsNow === def.dirs) continue;
           const runIn = point.dirs.filter((d) => d !== CWD_UNKNOWN);
           for (const dir of runIn.length ? runIn : [env.cwd]) {
             const callEnv: ExecutionEnvironment = {
@@ -15316,7 +15337,7 @@ function analyzeSegmentsInto(
               [],
               { ...state, depth: state.depth + 1, env: callEnv },
               false,
-              { stages: def.body, functions: fnDefs, names: functionNames, active: new Set([...(inherited?.active ?? []), segHead]) },
+              { stages: body, functions: fnDefs, names: functionNames, active: new Set([...(inherited?.active ?? []), segHead]) },
             ))
               hits.push({ ...h, via: `${h.via ?? ''} (the body of ${segHead}, run at its call)`.trim() });
           }
@@ -15355,6 +15376,12 @@ function analyzeSegmentsInto(
     for (const body of gitConfigCommands(seg))
       for (const h of analyzeSegments(table, ctx, compiled, [body], { ...state, env }, true))
         hits.push({ ...h, via: `${h.via ?? ''} (run by git from its configuration)`.trim() });
+    // A VARIABLE THE LINE FILLED WITH CODE, AND THAT THE SHELL THEN EVALUATES: `x='a[$(git push origin main)]'; echo $((x))`. The value was
+    // inert while it was assigned; arithmetic, `let`, `[[ -eq ]]`, `${!x}` and `eval "$x"` run what it holds (evaluated-words.ts: CodeFlow)
+    {
+      const head = statementHead(seg);
+      analyzeCodeBodies(codeFlow.commands(seg, head.prefix, head.verb, head.args), env);
+    }
     for (const rawBody of carriedShellBodies(seg)) {
       // A CARRIED BODY IS A UNIT OF SHELL, and the state that flows between its commands flows there too. Only a
       // body containing a PIPE re-entered the analyzer; one containing `&&`, `;` or a newline was flattened into
@@ -15733,6 +15760,7 @@ function analyzeSegmentsInto(
       // resolved, so every later use asks instead of being read as the home or working directory it used to be
       else if (/^(HOME|PWD|OLDPWD)$/.test(vn)) shellVars.set(vn, `\${${vn}:-assigned-at-run-time}`);
       else shellVars.delete(vn);
+      codeFlow.bind(vn, vv, bindingIsProven && b.how !== 'default-expansion');
       // (a value bound at run time is written as one that cannot be resolved, which is what it is)
       const written1 = `${vn}=${vv ?? '$RUNTIME'}`;
       Object.assign(carriedEnv, segmentEnvInputs(written1 + ' x', true));
@@ -16185,8 +16213,7 @@ export function evaluate(table: CompiledAuthorityTable, ctx: EvaluationContext, 
       } catch (e) {
         // (a shell command is answered inside `classifyBounded`, keeping what it found; this is every other tool - a path of megabytes, a
         // patch of thousands of files - and a command whose bound was reached while its answer was being finished)
-        if (!(e instanceof WorkBoundExceeded)) throw e;
-        const hit = unknownHit(table, ctx, e.message);
+        const hit = unknownHit(table, ctx, failureReason(e));
         const outcome = explainOutcome(table, ctx, hit)!;
         const where = `in profile ${ctx.profile}, mode ${ctx.mode} (${hit.via})`;
         const base =
@@ -16205,14 +16232,7 @@ function classifyBounded(table: CompiledAuthorityTable, ctx: EvaluationContext, 
   try {
     return classifyCommand(table, ctx, command);
   } catch (e) {
-    const why =
-      e instanceof WorkBoundExceeded
-        ? e.message
-        : e instanceof RangeError
-          ? 'too deeply nested to classify within the bound'
-          : null;
-    if (why === null) throw e;
-    return [unknownHit(table, ctx, why)];
+    return [unknownHit(table, ctx, failureReason(e))];
   }
 }
 

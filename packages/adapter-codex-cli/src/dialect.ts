@@ -2,7 +2,7 @@
 // installed (K4, M10): this dialect emits the neutral JSON shape and fails closed on anything it cannot parse.
 import { join } from 'node:path';
 import type { HookEvent, HookDecision, HookEventName } from '../../kernel/src/hooks/events.ts';
-import { decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
+import { checkPayloadEvent, decisionReason, isHookEventName } from '../../kernel/src/hooks/events.ts';
 import { writeAtomic } from '../../kernel/src/util/fs.ts';
 import { argvToCommandLine, shellQuote } from '../../kernel/src/util/shell-quote.ts';
 
@@ -13,12 +13,10 @@ export function parseCodexEvent(
   payload: Record<string, unknown>,
   cwdFallback: string,
 ): HookEvent {
-  const name =
-    typeof payload['hook_event_name'] === 'string'
-      ? payload['hook_event_name']
-      : typeof payload['event'] === 'string'
-        ? payload['event']
-        : eventName;
+  // THE REGISTERED EVENT STANDS, whichever key the payload names an event in (events.ts: checkPayloadEvent)
+  checkPayloadEvent(eventName, payload['hook_event_name']);
+  checkPayloadEvent(eventName, payload['event']);
+  const name = eventName;
   if (!isHookEventName(name)) throw new Error(`unknown hook event "${name}"`);
   const ev: HookEvent = {
     host: HOST_ID,
