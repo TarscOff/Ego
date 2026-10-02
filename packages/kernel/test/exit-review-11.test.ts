@@ -43,9 +43,12 @@ test('a writer whose operand is built at run time asks, and a variable the line 
     'f=.claude/settings.json; tee $f',
     'f=control-plane/permissions/matchers.md; sed -i s/a/b/ "$f"',
     'V=.claude/settings.json; echo x | tee $V',
+    // a substitution whose output is KNOWN is the path it prints (closure audit 2026-10-02, PA-01): it was asked about, and is the refusal that
+    // the same path spelled out has always been
+    'touch "$(echo .harness/runtime/pin.json)"',
   ])
     assert.equal(verdict(c, dir), 'DENY', c);
-  for (const c of ['touch "$(echo .harness/runtime/pin.json)"', 'tee $(find . -name matchers.md)', 'find . -name pre-commit -exec cp src/a.ts {} \\;', 'cp a "$DEST"'])
+  for (const c of ['tee $(find . -name matchers.md)', 'find . -name pre-commit -exec cp src/a.ts {} \\;', 'cp a "$DEST"'])
     assert.equal(verdict(c, dir), 'ASK', c);
   assert.equal(verdict('f=README.md; tee $f', dir), 'ALLOW');
   assert.equal(verdict('echo $HOME', dir), 'ALLOW');

@@ -229,6 +229,10 @@ const CC_GRAMMAR: Grammar = {
     '-I:v', '-L:v', '-l:v', '-D:v', '-U:v', '-x:v', '-c', '-S', '-E', '-g', '-shared', '-static', '-pipe', '-v', '-w', '-pthread',
     '--output=:j', '-isysroot:s', '--sysroot=:j', '-target:s', '--target=:j', '-fprofile-generate=:j', '-fprofile-use=:j', '-fprofile-dir=:j',
     '-ftime-report', '-fdump-tree-all', '-gen-cdb-fragment-path:s',
+    // the other files a compiler writes: clang's serialized diagnostics (`--serialize-diagnostics F`, also spelled with one dash), its
+    // optimization record and time trace, GCC's/clang's dump directory, and the crash reproducer directory (PA-14)
+    '--serialize-diagnostics:v', '-serialize-diagnostics:v', '-foptimization-record-file=:j', '-ftime-trace=:j', '-fcrash-diagnostics-dir=:j',
+    '-dumpdir:v', '-dumpbase:v',
   ],
 };
 const CC_ROLES: Record<string, Role> = {
@@ -245,7 +249,38 @@ const CC_ROLES: Record<string, Role> = {
   output: 'write',
   'fprofile-dir': 'writeDir',
   'fprofile-generate': 'writeDir',
+  'serialize-diagnostics': 'write',
+  'foptimization-record-file': 'write',
+  'ftime-trace': 'write',
+  'fcrash-diagnostics-dir': 'writeDir',
+  dumpdir: 'writeDir',
 };
+
+/** What the linker or the assembler is handed through a compiler's `-Wl,A,B` / `-Wa,A,B`: a comma-separated list of ITS options, and the ones that name a
+ *  file it writes are the link map (`-Map=F`, `-Map,F`, `--Map=F`), its output (`-o,F`, `--output=F`) and the assembler's listing (`-al=F`, `-a=F`)
+ *  (PA-14). They were an opaque `:j` value: the compiler's table read the option and not what is inside it. */
+export function passThroughWrites(name: string, value: string): string[] {
+  const parts = value.split(',');
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]!;
+    let m = /^-{1,2}(?:Map|output|dependency-file)=(.+)$/.exec(p) ?? (name === 'Wa,' ? /^-a[a-z]*=(.+)$/.exec(p) : null);
+    if (m) {
+      out.push(m[1]!);
+      continue;
+    }
+    m = /^-{1,2}(?:Map|output|o)$/.exec(p);
+    if (m && parts[i + 1] !== undefined) out.push(parts[++i]!);
+  }
+  return out;
+}
+
+// ---- mktemp ---------------------------------------------------------------------------------------------------------------------
+// `mktemp TEMPLATE` CREATES a file (or, with -d, a directory) at the template: `mktemp .git/hooks/zz.XXXX` made a file in a governed tree, and
+// `mktemp -p DIR` / `--tmpdir=DIR` creates one in DIR. -u (--dry-run) only prints a name. BSD's `-t PREFIX` and GNU's `-t` (a flag) both put the
+// file in the temporary directory, so the template is not a path of the working directory then (PA-14).
+const MKTEMP_GRAMMAR = gnu(['-d|--directory', '-u|--dry-run', '-q|--quiet', '-t', '-p:v', '--tmpdir:o', '--suffix:v', '--help', '--version']);
+const MKTEMP_ROLES: Record<string, Role> = { p: 'writeDir', tmpdir: 'writeDir' };
 
 // ---- linters and formatters that LOAD what their options name ----------------------------------------------------------------------
 // These are in the bounded vocabulary because they execute nothing they were not named for - and a formatter, a parser, a plugin, a
@@ -450,6 +485,7 @@ export const TOOL_TABLES: Record<string, ToolTable> = {
   curl: { grammar: CURL_GRAMMAR, roles: CURL_ROLES, complete: true },
   rsync: { grammar: RSYNC_GRAMMAR, roles: RSYNC_ROLES },
   cargo: { grammar: CARGO_GRAMMAR, roles: CARGO_ROLES },
+  mktemp: { grammar: MKTEMP_GRAMMAR, roles: MKTEMP_ROLES, complete: true },
   eslint: { grammar: ESLINT_GRAMMAR, roles: ESLINT_ROLES },
   prettier: { grammar: PRETTIER_GRAMMAR, roles: PRETTIER_ROLES },
   pylint: { grammar: PYLINT_GRAMMAR, roles: PYLINT_ROLES },
@@ -481,6 +517,7 @@ export function toolTableFor(head: string, argv: readonly string[]): { key: stri
   if (base === 'eslint' || base === 'prettier' || base === 'pylint' || base === 'rsync') return { key: base, table: TOOL_TABLES[base]!, from: 1 };
   if (base === 'wget' || base === 'wget2') return { key: 'wget', table: TOOL_TABLES['wget']!, from: 1 };
   if (base === 'curl') return { key: 'curl', table: TOOL_TABLES['curl']!, from: 1 };
+  if (base === 'mktemp' || base === 'gmktemp') return { key: 'mktemp', table: TOOL_TABLES['mktemp']!, from: 1 };
   if (base === 'cargo') {
     // `cargo +nightly build`: a toolchain selector comes first
     const at = argv[1]?.startsWith('+') ? 2 : 1;
@@ -529,6 +566,14 @@ export function toolEffects(head: string, argv: readonly string[]): ToolEffects 
   // curl's `-w` format carries a destination inside its value: `%output{FILE}` writes FILE and `%output{>>FILE}` appends to it. A format
   // taken from a file (`-w @fmt`) is read by the evaluator, which can open files; this reads the ones written on the command line
   if (found.key === 'curl') for (const f of curlWriteOut(parsed)) for (const m of f.matchAll(/%output\{(?:>>)?([^}]*)\}/g)) out.writes.push(m[1]!);
+  // what a compiler hands its linker and assembler: the files THEY write (`-Wl,-Map=F`)
+  if (found.key === 'cc')
+    for (const o of parsed.options)
+      if ((o.name === 'Wl,' || o.name === 'Wa,') && o.value !== null) out.writes.push(...passThroughWrites(o.name, o.value));
+  // `mktemp TEMPLATE` creates the template (unless it only prints a name, or the file goes to the temporary directory)
+  if (found.key === 'mktemp' && !has(parsed, 'dry-run') && !has(parsed, 't')) out.writes.push(...parsed.operands.map((o) => o.text));
+  // ...and `-u` creates nothing anywhere, in the directory `-p` names as much as at the template
+  if (found.key === 'mktemp' && has(parsed, 'dry-run')) out.writeDirs = [];
   // `git config --file F --get KEY` (and --list, --get-all...) READS F; only a setting, an unsetting or an edit writes it
   if (found.key === 'git config' && gitConfigAsks(parsed)) {
     out.reads.push(...out.writes);

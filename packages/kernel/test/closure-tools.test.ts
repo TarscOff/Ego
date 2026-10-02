@@ -197,7 +197,8 @@ test('a write through a link follows it the way the kernel does: loops end, link
   const dir = linked({ a: 'b', b: 'a', ok: 'new-file.txt', okdir: 'newdir' });
   // a loop cannot be opened at all; the point is that it is judged, once, and does not hang
   const loop = evalIn(dir, 'Write', { file_path: join(dir, 'a') });
-  assert.ok(['ALLOW', 'ASK', 'DENY'].includes(loop.verdict));
+  // (a loop cannot be opened at all - ELOOP - so nothing is written through it and it is an ordinary name: the answer is ALLOW, not "some verdict")
+  assert.equal(loop.verdict, 'ALLOW', caps(loop));
   // a link to a missing file inside the workspace is an ordinary repository write
   const inside = evalIn(dir, 'Write', { file_path: join(dir, 'ok') });
   assert.equal(inside.verdict, 'ALLOW', `[${caps(inside)}]`);
@@ -233,11 +234,14 @@ test('links are followed the way the kernel follows them: trailing slashes, `..`
   };
   assert.equal(evalIn(chain(30), 'Write', { file_path: 'c0' }).verdict, 'DENY');
   const started = Date.now();
-  assert.ok(['ALLOW', 'ASK', 'DENY'].includes(evalIn(chain(80), 'Write', { file_path: 'c0' }).verdict));
+  // (past the kernel's own limit the name cannot be opened either, so there is no credential store to reach: ALLOW, and in bounded time)
+  assert.equal(evalIn(chain(80), 'Write', { file_path: 'c0' }).verdict, 'ALLOW');
   // every level names the next level TWICE, so an unbudgeted walk does 2^25 link resolutions
   const farm: Record<string, string> = { m25: newCred() };
   for (let i = 0; i < 25; i++) farm[`m${i}`] = `m${i + 1}/m${i + 1}`;
-  assert.ok(['ALLOW', 'ASK', 'DENY'].includes(evalIn(linked(farm), 'Write', { file_path: 'm0' }).verdict));
+  // (the farm is resolved within the shared budget, to the credential store it names: the real open would fail with ELOOP, so refusing is the
+  // over-approximation - and it is never an ALLOW)
+  assert.equal(evalIn(linked(farm), 'Write', { file_path: 'm0' }).verdict, 'DENY');
   assert.ok(Date.now() - started < 5000, `resolution took ${Date.now() - started} ms: the link budget is shared by the whole walk`);
 });
 

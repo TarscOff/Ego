@@ -201,7 +201,10 @@ test('producer contract: the source has no second path around the canonical anal
   // one helper that hands it back to this function is the same analyzer fed one more segment.
   // AND ONE MORE (closure audit wave 5, PA-13): the segment a line that makes a link and then uses it is read as once more, with every
   // path word that goes through the link spelled through its target (`segmentThroughLinks`) - fed back in as its own segment, same ledger.
-  assert.equal(callers, 14, 'a new call site must feed the canonical pipeline, not go around it');
+  // AND THE OPERANDS ANOTHER COMMAND PRODUCES (closure audit 2026-10-02, wave 6, PA-01): `echo ~/.ssh/id_rsa | xargs cat`, a read loop and
+  // `cat $(echo …)` hand the words the producer prints to the consumer, and the consumer is judged again as the command it is with those
+  // words in place - the same analyzer, fed back in as its own segment (dataflow.ts plans it; nothing is classified on the side).
+  assert.equal(callers, 15, 'a new call site must feed the canonical pipeline, not go around it');
   for (const site of ['classifyCommand', 'classifyNormalized', 'execCarriedCommand', 'readsScriptFromStdin', 'carriedShellBodies', 'awkShellCommands', 'sedShellCommands', 'gitPagerCommands', 'gitConfigCommands', 'DB_CLIENT_HEADS'])
     assert.ok(src.includes(site), `${site} is one of the accounted-for paths`);
   // and the producer return type still has nowhere to put a verdict

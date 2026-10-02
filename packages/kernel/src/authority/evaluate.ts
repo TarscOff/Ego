@@ -42,17 +42,21 @@ import {
   chargeListing,
   isDirectory,
   namesAnEntry,
+  namesADashedEntry,
+  gitDirOf,
   directoryCandidates,
   hostTrim,
   isDevPath,
   isDiscardDevice,
   isNetworkDevice,
+  isStdinAlias,
   networkDevice,
   lexicalPath,
   chdirPath,
   openedPath,
   globMatches,
   pathCandidates,
+  wildcardNames,
   withPathCache,
   type PathCandidates,
 } from './paths.ts';
@@ -79,6 +83,11 @@ import { localRead } from './local-reads.ts';
 import { directorySelector } from './pkg-selectors.ts';
 import { assignmentWord, bindingsOf, type Binding as ShellBinding } from './bindings.ts';
 import { LOCATIONS, PROGRAM_NAMES, SHELL_LOCAL_NAMES, assignedValue, judgeLocation, type Whereabouts } from './env-vars.ts';
+import { restoreQuoting, textPieces } from './words.ts';
+import { aliasesOf } from './aliases.ts';
+import { unreadShellFields } from './host-fields.ts';
+import { copiesLinks, linksUnder } from './links.ts';
+import { NO_OUTPUT, combineProduced, planReadLoop, planSubstitutions, planXargs, producedBy, type FlowReaders, type Produced } from './dataflow.ts';
 import {
   canonicalGitTokens,
   forcesRefReset,
@@ -474,6 +483,10 @@ export interface ShellStage {
   readonly lastOfPipe?: boolean;
   /** the stage is, or sits in, an element to the right of `&&` or `||`: it runs only if the left side allowed it */
   readonly conditional?: boolean;
+  /** THE COMMANDS SUBSTITUTED INTO THIS STAGE, in the order their `$SUBST` markers stand in its text (a process substitution is null: what it hands
+   *  over is a file, not text). The markers say THAT something was substituted; this says what (flow.ts, PA-01). Absent when the count of markers
+   *  and of substitutions disagree - the text holds a `$SUBST` of its own - because then no marker can be tied to its command. */
+  readonly substitutions?: ReadonlyArray<string | null>;
 }
 
 /** The segments of a command, with the pipeline edges between them. */
@@ -492,7 +505,10 @@ export function splitShellPipeline(command: string): ShellStage[] {
     feedsPipe?: boolean;
     lastOfPipe?: boolean;
     conditional?: boolean;
+    substitutions?: ReadonlyArray<string | null>;
   }> = [];
+  // THE SUBSTITUTIONS SEEN SINCE THE LAST STAGE WAS PUSHED, in order: the next stage carries the ones whose markers it holds (ShellStage.substitutions)
+  let pendingSubst: Array<string | null> = [];
   // WHERE THE CURRENT PIPELINE ELEMENT AND AND-OR LIST BEGAN. A separator ends one, and what it ends is marked as a whole -
   // retroactively, because the `|` that makes `{ a; b; } | c` a pipeline is read after `a` and `b` were pushed. A group
   // keeps its own element and list and hands them back when it closes, so the group itself stays ONE element of the
@@ -585,6 +601,9 @@ export function splitShellPipeline(command: string): ShellStage[] {
   };
   const push = () => {
     const t = cur.trim();
+    const markers = (t.match(/\$SUBST/g) ?? []).length;
+    const carried = markers > 0 && markers === pendingSubst.length ? [...pendingSubst] : undefined;
+    pendingSubst = [];
     // A REDIRECTION IS NOT A COMMAND. Consuming a group's braces leaves `{ echo a; echo b; } > out.txt` with a
     // headless `> out.txt`, which was classified as an unknown command and asked for an ordinary workspace write
     // (exit review 4). It belongs to the command it redirects, so it is re-attached to it.
@@ -593,6 +612,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       else
         segments.push({
           text: t,
+          ...(carried !== undefined ? { substitutions: carried } : {}),
           pipedFromPrevious: consumePipe(),
           fromProcessSubstitution: sawProcessSubstitution,
           // the OUTERMOST group: a nested `{ … }` inside a group is still part of the same standard output, and
@@ -1035,6 +1055,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // the placeholder stands INSIDE the word the substitution was part of. Separating it with a space made
         // `TODAY=$(date +%F)` read as the assignment `TODAY=` followed by a command whose head is a substitution,
         // so the most ordinary line in any script was opaque (exit review 4).
+        pendingSubst.push(ch === '$' ? inner : null);
         cur += '$SUBST';
         i = j;
         continue;
@@ -1072,6 +1093,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
                 text: `${FUNCTION_UNBIND} ${sg.text.slice(FUNCTION_DEF_PREFIX.length + 1)}`,
                 pipedFromPrevious: false,
               });
+          pendingSubst.push(command.slice(i + 1, end).replace(/\\([`$\\])/g, '$1'));
           cur += '$SUBST';
           i = end + 1;
           continue;
@@ -1259,6 +1281,20 @@ function literalWord(word: string): string | null {
   const double = /^"([^"]*)"$/.exec(word);
   const body = double ? double[1]! : word;
   if (/[$`]/.test(body)) return null; // it expands: the real output is not this text
+  // A WORD WITH QUOTING INSIDE IT is the value the shell makes of it - `"$HOME"/.aws` or `'~+'/id_rsa` - and not its text: the quote characters
+  // are not printed. A `$` or a backtick outside single quotes expands, so the real output is not known.
+  if (double === null && /['"\\]/.test(body)) {
+    let inSingle = false;
+    let inDouble = false;
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i]!;
+      if (c === '\\' && !inSingle) i++;
+      else if (c === "'" && !inDouble) inSingle = !inSingle;
+      else if (c === '"' && !inSingle) inDouble = !inDouble;
+      else if ((c === '$' || c === '`') && !inSingle) return null;
+    }
+    return unquoteShellWord(body);
+  }
   return body;
 }
 
@@ -1897,7 +1933,11 @@ function normalizeSegmentInner(segment: string): string[] {
  *  `psql -c '\e'` carried through `kubectl exec` came back as `psql -c e`: psql's editor command read as the word `e`,
  *  at ALLOW (found by the generated cross-product of the database-client class). */
 function requote(tokens: string[]): string {
-  return tokens.map((t) => (t === '' ? "''" : /[\s;&|<>$`"'\\]/.test(t) ? `'${t.replace(/'/g, `'\\''`)}'` : t)).join(' ');
+  // (a value whose braces still EXPAND was quoted or escaped when it was typed - the text it came from had its unquoted braces expanded already -
+  // and the line this rebuilds is read once more, by readers that expand them: PA-03)
+  return tokens
+    .map((t) => (t === '' ? "''" : /[\s;&|<>$`"'\\]/.test(t) || (/[{}]/.test(t) && expandBraces(t) !== t) ? `'${t.replace(/'/g, `'\\''`)}'` : t))
+    .join(' ');
 }
 
 /** A command line with its REDIRECTIONS taken out. `cp x control-plane/permissions/matchers.md 2>&1` has three operands
@@ -2478,7 +2518,7 @@ function scanRedirections(segment: string, keepContinuations = false): Redirecti
         // `cat < /dev/tcp/HOST/PORT` makes the remote side the command's INPUT: judged by the network, not as a file
         if (isNetworkDevice(src)) sockets.push(src);
         // a device NAME is not file content, but an open descriptor above 2 (`/dev/fd/3`) is whatever an earlier line opened
-        else if (!src.startsWith('&') && !(isDevPath(src) && descriptorAlias(src) === null)) reads.push(src);
+        else if (!w.startsWith('&') && !(isDevPath(src) && descriptorAlias(src) === null)) reads.push(src);
       }
       i = Math.max(k, i + 1);
       continue;
@@ -2553,7 +2593,8 @@ function scanRedirections(segment: string, keepContinuations = false): Redirecti
       if (!word) continue;
       const target = unquoteShellWord(word);
       if (dup && /^\d+$|^-$/.test(target)) continue; // fd duplication, not a file
-      if (target.startsWith('&')) continue;
+      // (an `&` that STARTS the word as it was typed: a quoted or escaped one is the first character of a file's name - PA-03, `echo x > '&amp/f'`)
+      if (word.startsWith('&')) continue;
       // a discard device is not a write to a governed path - but only after `..` is resolved away, so that
       // `/dev/../etc/x` is judged as `/etc/x` (round 13). Every OTHER path under /dev is a destination: the raw disk
       // `echo x > /dev/disk0` used to be dropped with the null device. And `/dev/tcp/HOST/PORT` is a socket, judged by the
@@ -2563,11 +2604,13 @@ function scanRedirections(segment: string, keepContinuations = false): Redirecti
         sockets.push(target);
         continue;
       }
-      if (isDiscardDevice(target)) continue;
+      // (the standard input under another name is a discard only while nothing was opened for it: with `< file` on the line it IS that file, PA-06 -
+      // so it is kept here, and dropped below if the line opened no file)
+      if (isDiscardDevice(target) && !isStdinAlias(target)) continue;
       out.push(target);
     }
   }
-  return { writes: out, reads, sockets, operators, spans };
+  return { writes: reads.length > 0 ? out : out.filter((t) => !isStdinAlias(t)), reads, sockets, operators, spans };
 }
 
 /** THE COMMAND WITHOUT ITS REDIRECTIONS - what a matcher that describes the ACT should read. `git checkout .` discards the
@@ -3935,11 +3978,27 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
   const lexPosix = (isAbsolute(absPath) ? absPath : lexicalPath(absPath)).split(sep).join('/');
   // ...and once more on the FOLDED name, which is what the filesystem will actually resolve
   const foldRoots = canonRoots.map(foldName);
+  // ...AND WHERE THE PROTECTED NAME REALLY IS (PA-07, PA-08, aliases.ts): a protected directory that is itself a link, and a `.git` that is a
+  // file naming the git directory. The path is read as if it had been spelled with the protected name - `shared/claude/settings.json` with
+  // `.claude -> shared/claude` is `.claude/settings.json` - so the rule that names the place finds the place under whatever name it has
+  const canonHome = canonicalPath(homedir()).split(sep).join('/');
+  const viaAlias = (): boolean => {
+    for (const a of aliasesOf(pattern, canonRoots))
+      for (const p of [canonPosix, lexPosix]) {
+        const fp = foldName(p);
+        const fr = foldName(a.real);
+        if ((fp === fr || fp.startsWith(fr + '/')) && tryMatch(foldName(a.name) + fp.slice(fr.length), foldName(canonHome), foldRoots)) return true;
+      }
+    return false;
+  };
   return (
-    tryMatch(canonPosix, canonicalPath(homedir()).split(sep).join('/'), canonRoots) ||
+    tryMatch(canonPosix, canonHome, canonRoots) ||
+    // (a trailing slash names the DIRECTORY'S CONTENTS, which is what `dir/**` describes - and the canonical path has lost it: the reading
+    // that keeps it is the one that finds a credential directory reached through a link, or from a home that is itself under one)
+    (absPath.endsWith('/') && tryMatch(`${canonPosix.replace(/\/$/, '')}/`, canonHome, canonRoots)) ||
     (lexPosix !== canonPosix && tryMatch(lexPosix, homedir().split(sep).join('/'), lexRoots)) ||
-    (foldName(canonPosix) !== canonPosix &&
-      tryMatch(foldName(canonPosix), foldName(canonicalPath(homedir()).split(sep).join('/')), foldRoots))
+    (foldName(canonPosix) !== canonPosix && tryMatch(foldName(canonPosix), foldName(canonHome), foldRoots)) ||
+    viaAlias()
   );
 }
 
@@ -4349,6 +4408,117 @@ export function classifyPath(
   return j.hits[0] ?? unknownHit(table, ctx, `the path ${path} cannot be resolved`);
 }
 
+/** THE CONTENTS OF A DIRECTORY, AS A PATH RULE DESCRIBES THEM (PA-10). `~/.ssh/**` is the files in the directory, and the glob needs a slash
+ *  after the name, so it never matched the directory entry itself: `cp -R ~/./.aws out`, `grep -r KEY $HOME//.ssh`, `tar -cf o.tar lssh`
+ *  (a link to it) named a credential store by a spelling the text rules do not know, and were an ASK for a read outside the workspace. The
+ *  directory is asked about under the name it REALLY has, with the slash: [] when the path is not a directory. */
+function contentsProbe(abs: string): string[] {
+  if (!isDirectory(abs)) return [];
+  const real = canonicalPath(abs);
+  return [real.endsWith('/') ? real : `${real}/`];
+}
+
+/** THE GOVERNED PATH A LINK TARGET IS, OR CONTAINS: the question `ln -s` is judged by (exit review 9), asked once here for every act that makes a
+ *  link - `ln -s`, and a copy that keeps the links it copies (PA-05). A link to a directory that CONTAINS protected paths opens a writable
+ *  route into them, so the target is compared with the literal head of every path rule that guards a write, on the folded name. */
+function protectedReachOf(table: CompiledAuthorityTable, ctx: EvaluationContext, targetPosix: string): (typeof table.protectedPaths)[number] | null {
+  const linkRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) => canonicalPath(r).split(sep).join('/'));
+  const here = foldName(targetPosix);
+  for (const pp of table.protectedPaths) {
+    if (pp.tool === 'Read') continue;
+    const prefix = pp.path
+      .replace(/^\*\*\//, '')
+      .replace(/^~\//, homedir() + '/')
+      .split(/[*?[{]/)[0]!
+      .replace(/\/$/, '');
+    const candidates = (isAbsolute(prefix) ? [prefix] : linkRoots.map((r: string) => `${r}/${prefix}`)).map(foldName);
+    if (candidates.some((c) => c === here || c.startsWith(here + '/'))) return pp;
+  }
+  return null;
+}
+
+/** THE ROUTE A LINK OPENS INTO A GOVERNED TREE, ONE READER FOR EVERY ACT THAT MAKES A LINK (`ln -s`, and a copy that keeps the links it copies - wave 6,
+ *  PA-05; before the merge of wave 6 `ln -s` and the copy each had their own loop, one with the checks of the other missing). Three questions of a target:
+ *  (1) is it INSIDE a protected tree - a file there (`lh -> .git/hooks/pre-commit`)? A link to a path a rule governs is what a write to that path is;
+ *  (2) does it CONTAIN protected paths (`protectedReachOf`: `.harness`, `.git`, or a directory above them)? That is a writable route into them;
+ *  (3) unless it is a registered root or one of its ancestors and `exemptRoots` says so: every checkout contains the governance tree, so a link to the checkout
+ *  (`ln -s . self`) says nothing, and the route is judged when something WRITES THROUGH it (the path reader follows it, and `segmentThroughLinks` spells a name
+ *  made earlier in the line). A copy cannot claim that: the links it makes are not on the disk yet, so a copy asks for roots too (the stricter reading).
+ *  Both answers are returned when both hold; the caller pushes them all. */
+function linkRouteHits(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  target: string,
+  seg: string,
+  how: { /** what is being done, in the words of the reason: `symlink k points at ../x` */ phrase: string; exemptRoots: boolean },
+): CapabilityHit[] {
+  const out: CapabilityHit[] = [];
+  const posix = target.split(sep).join('/');
+  const into = classifyPath(table, ctx, 'Write', target);
+  // (a link to a path a rule governs - and an absolute refusal that is not just "outside the workspace" - is the route it always was)
+  if (into.via.startsWith('matcher path') || into.capability.startsWith('fs.credential') || (into.absolute && into.capability !== 'fs.outside-workspace.write'))
+    out.push({ ...into, via: `${how.phrase}, which is inside protected ${into.via}`, segment: seg });
+  if (how.exemptRoots) {
+    const roots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) => canonicalPath(r).split(sep).join('/'));
+    if (atOrAboveRoot(roots, posix)) return out;
+  }
+  const pp = protectedReachOf(table, ctx, posix);
+  if (pp !== null)
+    out.push({
+      capability: pp.capability,
+      verdict: verdictFor(table, ctx, pp.capability),
+      via: `${how.phrase}, which is or contains protected ${pp.path}`,
+      segment: seg,
+      absolute: isAbsoluteCap(table, pp.capability),
+    });
+  return out;
+}
+
+/** The commands that bring names into being on the disk (the ones a later wildcard of the same line may match). */
+const MAKES_NAMES: ReadonlySet<string> = new Set(
+  'mkdir mkfifo mknod mktemp touch tee cp mv ln install rsync ditto tar unzip dd truncate cpio patch git curl wget make'.split(' '),
+);
+
+/** What the names a wildcard destination matches do NOT settle (PA-09): the set is not the whole answer; or nothing matches now and something may
+ *  by the time the command runs - a name an earlier part of this line makes, or a protected tree that does not exist yet and that the pattern
+ *  could name. Asked of an operand and of a redirection target alike. */
+function wildcardLeavesOpen(
+  table: CompiledAuthorityTable,
+  ctx: EvaluationContext,
+  cwds: string | readonly string[],
+  word: string,
+  old: readonly string[] | undefined,
+  names: { matched: number; open: string | null },
+  written: ReadonlySet<string>,
+): boolean {
+  if (names.open !== null) return true;
+  // (a word with braces and no pattern characters is a NAME - the directory with the braces in it - and there is nothing for a later name to match)
+  if (names.matched > 0 || !/[*?[]/.test(word)) return false;
+  return written.size > 0 || pathCandidates(cwds, word, old, { whole: true }).paths.some((q) => wildcardCouldReachProtected(table, ctx, q));
+}
+
+/** Could a name this wildcard matches (not yet, but when it runs) be a PROTECTED path? The pattern is compared with each protected path rule's
+ *  literal head, a component at a time: `.har*` can be `.harness`, and `*.log` cannot be `.git`. For a wildcard that matches nothing today. */
+function wildcardCouldReachProtected(table: CompiledAuthorityTable, ctx: EvaluationContext, typedAbs: string): boolean {
+  const segs = canonicalPath(typedAbs).split(sep).filter(Boolean);
+  const roots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) => canonicalPath(r));
+  for (const pp of table.protectedPaths) {
+    if (pp.tool === 'Read') continue;
+    const prefix = pp.path
+      .replace(/^\*\*\//, '')
+      .replace(/^~\//, homedir() + '/')
+      .split(/[*?[{]/)[0]!
+      .replace(/\/$/, '');
+    if (prefix === '') continue;
+    for (const candidate of isAbsolute(prefix) ? [prefix] : roots.map((r) => join(r, prefix))) {
+      const fixed = candidate.split(sep).filter(Boolean);
+      const n = Math.min(segs.length, fixed.length);
+      if (segs.slice(0, n).every((sg, i) => foldName(sg) === foldName(fixed[i]!) || (/[*?[]/.test(sg) && globToRegExp(sg).test(fixed[i]!)))) return true;
+    }
+  }
+  return false;
+}
+
 function classifyResolved(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -4495,7 +4665,7 @@ function judgeWord(
   old?: readonly string[],
 ): WordJudgement {
   const c = pathCandidates(cwds, word, old);
-  if (c.dynamic) return { dynamic: true, glob: false, hits: [] };
+  if (c.dynamic) return { dynamic: true, glob: false, hits: judgeCandidates(table, ctx, kind, { ...c, paths: [...c.typed], dynamic: false }) };
   return { dynamic: false, glob: c.glob, hits: judgeCandidates(table, ctx, kind, c) };
 }
 
@@ -4535,6 +4705,14 @@ function discardWord(cwds: string | readonly string[], word: string, old?: reado
   return !c.dynamic && c.uncertain === null && c.paths.length > 0 && c.paths.every(isDiscardDevice);
 }
 
+/** Is this word the standard input under another name - and does this line open a FILE for input? Then writing to it is writing to that file
+ *  (PA-06): the stream was judged where it was opened, as a READ, and a write through the alias reopens the same file for writing. */
+function throughStdin(cwds: string | readonly string[], word: string, old: readonly string[] | undefined, stdinFiles: readonly string[]): boolean {
+  if (stdinFiles.length === 0) return false;
+  const c = pathCandidates(cwds, word, old);
+  return !c.dynamic && c.paths.length > 0 && c.paths.every(isStdinAlias);
+}
+
 /** A word as the entries the path loop works on: one per reading, `abs` canonical (for comparisons against the protected
  *  trees and the ledger) and `lex` the reading itself (what the classifier is handed, so the typed NAME is judged too). */
 interface PathEntry {
@@ -4548,7 +4726,8 @@ interface PathEntry {
 
 function pathEntries(cwds: string | readonly string[], raw: string, old?: readonly string[], whole = false): PathEntry[] {
   const c = pathCandidates(cwds, raw, old, { whole });
-  if (c.dynamic) return [{ raw, abs: null, glob: false }];
+  if (c.dynamic)
+    return [{ raw, abs: null, glob: false }, ...[...c.typed].map((lex) => ({ raw, abs: canonicalPath(lex), lex, glob: false }))];
   const out: PathEntry[] = [];
   const seen = new Set<string>();
   for (const lex of c.paths) {
@@ -4556,7 +4735,8 @@ function pathEntries(cwds: string | readonly string[], raw: string, old?: readon
     const key = `${abs}\0${lex}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ raw, abs, lex, glob: c.glob });
+    // (the word as typed is one name, not a set: `{a,b}` quoted is a directory with that name, and a wildcard in it is just a character)
+    out.push({ raw, abs, lex, glob: c.glob && !c.typed.has(lex) });
   }
   if (c.uncertain !== null) out.push({ raw, abs: null, glob: false, why: c.uncertain });
   return out;
@@ -4947,20 +5127,6 @@ function parseIndexEntries(buf: Buffer, version: number, count: number, hash: nu
   if (split) return { problem: 'the git index is a split index, whose entries are in another file' };
   if (sparse) return { problem: 'the git index is sparse, so it does not list every tracked file' };
   return { paths };
-}
-
-/** The git directory of a work tree whose `.git` is a directory, or a file that points to one (a worktree, a submodule). */
-function gitDirOf(root: string): string | null {
-  const dotGit = join(root, '.git');
-  try {
-    const st = statSync(dotGit);
-    if (st.isDirectory()) return dotGit;
-    if (!st.isFile() || st.size > 4096) return null;
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
-    return m ? openedPath(root, m[1]!) : null;
-  } catch {
-    return null;
-  }
 }
 
 /** git's own test for "this directory is another repository, and is listed as one entry": a git directory of its own. */
@@ -12639,7 +12805,11 @@ function relaxLocation(table: CompiledAuthorityTable, ctx: EvaluationContext, hi
     if (/[`*?[{]/.test(element) || /\$(?!HOME\b|\{HOME\}|PWD\b|\{PWD\})/.test(element)) return 'unsafe';
     // (a relative word means nothing when the directory it is relative to was not proved)
     if (!env.cwdVerified && !isAbsolute(element) && !/^(~|\$\{?HOME)/.test(element)) return 'unsafe';
-    const readings = pathCandidates(env.cwd, element).paths;
+    // (the value of an assignment is EXPANDED: `$HOME/go` is the directory under the home directory. The word AS TYPED - a directory called `$HOME`
+    // in the working directory, which the path reader adds beside the expansion for the readers that refuse - is no place this reader may call
+    // ordinary or in the checkout, and it would turn every home-relative toolchain location into "a place in the checkout")
+    const candidates = pathCandidates(env.cwd, element);
+    const readings = candidates.paths.filter((p) => !candidates.typed.has(p));
     if (readings.length === 0) return 'unsafe';
     let found: Whereabouts = 'external';
     for (const reading of readings) {
@@ -13035,14 +13205,37 @@ function pathValueOf(raw: string): string {
   return /^(of|if|dest|src|file)=/.test(raw) ? raw.slice(eq + 1) : raw;
 }
 
+/** A BARE WILDCARD IS A PATH OPERAND WHEN IT MATCHES SOMETHING (the sibling of `namesAnEntry`, PA-02): `cat *.pem` and `cat service-acc*` read
+ *  the files that exist and match, and a word with no slash in it was neither a path-shaped word nor a name, so the declared credential file
+ *  an overlay names (`*.pem`, `service-account.json`) was read at ALLOW by every spelling that did not spell it out. The existence test is
+ *  the same one: a word that matches nothing on disk is a word (`grep 'a*b'`, `awk '$1*2'`) and not an operand. */
+function namesAnEntryByWildcard(
+  cwd: string,
+  tok: string,
+  old: readonly string[] | undefined,
+  shellGlob: { dotfiles: boolean; ignoreCase: boolean; extended: boolean },
+): boolean {
+  if (!/[*?[]/.test(tok) || tok.startsWith('-')) return false;
+  const set = globMatches(cwd, tok, old, shellGlob);
+  return !set.dynamic && (set.paths.length > 0 || set.bounded);
+}
+
 /** Path-like tokens of a segment, read by the shared resolver in the tracked cwd (one entry per reading of each token);
  *  tokens with unresolved variables are reported as dynamic. */
-function pathTokens(segment: string, cwd: string, old?: readonly string[]): PathEntry[] {
+function pathTokens(
+  segment: string,
+  cwd: string,
+  old?: readonly string[],
+  shellGlob: { dotfiles: boolean; ignoreCase: boolean; extended: boolean } = { dotfiles: false, ignoreCase: false, extended: false },
+  patternWords: readonly string[] = [],
+): PathEntry[] {
   const out: PathEntry[] = [];
-  const home = canonicalPath(homedir()).split(sep).join('/');
+  // (compared the way the volume compares names - PA-11, `foldName`: `~/.SSH` is `~/.ssh` on the disk this kernel runs on, and the
+  // directory-reach logic of the search tools compared the bytes)
+  const home = foldName(canonicalPath(homedir()).split(sep).join('/'));
   // (read once: asked inside the `some` below it was one canonicalisation and one split-and-join of the whole working directory
   // per credential directory, for every stage - quadratic in the depth of a directory a long command had moved into)
-  const cwdPosix = canonicalPath(cwd).split(sep).join('/');
+  const cwdPosix = foldName(canonicalPath(cwd).split(sep).join('/'));
   const cwdIsSensitive = cwdPosix === home || CREDENTIAL_DIRS.some((d) => cwdPosix.startsWith(`${home}/${d}`));
   const allTokens = tokenize(segment);
   const head0 = (allTokens[0] ?? '').replace(/^.*\//, '');
@@ -13054,15 +13247,35 @@ function pathTokens(segment: string, cwd: string, old?: readonly string[]): Path
     !allTokens.some((t) => /^-[a-zA-Z]*[ef]$/.test(t) || /^--(regexp|file)=/.test(t))
       ? allTokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
       : -1;
+  // `--` ends the options for every parser, and a BSD one ends them at the first operand: a word that begins with a dash is then a name
+  // (PA-03) - provided something of that name is there, so that an option stays one
+  const ddAt = allTokens.indexOf('--');
+  // THE WORDS OF A SEARCH PATTERN ARE DATA - as many times as the pattern holds them, not wherever the same text stands. `grep -r . .` has a pattern
+  // `.` and a root `.`, and dropping every word equal to a pattern word dropped the root: a recursive read of the home directory was ALLOW
+  // (found by the filesystem oracle, `cd ~/../home && grep -r . .`). The pattern's own word is skipped by its place; its other words, which the
+  // normalizer has split apart, are skipped once each.
+  // (only when the pattern is still IN the text: once the normalizer has masked it as data there is nothing of it left to skip, and the same text
+  // further on is a root)
+  const spare = new Map<string, number>();
+  if (patternIndex >= 0 && patternWords.includes(allTokens[patternIndex] ?? '')) {
+    for (const w of patternWords) spare.set(w, (spare.get(w) ?? 0) + 1);
+    spare.set(allTokens[patternIndex]!, spare.get(allTokens[patternIndex]!)! - 1);
+  }
   for (const [idx, raw] of allTokens.entries()) {
     if (idx === 0 || idx === patternIndex) continue;
-    const tok = pathValueOf(raw);
+    if ((spare.get(raw) ?? 0) > 0) {
+      spare.set(raw, spare.get(raw)! - 1);
+      continue;
+    }
+    const dashed = raw.startsWith('-') && raw.length > 1 && ((ddAt > 0 && idx > ddAt) || (cwd !== CWD_UNKNOWN && namesADashedEntry(cwd, raw)));
+    const tok = dashed ? raw : pathValueOf(raw);
     if (!tok || tok === '{}') continue;
     // A BARE NAME IS A PATH OPERAND WHEN THERE IS A FILE OF THAT NAME where the command runs. `cat service-account.json` and `cd secrets
     // && cat db.txt` read a file in the working directory, and the scan took only words that LOOK like paths - a slash, a dot, a
     // tilde - so a rule that protected a file by its name (an overlay's `service-account.json`) was never asked (review 11 #117). The
     // existence test keeps the ordinary words out: `echo hello` and the value of `-n 5` name nothing on disk.
-    if (!isPathLike(tok, cwdIsSensitive) && !(cwd !== CWD_UNKNOWN && namesAnEntry(cwd, tok))) continue;
+    if (!isPathLike(tok, cwdIsSensitive) && !(cwd !== CWD_UNKNOWN && namesAnEntry(cwd, tok)) && !(cwd !== CWD_UNKNOWN && namesAnEntryByWildcard(cwd, tok, old, shellGlob)))
+      continue;
     out.push(...pathEntries(cwd, tok, old));
   }
   return out;
@@ -13086,8 +13299,6 @@ function shellGlobOptions(units: readonly string[]): { dotfiles: boolean; ignore
     extended: units.some((s) => EXTGLOB_RE.test(s)),
   };
 }
-/** a zsh glob qualifier list that carries `D`: this one pattern matches names that begin with a dot */
-const ZSH_DOT_QUALIFIER_RE = /\([A-Za-z0-9^.,:@/*%=+<>-]*D[A-Za-z0-9^.,:@/*%=+<>-]*\)$/;
 
 const GREP_FAMILY = /^(grep|egrep|fgrep|zgrep|zegrep|zfgrep|ggrep|rg|ripgrep|pgrep)$/;
 
@@ -13098,8 +13309,8 @@ const GREP_FAMILY = /^(grep|egrep|fgrep|zgrep|zegrep|zfgrep|ggrep|rg|ripgrep|pgr
  *  an absolute refusal of `ls ~/*` (review 11, #129). `~/.*`, a bracket or a brace at the start, or a shell that has dotglob
  *  on (`shellGlobOptions(...).dotfiles`) keep the answer they had. */
 function globCouldReachCredentials(abs: string, wildcardAt = '', dotGlob = false): boolean {
-  const home = canonicalPath(homedir()).split(sep).join('/');
-  const posix = abs.split(sep).join('/');
+  const home = foldName(canonicalPath(homedir()).split(sep).join('/'));
+  const posix = foldName(abs.split(sep).join('/'));
   if (!posix.startsWith(home + '/') && posix !== home) return false;
   const tail = posix.slice(home.length + 1);
   // `~/.s*` → tail ".s": a glob whose literal prefix under HOME starts a hidden name; `~/.*` → "."; `~/.{ssh,aws}` → "."
@@ -13122,10 +13333,37 @@ function patternEntersHome(abs: string, reach: string, home: string): boolean {
   for (let i = 0; i < down.length; i++) {
     const c = comps[i];
     if (c === undefined) return false;
-    if (!/[*?[{]/.test(c) && c !== down[i]) return false;
+    if (!/[*?[{]/.test(c) && foldName(c) !== foldName(down[i]!)) return false;
   }
   const rest = comps.slice(down.length);
   return rest.length > 0 && globCouldReachCredentials(`${home}/${rest.join('/')}`);
+}
+
+/** THE WORDS OF A SEGMENT WHOSE VALUE THE NEXT READER OF THE NORMALIZED TEXT WOULD READ DIFFERENTLY (words.ts): `hostile` hold a quote or a
+ *  backslash (which exist in a value only because they were quoted or escaped), or an angle bracket that was written as a character and
+ *  not as an operator (the tokenizer's shape: `literal` or `mixed`; a `real` one is a redirection, and stays one); `braces` were QUOTED and
+ *  hold a brace the normalizer's last step expands (`'{a,b}/pre-commit'` is a directory called `{a,b}`, and the text says `a/pre-commit
+ *  b/pre-commit`). The segment as written is read, where the quoting still exists, and so is every command it carries (`sh -c 'touch
+ *  "a\"b/x"'`). */
+function literalWords(rawSeg: string, depth = 0): { hostile: string[]; braces: string[]; dollars: string[] } {
+  const out = { hostile: [] as string[], braces: [] as string[], dollars: [] as string[] };
+  for (const w of tokenizeMarked(rawSeg)) {
+    // (a `$` the shell does not expand - single-quoted, or escaped - is a character of a name: `mktemp -p '$PWD'` is the directory called `$PWD`)
+    if (/[$`]/.test(w.text) && !w.expands) out.dollars.push(w.text);
+    // (a word with a blank in it is a STRING more often than a name - a statement, a program, a message - and its pieces are scanned as the
+    // words they are; a name with a blank is read whole by the loop over the words as written, below)
+    if ((/['"\\]/.test(w.text) || (w.shape !== 'none' && w.shape !== 'real')) && !/\s/.test(w.text)) out.hostile.push(w.text);
+    // (the segment is already brace-expanded: a word whose value still expands was quoted or escaped, and is the directory with the braces in its name)
+    if (/[{}]/.test(w.text) && expandBraces(w.text) !== w.text) out.braces.push(w.text);
+  }
+  if (depth < CARRIER_NEST)
+    for (const body of carriedShellBodies(rawSeg)) {
+      const inner = literalWords(expandBraces(body), depth + 1);
+      out.hostile.push(...inner.hostile);
+      out.braces.push(...inner.braces);
+      out.dollars.push(...inner.dollars);
+    }
+  return out;
 }
 
 /** Reads and writes implied by a shell segment's path arguments, classified like Read / Write tool calls. */
@@ -13247,7 +13485,25 @@ function classifyShellPaths(
   const linkSources = new Set<string>();
   // operands are read with the redirections taken out (`cp x f 2>&1`: the destination is `f`); the regex tests below keep
   // the whole segment, because `mysql < file` is exactly what they look for
-  const bare = withoutRedirections(seg);
+  // THE WORDS THE SHELL HANDS THE PROGRAM, not the words the normalizer's text reads as (PA-03, words.ts): the text is joined from word values,
+  // and a value that holds a quote, a backslash or an angle bracket is read differently the second time. The twin has those words put back
+  // inside quotes, so tokenizing it gives exactly the words of the command line.
+  const literal = literalWords(rawSeg);
+  const text = restoreQuoting(seg, literal.hostile);
+  // WHETHER A VALUE THE TOOL'S TABLE FOUND CANNOT BE READ: it holds a part the shell fills in that nobody here can name (`$OUT`). That is asked about where
+  // the word is an operand; here it is left. One built from names this reader knows (`$HOME//proj/x`, `$PWD/lc/h`) is a path like any other, and
+  // one whose `$` the shell does not expand (single-quoted, escaped) is a character of a name - the word, or a piece of one that holds a blank
+  const unreadable = (w: string): boolean =>
+    /[$`]/.test(w) && !literal.dollars.some((d) => d === w || textPieces(d).includes(w)) && pathCandidates(cwd, w, old).dynamic;
+  // the files this line opens for input: the standard input is one of them, and `/dev/stdin` names it (PA-06)
+  const stdinFiles = [...new Set([...redirectionSources(rawSeg), ...redirectionSources(text)])].filter((f) => !/[$`]/.test(f));
+  const writeThroughStdin = (word: string, hitsInto: CapabilityHit[]): boolean => {
+    if (!throughStdin(cwd, word, old, stdinFiles)) return false;
+    for (const f of stdinFiles)
+      judgeInto(hitsInto, table, ctx, 'Write', cwd, f, seg, (v) => `${word} is the file this line opened for input, ${f} (${v})`, old);
+    return true;
+  };
+  const bare = withoutRedirections(text);
   const tokens = tokenize(bare);
   const head0 = tokens[0] ?? '';
   const head = head0.slice(head0.lastIndexOf('/') + 1);
@@ -13274,7 +13530,16 @@ function classifyShellPaths(
       ? k8sObjectNames(head, tokens.slice(1).map((text) => ({ text, quoted: false, expands: /[$`]/.test(text) })))
       : [],
   );
-  const paths = pathTokens(bare, cwd, old).filter((p) => !patternWords.includes(p.raw) && !statementWords.has(p.raw) && !clusterNames.has(p.raw));
+  // (the pattern's own words are skipped inside `pathTokens`, by their place - see there; the names of a cluster command's objects and the
+  // words of a database statement are filtered here)
+  const paths = pathTokens(bare, cwd, old, shellGlob, patternWords).filter((p) => !statementWords.has(p.raw) && !clusterNames.has(p.raw));
+  // THE SCRIPT OF A STREAM EDITOR IS A PROGRAM, NOT A NAME. The normalized text holds it as the pieces of a string, and a piece that looks like a path
+  // (`/^$/d`, `.*//`, `/start/,/end/p`) was an operand of an editor that writes its operands in place: a typed absolute path outside the checkout
+  // is an absolute refusal, and a wildcard that matches `.git` is a write into it - for `sed -i '/^$/d' notes.txt`. What the script itself writes
+  // or reads (`w FILE`, `r FILE`, `s///w FILE`) is read from the script, below. A piece that is also the name of a file the command edits stays.
+  const sedScript = /^(sed|gsed)$/.test(head) ? sedScriptWords(rawSeg) : null;
+  const isSedScriptPiece = (word: string): boolean => sedScript !== null && sedScript.pieces.has(word) && !sedScript.files.has(word);
+  for (let i = paths.length - 1; i >= 0; i--) if (isSedScriptPiece(paths[i]!.raw)) paths.splice(i, 1);
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
   // approvable question, never a silent yes.
@@ -13376,7 +13641,9 @@ function classifyShellPaths(
     for (const why of formatWrites.unread) runs(why);
     for (const w of [...effects.writes, ...effects.writeDirs, ...formatWrites.files]) {
       // (`-` is standard output: `wget -qO- URL`)
-      if (!w || w === '-' || /[$`]/.test(w) || discardWord(cwd, w, old)) continue;
+      if (!w || w === '-' || unreadable(w)) continue;
+      if (writeThroughStdin(w, hits)) continue;
+      if (discardWord(cwd, w, old)) continue;
       extraDests.add(w);
       if (!paths.some((q) => q.raw === w)) paths.push(...pathEntries(cwd, w, old));
     }
@@ -13552,48 +13819,11 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // them — and routing that through the shared list made it depend on conditions further down that a
       // producer body does not always meet (the corpus found `npm run` carrying it reaching ALLOW while the
       // identical command alone was DENY).
-      const linkRoots = [...ctx.repoRoots, ...(ctx.cwd ? [ctx.cwd] : [])].map((r) =>
-        canonicalPath(r).split(sep).join('/'),
-      );
+      // (the route a link opens into a governed tree is read by `linkRouteHits`, the one reader of it: `ln -s` here, the copy that keeps links below)
       linkSources.add(src);
       for (const entry of entries) {
         if (entry.abs === null) continue;
-        const linkPosix = entry.abs.split(sep).join('/');
-        // A TARGET INSIDE A PROTECTED TREE is the route it always was: the link is a second name for a path a rule governs, and what
-        // the rule says of a WRITE to that path is what it says of a link to it. (A target outside the checkout that no rule names is
-        // not: the name is judged where it is used.)
-        const into = classifyPath(table, ctx, 'Write', entry.abs);
-        if (into.via.startsWith('matcher path') || (into.absolute && into.capability !== 'fs.outside-workspace.write')) {
-          hits.push({ ...into, via: `symlink ${targetDir ?? ops[ops.length - 1]} points at ${src}, which is inside protected ${into.via}`, segment: seg });
-          continue;
-        }
-        // A LINK TO A ROOT, OR TO ONE OF ITS ANCESTORS, IS A LINK TO THE CHECKOUT, not to what the checkout protects (`ln -s . self`,
-        // `ln -s .. parent`): every checkout contains the governance tree, and a route through the link is judged when something
-        // WRITES THROUGH IT - by the path reader, which follows it, and for a name made earlier in this very line by the segments
-        // that follow (segmentThroughLinks). The link to a directory strictly inside the checkout that holds protected paths
-        // (`ln -s ../.harness k`) is still the route it always was.
-        if (atOrAboveRoot(linkRoots, linkPosix)) continue;
-        for (const pp of table.protectedPaths) {
-          if (pp.tool === 'Read') continue;
-          const prefix = pp.path
-            .replace(/^\*\*\//, '')
-            .replace(/^~\//, homedir() + '/')
-            .split(/[*?[{]/)[0]!
-            .replace(/\/$/, '');
-          const candidates = (isAbsolute(prefix) ? [prefix] : linkRoots.map((r: string) => `${r}/${prefix}`)).map(
-            foldName,
-          );
-          const here = foldName(linkPosix);
-          if (!candidates.some((c) => c === here || c.startsWith(here + '/'))) continue;
-          hits.push({
-            capability: pp.capability,
-            verdict: verdictFor(table, ctx, pp.capability),
-            via: `symlink ${targetDir ?? ops[ops.length - 1]} points at ${src}, which is or contains protected ${pp.path}`,
-            segment: seg,
-            absolute: isAbsoluteCap(table, pp.capability),
-          });
-          break;
-        }
+        hits.push(...linkRouteHits(table, ctx, entry.abs, seg, { phrase: `symlink ${targetDir ?? ops[ops.length - 1]} points at ${src}`, exemptRoots: true }));
       }
     };
     if (targetDir !== null && ops.length >= 1) {
@@ -13703,7 +13933,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // because only docker and podman reached the resolver that judges the SOURCE path (exit review 8). A tool the
   // matchers name and the analyzer does not is a hole with a sign on it.
   if (/^(docker|podman|nerdctl)$/.test(head)) {
-    for (const src of containerMountSources(tokenize(seg))) {
+    for (const src of containerMountSources(tokenize(text))) {
       const entries = pathEntries(cwd, src, old);
       if (entries.some((e) => e.abs === null && e.why === undefined)) {
         hits.push({
@@ -13741,7 +13971,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       }
     }
   }
-  const home = canonicalPath(homedir()).split(sep).join('/');
+  const home = foldName(canonicalPath(homedir()).split(sep).join('/'));
   const recursive =
     RECURSIVE_HEADS.has(head) &&
     ([
@@ -13810,20 +14040,21 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   const outputValues = filesAreInputs
     ? []
     : [
-        ...optionValues(tokenize(seg), shortO, OUTPUT_FLAGS),
-        ...[...ownShorts].flatMap((letter) => optionValues(tokenize(seg), letter, [])),
+        ...optionValues(tokenize(text), shortO, OUTPUT_FLAGS),
+        ...[...ownShorts].flatMap((letter) => optionValues(tokenize(text), letter, [])),
       ];
   for (const extra of outputValues) {
-    if (!extra || extra.startsWith('-') || /[$`]/.test(extra)) continue;
+    if (!extra || extra.startsWith('-') || unreadable(extra)) continue;
     // `curl -o /dev/null` DISCARDS: the same reader a redirection asks (isDiscardDevice) says so for an option's value too
+    if (writeThroughStdin(extra, hits)) continue;
     if (discardWord(cwd, extra)) continue;
     judgeInto(hits, table, ctx, 'Write', cwd, extra, seg, (v) => `output flag names ${extra} (${v})`, old);
   }
   const rawOutput = filesAreInputs
     ? null
-    : (optionValue(tokenize(seg), shortO, OUTPUT_FLAGS) ??
+    : (optionValue(tokenize(text), shortO, OUTPUT_FLAGS) ??
       optionValue(
-        tokenize(seg).map((t) => t.replace(/^(--[A-Za-z][A-Za-z-]*)(?==|$)/, (f) => f.toLowerCase())),
+        tokenize(text).map((t) => t.replace(/^(--[A-Za-z][A-Za-z-]*)(?==|$)/, (f) => f.toLowerCase())),
         shortO,
         OUTPUT_FLAGS.map((f) => f.toLowerCase()),
       ));
@@ -13852,24 +14083,32 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // destination of a write-ish command: last operand for cp/mv/ln/install/rsync, -C/-d dir for archives, of= for dd
   let dest: string | null = null;
   let gitPathspecs: string[] = [];
+  // the operands a copy READS, for the copiers that may keep the links they copy (PA-05)
+  let copySources: string[] = [];
   if (write) {
     const bareOperands = (valueOpts?: RegExp): string[] => {
       // ignore redirections (`< list`, `2> err`) and their targets, then keep the bare operands even when a
       // destination is a bare name (`cd .harness/generated && cp x policy.json`)
       const operands: string[] = [];
+      let ended = false;
       for (let i = 1; i < tokens.length; i++) {
         const t = tokens[i]!;
-        if (/^\d*[<>]{1,2}$/.test(t) || t === '&>' || t === '>|') {
+        if (!ended && (/^\d*[<>]{1,2}$/.test(t) || t === '&>' || t === '>|')) {
           if (!t.includes('/') && i + 1 < tokens.length) i++;
           continue;
         }
         // an option that consumes the next token must not let its VALUE pass as an operand: a trailing
         // `--sparse always` would otherwise displace the real destination (round 13)
-        if (valueOpts?.test(t)) {
+        if (!ended && valueOpts?.test(t)) {
           i++;
           continue;
         }
-        if (!t.startsWith('-')) operands.push(t);
+        if (t === '--' && !ended) {
+          ended = true;
+          continue;
+        }
+        // (after `--` every word is a name, and before it a word with a dash is one when something of that name is there: PA-03)
+        if (ended || !t.startsWith('-') || (cwd !== CWD_UNKNOWN && namesADashedEntry(cwd, t))) operands.push(t);
       }
       return operands;
     };
@@ -13963,6 +14202,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         ['cp', 'install', 'mv', 'gcp', 'gmv'].includes(head) ? 't' : '',
         ['--target-directory'],
       );
+      if (/^(cp|gcp|rsync|ditto)$/.test(head)) copySources = targetDir ? operands : operands.slice(0, -1);
       // cpio -p reads its file list from stdin and copies INTO its sole operand; cp/rsync/... write the last operand
       dest = targetDir
         ? targetDir
@@ -14125,6 +14365,33 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // ...and an EXPLICIT output flag names a destination whatever the value looks like: `--outDir control-plane`
   // has neither a slash nor a dot, and this shape test rejected it (exit review 8)
   if (!dest && genericOutput && !/^-/.test(genericOutput)) dest = genericOutput;
+  // A COPY THAT KEEPS LINKS MAKES THEM (PA-05, links.ts): `cp -a lgen nl` makes `nl`, a second name for `.harness/generated`, and `cp -R sub
+  // newcopy` makes every link below `sub`. The link to a governed tree is refused when it is made by `ln -s`; it is the same act here. The
+  // links among the sources are read from the disk - within a bound - and each target is asked the question `ln -s` is asked.
+  if (copySources.length > 0 && copiesLinks(head, tokens)) {
+    const seenTargets = new Set<string>();
+    for (const src of copySources) {
+      if (/[$`]/.test(src)) continue;
+      for (const reading of wildcardNames(cwd, src, old, shellGlob).paths) {
+        // (a source that ends in a slash is the directory it names - a link to one is followed, and what is copied is what is in it)
+        const found = linksUnder(src.endsWith('/') ? canonicalPath(reading) : reading);
+        for (const target of found.targets) {
+          if (seenTargets.has(target)) continue;
+          seenTargets.add(target);
+          // (the same question `ln -s` is asked, by the same reader; a copy keeps no exemption for a link to the checkout itself)
+          hits.push(...linkRouteHits(table, ctx, target, seg, { phrase: `the copy of ${src} keeps a link to ${target}`, exemptRoots: false }));
+        }
+        if (found.bounded)
+          hits.push({
+            capability: 'command.unknown',
+            verdict: verdictFor(table, ctx, 'command.unknown'),
+            via: `${src} holds more entries than this kernel walks, so a link into a governed tree may be among the ones the copy keeps`,
+            segment: seg,
+            absolute: false,
+          });
+      }
+    }
+  }
   if (dest === 'ALL_PATHSPECS') {
     const psRoot = repoRootFor(ctx, cwd);
     for (const rawSpec of gitPathspecs) {
@@ -14139,8 +14406,11 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   if (dest && dest !== 'ALL' && dest !== 'AFTER_DASHDASH' && !paths.some((p) => p.raw === dest))
     paths.push(...pathEntries(cwd, dest, old));
   if (dest === 'ALL') {
-    for (const t of tokens.slice(1)) {
-      if (t.startsWith('-') || paths.some((p) => p.raw === t) || /^[sy]\/|^\d+$/.test(t)) continue;
+    const ddAll = tokens.indexOf('--');
+    for (const [ti, t] of tokens.entries()) {
+      if (ti === 0) continue;
+      const named = t.startsWith('-') && t !== '--' && ((ddAll > 0 && ti > ddAll) || (cwd !== CWD_UNKNOWN && namesADashedEntry(cwd, t)));
+      if ((t.startsWith('-') && !named) || paths.some((p) => p.raw === t) || /^[sy]\/|^\d+$/.test(t) || isSedScriptPiece(t)) continue;
       // the WHOLE word, glob and all: a protected pattern is matched against the text the shell will expand, and a
       // word built at run time is reported by the "writes to a path built at run time" hit above, not twice
       paths.push(...pathEntries(cwd, t, old, true).filter((e) => e.abs !== null || e.why !== undefined));
@@ -14165,8 +14435,17 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         ? tokens.findIndex((t, i) => i > 0 && !t.startsWith('-'))
         : -1;
     const searched: string[] = [];
+    const spareWords = new Map<string, number>();
+    if (patternAt >= 0 && patternWords.includes(tokens[patternAt] ?? '')) {
+      for (const w of patternWords) spareWords.set(w, (spareWords.get(w) ?? 0) + 1);
+      spareWords.set(tokens[patternAt]!, spareWords.get(tokens[patternAt]!)! - 1);
+    }
     for (const [ti, t] of tokens.entries()) {
-      if (ti === 0 || ti === patternAt || patternWords.includes(t)) continue;
+      if (ti === 0 || ti === patternAt) continue;
+      if ((spareWords.get(t) ?? 0) > 0) {
+        spareWords.set(t, spareWords.get(t)! - 1);
+        continue;
+      }
       if (t.startsWith('-')) continue;
       const roots = pathEntries(cwd, t, old);
       if (roots.some((e) => e.glob || (e.abs === null && e.why === undefined))) continue;
@@ -14174,7 +14453,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         if (e.abs === null) continue;
         const abs = e.abs.split(sep).join('/');
         searched.push(abs);
-        if (abs === home || home.startsWith(abs.replace(/\/$/, '') + '/')) {
+        const foldedAbs = foldName(abs);
+        if (foldedAbs === home || home.startsWith(foldedAbs.replace(/\/$/, '') + '/')) {
           hits.push({
             capability: 'fs.credential-store.read',
             verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
@@ -14256,6 +14536,16 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // other command's word is read the same way when it looks like a path. The pieces stay judged too: they over-read, which
   // only ever adds a hit.
   const wholeWords = new Set<string>();
+  // the words of the segment as written, and those of them that are STRINGS (they hold a blank): the pieces the normalized text made of a string are
+  // not words of the command, and a wildcard among them is not one the shell expands (see the destinations below)
+  const asWrittenValues = new Set<string>();
+  const stringValues: string[] = [];
+  // (the pieces as the normalized text has them: split at the blanks, and tokenized again - the quotes inside a string are its own, and the text the
+  // readers see reads them as quotes)
+  let pieceSet: Set<string> | null = null;
+  const stringPieces = (): Set<string> =>
+    (pieceSet ??= new Set(stringValues.flatMap((w) => [...textPieces(w), ...tokenize(w)].flatMap((q) => [q, ...tokenize(q)]))));
+  const ddOutputs = new Set<string>();
   // ...and the words of a command a CARRIER hands to a shell (`sh -c 'cp x "sp l/f"'`, `trap`, a herestring) are the carried
   // text's own: the carrier's quoting hid them one level up, exactly as normalization does
   const carriedTexts = new Set<string>();
@@ -14275,25 +14565,46 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     return words;
   };
   const wholeIsDest = (value: string): boolean => {
-    const pieces = value.split(/[ \t\n]+/).filter(Boolean);
+    const pieces = textPieces(value);
     if (dest === 'ALL') return true;
     if (dest === 'AFTER_DASHDASH') {
       const after = tokens.slice(tokens.indexOf('--') + 1);
       return pieces.some((piece) => after.includes(piece));
     }
-    return dest !== null && pieces.includes(dest);
+    // (a brace name is judged as written wherever the command writes: the destination the readers above found is one of the names its text
+    // was expanded to)
+    // (and so is a name whose pieces include one the TOOL'S TABLE found: `mktemp -p 'a b'` has the directory `a b`, which the table read as `a` and `b`)
+    return literal.braces.includes(value) || ddOutputs.has(value) || (dest !== null && pieces.includes(dest)) || pieces.some((piece) => extraDests.has(piece));
   };
   if (!containerPaths)
     for (const word of wordsAsWritten(rawSeg)) {
       if (carriedTexts.has(word)) continue; // a command line handed to a shell, not a name
       const value = pathValueOf(word);
-      if (!value || !/[ \t\n]/.test(hostTrim(value)) || patternWords.includes(value)) continue;
+      asWrittenValues.add(value);
+      if (/[ \t\n]/.test(hostTrim(value))) stringValues.push(value);
+      // ...and so is a word that was QUOTED and holds a brace: the text the readers above have is the names it would expand to, and the
+      // directory with the braces in its name is another path
+      const braceName = literal.braces.includes(value);
+      // (`dd of=' x/f'`: the word as written is the destination, and the normalized text has lost where it began)
+      if (head === 'dd' && word.startsWith('of=')) ddOutputs.add(value);
+      // (padding counts: ` lead/pre-commit` is a name whose first character is a blank, and the shell opens exactly that - it is
+      // pathCandidates that also reads the trimmed word, for the tools that trim)
+      if (!value || !(braceName || /[ \t\n]/.test(value)) || patternWords.includes(value)) continue;
+      // a database client's STATEMENT is data, however it is spelled (`psql -c 'DO $$ ... $$'`, the script piped to the client): the words of it that
+      // name a directory are scanned as words, above, and it is not itself a name with blanks in it
+      if (dbEscape !== null && dbEscape.statements.includes(value)) continue;
       // a word with a glob or a substitution in it is text more often than a name (`select * from t`), and its pieces
       // already answer for it as globs and dynamic words do
-      if (/[*?[{$`]/.test(value)) continue;
+      if (!braceName && (/[*?[{]/.test(value) || (/[$`]/.test(value) && !literal.dollars.includes(value)))) continue;
       if (!write && !value.includes('/') && !value.startsWith('~')) continue; // a read of a bare name: nothing to resolve
       wholeWords.add(value);
-      if (!paths.some((p) => p.raw === value)) paths.push(...pathEntries(cwd, value, old));
+      if (!paths.some((p) => p.raw === value)) {
+        // (a `$` the shell does not expand is a character of the name, not a part built at run time: a commit message that mentions `$HOME` and a
+        // directory is a message, and a link called `$x y` is the typed reading, which stays and is judged - only the "dynamic" entry that the
+        // reader makes of every dollar is dropped)
+        const entries = pathEntries(cwd, value, old);
+        paths.push(...(literal.dollars.includes(value) && !braceName ? entries.filter((e) => e.abs !== null || e.why !== undefined) : entries));
+      }
     }
   if (nestTooDeep)
     hits.push({
@@ -14304,6 +14615,51 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       absolute: false,
     });
   if (containerPaths) return hits;
+  // WHETHER AN OPERAND IS WHERE THE COMMAND WRITES, asked of every reading of every word (and, below, before a wildcard destination is
+  // expanded into the names it denotes): the capability behind a write to the trust store is `ego.trust.tamper`, and a READ of the store -
+  // `cat ~/.ego/trust/keys.json`, `ls ~/.ego/runtimes`, `du -sh ~/.ego`, `grep -r sha ~/.ego` - tampers with nothing. It held public keys
+  // and cached runtime bytes, the Read tool judges the same path as an ordinary read, and the absolute refusal fell on every look at the
+  // state EGO itself documents (review 11, #122). The read has its own capability, which the table answers.
+  const isDestEntry = (p: PathEntry): boolean =>
+    dest === 'ALL' ||
+    // a whole word is a destination when the destination the operand readers found is one of its pieces: `cp "sp l/x" /tmp`
+    // reads the link, `cp /tmp/x "sp l/x"` writes through it
+    (write && wholeWords.has(p.raw) && wholeIsDest(p.raw)) ||
+    (dest === 'AFTER_DASHDASH' && tokens.indexOf(p.raw) > tokens.indexOf('--')) ||
+    // ...and the files the tool's table says it writes (`sort -o F`, `tar -f A`, `go build -o B`)
+    extraDests.has(p.raw) ||
+    (dest !== null && p.raw === dest);
+  // A WILDCARD DESTINATION IS THE NAMES IT MATCHES (PA-09). It was an ASK for every wildcard - a spelling a human can approve of what the
+  // spelled-out path refuses absolutely (`touch .har?ess/generated/x`, `echo x > .cla[u]de/settings.json`, `rm ~/.s*/id_rsa`) - and an
+  // interruption for `rm *.log`. A wildcard denotes the names that exist and match it: each is judged as the destination it is. A pattern
+  // that matches nothing is left as typed by the shell, so it is the name it spells; it asks only where a name made earlier on this line may
+  // match it, or the set is not the whole answer.
+  if (write) {
+    const expanded: PathEntry[] = [];
+    const seenWords = new Set<string>();
+    for (const p of paths) {
+      if (!p.glob || p.abs === null || !isDestEntry(p)) {
+        expanded.push(p);
+        continue;
+      }
+      // THE PIECE OF A STRING IS NOT A WILDCARD THE SHELL EXPANDS: `perl -pi -e 's/"v": ".*"/x/'` has a script of which `.*"/"v":` is a piece, and it matches
+      // `.git` - a write into the git directory, from a quoted program text. It stays what it was before wildcard destinations were enumerated: asked about.
+      if (!asWrittenValues.has(p.raw) && stringPieces().has(p.raw)) {
+        expanded.push(p);
+        continue;
+      }
+      if (seenWords.has(p.raw)) continue;
+      seenWords.add(p.raw);
+      const names = wildcardNames(cwd, p.raw, old, shellGlob);
+      for (const n of names.paths) expanded.push({ raw: p.raw, abs: canonicalPath(n), lex: n, glob: false });
+      // what the names do not settle: the set is not the whole answer; the pattern is the VALUE of an option (`--file=ev*.mk`, `of=*.img`), which the
+      // shell does not expand and nobody here can say what the program does with; or nothing matches now and something may by the time it runs - a
+      // name an earlier part of this line makes, or a protected tree that does not exist yet and that the pattern could name
+      if ((!tokens.includes(p.raw) && !wholeWords.has(p.raw)) || wildcardLeavesOpen(table, ctx, cwd, p.raw, old, names, written)) expanded.push(p);
+    }
+    paths.length = 0;
+    paths.push(...expanded);
+  }
   const expandedGlobs = new Set<string>();
   const judgeGlob = (raw: string): void => {
     if (expandedGlobs.has(raw)) return;
@@ -14337,21 +14693,26 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         segment: seg,
         absolute: false,
       });
-    for (const m of set.paths)
-      for (const probe of set.directories.has(m) ? [m, `${m}/`] : [m]) {
+    for (const m of set.paths) {
+      // a directory is judged for what is IN it as well (`~/.ssh/**` does not match the directory entry), and under the name it really has
+      // (a link to a credential directory is one: `grep -r . ls*/.`)
+      const probes = [m, ...(set.directories.has(m) ? [`${m}/`] : []), ...contentsProbe(m)];
+      let outside: CapabilityHit | null = null;
+      let named = false;
+      for (const probe of probes) {
         const g = classifyPath(table, ctx, 'Read', probe);
         if (g.via.startsWith('matcher path') || g.capability.startsWith('fs.credential')) {
           hits.push({ ...g, via: `glob ${raw} matches ${m} (${g.via})`, segment: seg });
+          named = true;
           break;
         }
+        // ...and a match OUTSIDE the workspace is the same question the spelled-out name asks: a link that leads out of it is a read there
+        // (the stronger answer, if a later reading has one, is the one that is reported)
+        if (outside === null && g.capability === 'fs.outside-workspace.read' && !isDevPath(m)) outside = g;
       }
+      if (!named && outside !== null) hits.push({ ...outside, via: `glob ${raw} matches ${m} (${outside.via})`, segment: seg });
+    }
   };
-  // A BARE WILDCARD (`*`, `?*`, `*(D)`) IS NOT A PATH-SHAPED WORD, and no word of the loop below is judged unless it is - but with
-  // `dotglob`/`GLOB_DOTS` on, or a zsh `(D)` qualifier, it matches `.env` as surely as `.e*` does
-  for (const t of tokens.slice(1)) {
-    const v = pathValueOf(t);
-    if (v && /[*?[]/.test(v) && !isPathLike(v) && (shellGlob.dotfiles || ZSH_DOT_QUALIFIER_RE.test(v)) && !patternWords.includes(v)) judgeGlob(v);
-  }
   if (paths.length === 0) return hits;
   for (const p of paths) {
     if (p.abs === null) {
@@ -14365,20 +14726,8 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       continue;
     }
     const posix = p.abs.split(sep).join('/');
-    // WHETHER THIS OPERAND IS WHERE THE COMMAND WRITES, asked once and before the trust store is judged: the capability is
-    // `ego.trust.tamper`, and a READ of the store - `cat ~/.ego/trust/keys.json`, `ls ~/.ego/runtimes`, `du -sh ~/.ego`,
-    // `grep -r sha ~/.ego` - tampers with nothing. It held public keys and cached runtime bytes, the Read tool judges the
-    // same path as an ordinary read, and the absolute refusal fell on every look at the state EGO itself documents
-    // (review 11, #122). The read has its own capability, which the table answers.
-    const isDest =
-      dest === 'ALL' ||
-      // a whole word is a destination when the destination the operand readers found is one of its pieces: `cp "sp l/x" /tmp`
-      // reads the link, `cp /tmp/x "sp l/x"` writes through it
-      (write && wholeWords.has(p.raw) && wholeIsDest(p.raw)) ||
-      (dest === 'AFTER_DASHDASH' && tokens.indexOf(p.raw) > tokens.indexOf('--')) ||
-      // ...and the files the tool's table says it writes (`sort -o F`, `tar -f A`, `go build -o B`)
-      extraDests.has(p.raw) ||
-      (dest !== null && p.raw === dest);
+    const foldedPosix = foldName(posix);
+    const isDest = isDestEntry(p);
     // A glob that expands into the EGO_HOME trust store (`~/.ego/*`, `~/.ego/trust*`, `~/.ego/trus[t]`) or a recursive
     // op over the store's parent (`cp -r x ~/.ego`, `rm -rf ~/.ego`) tampers with the trust material, which the
     // strict-descendant check misses. The literal prefix is recomputed from the raw token (dest='ALL' and
@@ -14414,10 +14763,16 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
         (r.capability === 'fs.outside-workspace.read' && !isDevPath(p.abs) && !linkSources.has(p.raw))
       )
         hits.push({ ...r, via: `path argument ${p.raw} (${r.via})`, segment: seg });
+      // ...and a DIRECTORY is its contents: naming one is naming what is in it (see contentsProbe)
+      for (const probe of p.glob ? [] : contentsProbe(p.abs)) {
+        const inside = classifyPath(table, ctx, 'Read', probe);
+        if (inside.via.startsWith('matcher path') || inside.capability.startsWith('fs.credential'))
+          hits.push({ ...inside, via: `path argument ${p.raw} is a directory whose contents are protected (${inside.via})`, segment: seg });
+      }
       // a glob whose literal part is an ancestor of HOME (`/U*/me/.ssh/id_rsa`) can expand into a credential store too
       if (
         p.glob &&
-        home.startsWith(posix) &&
+        home.startsWith(foldedPosix) &&
         /(^|\/)\.([A-Za-z-]{0,16}[*?[{]|ssh|aws|kube|gnupg|azure|docker|netrc|npmrc|pypirc|git-credentials|config)/i.test(
           p.raw,
         )
@@ -14443,7 +14798,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       // the spellings that match a name without spelling it. A name that begins with a dot is matched only by a pattern that
       // begins with one, unless the line turns that off (DOTGLOB_RE). The expansion is bounded; a reached bound is a question.
       if (p.glob) judgeGlob(p.raw);
-      if (recursive && (posix === home || home.startsWith(posix + '/') || posix === '/'))
+      if (recursive && (foldedPosix === home || home.startsWith(foldedPosix + '/') || posix === '/'))
         hits.push({
           capability: 'fs.credential-store.read',
           verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
@@ -14465,6 +14820,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       }
       // a device sink is a DISCARD, not a destination — the redirection form has always known this
       // a device is a DISCARD, but a raw block device is a disk and a `/dev/tcp` path is a socket: neither is
+      if (writeThroughStdin(p.raw, hits)) continue;
       const w = discardWord(cwd, p.raw)
         ? { verdict: 'ALLOW' as const, via: '', capability: '', absolute: false }
         : classifyPath(table, ctx, 'Write', p.lex ?? p.abs);
@@ -14893,6 +15249,21 @@ function sedScripts(
   return { texts, unread };
 }
 
+/** THE WORDS OF A SED COMMAND THAT ARE ITS SCRIPT, as the pieces the normalized text makes of them (the segment AS WRITTEN keeps a script one word; the
+ *  text the path readers see has it split at its blanks), and the words that are the files it reads. The script is what sed's option parser says it is
+ *  (`sedProgram`: every `-e`, or the first operand); a script is a program and none of its words is a name, whatever it looks like. */
+function sedScriptWords(rawSeg: string): { pieces: Set<string>; files: Set<string> } {
+  const asWritten = tokenize(rawSeg);
+  const at = commandHeadIndex(asWritten);
+  // (only when the segment AS WRITTEN is the sed command: a sed that a carrier hands to a shell (`sh -c 'sed -i s/a/b/ FILE'`) is a body of the carrier, and
+  // the options of `sh` are not sed's - read as sed's, the whole body would be "the script" and FILE one of its pieces. Nothing is said about it here)
+  if (!/^(sed|gsed)$/.test((asWritten[at] ?? '').replace(/^.*\//, ''))) return { pieces: new Set(), files: new Set() };
+  const prog = sedProgram(asWritten, at + 1);
+  // (the text the path readers see has the script's own quotes still in it - they are the script's, not the shell's - and tokenizes them again)
+  const pieces = prog.scripts.flatMap((s) => [...s.split(/[ \t\n]+/).filter(Boolean), ...tokenize(s)]);
+  return { pieces: new Set(pieces.flatMap((q) => [q, ...tokenize(q)])), files: new Set(prog.files) };
+}
+
 /** What every script of this sed command does to the world outside the pattern space, by the scanner that reads a script the
  *  way sed does (sed.ts). `confused` scripts fall back to the coarser regex reading this used to be, so a script the scanner
  *  cannot follow is never read as doing LESS than it did before. */
@@ -15209,6 +15580,91 @@ function segmentThroughLinks(seg: string, pairs: ReadonlyArray<readonly [string,
  *
  *  Recursion is bounded by `state.depth` (truncation is opaque, never the parent's class) and by `state.seen`, which
  *  keys on execution identity (directory + target), not on a bare name. */
+/** The command whose OUTPUT a stage's output is, for the wrappers that hand it on unchanged: `sudo echo X` prints X, `xargs echo X` prints X once
+ *  per input, and `kubectl exec pod -- echo X` / `docker exec box -- echo X` print what the command in the container prints (PA-01: a producer behind
+ *  a wrapper is the producer it wraps). The text of the stage when there is no such wrapper. */
+function printsLike(text: string): string {
+  const marked = tokenizeMarked(emitterTail(text));
+  const words = marked.map((t) => t.text);
+  const peeled = peelCarriers(words, 0, { stopAt: (_n: string, spec: Carrier) => spec.payload === true });
+  const at = peeled.steps.length > 0 && peeled.at < marked.length && peeled.shellString === null ? peeled.at : 0;
+  const head = (words[at] ?? '').replace(/^.*\//, '');
+  const tail = emitterTail(text).slice(marked[at]?.at ?? 0);
+  if (head === 'xargs') {
+    const x = peelCarriers(words.slice(at), 0, { maxSteps: 1 });
+    const from = marked[at + x.at];
+    if (from !== undefined && x.at < words.length - at) return emitterTail(text).slice(from.at);
+  }
+  if (/^(kubectl|oc|docker|podman|nerdctl)$/.test(head) && words.includes('exec')) {
+    const dd = words.indexOf('--', at);
+    if (dd >= 0 && dd + 1 < marked.length) return emitterTail(text).slice(marked[dd + 1]!.at);
+  }
+  return tail;
+}
+
+/** THE READERS THE DATAFLOW PLAN ASKS OF THE ANALYZER (dataflow.ts, PA-01), bound to the directory a stage runs in and to the writes the line
+ *  has made so far: a file is content the line may rely on only if nothing earlier on the line writes it. */
+function flowReadersFor(ctx: EvaluationContext, cwd: string, written: ReadonlySet<string>): FlowReaders {
+  /** the text of a plain file name, as it is now, and whether something on this line may have written it since */
+  const fileText = (name: string): { text: string; stale: boolean } | null => {
+    if (/[$`*?[{~]/.test(name) || name.startsWith('-') || cwd === CWD_UNKNOWN) return null;
+    const abs = openedPath(cwd, name);
+    if (abs === null) return null;
+    const text = readWordFile(ctx, cwd, name);
+    return text !== null && text.length <= 65_536 ? { text, stale: writtenEarlier(written, abs) } : null;
+  };
+  const firstWords = (text: string): string[] => {
+    const n = normalizeSegment(printsLike(text)).find((x) => !x.startsWith(MARK)) ?? text;
+    return tokenize(n);
+  };
+  return {
+    // (`$HOME` and `$PWD` are plain variables the producer's words may hold: the text the shell prints is the directory they name)
+    literal: (text, heredoc) => literalStdout(substituteKnownVars(printsLike(text), new Map([['HOME', homedir()], ['PWD', cwd]])), heredoc),
+    fileContent: (text) => {
+      const w = tokenize(emitterTail(printsLike(text)));
+      if ((w[0] ?? '').replace(/^.*\//, '') !== 'cat' || w.length < 2) return null;
+      let out = '';
+      let stale = false;
+      for (const f of w.slice(1)) {
+        const t = fileText(f);
+        if (t === null) return null;
+        out += t.text.endsWith('\n') ? t.text : `${t.text}\n`;
+        stale ||= t.stale;
+      }
+      return { text: out, stale };
+    },
+    words: firstWords,
+    stages: (text) => splitShellPipeline(text),
+    inputFiles: (text) => redirectionSources(text).filter((f) => !/[$`]/.test(f)),
+    fileText,
+    xargs: (text) => {
+      const tail = emitterTail(text);
+      const marked = tokenizeMarked(tail);
+      const words = marked.map((t) => t.text);
+      if ((words[0] ?? '').replace(/^.*\//, '') !== 'xargs') return null;
+      const peeled = peelCarriers(words, 0, { maxSteps: 1 });
+      let placeholder: string | null = null;
+      let argFile: string | null = null;
+      for (const o of peeled.steps[0]?.options ?? []) {
+        if (o.name === 'I' || o.name === 'J') placeholder = o.value;
+        else if (o.name === 'replace') placeholder = o.value ?? '{}';
+        else if (o.name === 'arg-file') argFile = o.value;
+      }
+      if (peeled.at >= marked.length) return null;
+      return { payload: tail.slice(marked[peeled.at]!.at), placeholder, argFile };
+    },
+    substitute: (text, vars) => substituteKnownVars(text, vars),
+    expand: (text) => expandBraces(text),
+    readNames: (text) => {
+      const m = /^(?:(?:time|!)\s+)*(?:(?:while|until)\s+)?([\s\S]+)$/.exec(text.trim());
+      const command = m?.[1];
+      if (command === undefined || !/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:builtin\s+|command\s+)?read\b/.test(command)) return null;
+      const bound = bindingsOf(tokenize(withoutRedirections(command)), command).persistent.filter((b) => b.how === 'read');
+      return bound.length > 0 ? bound.map((b) => b.name) : null;
+    },
+  };
+}
+
 function analyzeSegments(
   table: CompiledAuthorityTable,
   ctx: EvaluationContext,
@@ -15422,6 +15878,8 @@ function analyzeSegmentsInto(
     // its commands write, so this is a LIST: `{ echo 'git push origin main'; echo ls; } | sh` feeds the shell
     // both lines, and keeping only the last stage lost the first (exit review 7).
     let upstream: string | null = null;
+    /** what the stage that feeds the next piped one hands on (dataflow.ts): known text, a list of paths, or nothing anybody can read */
+    let upstreamProduced: Produced = NO_OUTPUT;
     let upstreamParts: string[] = [];
     let upstreamGroup: number | undefined;
     let upstreamBody: { body: string; expanded: boolean } | null = null;
@@ -15804,6 +16262,24 @@ function analyzeSegmentsInto(
           opaqueHit(table, ctx, seg, `runs the standard output of \`${stdinFromResolved}\`, which this kernel did not read`),
         );
     }
+    // WHERE THIS STAGE'S OPERANDS COME FROM (PA-01, dataflow.ts). The path readers read the words of the line; the operands of `xargs cat`, of a
+    // read loop and of `cat $(...)` are another command's output. A producer whose output is known hands its words to the consumer, which is
+    // judged as the command it is with them in place; one nobody can read, feeding a command that opens its operands as files, asks.
+    const stdinProduced: Produced = stage.pipedFromPrevious ? upstreamProduced : NO_OUTPUT;
+    const stageHeredoc = stage.heredocBody === undefined ? undefined : { body: stage.heredocBody, expanded: stage.heredocExpanded === true };
+    {
+      const readers = flowReadersFor(ctx, env.cwd, written);
+      for (const plan of [
+        planSubstitutions(readers, seg, stage.substitutions),
+        planXargs(readers, seg, stdinProduced, stageHeredoc),
+        planReadLoop(readers, stages, stageIndex, stdinProduced),
+      ]) {
+        for (const variant of plan.variants)
+          for (const h of analyzeSegments(table, ctx, compiled, variant, { ...state, env }, true))
+            hits.push({ ...h, via: `${h.via ?? ''} (the operands are another command's output)`.trim() });
+        for (const why of plan.asks) hits.push({ ...unknownHit(table, ctx, why), segment: seg });
+      }
+    }
     // A CALL TO A FUNCTION DEFINED HERE runs the body that was already handed over at the definition, so the call
     // itself adds nothing — but its REDIRECTIONS and path operands are still its own, which is why the head is
     // marked rather than the segment skipped (exit review 5).
@@ -15966,7 +16442,14 @@ function analyzeSegmentsInto(
     const dequoted = tokenize(seg).join(' ');
     for (const n of normalizeSegment(seg))
       if (n !== dequoted) for (const t of redirectionTargets(n)) redirTargets.add(t);
+    const stdinFilesHere = redirectionSources(seg).filter((f) => !/[$`]/.test(f));
     for (const target of redirTargets) {
+      // the standard input under another name is the file this line opened for input, when it opened one (PA-06)
+      if (throughStdin(dirsHere, target, point.old, stdinFilesHere)) {
+        for (const f of stdinFilesHere)
+          judgeInto(hits, table, ctx, 'Write', dirsHere, f, seg, (v) => `redirection > ${target} is the file this line opened for input, ${f} (${v})`, point.old);
+        continue;
+      }
       // a discard device swallows what it is given, whichever way the word spells it (the one reader, see isDiscardDevice)
       if (discardWord(dirsHere, target, point.old)) continue;
       const cand = pathCandidates(dirsHere, target, point.old);
@@ -15977,7 +16460,9 @@ function analyzeSegmentsInto(
       // protected glob: `[c]ontrol-plane`, `[p]olicies`, `.[c]laude`, `.h[u]sky`, `[n]ode_modules`, `.[m]cp.json`
       // (exit review 10). The operand readers had it right all along, which is why `cp x [c]ontrol-plane/...`
       // reported a glob destination while the redirection form did not.
-      if (cand.dynamic || cand.glob) {
+      if (cand.dynamic) {
+        for (const h of judgeCandidates(table, ctx, 'Write', { ...cand, paths: [...cand.typed], dynamic: false }))
+          hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
         written.add('\0any'); // a file nobody can name was written
         hits.push({
           capability: 'command.unknown',
@@ -15986,6 +16471,25 @@ function analyzeSegmentsInto(
           segment: seg,
           absolute: false,
         });
+        continue;
+      }
+      // A WILDCARD TARGET IS THE NAMES IT MATCHES (PA-09), as a wildcard operand of a writer is: each is a path written, and judged as one
+      if (cand.glob) {
+        const names = wildcardNames(dirsHere, target, point.old, shellGlob);
+        const open = wildcardLeavesOpen(table, ctx, dirsHere, target, point.old, names, written);
+        for (const q of names.paths) recordWrite(q);
+        for (const h of judgeCandidates(table, ctx, 'Write', { paths: names.paths, dynamic: false, glob: false, typed: new Set<string>(), uncertain: null }))
+          hits.push({ ...h, via: `redirection > ${target} (${h.via})`, segment: seg });
+        if (open) {
+          written.add('\0any'); // a file nobody can name was written
+          hits.push({
+            capability: 'command.unknown',
+            verdict: verdictFor(table, ctx, 'command.unknown'),
+            via: 'redirection to a dynamic path',
+            segment: seg,
+            absolute: false,
+          });
+        }
         continue;
       }
       for (const q of cand.paths) recordWrite(q); // A4: a later unit resolving THIS file is now stale
@@ -16033,6 +16537,9 @@ function analyzeSegmentsInto(
     for (const n of new Set([seg, ...normalizeSegment(seg)])) {
       const lnTokens = tokenize(n);
       const lh = commandHeadIndex(lnTokens);
+      // a command that MAKES NAMES: a wildcard that matches nothing now may match what it made (the ledger below holds the files it can name; this holds
+      // the fact that the line made some - a directory, a file, a copy - which the wildcard destinations ask about, PA-09)
+      if (MAKES_NAMES.has((lnTokens[lh] ?? '').replace(/^.*\//, ''))) written.add('\0made');
       if ((lnTokens[lh] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
         const lnOps = lnTokens.slice(lh + 1).filter((t) => !t.startsWith('-'));
         if (lnOps.length >= 2) {
@@ -16125,6 +16632,12 @@ function analyzeSegmentsInto(
         )
     )
       written.add('\0any');
+    // (what this stage hands on is worked out only for a stage that something is piped from - the next one, or the rest of its group - since a
+    // file may be read to know it)
+    if (stages[stageIndex + 1]?.pipedFromPrevious === true || stage.groupId !== undefined) {
+      const mine = producedBy(flowReadersFor(ctx, env.cwd, written), seg, stdinProduced, stageHeredoc);
+      upstreamProduced = stage.groupId !== undefined && stage.groupId === upstreamGroup ? combineProduced(upstreamProduced, mine) : mine;
+    } else upstreamProduced = NO_OUTPUT;
     // A PASS-THROUGH COPIES ITS INPUT TO ITS OUTPUT, so the literal survives it: `echo 'rm -rf /' | cat | bash`
     // runs the rm, and one identity stage was enough to defeat the edge entirely (exit review 5).
     if (!(stdinFrom !== null && PASS_THROUGH_RE.test(seg.trim()))) {
@@ -16323,6 +16836,7 @@ function toolPathHits(
         paths: [...new Set([...literal.paths, ...(expanded.dynamic ? [] : expanded.paths)])],
         dynamic: false,
         glob: false,
+        typed: new Set<string>(),
         uncertain: literal.uncertain ?? expanded.uncertain,
       }),
     );
@@ -16405,7 +16919,8 @@ function searchToolHits(
   // the reach is computed from the path as a trimming host would read it; the path as written is classified too
   const baseJudged = hostTrim(base.split('\0')[0] ?? '') || (ctx.cwd ?? process.cwd());
   const hits = toolPathHits(table, ctx, 'Read', base);
-  const home = canonicalPath(homedir()).split(sep).join('/');
+  // (the home directory is compared the way the volume compares names - `~/.SSH` and `<HOME in capitals>/.ssh` are the same directory, PA-11)
+  const home = foldName(canonicalPath(homedir()).split(sep).join('/'));
   // THE BASE IS READ THE WAY EVERY OTHER PATH IS: lexically and physically (`d/..` with `d` a link is the parent of the
   // link's TARGET), and the reach below is worked out from each reading
   const baseReadings = pathCandidates(ctx.cwd ?? process.cwd(), baseJudged);
@@ -16521,9 +17036,10 @@ function searchToolHits(
           }
       }
     }
+    const foldedAbs = foldName(abs);
     if (
-      (abs === home && reaches.length === 0) ||
-      ((home.startsWith(abs + '/') || abs === '/') && (reaches.length === 0 || reaches.some((r) => patternEntersHome(abs, r, home)))) ||
+      (foldedAbs === home && reaches.length === 0) ||
+      ((home.startsWith(foldedAbs + '/') || abs === '/') && (reaches.length === 0 || reaches.some((r) => patternEntersHome(foldedAbs, r, home)))) ||
       reaches.some((r) => globCouldReachCredentials(abs + '/' + r)) ||
       (reaches.length === 0 && globCouldReachCredentials(abs + '/'))
     )
@@ -16726,6 +17242,14 @@ function evaluateRequest(table: CompiledAuthorityTable, ctx: EvaluationContext, 
         }
       }
     }
+  }
+  // A SHELL CALL'S OTHER FIELDS ARE ASKED ABOUT (PA-17, host-fields.ts). A request to run outside the host's sandbox (`dangerouslyDisableSandbox`,
+  // `with_escalated_permissions`, `sandbox_permissions: "require_escalated"`) and any field nobody read is something the host may act on: the
+  // command was judged, and the call it arrived in was not the plain one, so `allow` would end the host's own question about it.
+  if (tool === 'Bash' || tool === 'shell') {
+    const unread = unreadShellFields(input).filter((k) => !FOREIGN_CANDIDATES.has(k));
+    if (unread.length)
+      hits.push(unknownHit(table, ctx, `${tool} also carries ${unread.join(', ')}, which change what the host does with the command and which this kernel has not read`));
   }
   // WHETHER A HIT IS ABSOLUTE IS A FACT ABOUT THE CAPABILITY, not about the code path that produced the hit. Thirty-odd
   // construction sites each spelled the flag themselves, and the ones that wrote `false` for an identifier that was

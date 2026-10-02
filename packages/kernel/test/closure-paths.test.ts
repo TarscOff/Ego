@@ -595,19 +595,25 @@ test('G. the resolver returns the lexical reading AND the physical one, bounded 
   const long = pathCandidates(dir, `${'a/'.repeat(30000)}z`);
   assert.ok(long.paths.length >= 1 && Date.now() - longStarted < 2000, `thirty thousand components took ${Date.now() - longStarted} ms`);
   const longVerdictStarted = Date.now();
-  assert.ok(['ALLOW', 'ASK', 'DENY'].includes(verdictOf(`echo x > ${'a/'.repeat(8000)}z`)));
+  // (a path longer than the kernel opens writes nothing; it is refused, not allowed, and it is refused in bounded time)
+  assert.equal(verdictOf(`echo x > ${'a/'.repeat(8000)}z`), 'DENY');
   assert.ok(Date.now() - longVerdictStarted < 15000, 'a redirection to a path of eight thousand components is decided in bounded time');
   assert.equal(pathCandidates(dir, '/proc/self/cwd/a').uncertain !== null, true);
   assert.equal(pathCandidates(dir, '/dev/fd/3').uncertain !== null, true);
   assert.equal(pathCandidates(dir, '/dev/fd/1').uncertain, null);
   assert.equal(pathCandidates(dir, '~nobody-such-user/a').uncertain !== null, true);
   // $HOME is the user's home, on both spellings, and only when it is the whole variable name
-  const home = pathCandidates(dir, '$HOME/a').paths;
+  // (the word AS TYPED is one more reading of it - a quoted `$HOME` is a directory of that name - and is not part of what the variable expands to)
+  const expanded = (word: string): string[] => {
+    const c = pathCandidates(dir, word);
+    return c.paths.filter((p) => !c.typed.has(p));
+  };
+  const home = expanded('$HOME/a');
   assert.ok(home.includes(join(HOME, 'a')), home.join(' '));
-  assert.deepEqual(pathCandidates(dir, '${HOME}/a').paths, home);
+  assert.deepEqual(expanded('${HOME}/a'), home);
   assert.equal(pathCandidates(dir, '$HOMEDIR/a').dynamic, true);
   // ...whereas a BRACE ends the name, so `${HOME}x` is the home directory followed by an `x`
-  assert.deepEqual(pathCandidates(dir, '${HOME}x/a').paths, [`${HOME}x/a`]);
+  assert.deepEqual(expanded('${HOME}x/a'), [`${HOME}x/a`]);
   // an alias is recognised before a `..` is applied to it: `/proc/self/cwd/../x` is beside the working directory
   const beside = pathCandidates(dir, '/proc/self/cwd/../x');
   assert.notEqual(beside.uncertain, null);
