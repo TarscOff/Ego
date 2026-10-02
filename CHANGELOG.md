@@ -392,3 +392,15 @@ discipline of decision Q84 (authority changes are never patch releases).
   the ordinary corpus spends 4% of the bound, the largest attack spelling 8%); `find -exec env EDITOR=x git commit \;` and `fd -x env
   VAR=x …` carry the assignment like `env EDITOR=x git commit` does (it was ALLOW); `git checkout-index` and `git format-patch` are read
   as the writes they are again, and a hyphenated git command is renamed for the patterns only, never for the readers keyed by the verb.
+- **A body reaches the same readers as the command line it holds** (closure audit 2026-10-02, integration of the four waves; found by the
+  corpus crossing every class with every producer). Two routes through a producer's body did not meet the readers a plain command line does.
+  (1) The cycle guard identified a producer's pass by what it resolves to, and for a git hook that is the hooks directory and the verb: `env
+  'EDITOR=/tmp/x' git commit` inside the pre-commit hook of `git commit` was "the same execution" as the commit that fired the hook, was
+  cut off as a repeat and never asked about the environment it hands the command - ASK on the command line, ALLOW in the hook and in a
+  lint-staged task. The environment a pass runs in is now part of which pass it is, for every producer (make's key always carried it): a
+  second pass in another environment is read, a second pass in the same one is still a repeat. Visible change: a hook that runs the commit
+  or checkout that fired it again with an assignment (a program-selecting name asks, as on the command line; any other name is a further
+  pass that the analysis may not finish and then asks) asks; a hook that does not re-enter is as it was. (2) A make override carries a
+  command, and the guard against `make -E` / `--eval` scanned the normalised words, in which `V="gawk -Eevil.awk d.txt"` holds a word
+  spelled like make's option: the command line was called "supplied on stdin", the makefile unreadable, and the program file the override
+  names was never read (`grep -E` in an override asked too). make's command line has one reader, which reads the words make is handed.
