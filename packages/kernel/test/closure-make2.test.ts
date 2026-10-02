@@ -241,6 +241,7 @@ test('MK-05. a goal make can build with a built-in rule runs the variables that 
     ['an object prerequisite', 'make all', { Makefile: `CC = ${ACT} ;\nall: foo.o\n`, ...c }, 'DENY'],
     ['a rule with a dependency and no recipe takes its recipe from the built-in one', 'make all', { Makefile: `CC = ${ACT} ;\nall: foo.o\nfoo.o: foo.h\n`, ...c, 'foo.h': 'x' }, 'DENY'],
     ['in a subdirectory', 'make sub/foo', { Makefile: `CC = ${ACT} ;\n`, 'sub/foo.c': 'x' }, 'DENY'],
+    ['a rule of the makefile that cannot apply does not hide the built-in one that can', 'make foo', { Makefile: `CC = ${ACT} ;\n.deploy:\n${T}@echo x\n%.o: %.cc\n${T}@echo y\n`, ...c }, 'DENY'],
     ['on the command line, with no makefile at all', 'make CC=./tool.sh foo', { ...c, ...tool }, 'DENY'],
     ['on the command line with a compiler name that is the act', `make 'CC=${ACT} #' foo`, c, 'DENY'],
     ['the environment spelling asks (control)', 'CC=./tool.sh make foo', { ...c, ...tool }, 'GATED'],

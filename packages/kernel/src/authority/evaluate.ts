@@ -8030,9 +8030,11 @@ function resolveScriptCommand(
       const can = (u: { prereqs: string[] }): boolean => u.prereqs.every(there);
       const applicable = matches.filter(can);
       if (applicable.length) return applicable;
-      if (matches.length) return matches;
+      // (a rule of the makefile that cannot apply is still read - and it does not hide the built-in one that can: `.deploy:` is the
+      //  single-suffix rule `%: %.deploy`, and it was taken for the only rule that could build `foo`)
       const built = cl.noBuiltinRules ? [] : builtinRulesFor(t, there, viaImplicit);
-      if (built.length) return built.map((h) => ({ prereqs: h.prereqs, recipes: [...h.rule.recipes], stem: h.stem }));
+      if (matches.length || built.length)
+        return [...matches, ...built.map((h) => ({ prereqs: h.prereqs, recipes: [...h.rule.recipes], stem: h.stem as string | undefined }))];
       // `.DEFAULT` IS THE RECIPE OF A GOAL NO RULE BUILDS AND NO FILE IS: make runs it for any name it cannot make (exit review 6)
       const fallback = merged.rules.get('.DEFAULT');
       return fallback && fallback.recipes.length > 0 && !onDisk(t) ? [{ prereqs: [], recipes: fallback.recipes, stem: undefined }] : [];
