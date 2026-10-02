@@ -1407,7 +1407,9 @@ matchers:
   # script uses to test whether a tool exists (exit review 4).
   - capability: command.read-only
     tool: Bash
-    command: '^command\s+-[vV]\s+\S+(?:\s+(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null))*\s*$'
+    # (ANY NUMBER OF NAMES: `command -v docker podman` looks both up. A name is a word with no operator in it, so the redirections after
+    # them are told apart from the names by what they are made of)
+    command: '^command\s+-[vV]\s+[^\s<>&|;]+(?:\s+[^\s<>&|;]+)*(?:\s+(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null))*\s*$'
   # interposed interpreter options (`python3 -u -c`, `node --no-warnings -e`) must not escape the ^-anchored match
   - capability: command.interpreter-inline
     tool: Bash

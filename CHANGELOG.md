@@ -404,3 +404,31 @@ discipline of decision Q84 (authority changes are never patch releases).
   command, and the guard against `make -E` / `--eval` scanned the normalised words, in which `V="gawk -Eevil.awk d.txt"` holds a word
   spelled like make's option: the command line was called "supplied on stdin", the makefile unreadable, and the program file the override
   names was never read (`grep -E` in an override asked too). make's command line has one reader, which reads the words make is handed.
+- **A word that is another language's text is not shell text** (closure audit 2026-10-02, wave 5, ordinary-development review U-01..U-09).
+  The readers of shell words - the path scan, the wildcard enumerator, the option scan, the redirection scan, the launcher matchers - were
+  handed words that are a second language, and invented a command, a path or a flag out of each: `/**` in a JSDoc comment is the wildcard
+  that matches every file on the machine, `// a -o b` an output flag, `expect(` the nested-terminal launcher. The dominant edit idiom of the
+  agents, `python3 - <<'PY'` over a TypeScript file, was an unapprovable DENY in 12% of 7,523 recorded runs, and one command in four was
+  gated for text it only held. `authority/program-words.ts` is the grammar of those words (the code after `python3 -c` / `node -e` /
+  `perl -pe` / `php -r`, a sed or awk script, a jq or `gh --jq` filter, the value of `find -regex`, a separator - `cut -d /`, `sort -t /`,
+  `awk -F /`, `tr` -, the strings of `test`, the body of `curl -d`), read with the option parsers and tables the tools already have;
+  `operands.ts` is the one reader and every consumer asks it: the text matchers (the same recursion through carriers), the path scan, the
+  wildcard scans, the destination scans, the `-c` carrier and the herestring. A text counts only if every occurrence of it is such a word,
+  so `grep /etc/passwd /etc/passwd` has a file in it (it was ALLOW: the pattern and the file were one text). The pattern-first list of
+  search tools, kept in three places, is retired into the same reader. The standard input of an interpreter that is not a shell - a
+  here-document, a here-string, a literal piped in, in a typed command and in a script file - is one **program-text** stage: the opener
+  asks (`command.interpreter-script`), and the rules that name a protected store read the text, as they read `python3 -c`; the shell
+  still expands what it expands (`$( )` in an unquoted delimiter is a command of its own). Beside it: **sed's `e` is read by the sed
+  scanner** (a regex looked for the letter `e` after three of one character and matched `sed -n 1,5p src/service.ts` - 7.5% of all the
+  agents' commands - and missed `s/a/b/2e`); **`-B` is the compiler driver's program prefix by the driver's table**, and
+  before-context / block size / ignore-blank-lines for the tools that have it (1,090 commands); an awk `-F` is the field separator, not
+  `-f` (the matchers are case-blind; the case-sensitive reader of awk's file options already existed); **`command -v NAME` keeps its
+  redirections** (the carrier re-quoted `>/dev/null` into two literal arguments), for any number of names; **a Dockerfile `RUN` line and a
+  container's own argv write the container's paths** - a redirection, a credential-store name, a hook - while a bind mount is still the
+  host path it is and the host's own redirection stays the host's; **a wildcard group `(src|examples)/**` is enumerated**, and a pattern
+  nobody can enumerate matches nothing where the directory in front of it is not there. Visible changes: a program on standard input
+  asks (it was DENY for a line that held `/**`, `// a -o b`, `expect(`, `script`, `>/dev/null`) and, if it names a credential store,
+  hook or git directory, is refused as `python3 -c` is; `awk 'getline < "FILE"'` asks; `sed 's/a/b/2e'` asks; `docker compose build`
+  over a Dockerfile that writes a file in the image asks nothing it did not (it was an absolute DENY). Not changed: a quoted wildcard
+  given to a program nobody modelled is still judged as the wildcard it would be (the program may expand it), and `docker exec`
+  still names a credential store it is handed in the text of its own line.

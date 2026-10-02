@@ -428,6 +428,20 @@ Two modules now answer, and every reader uses them:
   command with the same `peelCarriers`, and the clause of a `find -exec` / `fd -x` with the same `payloadSpans`; an option
   its grammar of the data-taking tools does not list, or a carrier whose carried command cannot be placed, leaves the line
   unread — it can only ever *reduce* what the matchers see, never classify.
+- [`authority/program-words.ts`](../../packages/kernel/src/authority/program-words.ts) is the grammar of the words that are
+  **another language's text**: the code after `python3 -c` / `node -e` / `perl -pe`, a `sed` or `awk` script, a `jq` or `gh --jq`
+  filter, the pattern of `find -regex`, a separator (`cut -d /`, `sort -t /`, `awk -F /`, `tr`), the strings of `test` and the
+  body of `curl -d`. Such a word is *program* text to `operands.ts`: the matchers still read it (they are the readers of what a
+  program may do, and the rules that fail a protected store closed read an inline program's text), and no reader of **shell words**
+  does — the path scan, the wildcard enumerator, the option scan, the redirection scan and the launcher matchers were handed `/**`
+  from a JSDoc comment as the wildcard that matches the whole disk, `// a -o b` as an output flag and `expect(` as the nested-terminal
+  launcher (the dominant edit idiom of the agents, `python3 - <<'PY'`, became a refusal nobody can approve). The standard input of
+  an interpreter that is not a shell — a here-document, a here-string, a literal piped in — is one **program-text** stage: the
+  opener asks (`command.interpreter-script`), the text is read by the rules that name a thing wherever the text names it, and the
+  shell still expands what it expands (`$( )` in an unquoted here-document is a command of its own). A program on standard input is
+  **opaque**: what it does with a string it holds (`os.system("…")`, a perl backtick) is not read, and the opener always asks. A word that is a file
+  stays a file: `curl -d @FILE`, `jq --rawfile`, `sed 'r FILE'`, `awk 'getline < FILE'` and the operands beside a pattern are judged
+  as the paths they are.
 
 What this does **not** establish: a tool whose options no table lists is still read by the regexes it always was; a table is
 the tool's *documented* option set and an option added to the tool tomorrow is `unknown` to the parser until its row is

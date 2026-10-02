@@ -353,9 +353,26 @@ test('U-07: the pattern of a search is text, whatever it starts with and whateve
       'git log --grep="// TODO" --oneline',
       'git log -S"/api v1" --oneline',
       "xargs grep -n '// TODO' < /dev/null",
+      // behind the structure of a shell line and the wrappers that carry a command
+      'for f in src docs; do grep -rn "// TODO" $f; done',
+      'if grep -q "// TODO" src; then echo yes; fi',
+      '! grep -rn "// TODO" src',
+      'time grep -rn "// TODO" src',
+      'grep -rn "// TODO" src || true',
+      'grep -rn "// TODO" src | head -20',
+      '{ grep -rn "// TODO" src; } | wc -l',
+      'LC_ALL=C grep -rn "// TODO" src',
+      'env LC_ALL=C grep -rn "// TODO" src',
+      'timeout 5 grep -rn "// TODO" src',
+      'nice -n 5 rg "// TODO" src',
+      "find . -name '*.ts' | xargs grep -n \"// TODO\"",
+      "time sed -E 's/([0-9]+)/<\\1>/g' file.txt",
     ],
     dir,
   );
+  // (a loop that reads a variable asks for the variable, and for nothing the pattern holds)
+  for (const c of ['while read l; do grep -n "// TODO" $l; done < /dev/null', "for f in src; do sed -E 's/([0-9]+)/<\\1>/g' $f/index.ts; done"])
+    assert.deepEqual(gates(run(c, dir)).filter((h) => /TODO|<|\/\*\*/.test(String(h.via ?? ''))), [], `${c} -> ${show(c, dir)}`);
   // ag and ack are search tools this kernel has no rule for (they ask), and their pattern is a pattern all the same
   for (const c of ['ag "// TODO" src', 'ack "// TODO" src', 'ag -i --hidden "/api v1" src', 'ack -i -B2 "/api v1" src'])
     assert.deepEqual(shellReaders(run(c, dir)).filter((h) => h.via !== 'no matcher'), [], `${c} -> ${show(c, dir)}`);
@@ -502,6 +519,9 @@ test('U-09: -B is before-context for a search, a block size for du, df and ls, a
     ],
     dir,
   );
+  // (a loop that reads a variable asks for the variable, and for nothing the pattern holds)
+  for (const c of ['while read l; do grep -n "// TODO" $l; done < /dev/null', "for f in src; do sed -E 's/([0-9]+)/<\\1>/g' $f/index.ts; done"])
+    assert.deepEqual(gates(run(c, dir)).filter((h) => /TODO|<|\/\*\*/.test(String(h.via ?? ''))), [], `${c} -> ${show(c, dir)}`);
   // ag and ack are search tools with the same option
   for (const c of ['ag -B2 foo src', 'ack -B2 foo src']) assert.deepEqual(gates(run(c, dir)).filter((h) => /the option -B/.test(String(h.via))), [], show(c, dir));
   // du/df: a size, whatever else the command asks

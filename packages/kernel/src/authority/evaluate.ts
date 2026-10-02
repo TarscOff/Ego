@@ -13328,7 +13328,7 @@ function classifyShellPaths(
   // filter, a separator, a request body - found by the one role reader (operands.ts / program-words.ts), and set aside by every scan
   // of shell words below: the path scan, the wildcard scans, the destination scans. Their texts are compared with the words of the
   // normalized segment, which has lost the quoting, and a text counts only if EVERY occurrence of it is such a word.
-  const nonShell = nonShellWords(rawWords.map((t) => t.text), rawWords.map((t) => t.shape), asScanned);
+  const nonShell = nonShellWords(rawWords.map((t) => t.text), rawWords.map((t) => t.shape), asScanned, HEAD_PREFIXES);
   const paths = pathTokens(bare, cwd, old, nonShell.pieces).filter((p) => !statementWords.has(p.raw));
   // A WRITER WHOSE OPERAND IS BUILT AT RUN TIME NAMES A FILE NOBODY CAN JUDGE. `tee "$(echo .harness/runtime/pin.json)"` and
   // `tee $f` reached ALLOW because only the destructive verbs reported an unreadable operand (exit review 11). An
@@ -13682,11 +13682,13 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
       const prog =
         (PROGRAM_OPERAND_TOOL_RE.test(spliced) ? PROGRAM_OPERAND_RE : PROGRAM_OPERAND_LONG_RE).exec(spliced) ??
         PROGRAM_OPERAND_GLUED_RE.exec(spliced);
-      if (prog)
+      // ...and the tool's own table reads the spliced line the way the tool will (`-B` is the driver's program prefix, and only its table says so)
+      const named = prog === null ? toolEffects(head, tokenize(spliced))?.programs[0] : undefined;
+      if (prog || named !== undefined)
         hits.push({
           capability: 'command.script-opaque',
           verdict: verdictFor(table, ctx, 'command.script-opaque'),
-          via: `the response file ${rf} supplies ${prog[1] ?? prog[0]}, which names a program the command class does not bound`,
+          via: `the response file ${rf} supplies ${prog ? (prog[1] ?? prog[0]) : `the option value ${named}`}, which names a program the command class does not bound`,
           segment: seg,
           absolute: false,
           opaqueUnread: true,
@@ -14272,7 +14274,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
     const words = tokenize(text);
     if (depth > 0) {
       const marked = tokenizeMarked(text);
-      for (const w of nonShellWords(marked.map((t) => t.text), marked.map((t) => t.shape), asScanned).wholes) carriedNonShell.add(w);
+      for (const w of nonShellWords(marked.map((t) => t.text), marked.map((t) => t.shape), asScanned, HEAD_PREFIXES).wholes) carriedNonShell.add(w);
     }
     if (depth >= CARRIER_NEST) {
       // a carrier below the cap was not read: the words it holds are unproved, not absent
@@ -14773,7 +14775,7 @@ function carrierCommandValues(seg: string): string[] {
   // A WORD THAT IS DATA TO ITS COMMAND IS NOT A COMMAND STRING, whatever option stands in front of it: `git log -S "=>" --oneline` searches
   // for an arrow (the pickaxe's `-S` is not env's), and `grep -c "a; b" f` counts. One reader says which words those are (operands.ts)
   // - and the code after `python3 -c` is not a command string either: it is Python (U-01)
-  const roleScan = scanLine(words, m.map((x) => x.shape));
+  const roleScan = scanLine(words, m.map((x) => x.shape), false, HEAD_PREFIXES);
   const dataAt = roleScan.roles.map((r, k) => (r === 'data' || r === 'program') && m[k]!.shape !== 'real');
   for (let i = 0; i < m.length; i++) {
     const t = m[i]!.text;
@@ -15797,7 +15799,7 @@ function analyzeSegmentsInto(
           if (marked[k]!.quoted) continue; // a verb inside quotes is data
           if (k > noExecFrom) continue;
           if (predicateValues.has(k)) continue;
-          if (roles !== null && (roles.roles[k] === 'data' || roles.roles[k] === 'operand')) continue;
+          if (roles !== null && (roles.roles[k] === 'data' || roles.roles[k] === 'program' || roles.roles[k] === 'operand')) continue;
           const name = marked[k]!.text.slice(marked[k]!.text.lastIndexOf('/') + 1);
           if (!LOCKED_HEADS.has(name)) continue;
           const suffix = [name, ...marked.slice(k + 1).map((t) => t.text)].join(' ');

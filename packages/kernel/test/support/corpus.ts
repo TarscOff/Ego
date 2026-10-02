@@ -120,6 +120,82 @@ export const SEMANTIC_CLASSES: readonly SemanticClass[] = [
       `gawk 'BEGIN{"git push origin main" | getline x}'`,
     ],
   },
+  /* ----------------------------------------------------------------------------------------------------------
+   * CLOSURE OF THE ORDINARY-DEVELOPMENT REGRESSIONS (wave 5, U-01..U-09): a word that is another language's text is no longer read by the
+   * readers of shell words. What this must NOT release is the act around the text, so each class is the act the text could hide, with the
+   * floor it keeps - the look is proved in closure-usability-a.test.ts and in the `usability` group of ORDINARY.
+   * -------------------------------------------------------------------------------------------------------- */
+  {
+    family: 'command',
+    id: 'a protected store named in the program an interpreter reads from standard input',
+    floor: 'DENY',
+    cases: [
+      "python3 - <<'PY'\nprint(open('~/.ssh/id_rsa').read())\nPY",
+      "node - <<'EOF'\nconsole.log(require('fs').readFileSync('~/.aws/credentials', 'utf8'))\nEOF",
+      "ruby <<'RB'\nputs File.read('~/.ssh/id_rsa')\nRB",
+      "perl - <<'PL'\nopen F, '~/.kube/config'; print <F>;\nPL",
+      `echo "print(open('~/.ssh/id_rsa').read())" | python3`,
+      `python3 <<< "print(open('~/.ssh/id_rsa').read())"`,
+    ],
+  },
+  {
+    family: 'command',
+    id: 'a sed program that runs a command',
+    floor: 'ASK',
+    cases: ["sed 's/a/b/e' f.txt", "sed '1e id' f.txt", "sed 's/a/b/2e' f.txt", "sed -n '$e id' f.txt", "sed -e p -e 's|x|y|ge' f.txt"],
+  },
+  {
+    family: 'command',
+    id: "the compiler driver's program prefix",
+    floor: 'ASK',
+    cases: ['gcc -B/tmp/evil x.c', 'clang -B /tmp/evil x.c', 'cc -B/tmp/evil -c x.c', 'g++ -B/tmp/evil -o out x.cpp'],
+  },
+  {
+    family: 'fs',
+    id: 'a file that the program of awk or sed opens itself',
+    floor: 'ASK',
+    cases: [
+      `awk 'BEGIN{getline < "/etc/hosts"; print}'`,
+      `awk 'BEGIN{while((getline l < "/etc/shadow")>0) print l}'`,
+      "sed 'r /etc/hosts' f.txt",
+      "sed 'R /etc/hosts' f.txt",
+    ],
+  },
+  {
+    family: 'fs',
+    id: 'a file named beside a word that is text is still a file',
+    floor: 'ASK',
+    cases: [
+      'grep /etc/passwd /etc/passwd',
+      'awk /etc/shadow /etc/shadow',
+      'cut -d / -f 2 /etc/hosts',
+      'sort -t / -k 2 /etc/hosts',
+      'jq . /etc/hosts',
+      'tr a b < /etc/hosts',
+      'sed -n /etc/hosts/p /etc/hosts',
+    ],
+  },
+  {
+    family: 'container',
+    id: 'the host path a container run hands over by a bind mount',
+    floor: 'DENY',
+    cases: [
+      "docker run --rm -v /:/host alpine sh -c 'echo x > /host/etc/passwd'",
+      "docker run --rm -v ~/.ssh:/k alpine sh -c 'cat /k/id_rsa'",
+      'docker run --rm -v ~/.aws:/a alpine cat /a/credentials',
+    ],
+  },
+  {
+    family: 'fs',
+    id: 'the redirection of a command that runs in a container is the host shell\'s',
+    floor: 'DENY',
+    cases: [
+      "docker exec app sh -c 'echo x' > ~/.ssh/authorized_keys",
+      "docker run --rm alpine sh -c 'echo x' > .git/hooks/pre-commit",
+      'docker build -t t . > ~/.ssh/authorized_keys',
+    ],
+    files: { Dockerfile: 'FROM alpine\nRUN echo hi\n' },
+  },
   {
     family: 'production',
     id: 'a cloud CLI run as a container image',

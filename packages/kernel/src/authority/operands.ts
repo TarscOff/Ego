@@ -451,9 +451,16 @@ function parallelCommandAt(line: readonly string[], at: number): number {
  *  `-exec` clause begins and ends (payloadSpans); this file used to walk `sudo`'s and `xargs`'s options with lists of its own. A
  *  carrier whose carried command cannot be located (an option the table does not know), or that hands it on as a string, leaves the
  *  line unread: every word is `unread`. */
-export function scanLine(line: readonly string[], shape?: readonly OperatorShape[], lenient = false): Scan {
+export function scanLine(
+  line: readonly string[],
+  shape?: readonly OperatorShape[],
+  lenient = false,
+  /** shell structure in front of a command (`do`, `then`, `!`, `time`): the caller owns the list, and a line read as it stands from a
+   *  loop body or a condition has one */
+  prefixes?: ReadonlySet<string>,
+): Scan {
   const out: Scan = { roles: line.map((): WordRole => 'unread'), glued: new Map() };
-  const peeled = peelCarriers(line, 0);
+  const peeled = peelCarriers(line, 0, prefixes === undefined ? {} : { prefixes });
   if (peeled.partial !== null || peeled.strings.length > 0 || peeled.shellString !== null || peeled.lookup) return out;
   const at = peeled.at;
   if (at >= line.length) return out;
@@ -468,12 +475,12 @@ export function scanLine(line: readonly string[], shape?: readonly OperatorShape
     // the carrier's own words first (find's name patterns), then each clause: the clause's words are the carried command's
     const own = wordRoles(line, at, shape, lenient);
     if (own !== null) into(own, 0);
-    for (const [from, to] of payloadSpans(line, at)) into(scanLine(line.slice(from, to), shape?.slice(from, to), lenient), from);
+    for (const [from, to] of payloadSpans(line, at)) into(scanLine(line.slice(from, to), shape?.slice(from, to), lenient, prefixes), from);
     return out;
   }
   if (head === 'parallel') {
     const c = parallelCommandAt(line, at);
-    if (c >= 0) into(scanLine(line.slice(c), shape?.slice(c), lenient), c);
+    if (c >= 0) into(scanLine(line.slice(c), shape?.slice(c), lenient, prefixes), c);
     return out;
   }
   const own = wordRoles(line, at, shape, lenient);
@@ -510,8 +517,9 @@ export function nonShellWords(
   /** how the normalized segment comes apart again: the words are joined with blanks and TOKENIZED a second time, so a word that holds
    *  blanks or quotes (`x = "/**"`) reaches the scan as the pieces that second tokenization makes of it, not as the word */
   pieces: (word: string) => string[] = (word) => word.split(/\s+/),
+  prefixes?: ReadonlySet<string>,
 ): NonShellWords {
-  const s = scanLine(line, shape, true);
+  const s = scanLine(line, shape, true, prefixes);
   const textWholes = new Set<string>();
   const textPieces = new Set<string>();
   const shellWholes = new Set<string>();
