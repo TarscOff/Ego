@@ -10,6 +10,7 @@
 // Nothing here reads the disk or classifies. The analyzer hands in the readers it owns (`FlowReaders`), which keeps this module free of
 // the evaluator and the evaluator free of one more block of its own.
 import { foldSubstitutions, listsPaths, operandReadings, passesInputThrough, producedWord, readsOperandsAsFiles, substitutionSites } from './flow.ts';
+import { wordRoles } from './operands.ts';
 
 /** What a command leaves on its standard output, as far as anyone here can tell. */
 export type Produced =
@@ -92,17 +93,22 @@ function fromFile(r: FlowReaders, name: string): Produced {
 /** how many alternatives one produced text may add: a produced list is a few words, and a bound is a question, not an absence */
 const MAX_WORDS = 64;
 
-/** the heads whose first operand is a pattern, not a file */
+/** the heads whose first operand is a pattern, not a file - the reading of a line the role reader (operands.ts) cannot place (an option nobody listed) */
 const PATTERN_FIRST = /^(grep|egrep|fgrep|zgrep|rg|ag|ack)$/;
 
-/** Tokens of a stage that carry a `$SUBST` and are operands (not options, not a search pattern) of a command that opens operands as files. */
+/** Tokens of a stage that carry a `$SUBST` and are operands (not options, not a search pattern) of a command that opens operands as files.
+ *  WHICH WORD IS THE PATTERN is the role reader's answer (operands.ts `wordRoles`, read leniently as the path scan reads a search tool): the
+ *  reader that says it of `grep -A 3 PATTERN FILE` and `grep -e PATTERN FILE` for every other reader of the words of a line. Only a line it
+ *  cannot place keeps the reading below (the first word that is not an option). */
 function substitutedOperands(words: readonly string[]): number[] {
   if (!readsOperandsAsFiles(words)) return [];
   const head = (words[0] ?? '').replace(/^.*\//, '');
+  const roles = wordRoles(words, 0, undefined, true);
   const out: number[] = [];
-  let patternSeen = !PATTERN_FIRST.test(head) || words.some((w) => /^-[A-Za-z]*[ef]$/.test(w) || /^--(regexp|file)=/.test(w));
+  let patternSeen = roles !== null || !PATTERN_FIRST.test(head) || words.some((w) => /^-[A-Za-z]*[ef]$/.test(w) || /^--(regexp|file)=/.test(w));
   for (let i = 1; i < words.length; i++) {
     const w = words[i]!;
+    if (roles !== null && roles.roles[i] === 'data') continue;
     if (w.startsWith('-')) continue;
     if (!patternSeen) {
       patternSeen = true;

@@ -1338,30 +1338,30 @@ matchers:
   # awk and sed are read-only only while their program neither escapes to a shell nor writes a file
   - capability: command.interpreter-inline
     tool: Bash
-    # a pipe on EITHER side of a quoted string inside an awk program is a shell command (`"cmd" | getline`,
-    # `print | "cmd"`); sed's `e` command and the s///e flag execute their result; `w` writes a file
-    command: '^(awk|gawk|mawk|nawk|sed)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|\|\s*&?\s*getline|ENVIRON|close\s*\(|print[fl]?[^|>]*>|\bw\s+/|--in-place|(^|[;{''"\s])(?:[0-9$,~+]+\s*)?e[\s;}]|s(.)(?:(?!\3).)*\3(?:(?!\3).)*\3[a-z]*e)'
-  # sed's `e` FLAG on a substitution executes the result, with ANY delimiter (`s|x|id|e`, `s#x#id#e`).
-  # A dedicated matcher keeps the backreference unambiguous.
+    # a pipe on EITHER side of a quoted string inside an awk program is a shell command (`"cmd" | getline`, `print | "cmd"`).
+    # THIS RULE READS AN AWK PROGRAM, so it is anchored at awk: sed's script is not awk's, and `sed -n '/system(/p'` is a search.
+    # A program's text is no longer read by the path scan (it is not shell words), and it opens files itself: `getline < "FILE"` and
+    # `getline VAR < "FILE"` read one (`print > "FILE"` writes one, above), so they ask here, where the whole program is read as one.
+    command: '^(awk|gawk|mawk|nawk)\b[\s\S]*(system\s*\(|\|\s*["'']|["'']\s*\|&?|\|\s*&?\s*getline|ENVIRON|close\s*\(|print[fl]?[^|>]*>|getline\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\s*)?<)'
+  # sed's `w` writes a file, and `--in-place` rewrites its input
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(?:sed|gsed)\b[\s\S]*\ss(.)(?:(?!\1)[\s\S])*\1(?:(?!\1)[\s\S])*\1[a-z]*e'
-  # a program supplied by FILE is opaque: it is judged like any other script, not as a read-only one-liner
-  # sed's `e` COMMAND — `1e CMD`, `$e CMD`, `/re/e CMD` — executes CMD for the matching lines; the existing rule
-  # covered only the `s///e` FLAG. gawk's `-i`/`-l` load a library and `-E` takes its program from a file, and
-  # each of those is a program EGO never read (exit review 8).
+    command: '^(sed|gsed)\b[\s\S]*(\bw\s+/|--in-place)'
+  # WHETHER A SED PROGRAM RUNS A COMMAND IS READ BY THE SCANNER THAT READS A SED SCRIPT (sed.ts), not by this text: the `e` command
+  # (`1e CMD`, `$e CMD`, `/re/e CMD`) and the `e` flag of a substitution (`s|x|id|e`, `s/a/b/2e`) are found by their grammar, and
+  # the normalizer surfaces the answer as a marker. Three regexes stood here, each looking for the letter `e` after three of one
+  # character anywhere in the line; a back-reference to the wrong group made the first of them match `sed -n 1,5p src/service.ts`
+  # (the letters `s`, `e`, `e` and `e`), which was 7.5% of every command the agents ran (U-08), and none of them knew `2e`.
   - capability: command.interpreter-inline
     tool: Bash
-    command: '^(sed|gsed)\b[\s\S]*(^|[;{''"\s])(?:[0-9$,~+/^]+\s*)?e\s+\S'
+    command: '^\x00ego\x00sed-executes\b'
+  # a program supplied by FILE is opaque: it is judged like any other script, not as a read-only one-liner. (sed's `-f`. awk's is read by
+  # the marker below, which sees the CASE: `-F` is the field separator, and a matcher compiled case-insensitively read it as `-f`, so
+  # `awk -F / '{print $2}'` asked for a program file it did not have. gawk's `-i`, `-l`, `-E`, `--include`, `--load` and `--exec` are
+  # the same marker's: one reader of awk's file options, with the case.)
   - capability: command.interpreter-script
     tool: Bash
-    command: '^(awk|gawk|mawk|nawk|sed|gsed)\b[^|;&]*\s(-f|--file|--source)(=|\s)'
-  # gawk's library flags load a program file. `-E` is deliberately absent: every matcher here is compiled
-  # case-insensitively, so it cannot be told apart from `-e`, and `sed -e s/a/b/ f` is the most ordinary
-  # invocation there is. The long spelling `--exec` says the same thing and can be matched.
-  - capability: command.interpreter-script
-    tool: Bash
-    command: '^(gawk|awk|mawk|nawk)\b[^|;&]*\s(-i|--include|-l|--load|--exec|--source)(=|\s)'
+    command: '^(sed|gsed)\b[^|;&]*\s(-f|--file)(=|\s)'
   # gawk's `-E FILE`, surfaced by the normalizer because a case-insensitive matcher cannot tell it from `-e`.
   - capability: command.interpreter-script
     tool: Bash
@@ -1466,7 +1466,9 @@ matchers:
   # script uses to test whether a tool exists (exit review 4).
   - capability: command.read-only
     tool: Bash
-    command: '^command\s+-[vV]\s+\S+(?:\s+(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null))*\s*$'
+    # (ANY NUMBER OF NAMES: `command -v docker podman` looks both up. A name is a word with no operator in it, so the redirections after
+    # them are told apart from the names by what they are made of)
+    command: '^command\s+-[vV]\s+[^\s<>&|;]+(?:\s+[^\s<>&|;]+)*(?:\s+(?:\d?>>?\s*/dev/null|\d?>&[0-9-]|&>>?\s*/dev/null))*\s*$'
   # interposed interpreter options (`python3 -u -c`, `node --no-warnings -e`) must not escape the ^-anchored match
   - capability: command.interpreter-inline
     tool: Bash

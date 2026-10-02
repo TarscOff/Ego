@@ -90,7 +90,8 @@ test('ordinary development is gated in exactly the places that are accounted for
   // + the 33 looks that are not acts, locations the tool already uses and links that record a name (`looks`, closure-usability-b.test.ts)
   // + the 16 commands the operand-flow, wildcard-destination, link-copy and option-table readers must leave alone (`paths2`, closure-paths2.test.ts)
   // + the 7 statements about the harness's own commands and about sudo that the anchored rules must leave alone (closure-authority2.test.ts)
-  assert.equal(total, 374, 'the ordinary corpus changed size; update the count deliberately');
+  // + the 27 commands whose words are another language's text (`usability`, closure-usability-a.test.ts)
+  assert.equal(total, 401, 'the ordinary corpus changed size; update the count deliberately');
   assert.deepEqual(unexpected, [], `ordinary development gated without a reason:\n  ${unexpected.join('\n  ')}`);
   assert.deepEqual(stale, [], `EXPECTED_GATES is out of date:\n  ${stale.join('\n  ')}`);
 });

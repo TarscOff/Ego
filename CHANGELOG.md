@@ -614,3 +614,59 @@ discipline of decision Q84 (authority changes are never patch releases).
   while the producer is read, and HOME is written as `~` in the line the consumer is judged as), the contents probe of a directory the
   machine keeps for itself (HOME or the temporary directory, there or not), and the canonical form of a path that has already been walked.
   One more decode of a percent escape (the location a tool's own variable names) is the one that cannot throw.
+- **A word that is another language's text is not shell text** (closure audit 2026-10-02, wave 5, ordinary-development review U-01..U-09).
+  The readers of shell words - the path scan, the wildcard enumerator, the option scan, the redirection scan, the launcher matchers - were
+  handed words that are a second language, and invented a command, a path or a flag out of each: `/**` in a JSDoc comment is the wildcard
+  that matches every file on the machine, `// a -o b` an output flag, `expect(` the nested-terminal launcher. The dominant edit idiom of the
+  agents, `python3 - <<'PY'` over a TypeScript file, was an unapprovable DENY in 12% of 7,523 recorded runs, and one command in four was
+  gated for text it only held. `authority/program-words.ts` is the grammar of those words (the code after `python3 -c` / `node -e` /
+  `perl -pe` / `php -r`, a sed or awk script, a jq or `gh --jq` filter, the value of `find -regex`, a separator - `cut -d /`, `sort -t /`,
+  `awk -F /`, `tr` -, the strings of `test`, the body of `curl -d`), read with the option parsers and tables the tools already have;
+  `operands.ts` is the one reader and every consumer asks it: the text matchers (the same recursion through carriers), the path scan, the
+  wildcard scans, the destination scans, the `-c` carrier and the herestring. A text counts only if every occurrence of it is such a word,
+  so `grep /etc/passwd /etc/passwd` has a file in it (it was ALLOW: the pattern and the file were one text). The pattern-first list of
+  search tools, kept in three places, is retired into the same reader. The standard input of an interpreter that is not a shell - a
+  here-document, a here-string, a literal piped in, in a typed command and in a script file - is one **program-text** stage: the opener
+  asks (`command.interpreter-script`), and the rules that name a protected store read the text, as they read `python3 -c`; the shell
+  still expands what it expands (`$( )` in an unquoted delimiter is a command of its own). Beside it: **sed's `e` is read by the sed
+  scanner** (a regex looked for the letter `e` after three of one character and matched `sed -n 1,5p src/service.ts` - 7.5% of all the
+  agents' commands - and missed `s/a/b/2e`); **`-B` is the compiler driver's program prefix by the driver's table**, and
+  before-context / block size / ignore-blank-lines for the tools that have it (1,090 commands); an awk `-F` is the field separator, not
+  `-f` (the matchers are case-blind; the case-sensitive reader of awk's file options already existed); **`command -v NAME` keeps its
+  redirections** (the carrier re-quoted `>/dev/null` into two literal arguments), for any number of names; **a Dockerfile `RUN` line writes the image**: an
+  absolute redirection target in it, and an absolute credential-store name in its text (`/root/.ssh`, `/home/app/.ssh`, `/app/.env`), are the
+  image's and no longer a host refusal - a relative name and a `~` are judged as the places they would be here, and the floors of the governed
+  names (`.harness/…`, `.git/hooks/…`) hold in a RUN line as before; and the redirection of the command a container runs - `docker exec C sh -c
+  'echo x > /app/out.txt'` - to an absolute path outside every repository is a question and no longer an absolute refusal (a governed name
+  reached through a mount keeps its floor, and the host's own redirection stays the host's); **a wildcard group `(src|examples)/**` is
+  enumerated** (checked against zsh), and a pattern nobody can enumerate matches nothing where the directory in front of it is not there.
+  Visible changes: a program on standard input asks (it was DENY for a line that held `/**`, `// a -o b`, `expect(`, `script`,
+  `>/dev/null`) and, if it names a credential store by a path, is refused as `python3 -c` is; `awk 'getline < "FILE"'` asks (it was ALLOW);
+  `sed 's/a/b/2e'` asks; `docker compose build` and `docker build` over a Dockerfile that writes a file in the image are what they are over one
+  that does not (they were an absolute DENY since the compose reader began to read the Dockerfile). Not changed: a quoted wildcard given to a program
+  nobody modelled is still judged as the wildcard it would be (the program may expand it); a `docker exec` that names a credential store
+  by an absolute path in the text of its own line is still refused; a program fed to an interpreter that names a git hook or `.claude/`
+  file is still a question (the `-c` form of the same text is refused, and the heredoc form has always been a question).
+  Where the text sits is part of what reads it: a here-string is text for an interpreter and for the tools that read text (`cat`, `grep`, `jq`,
+  `wc`, `read` ...) - a POSITIVE list - and stays shell words for a container's shell, `ssh`, `xargs`, a database client and a script of the
+  project's own; the sed and awk readings hold behind `then`, `do`, `!`, `npx` and a wrapper; the body that `find -exec`, `watch` or `sh -c`
+  carries is re-read as written when a sed script `r`/`R` names a file, when an input redirection does, or when the shell builds an awk
+  program; an absolute name under `/proc` is a second name for a directory of the process and never "a path in the image"; a heredoc that an
+  interpreter reads behind `sudo`, `xargs` or `docker exec` is, as it was, a question (the carrier is the question, and the body is not read).
+  `docker run IMG gcc -B/dir` no longer asks for the `-B` (the compiler runs in the container, so the program prefix is the container's, and the
+  question is the one the run itself is); on the host, in `docker exec` and in `kubectl exec` the prefix still asks.
+  The join with the work of waves 5 and 6 that had already read the same words made the readers ONE. Which words of a segment are text
+  was answered four times: the search pattern in the path scan (`PATTERN_FIRST_HEADS`, by place, with a count of the pattern's pieces),
+  the pattern of the recursive-read scan (`patternWords`), the pieces of a sed script (`sedScriptWords`, the paths work) and the role
+  reader of this entry. They are `nonShellWords` now: the texts of the words of the segment as written that are not shell text, each listed
+  only when every occurrence of it is such a word (so `grep -r . .` keeps its root and a piece of a sed script that is also the file the
+  command edits stays a name), and the operand-flow plan for `$(...)` asks the same reader which word is the pattern. The wildcard
+  enumerator's "a segment nobody enumerates matches nothing where its directory is absent" was written twice (the paths work and this one) and is
+  one rule; a parenthesis with no partner in its segment is a character (paths) and a group is enumerated (this entry) - a stray parenthesis
+  inside a group's tail or alternative is not enumerated. Which absolute path is the image's was answered by `confinedToImage` (a body that runs in
+  an image has no judgement of a path) and by `isImagePath` (this entry): the judgement of a path is the image's unless the name is under `/proc`,
+  where `self/cwd` is the directory the build runs in, so the one answer is `isImagePath` for both; a container's redirection that is a question
+  and not a refusal is the same rule for a name and for the names a wildcard target matches. Which option of which tool names a program is
+  `program-operands.ts` (OT-01) and the tool tables (`effects.programs`), and the response file is read by both as a command line is. The
+  work bound answers `zip x.zip "/**"` as it does on main (a question, "too large to classify"; the test of this entry that held it to a
+  refusal by enumeration holds it to a gate).

@@ -716,10 +716,100 @@ const escapeRe = (c: string): string => c.replace(/[\\^$.|?*+()[\]{}/-]/g, '\\$&
 const EXTENDED_PATTERN = /[\^#<]|.~/;
 const hasWildcard = (seg: string, extended = false): boolean => /[*?[(|]/.test(seg) || (extended && EXTENDED_PATTERN.test(seg));
 
-/** One path segment of a glob as a regular expression, or null for syntax this does not enumerate (an extended glob, `a|b`,
- *  a character class it cannot read). */
+/** Where the bracket expression that opens at `seg[at]` closes, or -1 when it does not (and the `[` is a character like any other). */
+function bracketEnd(seg: string, at: number): number {
+  let j = at + 1;
+  if (seg[j] === '!' || seg[j] === '^') j++;
+  if (seg[j] === ']') j++;
+  for (; j < seg.length && seg[j] !== ']'; j++)
+    if (seg[j] === '[' && seg[j + 1] === ':') {
+      const end = seg.indexOf(':]', j + 2);
+      if (end < 0) return -1;
+      j = end + 1;
+    }
+  return j < seg.length ? j : -1;
+}
+
+/** The first group of a segment - `(a|b)` - as the places of its two parentheses; null when there is none, 'stray' when a parenthesis
+ *  is not paired. An escaped character and a bracket expression hide a parenthesis. */
+function groupSpan(seg: string): { open: number; close: number } | null | 'stray' {
+  let depth = 0;
+  let open = -1;
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]!;
+    if (c === '\\') i++;
+    else if (c === '[') {
+      const end = bracketEnd(seg, i);
+      if (end > i) i = end;
+    } else if (c === '(') {
+      if (depth++ === 0) open = i;
+    } else if (c === ')') {
+      if (depth === 0) return 'stray';
+      if (--depth === 0) return { open, close: i };
+    }
+  }
+  return depth > 0 ? 'stray' : null;
+}
+
+/** The alternatives of a group's body, split at the `|` that is not inside a nested group, a bracket expression or an escape. */
+function alternativesOf(body: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === '\\') i++;
+    else if (c === '[') {
+      const end = bracketEnd(body, i);
+      if (end > i) i = end;
+    } else if (c === '(') depth++;
+    else if (c === ')') depth--;
+    else if (c === '|' && depth === 0) {
+      out.push(body.slice(from, i));
+      from = i + 1;
+    }
+  }
+  out.push(body.slice(from));
+  return out;
+}
+
+/** What a segment with GROUPS - `(src|examples)`, which zsh reads as an alternation and picomatch (prettier, eslint) too - matches, as
+ *  regular-expression source. The groups were "syntax this does not enumerate", so `prettier "(src|examples)/**\/*.ts"` could be
+ *  neither expanded nor ruled out and asked (U-06). A group's alternatives are read as segments of their own, up to a depth and a
+ *  width that keep the expansion small; a ksh-style operator in front of the group (`@(a|b)`, `*(a|b)`, `+(a|b)`, `?(a|b)`,
+ *  `!(a|b)`) means one thing to bash with `extglob` and another to zsh, and stays unenumerated. */
+function segmentSource(seg: string, depth = 0): string | null {
+  const g = groupSpan(seg);
+  // a parenthesis with no partner: a character in every shell (`console.log("a/*")`) when it stands alone in a whole segment - plainSource
+  // keeps the rule of wave 6 (paths), a parenthesis is a group only with its partner - and never a character inside a group's tail or
+  // alternative, where the group's own parentheses leave it ambiguous (not enumerated)
+  if (g === 'stray') return depth === 0 ? plainSource(seg) : null;
+  if (g === null) return plainSource(seg);
+  const before = seg.slice(0, g.open);
+  const alts = alternativesOf(seg.slice(g.open + 1, g.close));
+  if (depth >= 4 || alts.length > 32 || /[@*?+!]$/.test(before)) return null;
+  const parts = alts.map((a) => segmentSource(a, depth + 1));
+  const head = plainSource(before);
+  const tail = segmentSource(seg.slice(g.close + 1), depth + 1);
+  if (head === null || tail === null || parts.some((p) => p === null)) return null;
+  return `${head}(?:${parts.join('|')})${tail}`;
+}
+
+/** One path segment of a glob as a regular expression, or null for syntax this does not enumerate (an extended glob, a group it
+ *  cannot read, a character class it cannot read). */
 function segmentRegExp(seg: string, ignoreCase = false, extended = false): RegExp | null {
   if (extended && EXTENDED_PATTERN.test(seg)) return null;
+  const re = segmentSource(seg);
+  if (re === null) return null;
+  try {
+    return new RegExp(`^${re}$`, ignoreCase ? 'si' : 's');
+  } catch {
+    return null;
+  }
+}
+
+/** A segment with no group in it, as regular-expression source. */
+function plainSource(seg: string): string | null {
   let re = '';
   for (let i = 0; i < seg.length; i++) {
     const c = seg[i]!;
@@ -765,11 +855,7 @@ function segmentRegExp(seg: string, ignoreCase = false, extended = false): RegEx
       re += escapeRe(c);
     } else re += escapeRe(c);
   }
-  try {
-    return new RegExp(`^${re}$`, ignoreCase ? 'si' : 's');
-  } catch {
-    return null;
-  }
+  return re;
 }
 
 /**
@@ -903,8 +989,9 @@ function expandGlobText(
     const re = segmentRegExp(seg, style.ignoreCase, style.extended);
     if (re === null) {
       // a segment nobody enumerates (an extended pattern, `a|b`, a parenthesis) leaves the answer open only where there is a directory to match it
-      // in: below a name that does not exist the shell matches nothing, and the text of a program that holds a slash and a bracket - `sed
-      // 's/(foo)/[\1]/'`, `node -e 'console.log("/**")'` - is not a place to look (it was a word without its quotes, and now it is the word)
+      // in: below a name that does not exist the shell matches nothing ("unproved" is a statement about names that might exist, and these
+      // cannot; U-06), and the text of a program that holds a slash and a bracket - `sed 's/(foo)/[\1]/'`, `node -e 'console.log("/**")'` - is
+      // not a place to look (it was a word without its quotes, and now it is the word). ONE rule for the two branches that wrote it.
       if (frontier.some((p) => isDirectory(p))) budget.bounded = true;
       return;
     }
