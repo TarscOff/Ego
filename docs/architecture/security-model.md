@@ -441,7 +441,10 @@ Two modules now answer, and every reader uses them:
   shell still expands what it expands (`$( )` in an unquoted here-document is a command of its own). A program on standard input is
   **opaque**: what it does with a string it holds (`os.system("…")`, a perl backtick) is not read, and the opener always asks. A word that is a file
   stays a file: `curl -d @FILE`, `jq --rawfile`, `sed 'r FILE'`, `awk 'getline < FILE'` and the operands beside a pattern are judged
-  as the paths they are.
+  as the paths they are - also when a carrier (`find -exec`, `watch`, `sh -c`) holds the command, whose body is then re-read as written.
+  What reads text is a **positive** list: a here-string is text for an interpreter and for the tools that search, count or filter it;
+  for a container's shell, `ssh`, `xargs`, a database client or a script of the project's own it stays shell words, because the
+  receiver may run it.
 
 What this does **not** establish: a tool whose options no table lists is still read by the regexes it always was; a table is
 the tool's *documented* option set and an option added to the tool tomorrow is `unknown` to the parser until its row is

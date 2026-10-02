@@ -437,3 +437,11 @@ discipline of decision Q84 (authority changes are never patch releases).
   nobody modelled is still judged as the wildcard it would be (the program may expand it); a `docker exec` that names a credential store
   by an absolute path in the text of its own line is still refused; a program fed to an interpreter that names a git hook or `.claude/`
   file is still a question (the `-c` form of the same text is refused, and the heredoc form has always been a question).
+  Where the text sits is part of what reads it: a here-string is text for an interpreter and for the tools that read text (`cat`, `grep`, `jq`,
+  `wc`, `read` ...) - a POSITIVE list - and stays shell words for a container's shell, `ssh`, `xargs`, a database client and a script of the
+  project's own; the sed and awk readings hold behind `then`, `do`, `!`, `npx` and a wrapper; the body that `find -exec`, `watch` or `sh -c`
+  carries is re-read as written when a sed script `r`/`R` names a file, when an input redirection does, or when the shell builds an awk
+  program; an absolute name under `/proc` is a second name for a directory of the process and never "a path in the image"; a heredoc that an
+  interpreter reads behind `sudo`, `xargs` or `docker exec` is, as it was, a question (the carrier is the question, and the body is not read).
+  `docker run IMG gcc -B/dir` no longer asks for the `-B` (the compiler runs in the container, so the program prefix is the container's, and the
+  question is the one the run itself is); on the host, in `docker exec` and in `kubectl exec` the prefix still asks.
