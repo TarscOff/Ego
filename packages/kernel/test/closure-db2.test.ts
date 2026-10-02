@@ -16,9 +16,11 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  DB_CONNINFO,
   DB_GRAMMAR,
   REDIS_OPTIONS,
   SQLITE_OPTIONS,
+  isScriptWord,
   parseDbArgs,
   readDbTarget,
   type DbWord,
@@ -1268,4 +1270,31 @@ test("sqlite3's table lists every option of the real binary's -help, with its ar
   // sqlite3 takes `--name` for `-name`, and nothing shorter: `-hea` is not `-header`
   const abbreviated = spawnSync('sqlite3', ['-hea', ':memory:', 'select 1'], { encoding: 'utf8' });
   assert.notEqual(abbreviated.status, 0, 'sqlite3 takes an abbreviation of an option');
+});
+
+test('a connection string is recognised in linear time, and by one definition', () => {
+  for (const ok of [
+    'host=prod-db.acme.com dbname=app',
+    'dbname = app host = prod',
+    "host='prod db' user=me",
+    'a=b',
+    '  host=x  ',
+  ]) {
+    assert.ok(DB_CONNINFO.test(ok), ok);
+    assert.equal(isScriptWord(ok), false, ok);
+  }
+  for (const no of ['select 1', 'select * from t where a = 1', 'host=a b', ''])
+    assert.ok(!DB_CONNINFO.test(no), no);
+  // the form this replaces took exponential time on a string that is almost a connection string
+  for (const bad of [`${'a=a'.repeat(40)} b`, `${'a=b '.repeat(60)}c`, `${'a = '.repeat(50)}'`]) {
+    const t0 = Date.now();
+    DB_CONNINFO.test(bad);
+    assert.ok(Date.now() - t0 < 200, `${bad.slice(0, 20)}… took ${Date.now() - t0} ms`);
+  }
+  // ...and so does every operand of every client, which asks it for each word of the line
+  const dir = workspace();
+  const t0 = Date.now();
+  verdict(`psql ${'a=a'.repeat(40)} b -c 'select 1'`, dir);
+  verdict(`mongosh ${'a=a'.repeat(40)} b --eval 'db.stats()'`, dir);
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
 });

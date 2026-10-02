@@ -74,6 +74,7 @@ import {
 import { GIT_VERB_OPTIONS } from './git-verb-options.ts';
 import { SQL_IDENT_CONT_SRC, SQL_IDENT_START_SRC, endsWithEscapePrefix, sqlScan, type SqlDialect, type SqlVariables } from './sql-lex.ts';
 import {
+  DB_CONNINFO,
   DB_GRAMMAR,
   SQLITE_OPTIONS,
   hostNames,
@@ -11047,11 +11048,10 @@ function psqlEscape(parsed: DbArgs): DbEscape {
   }
   // the positional operands are a database and a user; one that is a script is standard input handed over as a word - and a word
   // that is only a variable reference (`:x`) is a script as well, the shortest there is
-  const conninfo = /^\s*(\w+\s*=\s*('[^']*'|\S+)\s*)+$/;
   for (const w of parsed.positional)
     if (
       (/[\s;\\]/.test(w.text) || /(^|[^:]):[A-Za-z0-9_\u0080-￿]/.test(w.text)) &&
-      !conninfo.test(w.text) &&
+      !DB_CONNINFO.test(w.text) &&
       !/^[a-z][a-z0-9+.-]*:\/\//i.test(w.text)
     )
       statement(w);

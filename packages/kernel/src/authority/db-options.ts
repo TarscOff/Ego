@@ -610,9 +610,14 @@ export function hostNames(value: string): string[] {
  *  connection string. A URI and a `key=value` connection string are operands, whatever they hold. */
 export function isScriptWord(text: string): boolean {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return false;
-  if (/^\s*(\w+\s*=\s*('[^']*'|\S+)\s*)+$/.test(text)) return false;
+  if (DB_CONNINFO.test(text)) return false;
   return /[\s;\\()]/.test(text);
 }
+
+/** A libpq `key=value key='quoted value'` connection string, with blanks allowed around the `=`. The segments are separated by blanks and
+ *  a value ends at a blank or is quoted, so there is exactly one way to read a string and the test takes linear time on any input (the
+ *  form `(\w+=\S+\s*)+` it replaces took exponential time on `a=a=a=…=a b`). */
+export const DB_CONNINFO = /^\s*\w+\s*=\s*(?:'[^']*'|[^\s']+)(?:\s+\w+\s*=\s*(?:'[^']*'|[^\s']+))*\s*$/;
 
 export function readDbTarget(spec: DbOptionSpec, parsed: DbArgs): DbTargetReading {
   const hosts: string[] = [];
