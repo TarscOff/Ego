@@ -72,7 +72,7 @@ import {
   wholeTreePathspec,
 } from './git-invocation.ts';
 import { GIT_VERB_OPTIONS } from './git-verb-options.ts';
-import { MAKE_WILDCARD, MakeStore, encodeMakeParts, parseMakeCommandLine, readMakeNames, recipeCommands } from './make.ts';
+import { MAKE_WILDCARD, MakeStore, encodeMakeParts, flagDefinitions, parseMakeCommandLine, readMakeNames, recipeCommands } from './make.ts';
 import { MakeReader, newMakeModel, type MakeHost, type MakeModel } from './make-reader.ts';
 import { builtinRulesFor, matchPatternRule, stemmed } from './make-builtins.ts';
 import type { LocalTargets, TargetClass, Verdict } from '../control-plane/types.ts';
@@ -7786,8 +7786,8 @@ function resolveScriptCommand(
       ['SHELL', '/bin/sh'], ['.SHELLFLAGS', '-c'], ['MAKEFILES', ''], ['GNUMAKEFLAGS', ''],
     ] as const)
       store.seed(n, v);
-    // (MAKEFLAGS carries the command-line variables, with their values: a recipe that prints it is printing them)
-    const flags = cl.assignments.length || parentCli.length ? encodeMakeParts([null]) : '';
+    // (MAKEFLAGS carries the command-line variables, with their values and a blank escaped as make escapes it: a recipe that prints it prints them)
+    const flags = encodeMakeParts([[...cliVars].map(([k, v]) => `${k}=${v.replace(/([\\ \t#])/g, '\\$1')}`).join(' ')]);
     store.set('MAKEFLAGS', [flags], { origin: 'default', simple: true, conditional: false });
     store.set('MFLAGS', [flags], { origin: 'default', simple: true, conditional: false });
     const cliGoal = cl.assignments.filter((a) => a.name.trim() === '.DEFAULT_GOAL').pop();
@@ -7886,7 +7886,8 @@ function resolveScriptCommand(
     // NO MAKEFILE IS NOT NO RULES (MK-05): `make foo` with a `foo.c` beside it runs the C compiler make knows about, and `make CC=./tool.sh foo`
     // with no makefile at all runs `./tool.sh`. A goal a built-in rule can build is read like any other, from an empty makefile.
     const builtinGoal = !paths.length && !cl.noBuiltinRules && targets.some((t) => builtinRulesFor(t, onDisk).length > 0);
-    if ((!builtinGoal || staleNow) && (!paths.length || !paths.some((p) => readInsideWorkspace(ctx, p) !== null))) {
+    // (when the same command may also WRITE the makefile, the built-in rules are still read and handed over, with the staleness as a gap below)
+    if (!builtinGoal && (!paths.length || !paths.some((p) => readInsideWorkspace(ctx, p) !== null))) {
       // ...AND AN ABSENCE CANNOT BE CLAIMED OVER A FILE THIS COMMAND CREATES. With nothing on disk there is no
       // body to hand over, so the staleness is the whole answer — and it must be given BEFORE the absence,
       // which is a positive claim (exit review 9; the ordering was the self-attack's second-order finding).
@@ -8161,6 +8162,11 @@ function resolveScriptCommand(
       const alt = store.expand(`$(${n})`).alts[0];
       exportedEnv.push([n, alt?.text ?? store.text(n) ?? '']);
     }
+    // ...AND THE VARIABLES THE FLAGS CARRY: `MAKEFLAGS += CMD=...` and `MAKEOVERRIDES += CMD=...` in a makefile define CMD in the make that `$(MAKE)`
+    // starts, where it beats the sub-makefile's own `?=` (and, for MAKEOVERRIDES, its `=`). They are command-line variables of everything below.
+    const flagged = flagDefinitions(store);
+    const childCli = new Map(cliVars);
+    for (const [k, v] of flagged.definitions) if (!childCli.has(k)) childCli.set(k, v);
     const bodyEnv = childEnvironment(env, {
       cwd: makeDir,
       cwdVerified: env.cwdVerified,
@@ -8171,7 +8177,7 @@ function resolveScriptCommand(
       sources: Object.fromEntries(merged.sources.map((f) => [f, fingerprint(merged.text)])),
       envInputs: {
         ...env.envInputs,
-        ...Object.fromEntries([...cliVars].map(([k, v]) => [`\0cli:${k}`, v])),
+        ...Object.fromEntries([...childCli].map(([k, v]) => [`\0cli:${k}`, v])),
         ...Object.fromEntries(exportedEnv.filter(([k]) => merged.exported.has(k) || merged.exportAll).map(([k, v]) => [`\0env:${k}`, v])),
       },
     });
@@ -8192,7 +8198,7 @@ function resolveScriptCommand(
     // ...AND THE COMMAND-LINE VARIABLES, which change what every recipe expands to. Omitting them made
     // `make run` and its own `make CMD="git push origin main" run` the SAME execution, so the cycle guard
     // stopped the second one and its recipe was never analysed (exit review 8).
-    const cliKey = [...cliVars].map(([k, v]) => `${k}=${v}`).sort().join('\u0000');
+    const cliKey = [...childCli].map(([k, v]) => `${k}=${v}`).sort().join('\u0000');
     // ...AND THE DIRECTORY IT RUNS IN. The key dropped `makeDir` whenever a makefile was resolved, so a recipe
     // that re-enters make with `-C sub -f ../Makefile all` was the SAME execution as the one that started it and
     // the cycle guard stopped it - while `./x.sh` inside it is `sub/x.sh`, a different file (exit review 10).
@@ -8246,6 +8252,8 @@ function resolveScriptCommand(
       gaps.push({ what: 'binding', where: mkName, why: `the environment redefines program lookup: ${r}` });
     for (const i of cliInputs)
       gaps.push({ what: 'context', where: i.slice(0, i.indexOf('=')), why: `make is given ${i}, which changes what it reads` });
+    if (flagged.unknown)
+      gaps.push({ what: 'config', where: mkName, why: 'MAKEFLAGS, MAKEOVERRIDES or GNUMAKEFLAGS holds text this resolver cannot determine, and every make below this one reads the variables in it' });
     // SELF-MODIFYING PRODUCER — make REMAKES a makefile that is itself a target, then restarts and runs the new
     // one. The source EGO read is then the pre-image of what executes (challenge 6, finding 9).
     for (const r of remade)

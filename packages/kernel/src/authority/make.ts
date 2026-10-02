@@ -543,6 +543,35 @@ export class MakeStore {
   }
 }
 
+/**
+ * THE VARIABLES A MAKEFILE HANDS TO EVERY MAKE BELOW IT THROUGH THE FLAGS (MAKEFLAGS, MAKEOVERRIDES, GNUMAKEFLAGS). make passes its own flags to a
+ * sub-make in the environment variable MAKEFLAGS, and a sub-make reads a word of the form NAME=value in it as a variable definition - so `MAKEFLAGS +=
+ * CMD=git\ push\ origin\ main` in the parent defines CMD in the make that `$(MAKE)` starts, where it beats the `CMD ?= echo safe` of the sub-makefile,
+ * and `MAKEOVERRIDES += CMD=...` does it with the precedence of the command line (checked against GNU make 3.81). The words are read by the name
+ * grammar (`\ ` is a blank inside a word); a word that begins with `-` is an option. `unknown` says that some value of these variables could not be
+ * determined, so the definitions a sub-make receives could not either.
+ */
+export function flagDefinitions(store: MakeStore): { definitions: Array<[string, string]>; unknown: boolean } {
+  const out = new Map<string, string>();
+  let unknown = false;
+  for (const name of ['MAKEFLAGS', 'MAKEOVERRIDES', 'GNUMAKEFLAGS']) {
+    for (const text of store.candidates(name)) {
+      for (const alt of store.expand(text).alts) {
+        if (alt.text === null) {
+          unknown = true;
+          continue;
+        }
+        for (const word of readMakeNames(alt.text, false).names) {
+          if (word.startsWith('-')) continue;
+          const a = readAssignment(word);
+          if (a !== null && a.name.trim() !== '' && !a.name.includes('$')) out.set(a.name.trim(), a.value);
+        }
+      }
+    }
+  }
+  return { definitions: [...out], unknown };
+}
+
 /* ------------------------------------------------------------------------------------------------------------- *
  * 4. THE EXPANSION
  * ------------------------------------------------------------------------------------------------------------- */

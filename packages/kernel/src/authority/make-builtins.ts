@@ -135,6 +135,7 @@ export const BUILTIN_RULES: readonly BuiltinRule[] = [
   { target: '%.p', prereqs: ['%.web'], recipes: ['$(TANGLE) $<'] },
   { target: '%.tex', prereqs: ['%.web'], recipes: ['$(WEAVE) $<'] },
   { target: '%', prereqs: ['%.sh'], recipes: ['cat $< >$@', 'chmod a+x $@'] },
+  { target: '(%)', prereqs: ['%'], recipes: ['$(AR) $(ARFLAGS) $@ $<'] },
   { target: '%.out', prereqs: ['%'], recipes: ['@rm -f $@', 'cp $< $@'] },
   { target: '%.c', prereqs: ['%.w', '%.ch'], recipes: ['$(CTANGLE) $^ $@'] },
   { target: '%.tex', prereqs: ['%.w', '%.ch'], recipes: ['$(CWEAVE) $^ $@'] },
@@ -165,6 +166,11 @@ export interface PatternMatch {
   readonly bare: string;
 }
 export function matchPatternRule(pattern: string, name: string): PatternMatch | null {
+  // an archive member: `lib.a(foo.o)` is built by putting `foo.o` into `lib.a` with $(AR) - a program a variable names
+  if (pattern === '(%)') {
+    const member = /^[^()]+\(([^()]+)\)$/.exec(name)?.[1];
+    return member === undefined ? null : { stem: member, dir: '', bare: member };
+  }
   const dir = pattern.includes('/') ? '' : name.slice(0, name.lastIndexOf('/') + 1);
   const bare = patternStem(pattern, name.slice(dir.length));
   return bare === null ? null : { stem: dir + bare, dir, bare };

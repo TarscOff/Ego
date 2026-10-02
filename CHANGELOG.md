@@ -404,3 +404,45 @@ discipline of decision Q84 (authority changes are never patch releases).
   command, and the guard against `make -E` / `--eval` scanned the normalised words, in which `V="gawk -Eevil.awk d.txt"` holds a word
   spelled like make's option: the command line was called "supplied on stdin", the makefile unreadable, and the program file the override
   names was never read (`grep -E` in an override asked too). make's command line has one reader, which reads the words make is handed.
+- **One model of a make invocation's variables** (closure audit 2026-10-02, wave 6; the make findings MK-01..MK-10 and test gap TG-01 of the
+  wave-5 review). Ten findings were one question - what text does make hand the shell, and what does it run on the way - asked in ten places,
+  each answer a way two readers of the same makefile disagreed. There is now one of each, as modules of `authority/` (`make.ts`,
+  `make-reader.ts`, `make-builtins.ts`): the command line (every word that holds `=` is a variable definition, never a goal), the lines (a
+  backslash continues a line only when it is the odd one out; a value ends at its `#`), ONE variable store (origins and precedence - default,
+  environment, makefile, `-e`, command line, `override` - flavour, the values a conditional can give, read in make's order: an `include` is
+  read inline, into the same store, so what it declines to assign with `?=` or an `ifndef` is judged against what the includer set), ONE
+  expansion (every text function, `$(call)`, a computed name, `$(VAR:a=b)`, an exact `$(wildcard)`; it returns the commands `$(shell)` runs
+  as well as the text) and a table of make's own implicit rules and default variables, read off `make -p`. Visible changes, each from ALLOW to
+  ASK or DENY unless it says otherwise:
+  - A command-line `CMD:=x`, `CMD?=x`, `CMD+=x`, `CMD::=x`, `'CMD = x'`, `.DEFAULT_GOAL=x` and `NAME!=cmd` are definitions (they were goals no
+    rule defined, "absent", while make used them); the last of two definitions of a name is the one make uses (the first was read).
+  - A tab-indented line outside a rule is a makefile line (an assignment, a conditional, an include); one that is none of them is a fatal
+    error to make and is read as an error AND as a recipe of the last rule, never as nothing. A line this reader does not read is recorded.
+    An `override` assignment, a `define`, a conditional and a comment do not end a rule (checked against GNU make 3.81); the others do.
+  - An even run of backslashes ends the line (`X = a\\` above a rule hid the rule); a recipe's continuation reaches the shell as the shell reads it.
+  - A `$(shell)` in a `define` runs wherever the define is expanded while the makefile is read (`X := $(call RUN)`, `$($(N))`, `ifeq ($(call
+    RUN),x)`, `define X :=`); a `define` nothing expands runs nothing.
+  - A name make computes is the name: `$(N) = ...`, `CMD$(E) = ...`, `export $(N) = ...`, `define $(N)`; one nobody can compute asks.
+  - A value ends at its `#`: `CC = git push origin main #` no longer hides what follows the reference.
+  - A goal or prerequisite no rule of the makefile gives a recipe is built by make's own rules when its source is there (`make foo` with a
+    `foo.c`; `all: foo.o`; `foo.o: foo.h` with no recipe), and `CC`, `COMPILE.c`, `LEX`, `YACC`, `CFLAGS`... are execution inputs of those
+    rules, in the makefile and on the command line, with no makefile at all. The environment spelling asked and still does.
+  - Every value a conditional can give is expanded at EVERY place make expands it, parse time included (a `$(shell $(CMD))` after an
+    `ifdef` ran only the value that was last in the file); `$(shell $(UNDEFINED))` asks; `export` alone, `.EXPORT_ALL_VARIABLES:`,
+    `export A B` and every command-line variable are in the environment of the recipes (`make PGHOST=prod-db migrate`); the first rule of a
+    file is not a pattern rule; a rule line's `\#` is a `#`.
+  - The reported 654-byte makefile took 42 s to answer (the hook has 30 s, and a hook that has not answered has not refused). Every
+    expansion step is charged to the work counter, a variable is expanded once per expansion, and the size, the number of alternatives, the
+    nesting and the depth are capped: a reached bound is a gap (ASK), and that makefile is answered in about 25 ms. An `include` line follows
+    at most 512 files.
+  - Ordinary makefiles that asked do not: `app: $(OBJS)` (the prerequisites are expanded where the rule is read; `$^` is the list), a
+    `%.o: %.c` rule with plain source prerequisites, a static pattern rule, an old-style suffix rule, `$(CURDIR)`, `$(MAKE) -C sub` (the sub-make is
+    read), `$(RM)`, `$(CC)`, `$(MAKEFILE_LIST)`, `$(MAKECMDGOALS)`, `$(MAKE_VERSION)`, the user's own `$(HOME)`/`$(PWD)`, the flags of the
+    implicit rules, a canned recipe (`$(call BUILD,app)`), `.SHELLFLAGS := -eu -o pipefail -c`. `closure-make.test.ts` pinned three `$(MAKE)`
+    rows to an opacity that asks; they are the DENY they always were.
+  - Still asks, as before: `make CC=gcc build` and `make CFLAGS=-O2` (a program-selecting name given to make is an execution input, as in the
+    environment spelling), a conditional on `$(OS)` (the union of both branches is read), a nested make whose `-C` is a shell loop variable.
+  - Tests: `closure-make2.test.ts` (every row fails on the unfixed tree), the real GNU make as an oracle (`support/make-oracle.ts`: a logging
+    `git` on the PATH, the makefile run for real, the verdict compared with what ran - over the reviewers' cases and a seeded cross-product of
+    setters, users and noise), a work-bound property test, `ORDINARY_MAKEFILES` (realistic content for the producer, which the empty ORDINARY
+    workspace could not give) and nine corpus classes.
