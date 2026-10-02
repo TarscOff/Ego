@@ -16,7 +16,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { workspace, verdict, ORDINARY_MAKEFILES } from './support/corpus.ts';
 import { generateCases, implicitCases, oracleRoot, realMakeAvailable, runReal, siteCases } from './support/make-oracle.ts';
 import {
@@ -30,6 +32,7 @@ import {
   readAssignment,
   readMakeNames,
 } from '../src/authority/make.ts';
+import { MakeReader, newMakeModel } from '../src/authority/make-reader.ts';
 import { BUILTIN_RULES, BUILTIN_SUFFIXES, BUILTIN_VARIABLES, builtinRulesFor } from '../src/authority/make-builtins.ts';
 
 const T = '\t';
@@ -634,6 +637,165 @@ test('the built-in table is the table of the make that is installed', { skip: !r
   for (const sfx of suffixes) if (!BUILTIN_SUFFIXES.includes(sfx)) missing.push(`suffix ${sfx}`);
   assert.deepEqual(missing, [], 'make knows something this table does not: add it');
   assert.ok(builtinRulesFor('foo', (f) => f === 'foo.c').length > 0);
+});
+
+/** the variables and the expressions the expander is held to the real make on: each expression is printed by `$(info)` and by `MakeStore.expand` */
+const EXPR_DEFS = [
+  'A = foo bar baz', 'B := $(A) qux', 'C = $(A:o=0)', 'D = a.c b.c dir/e.c', 'E = $(D:.c=.o)', 'F = %.c', 'G =', 'H = x y\tz', 'I = $(J)', 'J = jj',
+  'K = a,b,c', 'L = ( paren', 'M = $$HOME', 'N := $$HOME', 'O = one two three four five', 'P = src/a.c src/b.c lib/c.c',
+  'Q = foo.tar.gz bar.txt noext .hidden dir/file.ext dir.d/noext', 'f = [$(1)|$(2)|$(3)]', 'g = $(1)$(1)', 'define DEF\nline1\nline2\nendef',
+];
+const EXPRS = [
+  '$(A)', '${A}', '$A', '$(B)', '$(C)', '$(E)', '$(G)', '[$(G)]', '$(H)', '$(I)', '$(K)', '$(L)', '$(M)', '$(N)',
+  '$(subst o,0,$(A))', '$(subst ,X,abc)', '$(subst a,,banana)', '$(subst foo,$(J),$(A))',
+  '$(patsubst %.c,%.o,$(D))', '$(patsubst %.c,%,$(D))', '$(patsubst a%,X%,$(A) apple)', '$(patsubst %,[%],$(A))', '$(patsubst b%,%b,$(A))', '$(patsubst foo,bar,$(A))', '$(patsubst %.c,%.o,.c a.c)',
+  '$(strip   $(H)  )', '$(strip )', '$(findstring bar,$(A))', '$(findstring x,$(A))', '$(findstring ,$(A))',
+  '$(filter %.c,$(D) x.h)', '$(filter-out %.c,$(D) x.h)', '$(filter foo baz,$(A))', '$(filter-out foo,$(A))', '$(filter %,$(A))', '$(filter a%b,ab acb a)',
+  '$(sort $(O) one)', '$(sort z a m a)', '$(sort )',
+  '$(word 1,$(O))', '$(word 5,$(O))', '$(word 6,$(O))', '$(wordlist 2,3,$(O))', '$(wordlist 4,9,$(O))', '$(wordlist 1,1,$(O))', '$(words $(O))', '$(words )', '$(words   a   b  )',
+  '$(firstword $(O))', '$(lastword $(O))', '$(firstword )', '$(lastword )',
+  '$(dir $(P))', '$(notdir $(P))', '$(dir a b/ /c)', '$(notdir a/ /b c//d)',
+  '$(suffix $(Q))', '$(basename $(Q))', '$(basename a.b/c)', '$(suffix a.b/c)',
+  '$(addprefix pre_,$(A))', '$(addsuffix .x,$(A))', '$(addprefix a b,c d)', '$(addsuffix 1 2,c d)', '$(addprefix x,)',
+  '$(join a b c,1 2)', '$(join a,1 2 3)', '$(join ,)',
+  '$(if $(G),yes,no)', '$(if $(A),yes,no)', '$(if $(A),yes)', '$(if  ,yes,no)', '$(if $(G),yes)x',
+  '$(or $(G),$(G),c)', '$(or $(G),$(G))', '$(and a,b,c)', '$(and a,,c)',
+  '$(foreach x,$(A),<$(x)>)', '$(foreach x,,<$(x)>)', '$(foreach x,a b,$(x)$(x))',
+  '$(call f,1)', '$(call f,1,2,3)', '$(call f,,2)', '$(call f)', '$(call g,ab)', '$(call g,$(A))',
+  '$(value A)', '$(value N)', '$(value M)', '$(flavor A)', '$(flavor B)', '$(origin A)',
+  '$($(J))', '$(J$(J))', '$(subst j,J,$(J))', '$(patsubst %,$(J)%,x y)',
+  '$(A:foo=1)', '$(A:o=0)', '$(A:%o=%0)', '$(A:a%=x%)', '$(D:%.c=%.o)',
+  '$(strip $(subst a,b,$(filter %a%,$(A))))', '$(words $(sort $(A) $(A)))', '$(patsubst %.c,%.o,$(filter %.c,$(D)))',
+  '$(if $(findstring bar,$(A)),FOUND,MISSING)', '$(foreach f,$(D),$(basename $(f)))',
+  'x$(G)y', '$(G)$(G)', '$$', '$$$$', '$$(A)', '$(A)$$', 'a  b', '$(subst a,b, a )', '$(words a,b c)', '$(subst $(L),x,$(L) y)',
+  '$(strip $(DEF))', '$(words $(DEF))', '$(word 2,$(DEF))',
+];
+
+test('REAL MAKE. the expander computes what make computes, function by function', { skip: !realMakeAvailable() }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'make-exprs-'));
+  try {
+    const defs = EXPR_DEFS.join('\n') + '\n';
+    writeFileSync(join(dir, 'Makefile'), [defs, ...EXPRS.map((e, i) => `$(info @@${i}@@${e}@@/@@)`), 'all: ;', ''].join('\n'));
+    const r = spawnSync('make', ['-f', 'Makefile', 'all'], { cwd: dir, encoding: 'utf8', env: { ...process.env, MAKEFLAGS: '' } });
+    const real = new Map<number, string>();
+    for (const m of r.stdout.matchAll(/@@(\d+)@@([\s\S]*?)@@\/@@/g)) real.set(Number(m[1]), m[2]!);
+    assert.equal(real.size, EXPRS.length, `make printed ${real.size} of ${EXPRS.length}: ${r.stderr}`);
+    const store = new MakeStore();
+    const model = newMakeModel(store);
+    new MakeReader(
+      { read: (p) => (p.endsWith('Makefile') ? defs : null), opened: (d, n) => join(d, n), exists: () => false, glob: () => ({ names: [], incomplete: false }), ordinaryShell: () => true },
+      model,
+      [],
+    ).readRoot(join(dir, 'Makefile'), dir);
+    const wrong: string[] = [];
+    let known = 0;
+    EXPRS.forEach((e, i) => {
+      const x = store.expand(e);
+      const mine = x.alts[0]?.text;
+      if (mine === null || mine === undefined) return;
+      known++;
+      if (x.alts.length === 1 && mine !== real.get(i)) wrong.push(`${e}: make says ${JSON.stringify(real.get(i))}, the expander ${JSON.stringify(mine)}`);
+    });
+    assert.deepEqual(wrong, []);
+    assert.ok(known >= EXPRS.length - 2, `only ${known} of ${EXPRS.length} expressions were computed`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('REAL MAKE. the reader\'s rules and variables are the ones in make\'s own database (make -p)', { skip: !realMakeAvailable() }, () => {
+  // makefiles whose syntax every GNU make reads alike; what is compared is what the recipe walk is built on - the targets, their prerequisites
+  // and recipes, and the value of each variable the makefile sets
+  const mks: Array<[string, string]> = [
+    ['several targets, several prerequisites', `a b: c d\n${T}echo $@\nc d:\n${T}echo x\n`],
+    ['order-only prerequisites', `all: a b | c d\n${T}echo all\na b c d:\n${T}echo $@\n`],
+    ['targets and prerequisites from variables', `T = x y\nP = z\n$(T): $(P)\n${T}echo $@\nz:\n${T}echo z\n`],
+    ['prerequisites on several lines', `all: a \\\n  b \\\n  c\n${T}echo all\na b c:\n${T}echo $@\n`],
+    ['a recipe on the rule line, and more', `all: ; echo one\n${T}echo two\n`],
+    ['an empty recipe', `all: a ;\na:\n${T}echo a\n`],
+    ['a static pattern rule over a substitution reference', `SRC = a.c b.c\nOBJ = $(SRC:.c=.o)\nall: $(OBJ)\n$(OBJ): %.o: %.c\n${T}cc -c $< -o $@\n`],
+    ['special targets', `.PHONY: all\n.SUFFIXES:\nall:\n${T}echo hi\n`],
+    ['comments', `# c\nall: a # trailing\n${T}echo all # not a make comment\na:\n${T}echo a\n`],
+    ['assignment kinds', `A = 1\nB := $(A)\nC ?= 3\nD += 4\nall: ;\n`],
+    ['hashes in values', `A = x \\# y\nB = x # y\nC = x \\\\# y\nall: ;\n`],
+    ['a define', `define D\nline1\nline2\nendef\nall:\n${T}$(D)\n`],
+    ['override and export', `override A = 1\nexport B = 2\nexport C := 3\nall: ;\n`],
+    ['an include', `include inc.mk\nI2 = $(I)\nall: ;\n`],
+    ['a computed name', `N = CMD\n$(N) = foo\nall: ;\n`],
+    ['a tab-indented assignment', `all: ;\n${T}A = 1\nB = 2\n`],
+    ['dollars', `A = $$HOME $$$$\nall:\n${T}echo $$X $(A)\n`],
+    ['a rule with only prerequisites, twice', `all: a\nall: b\na b: ;\n`],
+    ['a rule indented with blanks', `  all: a\n${T}echo all\na: ;\n`],
+    ['an appended value', `V = a\nV += b\nW :=\nW += c\nall: ;\n`],
+    ['a value that continues', `V = a \\\n  b \\\n  c\nall: ;\n`],
+  ];
+  const root = mkdtempSync(join(tmpdir(), 'make-db-'));
+  try {
+    writeFileSync(join(root, 'inc.mk'), 'I = 1\n');
+    const bad: string[] = [];
+    for (const [name, text] of mks) {
+      writeFileSync(join(root, 'Makefile'), text);
+      const r = spawnSync('make', ['-p', '-q', '-f', 'Makefile'], { cwd: root, encoding: 'utf8', env: { ...process.env, MAKEFLAGS: '' } });
+      const lines = r.stdout.split('\n');
+      // the database: variables the makefile sets, and the targets whose commands or prerequisites it gives
+      const vars = new Map<string, string>();
+      const targets = new Map<string, { prereqs: string[]; orderOnly: string[]; recipe: string }>();
+      let section = '';
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i]!;
+        if (l === '# Variables') section = 'vars';
+        else if (l === '# Files') section = 'files';
+        else if (/^# (Implicit Rules|Pattern-specific|VPATH)/.test(l)) section = 'other';
+        if (section === 'vars' && /^# makefile \(from/.test(l)) {
+          const m = /^([^\s=:+?]+)\s*:?=\s?(.*)$/.exec(lines[i + 1] ?? '');
+          if (m) vars.set(m[1]!, m[2]!);
+        }
+        if (section === 'files') {
+          const m = /^([^#\s][^:]*):(?::)?\s*(.*)$/.exec(l);
+          if (m && !/^\.(SUFFIXES|PHONY)/.test(m[1]!)) {
+            let j = i + 1;
+            let fromFile = false;
+            const rec: string[] = [];
+            for (; j < lines.length && (lines[j]!.startsWith('#') || lines[j]!.startsWith('\t')); j++) {
+              if (/^#\s{2}commands to execute \(from/.test(lines[j]!)) fromFile = true;
+              if (lines[j]!.startsWith('\t')) rec.push(lines[j]!.trim());
+            }
+            const [pre, ord] = (' ' + m[2]!).split(' | ');
+            const ws = (s: string | undefined): string[] => (s ?? '').split(/\s+/).filter(Boolean);
+            if (fromFile || ws(pre).length) targets.set(m[1]!, { prereqs: ws(pre), orderOnly: ws(ord), recipe: rec.join('').replace(/\s+/g, '') });
+          }
+        }
+      }
+      const store = new MakeStore({ builtinVariables: false });
+      const model = newMakeModel(store);
+      new MakeReader(
+        { read: (p) => (p.endsWith('inc.mk') ? 'I = 1\n' : p.endsWith('Makefile') ? text : null), opened: (d, n) => join(d, n), exists: (p) => p.endsWith('inc.mk'), glob: () => ({ names: [], incomplete: false }), ordinaryShell: () => true },
+        model,
+        [],
+      ).readRoot(join(root, 'Makefile'), root);
+      const set = (a: string[]): string => [...new Set(a)].sort().join(' ');
+      for (const [t, d] of targets) {
+        const mine = model.rules.get(t);
+        if (mine === undefined) bad.push(`${name}: make has the target ${t}, the reader does not`);
+        else {
+          if (set(d.prereqs) !== set(mine.prereqs)) bad.push(`${name}: prerequisites of ${t}: make [${d.prereqs}] reader [${mine.prereqs}]`);
+          if (set(d.orderOnly) !== set(mine.orderOnly)) bad.push(`${name}: order-only prerequisites of ${t}: make [${d.orderOnly}] reader [${mine.orderOnly}]`);
+          // (a continued recipe is printed by make with its backslash, and read here with the newline it is handed to the shell with)
+          const norm = (x: string): string => x.replace(/\\/g, '').replace(/\s+/g, '');
+          if (norm(d.recipe) !== norm(mine.recipes.join(''))) bad.push(`${name}: recipe of ${t}: make ${JSON.stringify(d.recipe)} reader ${JSON.stringify(mine.recipes)}`);
+        }
+      }
+      for (const [v, val] of vars) {
+        if (/^(MAKEFILE_LIST|MAKEFLAGS|MFLAGS|MAKEOVERRIDES|CURDIR|\.DEFAULT_GOAL)$/.test(v)) continue;
+        const mine = store.has(v) ? (store.isSimple(v) ? store.expand(`$(${v})`).alts[0]?.text : store.text(v)) : undefined;
+        if (mine === undefined) bad.push(`${name}: make sets ${v}, the reader does not`);
+        else if (mine !== null && mine !== val) bad.push(`${name}: ${v} is ${JSON.stringify(val)} to make and ${JSON.stringify(mine)} to the reader`);
+      }
+    }
+    assert.deepEqual(bad, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 /* ------------------------------------------------------------------------------------------------------------- *

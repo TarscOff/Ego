@@ -694,7 +694,9 @@ function parseMakeText(text: string, depth = 0): MNode[] {
   return nodes;
 }
 
-const words = (s: string): string[] => s.split(/[ \t\n\r\f\v]+/).filter(Boolean);
+/** The words of a text for every function but `strip`: split at a blank or a TAB and nothing else - a newline is part of a word (checked against GNU make 3.81:
+ *  `$(words a<newline>b)` is 1). `strip` alone collapses every kind of white space. */
+const words = (s: string): string[] => s.split(/[ \t]+/).filter(Boolean);
 
 function patternMatch(pat: string, word: string): string | null {
   const at = pat.indexOf('%');
@@ -718,7 +720,7 @@ function applyPure(fn: string, a: string[]): string | null {
     case 'patsubst':
       return words(a[2]!).map((w) => patsubstOne(a[0]!.trim(), a[1]!.trim(), w)).join(' ');
     case 'strip':
-      return words(a[0]!).join(' ');
+      return a[0]!.split(/[ \t\n\r\f\v]+/).filter(Boolean).join(' ');
     case 'findstring':
       return a[1]!.includes(a[0]!) ? a[0]! : '';
     case 'filter':
