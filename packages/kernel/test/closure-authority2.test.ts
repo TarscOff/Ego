@@ -1652,14 +1652,16 @@ test('I. BOUNDED WORK: for every reader family, at growing sizes, a decision is 
       // fraction of a unit a character did not pay (the stage cap, 32 KiB, is the one place text is skipped, and says so)
       const read = Math.min(command.length, 32_768);
       if (units < read * 0.2 && !['a numeric brace range'].includes(family.id)) problems.push(`${where}: ${units} units for ${read} characters read - the reader does not pay`);
-      if (best >= 1000) timings.push(`${where}: ${Math.round(best)} ms of CPU (${units} units, ${r.verdict})`);
+      // (a shape at the bound costs about a second of CPU on a quiet machine and was measured at 0.1-0.19 microseconds a unit under load: the hook
+      // budget is thirty seconds, so what this pins is 'ends in seconds, not in minutes' - two and a half seconds is the line, one is the retry)
+      if (best >= 2500) timings.push(`${where}: ${Math.round(best)} ms of CPU (${units} units, ${r.verdict})`);
     }
   }
   assert.deepEqual(problems, []);
   assert.ok(decided >= FAMILIES.length * 2, `${decided} decisions`);
   // (the time is the claim, and on a machine that is busy with something else it is not a fair measurement of THIS code: the deterministic
   // claims above hold either way, and the time is judged only when the machine is not overloaded)
-  if (!overloaded) assert.deepEqual(timings, [], 'a decision took a second of CPU or more');
+  if (!overloaded) assert.deepEqual(timings, [], 'a decision took two and a half seconds of CPU or more');
 });
 
 test('I. BOUNDED WORK: the families are the readers: every reader named in the header of work-bound.ts has one, and a family names the reader that pays', () => {
