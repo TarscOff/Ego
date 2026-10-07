@@ -381,7 +381,9 @@ test('a global option is accepted past the verb, and means what it means before 
       ['docker images --context production', undefined, 'ALLOW'],
       ['docker --context production compose version', undefined, 'ALLOW'],
       ['docker run alpine ls --context production', undefined, 'ALLOW'],
-      ["docker run alpine curl -H 'X: y' http://localhost:8080", undefined, 'ALLOW'],
+      // (the argv after the image is analysed since the exit review of 2026-10-07, CX-02: curl asks here as it asks on this machine; the
+      //  point of the row stands - the `-H` is curl's header, not the CLI's host, so this is not a production engine)
+      ["docker run alpine curl -H 'X: y' http://localhost:8080", undefined, 'ASK'],
       ['docker run --rm node:22 tool --builder prod', undefined, 'ALLOW'],
       ['docker run -c 512 --rm alpine sh', undefined, 'ALLOW'],
       ['podman run -c 5 alpine ls', undefined, 'ALLOW'],
@@ -721,4 +723,73 @@ test('the commands a developer runs all day against a local engine stay ALLOW', 
   ];
   const wrong = ordinary.filter((c) => verdict(c, workspace()) !== 'ALLOW').map((c) => `${verdict(c, workspace())}: ${c}`);
   assert.deepEqual(wrong, []);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * THE EXIT REVIEW OF 2026-10-07: the cluster and container findings, pinned (CX-01 .. CX-06)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('CX-01: the words after `--` are the resource type and names of a kubectl verb', () => {
+  const dir = workspace({});
+  for (const c of [
+    'kubectl --context production get -- secrets',
+    'kubectl --context production get -- secret db',
+    'kubectl --context production get -o yaml -- secrets',
+    'kubectl --context production get -- cm,secret',
+    'kubectl --context production describe -- secret db',
+    'oc --context production extract -- secret/db',
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  assert.equal(verdict('kubectl --context production get -- pods', dir), 'ALLOW');
+});
+
+test('CX-02: the argv after the image is the command it is, inside the container', () => {
+  const dir = workspace({});
+  for (const c of [
+    "docker run --rm postgres:16 psql postgresql://admin:pw@prod-db.example.com/db -c 'drop table x'",
+    "docker run --rm mysql:8 mysql -h prod-db.example.com -uroot -ppw -e 'drop database x'",
+    'docker run --rm alpine kubectl --context production delete pod x',
+    'docker run --rm alpine helm --kube-context production uninstall app',
+    "docker compose run --rm db psql -h prod-db.example.com -U admin -c 'drop table x'",
+    "podman run --rm redis:7 redis-cli -h prod-redis.example.com -a pw flushall",
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  for (const c of ["docker run --rm curlimages/curl -X POST -H 'Authorization: Bearer t' https://api.example.com/deploy", "docker run --rm alpine ssh root@prod.example.com 'systemctl stop nginx'"])
+    assert.notEqual(verdict(c, dir), 'ALLOW', c);
+  // and an ordinary argv is ordinary
+  for (const c of ['docker run --rm alpine echo hi', 'docker run --rm node:22 node --version', 'docker run --rm node:22 tool --builder prod'])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+  // (`docker run --rm alpine ls /` still asks: the path scan reads `/` as this machine's - recorded with CX-07, not fixed here)
+});
+
+test('CX-03: --iidfile, --metadata-file and --cidfile are files the CLI writes on the host', () => {
+  const dir = workspace({ Dockerfile: 'FROM alpine\nRUN echo ok\n', '.git/hooks/pre-commit': '#!/bin/sh\n' });
+  for (const c of [
+    'docker build --iidfile .git/hooks/pre-commit .',
+    'docker buildx build --iidfile=.git/hooks/pre-commit -t x .',
+    'docker build --metadata-file .claude/settings.json .',
+    'docker buildx bake --metadata-file .git/hooks/pre-commit',
+    'docker run --cidfile .git/hooks/pre-commit alpine true',
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  assert.equal(verdict('docker build --iidfile build/iid.txt .', dir), 'ALLOW');
+});
+
+test('CX-04, CX-05: an anonymous volume names no host path, and a read-only bind mount is the read it is', () => {
+  const dir = workspace({});
+  // (no longer the absolute refusal of a bind mount; the path scan still reads the container path as this machine's and asks - recorded
+  // with CX-07, not fixed here)
+  for (const c of ['docker run --rm -v /data alpine sh', 'docker run --rm -v /data -v /logs alpine true', 'docker run --rm --volume /data alpine true', 'docker run --rm -v /var/lib/mysql mysql'])
+    assert.notEqual(verdict(c, dir), 'DENY', c);
+  for (const c of [
+    'docker run --rm -v /etc/localtime:/etc/localtime:ro alpine date',
+    'docker run --rm -v /etc/ssl/certs:/etc/ssl/certs:ro alpine true',
+    'docker run --rm --mount type=bind,source=/etc/ssl/certs,target=/certs,readonly alpine true',
+    'docker run --rm --mount type=bind,src=/usr/share/zoneinfo,dst=/z,ro alpine true',
+  ])
+    assert.notEqual(verdict(c, dir), 'DENY', c);
+  // read-write, the mount is still the write it is
+  assert.equal(verdict('docker run --rm -v /etc/localtime:/etc/localtime alpine date', dir), 'DENY');
+  // ...and a read-only mount of a credential store is still a credential read
+  assert.notEqual(verdict('docker run --rm -v ~/.ssh:/root/.ssh:ro alpine cat /root/.ssh/id_rsa', dir), 'ALLOW');
 });

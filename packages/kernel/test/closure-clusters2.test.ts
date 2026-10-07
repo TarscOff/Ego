@@ -78,7 +78,9 @@ test('a name is production when a marker is a WORD of it: numbered environments,
     'aks-prd1-weu', 'aks-live1-weu', 'team-prd2', 'team-live1', 'db.prod1.eu.acme.test', 'dev-prod1', 'prod01', 'live2', 'prd1', 'prod1',
     // the shapes a name comes in
     'prod', 'production', 'prd', 'live', 'prd-1', 'prod-eu', 'eu-prod', 'eu_prod', 'eu.prod.corp', 'aks-production-weu', 'kind-production',
-    'acme-prod-eks', 'prod_eu_1', '1prod', 'eu1prod2', 'PROD-EU', 'Prod', 'LIVE',
+    'acme-prod-eks', 'prod_eu_1', '1prod', 'eu1prod2', 'PROD-EU',
+    // a marker glued to a word is still that environment (exit review 2026-10-07, AX-4): a team that does not use dashes
+    'prodsys', 'appprod', 'eksprod', 'proddb', 'acmeprd', 'dblive', 'Prod', 'LIVE',
     // CamelCase is word boundaries too
     'eksProd', 'ProdEU', 'clusterProd1', 'PRODCluster', 'aksPrdWeu',
     // pre-production is shared and production-like
@@ -87,7 +89,7 @@ test('a name is production when a marker is a WORD of it: numbered environments,
   const notProduction = [
     // words that merely CONTAIN the letters
     'products', 'product-service', 'product-catalog', 'productivity', 'produce', 'prodigy', 'reproduce', 'reproduction', 'liveness',
-    'delivery', 'alive', 'olive', 'oliver', 'lively', 'prodsys', 'kind-reproduce', 'kind-product-catalog', 'k3d-products',
+    'delivery', 'alive', 'olive', 'oliver', 'lively', 'kind-reproduce', 'kind-product-catalog', 'k3d-products',
     // local names
     'minikube', 'kind-dev', 'docker-desktop', 'localhost', 'aks-dev-weu', 'team-eu', 'dev-1', 'staging', 'stg1', 'ProductCatalog', 'eksProducts',
   ];

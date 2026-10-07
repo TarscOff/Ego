@@ -912,8 +912,15 @@ export function secretEffects(spec: string): BuildEffect[] {
  *  compose build): `-o`, `--output`, `--push`, `--cache-to`, `--secret`, `--network host`, and bake's `--set
  *  SELECTOR.KEY=VALUE`, which is any of them under another spelling. */
 export function commandBuildEffects(cmd: ContainerCommand): BuildEffect[] {
-  if (!cmd.modelled || !(cmd.flags.includes('b') || cmd.flags.includes('B') || cmd.flags.includes('m'))) return [];
+  if (!cmd.modelled) return [];
   const out: BuildEffect[] = [];
+  // THE FILES THE CLI WRITES ON THE HOST BESIDE ITS OUTPUT: `--iidfile F` and `--metadata-file F` of a build or a bake, `--cidfile F` of a
+  // run or a create. Each was listed for its arity only, so `docker build --iidfile .git/hooks/pre-commit .` replaced the hook with an
+  // image id at ALLOW (exit review 2026-10-07, CX-03, run for real: exit 0, the hook gone)
+  for (const o of cmd.options)
+    if ((o.name === '--iidfile' || o.name === '--metadata-file' || o.name === '--cidfile') && o.value !== null && o.value !== '')
+      out.push(isDynamic(o.value) ? { kind: 'gap', why: `the file ${o.name} names is built at run time` } : { kind: 'write', dest: o.value });
+  if (!(cmd.flags.includes('b') || cmd.flags.includes('B') || cmd.flags.includes('m'))) return out;
   const take = (key: string, value: string | null): void => {
     if (value === null) return;
     if (key === 'output') out.push(...outputEffects(value));

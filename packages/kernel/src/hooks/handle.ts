@@ -521,6 +521,16 @@ function handleLocked(
           decision.reason = renderApproval(presented, ctx, hit.capability);
           decision.details = { ...decision.details, approval: presented };
         }
+        // WHAT A PERSON ACCEPTS IS WHAT THEY WERE SHOWN (AUTH-4), on this road too. Approving `ego init` or `ego sync` from a tool
+        // call runs it as a human would (an agent that drops its own CLAUDECODE marker: `env -u CLAUDECODE ego init`), and that
+        // accepts every widening waiting in the layer files - while the question said only "ego.policy.accept requires human
+        // approval" (exit review 2026-10-07, AX-2). The widenings are the question.
+        if (cache.pendingWidening && evaluation.hits.some((h) => h.capability === 'ego.policy.accept')) {
+          const w = cache.pendingWidening.widenings;
+          const shown = w.slice(0, 8).map((x) => flatText(x, 200)).join('; ');
+          decision.reason += ` Approving this ACCEPTS ${w.length} policy widening(s) waiting in the layer files, which take effect at once: ${shown}${w.length > 8 ? `; … and ${w.length - 8} more (\`ego doctor\` lists them)` : ''}.`;
+          decision.details = { ...decision.details, pendingWidenings: [...w] };
+        }
       }
       return decision;
     }

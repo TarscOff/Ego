@@ -1458,6 +1458,17 @@ test('a wildcard declaration never reaches a production-marked name, in any fami
   assert.equal(cap(c, dir, 'psql -h prod.dev.acme.test -c "drop table t"'), 'production.database.mutate');
   assert.equal(cap(c, dir, 'psql -h pg.live.dev.acme.test -c "drop table t"'), 'production.database.mutate');
   assert.equal(cap(c, dir, 'docker --context team-prd run alpine true'), 'production.deploy');
+  // ...and a marker GLUED to a word is still that environment: a team that does not use dashes names production `appprod`,
+  // `eksprod` or `proddb`, and under an accepted wildcard each was LOCAL while `app-prod` was refused (exit review 2026-10-07, AX-4)
+  for (const name of ['team-appprod', 'team-eksprod', 'team-proddb', 'team-acmeprd', 'team-dblive'])
+    assert.equal(cap(c, dir, `kubectl --context ${name} apply -f a.yaml`), 'production.k8s.mutate', name);
+  assert.equal(cap(c, dir, 'psql -h dbprod.dev.acme.test -c "drop table t"'), 'production.database.mutate');
+  assert.equal(cap(c, dir, 'psql -h proddb.dev.acme.test -c "drop table t"'), 'production.database.mutate');
+  assert.equal(cap(c, dir, 'docker --context team-appprod run alpine true'), 'production.deploy');
+  // while an ordinary word that happens to begin or end with a marker is a name like any other
+  assert.equal(cap(c, dir, 'kubectl --context team-products apply -f a.yaml'), 'k8s.local.apply');
+  assert.equal(cap(c, dir, 'kubectl --context team-delivery apply -f a.yaml'), 'k8s.local.apply');
+  assert.equal(cap(c, dir, 'psql -h olive.dev.acme.test -c "drop table t"'), 'db.local.query');
   // a layer's own marker applies to what its other declarations match
   const marked = workspace({
     [PROJECT_FILE]: layerFile({ k8s_local_contexts: ['team-*'], production_markers: ['canary'] }),

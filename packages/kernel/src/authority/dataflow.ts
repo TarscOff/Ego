@@ -33,8 +33,9 @@ export interface FlowReaders {
   inputFiles(text: string): string[];
   /** the content of a file the analyzer may read, or null; see `fileContent` for `stale` */
   fileText(name: string): { text: string; stale: boolean } | null;
-  /** an `xargs` stage: the command it runs as written, the placeholder it names, the file it reads its arguments from; null when not xargs */
-  xargs(text: string): { payload: string; placeholder: string | null; argFile: string | null } | null;
+  /** an `xargs` stage: the command it runs as written, the placeholder it names, the file it reads its arguments from, the here-string
+   *  (`<<< WORD`) it is fed; null when not xargs */
+  xargs(text: string): { payload: string; placeholder: string | null; argFile: string | null; hereString?: { body: string; expanded: boolean } | null } | null;
   /** `$NAME` replaced by a value, outside single quotes */
   substitute(text: string, vars: ReadonlyMap<string, string>): string;
   /** a text with its braces expanded */
@@ -156,6 +157,11 @@ export function planXargs(r: FlowReaders, text: string, stdin: Produced, heredoc
   if (x.argFile !== null) source = fromFile(r, x.argFile);
   else if (heredoc !== undefined) {
     const t = r.literal(text, heredoc);
+    source = t === null ? { kind: 'unknown' } : { kind: 'literal', text: t };
+  } else if (x.hereString) {
+    // `xargs cat <<< ~//.ssh/id_rsa` runs `cat ~//.ssh/id_rsa`: a here-string feeds the word to xargs as its standard input exactly as
+    // the pipe form does, and the pipe form was refused while this one was ALLOW (exit review 2026-10-07, RVP6-2)
+    const t = r.literal(text, { body: x.hereString.body, expanded: x.hereString.expanded });
     source = t === null ? { kind: 'unknown' } : { kind: 'literal', text: t };
   } else {
     const files = r.inputFiles(text);

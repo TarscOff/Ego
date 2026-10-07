@@ -1391,3 +1391,17 @@ test('challenge round 2: generalized guards and the protected hooks directory', 
     assert.equal(bash(cmd, c).verdict, 'ALLOW', cmd);
   assert.notEqual(bash('tar -I /tmp/pwn -cf a.tgz src', c).verdict, 'ALLOW');
 })
+
+test('the seal key under EGO_HOME is a credential store for every reader (exit review 2026-10-07, AX-3)', () => {
+  const c = ctx();
+  const ego = c.egoHome!;
+  for (const cmd of [`cat ${ego}/policy-seal.key`, `head -c 32 ${ego}/policy-seal.key`, `grep -r . ${ego}`, `grep -rn x ${ego}/`, `cp ${ego}/policy-seal.key /tmp/k`])
+    assert.equal(bash(cmd, c).decisive?.capability, 'fs.credential-store.read', cmd);
+  assert.equal(
+    evaluate(table, c, { tool: 'Read', input: { file_path: join(ego, 'policy-seal.key') } }).decisive?.capability,
+    'fs.credential-store.read',
+  );
+  assert.notEqual(evaluate(table, c, { tool: 'Grep', input: { pattern: 'x', path: ego } }).verdict, 'ALLOW');
+  // EGO's other state is its own to read
+  assert.equal(bash(`cat ${ego}/index.json`, c).verdict, 'ALLOW');
+});

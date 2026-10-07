@@ -902,9 +902,17 @@ function secretRead(p: Parsed, host: K8sHost): string | null {
   const what = `${p.head} ${p.verb ?? ''}`;
   // the words that can be a TYPE: the operands after the verb (after the sub-verb, for `apply view-last-applied`), and the
   // words an option of unknown arity may or may not have taken as its value
+  // (...and the words after a `--`: cobra ends flag parsing there and hands the rest to the verb as its positional type and names -
+  // `get -- secrets` requests the Secrets exactly as `get secrets` does, and read as nobody's operand it was ALLOW on a
+  // production cluster while the plain spelling was refused; exit review 2026-10-07, CX-01)
   const candidates = p.words
     .map((w, i) => ({ w, i }))
-    .filter(({ i }) => i > p.verbAt && (p.roles[i] === 'maybe' || (p.roles[i] === 'operand' && !(p.verb === 'apply' && i === p.operands[0]))));
+    .filter(
+      ({ w, i }) =>
+        i > p.verbAt &&
+        w.text !== '--' &&
+        (p.roles[i] === 'maybe' || p.roles[i] === 'rest' || (p.roles[i] === 'operand' && !(p.verb === 'apply' && i === p.operands[0]))),
+    );
   // `get TYPE NAME…` names one type; `get TYPE/NAME TYPE/NAME…` names a type in every operand. And an option of unknown
   // arity in front of them may or may not have taken the first as its value, which moves the type to the second
   const listForm = candidates[0]?.w.text.includes('/') ?? false;

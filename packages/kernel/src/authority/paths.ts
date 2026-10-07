@@ -528,6 +528,16 @@ function readVariant(
     const literal = cut >= 0 && !whole ? text.slice(0, cut) : text;
     for (const base of isAbsolute(literal) ? [null] : dirs) {
       const lexical = base === null ? resolve(literal) : resolve(base, literal);
+      // A PATH LONGER THAN THE KERNEL OPENS NAMES NOTHING THAT CAN BE OPENED (ENAMETOOLONG), so a read or a write at it is not the
+      // plain read or write of the file it spells, and the text is no reading of anything: the word is uncertain and asks, on every
+      // machine alike. (`resolve` has applied every `..` by now, so a long spelling of a short path is short here.) It used to be
+      // refused only where the temporary directory is reached through a link - macOS's /var - because the unwalked text then matched
+      // no root and fell to an outside-workspace write; on a machine whose TMPDIR is its own real path the same word was an ordinary
+      // repository write, ALLOW. Found by the cold validation of 2026-10-07.
+      if (lexical.length > PATH_MAX) {
+        note.uncertain ??= 'a path longer than the kernel opens (ENAMETOOLONG) names no file this kernel can judge';
+        continue;
+      }
       out.lexical.push(lexical);
       if (isTyped) out.typed.push(lexical);
       // the physical reading differs only where a `..` can follow a link; a word without one is judged by the

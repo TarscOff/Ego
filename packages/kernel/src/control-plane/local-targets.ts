@@ -118,9 +118,30 @@ export function hasProductionMarker(name: string, markers: string[]): boolean {
     if (marker.length === 0 || marker.length > words.length) return false;
     for (let at = 0; at + marker.length <= words.length; at++)
       if (marker.every((w, k) => words[at + k] === w)) return true;
+    // A MARKER GLUED TO A WORD IS STILL THAT ENVIRONMENT. `appprod`, `eksprod`, `dbprod`, `proddb` and `acmeprod` are how a
+    // production cluster or database is named when a team does not use dashes; under an accepted wildcard (`app*`,
+    // `*.acme.internal`) each was LOCAL while `app-prod`, `eksProd` and `prod1` were refused (exit review 2026-10-07, AX-4). A
+    // one-word marker at the START or the END of a word marks it, unless the word is an ordinary English word that happens to
+    // contain the marker: those are listed, because a list of words is checkable and a rule about letters is not. (`production` and
+    // `preproduction` are not on the list: they ARE the environment.)
+    if (marker.length === 1 && marker[0]!.length >= 3) {
+      const mk = marker[0]!;
+      for (const w of words)
+        if (w !== mk && (w.startsWith(mk) || w.endsWith(mk)) && !ORDINARY_WORDS_WITH_A_MARKER.has(w)) return true;
+    }
     return false;
   });
 }
+
+/** Ordinary words that begin or end with a marker and say nothing about an environment: a `products` API or an `olive` cluster is
+ *  not production. Reviewed when a marker is added (a layer may add markers; a word that embeds a new marker is simply not here yet,
+ *  which errs towards production, the safe side). */
+const ORDINARY_WORDS_WITH_A_MARKER = new Set([
+  'product', 'products', 'productive', 'productivity', 'produce', 'produced', 'producer', 'producers', 'produces', 'byproduct',
+  'reproduce', 'reproduced', 'reproducer', 'reproduction', 'reproductions', 'prodigy', 'prodigal', 'prodding', 'prodded',
+  'alive', 'olive', 'olives', 'livestream', 'livestreams', 'liveness', 'lively', 'livestock', 'liver', 'livery', 'lives', 'delivery',
+  'deliveries', 'deliver', 'delivered', 'deliverable', 'deliverables', 'sliver', 'oblive', 'relive', 'outlive',
+]);
 
 /* ------------------------------------------------------------------------------------------------------------- *
  * VALIDATION: what a layer may declare

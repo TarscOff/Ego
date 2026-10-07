@@ -593,10 +593,16 @@ test('G. the resolver returns the lexical reading AND the physical one, bounded 
   // a path longer than the kernel opens (ENAMETOOLONG) is not walked: no stack overflow, no seconds spent asking the disk
   const longStarted = Date.now();
   const long = pathCandidates(dir, `${'a/'.repeat(30000)}z`);
-  assert.ok(long.paths.length >= 1 && Date.now() - longStarted < 2000, `thirty thousand components took ${Date.now() - longStarted} ms`);
+  assert.ok(long.uncertain !== null && long.paths.length === 0 && Date.now() - longStarted < 2000, `thirty thousand components took ${Date.now() - longStarted} ms`);
+  // ...while a long SPELLING of a short path is the short path: `..` is applied before the length is judged
+  assert.deepEqual(pathCandidates(dir, `${'a/../'.repeat(3000)}src/a.ts`).paths, [real('src/a.ts')]);
   const longVerdictStarted = Date.now();
-  // (a path longer than the kernel opens writes nothing; it is refused, not allowed, and it is refused in bounded time)
-  assert.equal(verdictOf(`echo x > ${'a/'.repeat(8000)}z`), 'DENY');
+  // (a path longer than the kernel opens writes nothing and names nothing the kernel can judge: the word is uncertain and the
+  // redirection asks - on every machine. It used to read DENY here, and only because this machine reaches its temporary directory
+  // through a link, so the unwalked text matched no root and fell to an outside-workspace write; on a machine whose TMPDIR is its own
+  // real path the same word was an ordinary repository write, ALLOW. Found by the cold validation of 2026-10-07.)
+  assert.equal(pathCandidates(dir, `${'a/'.repeat(8000)}z`).uncertain !== null, true, 'a path longer than PATH_MAX is uncertain');
+  assert.equal(verdictOf(`echo x > ${'a/'.repeat(8000)}z`), 'ASK');
   assert.ok(Date.now() - longVerdictStarted < 15000, 'a redirection to a path of eight thousand components is decided in bounded time');
   assert.equal(pathCandidates(dir, '/proc/self/cwd/a').uncertain !== null, true);
   assert.equal(pathCandidates(dir, '/dev/fd/3').uncertain !== null, true);
@@ -786,4 +792,65 @@ test('the workspace made by this file is unaffected by an earlier test (a fixtur
   symlinkSync('.claude/sub', join(root, 'lnk'));
   const second = evaluate(table, c, { tool: 'Bash', input: { command: 'echo x > lnk/../settings.json' } }).verdict;
   assert.equal(second, 'DENY');
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * THE EXIT REVIEW OF 2026-10-07: the path findings, pinned (RVP6-1, RVP6-2, RVP6-3)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('RVP6-1: a name made by cp -s / cp -l is a second name for its source, exactly as one made by ln', () => {
+  const dir = workspace({ ...FILES, '.harness/generated/x': 'x', lgen: link('.harness/generated'), 'x.txt': 'x' });
+  const v = (c: string): string => verdictOf(c, dir);
+  // a write through the new name reaches EGO's generated state - an absolute floor - however the source was spelled
+  for (const c of [
+    'cp -s .harness/./generated/x nl && echo evil > nl',
+    'cp --symbolic-link .harness/./generated/x nl && echo evil > nl',
+    'cp -sf .harness/generated/x nl && echo evil > nl',
+    'cp -s lgen nl && echo x > nl/x',
+    'cp -sr .harness/./generated nl && echo x > nl/x',
+    'cp -l .harness/./generated/x nl && echo evil > nl',
+    'cp --link .harness/generated/x nl && echo evil > nl',
+    'ln .harness/./generated/x nl && echo evil > nl',
+    'ln -s .harness/./generated/x nl && echo evil > nl',
+  ])
+    assert.equal(v(c), 'DENY', c);
+  // an ordinary file linked and written through is ordinary
+  for (const c of ['cp -s x.txt nl && echo x > nl', 'cp -l x.txt nl && echo x > nl', 'ln -s x.txt nl && echo x > nl'])
+    assert.equal(v(c), 'ALLOW', c);
+  // a copy that is not a link copies: the write is to the copy
+  assert.notEqual(v('cp .harness/generated/x nl && echo x > nl'), 'DENY');
+});
+
+test('RVP6-2: a here-string is what xargs reads, exactly as a pipe is', () => {
+  const dir = workspace({ ...FILES, lssh: link(join(HOME, '.ssh')) });
+  for (const c of [
+    'xargs cat <<< ~//.ssh/id_rsa',
+    'xargs cat <<< $HOME/.ssh/id_rsa',
+    'xargs cat <<< lssh/id_rsa',
+    'xargs -n1 cat <<< "lssh/id_rsa"',
+    'xargs cat <<< ~/.aws/credentials',
+    'echo ~//.ssh/id_rsa | xargs cat',
+  ])
+    assert.equal(verdictOf(c, dir), 'DENY', c);
+  // the same reader, an ordinary word: the command it feeds is the ordinary one
+  assert.equal(verdictOf('xargs cat <<< src/deep/keep', dir), 'ALLOW');
+});
+
+test('RVP6-3: a recursive read rooted at a glob that matches the home directory reads its credential stores', () => {
+  const dir = workspace(FILES);
+  const base = HOME.split('/').filter(Boolean).pop()!;
+  const partial = `${base.slice(0, Math.max(1, Math.ceil(base.length / 2)))}*`;
+  const marks = base.replace(/./g, '?');
+  for (const c of [
+    `grep -r . ~/../${partial}`,
+    `grep -rn x $HOME/../${partial}`,
+    `grep -rn secret $HOME/../${marks}`,
+    `find ~/../${partial} -name id_rsa -exec cat {} +`,
+    `find $HOME//../${partial} -type f | xargs cat`,
+    `grep -r . ~/../${partial}/.ssh`,
+  ])
+    assert.notEqual(verdictOf(c, dir), 'ALLOW', c);
+  // the controls the review named: the bare wildcard and the literal name were refused already
+  assert.notEqual(verdictOf('grep -r . $HOME/../*', dir), 'ALLOW');
+  assert.notEqual(verdictOf(`grep -r . $HOME/../${base}`, dir), 'ALLOW');
 });

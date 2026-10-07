@@ -627,3 +627,58 @@ for (const shell of SHELLS) {
     assert.deepEqual(failures, []);
   });
 }
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * THE EXIT REVIEW OF 2026-10-07: the shell findings, pinned (SH-EXIT-1, SH-EXIT-2, SH-EXIT-3)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test("SH-EXIT-1..3: a redirection in front of the command, a coproc and zsh's =cmd are the command they carry", () => {
+  const dir = workspace({ 'README.md': 'r\n' });
+  const prod = 'kubectl --context production delete pod x';
+  for (const c of [
+    `>/dev/null nohup ${prod}`,
+    `2>&1 nohup ${prod}`,
+    `2>/dev/null timeout 5 ${prod}`,
+    `</dev/null nohup ${prod}`,
+    `>/dev/null 2>&1 nice -n 10 ${prod}`,
+    `>/dev/null bash -c "${prod}"`,
+    `3>/tmp/x nohup ${prod}`,
+    `> /dev/null nohup ${prod}`,
+    `coproc ${prod}`,
+    `=${prod}`,
+    '>/dev/null nohup psql -h prod-db.acme.com -c "drop table x"',
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  for (const c of ['>/dev/null nohup ls', '>/dev/null nice -n 10 cat README.md', '2>/dev/null timeout 5 git status', '>/dev/null 2>&1 env ls', 'coproc ls'])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+  // the operator keeps its meaning: a redirection to a governed file in front of the command is the write it is
+  assert.notEqual(verdict('>.git/hooks/pre-commit nohup echo x', dir), 'ALLOW');
+  assert.notEqual(verdict('>.git/hooks/pre-commit echo x', dir), 'ALLOW');
+});
+
+test('RB-EXIT-1: a run of grouping metacharacters is a question within the bound, not a hook the host kills', () => {
+  const dir = workspace({});
+  for (const ch of ['(', ')', '{', '${']) {
+    const started = Date.now();
+    const v = verdict(`echo ${ch.repeat(200000)}; git push origin main`, dir);
+    assert.ok(['ASK', 'DENY'].includes(v), `${ch}: ${v}`);
+    assert.ok(Date.now() - started < 3000, `${ch}: ${Date.now() - started} ms`);
+  }
+  // ordinary grouping is unaffected
+  for (const c of ['( git status )', '{ ls; git status; }', 'if true; then ( ls ); fi', 'echo $( ls )', 'x=$(( 1 + 2 )); echo $x'])
+    assert.equal(verdict(c, dir), 'ALLOW', c);
+});
+
+test('RB-EXIT-2: a pipe inside a group reads the stage before it, and a pipe after a group reads the group', () => {
+  const dir = workspace({});
+  for (const c of [
+    "( ls; echo 'git push origin main' | bash )",
+    "{ ls; echo 'git commit --no-verify -m x' | bash; }",
+    "( true; echo 'git push origin main' | sh )",
+    "for i in 1; do echo 'git push origin main' | bash; done",
+    "( printf 'git '; printf 'push origin main\\n' ) | bash",
+    "{ printf 'git '; printf 'push origin main\\n'; } | bash",
+  ])
+    assert.equal(verdict(c, dir), 'DENY', c);
+  assert.notEqual(verdict("( ls; echo 'ls' | bash )", dir), 'DENY'); // (a pipe into a shell is a question on its own)
+});

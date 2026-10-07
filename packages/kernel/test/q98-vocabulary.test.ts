@@ -1551,3 +1551,21 @@ test('D3 `ego authority diff` fails with a usage line, never with a guess', asyn
   const help = await cli(p, ['help']);
   assert.match(help.out, /authority/, 'help lists the command');
 });
+
+test('B7c the question for `ego init` from a tool call names the widenings it would accept (exit review 2026-10-07, AX-2)', () => {
+  const p = project();
+  const seal = sealFor(p.env);
+  ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true, seal });
+  orgPolicy(p.root, 'Requires human approval', 'git.remote.push');
+  assert.ok(ensurePolicyCache(CP, p.root, SELF(), { seal }).cache.pendingWidening, 'a widening waits');
+  for (const command of ['ego init', 'env -u CLAUDECODE ego init', 'sh -c "unset CLAUDECODE; ego init"', 'ego sync']) {
+    const d = handleHook(pre(p.root, command), p.rt) as HookDecision & { details?: { pendingWidenings?: string[] } };
+    assert.equal(d.action, 'ask', command);
+    assert.match(d.reason ?? '', /ACCEPTS 1 policy widening/, command);
+    assert.match(d.reason ?? '', /git\.remote\.push/, command);
+    assert.equal(d.details?.pendingWidenings?.length, 1, command);
+  }
+  // with nothing waiting, the question is the plain one
+  ensurePolicyCache(CP, p.root, SELF(), { acceptWidening: true, seal });
+  assert.doesNotMatch(handleHook(pre(p.root, 'ego init'), p.rt).reason ?? '', /ACCEPTS/);
+});

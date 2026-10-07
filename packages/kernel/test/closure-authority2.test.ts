@@ -24,7 +24,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { cpus, loadavg, tmpdir } from 'node:os';
+import { cpus, homedir, loadavg, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { main } from '../../cli/src/main.ts';
 import { parseCodexEvent, renderCodexOutput } from '../../adapter-codex-cli/src/dialect.ts';
@@ -40,7 +40,7 @@ import { handleHook, type HookRuntime } from '../src/hooks/handle.ts';
 import type { HookEvent } from '../src/hooks/events.ts';
 import { readPin, writePin } from '../src/launcher/pin.ts';
 import { selfIdentity, selfVersion } from '../src/launcher/self.ts';
-import { evaluate } from '../src/authority/evaluate.ts';
+import { evaluate, isScratchPath, type EvaluationContext } from '../src/authority/evaluate.ts';
 import { initProject } from '../src/project/init.ts';
 import { runDoctor, formatDoctor } from '../src/project/doctor.ts';
 import { readGeneratedManifest } from '../src/project/init.ts';
@@ -864,16 +864,29 @@ test('E. RB-7: the units a decision spends do not depend on where the machine ke
 
 test('E. RB-7: a HOME that is not there is not a different amount of work', () => {
   const checkout = join(PARENT, 'checkout-b');
-  const a = unitsRun(homeDir(), mkdtempSync(join(PARENT, 'tmp-')), checkout);
+  const home = homeDir();
+  const a = unitsRun(home, mkdtempSync(join(PARENT, 'tmp-')), checkout);
   const b = unitsRun('/nonexistent/very/deep/home/directory', mkdtempSync(join(PARENT, 'tmp-')), checkout);
+  const commandOf = (l: string): string => l.slice(0, l.lastIndexOf(': '));
   // a command that MOVES INTO the home directory runs somewhere else when there is none: that is a different command line to analyse,
   // not a different price for the same one
-  const moves = /cd\s+(~|\$\{?HOME)/;
+  const moves = /^cd\s+(~|\$\{?HOME)/;
+  // and a command that NAMES the home directory is judged by where that directory is. A home that is not there is outside the
+  // workspace; the one this test makes sits under PARENT, which on a machine whose temporary directory is /tmp (Linux; a cold
+  // validation that keeps TMPDIR under it) is the machine's scratch space, where a read is ordinary and a write is a scratch write
+  // (isScratchPath). There the VERDICT of such a command differs between the two runs, and with it the path the decision takes and
+  // the units it spends; those lines are checked for differing on the capability that names where the home is, and on nothing else.
+  // On a machine where PARENT is not scratch (macOS reaches its temporary directory through /var, which is not /tmp) every line is held equal.
+  const names = /(^|[\s='"])(~|\$\{?HOME)/;
+  const homeIsScratch = isScratchPath(home);
+  const lines = differing(a, b).filter((l) => !moves.test(commandOf(l)));
   assert.deepEqual(
-    differing(a, b).filter((l) => !moves.test(l.split(': ')[0]!)),
+    lines.filter((l) => !(homeIsScratch && names.test(commandOf(l)))),
     [],
     'the same command, a machine with no home directory',
   );
+  for (const l of lines.filter((l) => homeIsScratch && names.test(commandOf(l))))
+    assert.match(l.slice(l.lastIndexOf(': ') + 2), /fs\.(scratch|outside-workspace)\.|command\.env-inject|fs\.credential-store\.read/, `a home under scratch space: ${l}`);
 });
 
 test('E. RB-7: a process that has already decided a command spends the same units on it again (a memo saves time, not the bound)', () => {
@@ -1918,4 +1931,28 @@ test('J. STRUCTURAL: every reader and writer of the policy cache under packages/
   assert.equal(scan('x.ts', 'ensurePolicyCache(cp, root, self, { acceptWidening: true, seal });').length, 0);
   assert.equal(scan('x.ts', 'policyCacheFreshness(cp, root, self);').length, 1);
   assert.equal(scan('x.ts', 'writePolicyCache(root, cache);').length, 1);
+});
+
+/* ------------------------------------------------------------------------------------------------------------- *
+ * THE EXIT REVIEW OF 2026-10-07: the authority findings, pinned (AX-1)
+ * ------------------------------------------------------------------------------------------------------------- */
+
+test('B. AX-1: an overlay rule that matches a path outside every root cannot stand in for the outside-workspace floor', () => {
+  const dir = repo({
+    '.harness/overlay/matchers.md':
+      '---\nschema: ego.matchers/1\nmatchers:\n  - capability: command.network-tool\n    tool: Write\n    path: "~/**"\n  - capability: command.destructive\n    tool: any\n    path: "**/*.sh"\n---\n',
+  });
+  const { cache } = ensurePolicyCache(CP, dir, SELF, { acceptWidening: true });
+  const ectx = { profile: 'STANDARD', mode: 'NORMAL_DELIVERY', repoRoots: [dir], cwd: dir } as EvaluationContext;
+  const granted = { ...ectx, grants: ['command.network-tool', 'command.destructive'] } as EvaluationContext;
+  const rc = join(homedir(), '.zshrc');
+  const w = evaluate(cache.table, ectx, { tool: 'Write', input: { file_path: rc, content: 'x' } });
+  assert.equal(w.verdict, 'DENY', 'the floor, not the rule');
+  assert.equal(w.decisive?.capability, 'fs.outside-workspace.write');
+  assert.equal(evaluate(cache.table, granted, { tool: 'Write', input: { file_path: rc, content: 'x' } }).verdict, 'DENY', 'a grant for the rule lifts nothing');
+  for (const command of [`echo x > ${rc}`, 'cp x.sh /usr/local/bin/x.sh', 'echo x > ~/bin/x.sh', 'install -m 755 x.sh /etc/profile.d/x.sh'])
+    assert.equal(evaluate(cache.table, granted, { tool: 'Bash', input: { command } }).verdict, 'DENY', command);
+  // inside the workspace the rule narrows, as a rule does, and names nothing else
+  assert.equal(evaluate(cache.table, ectx, { tool: 'Write', input: { file_path: join(dir, 'run.sh'), content: 'x' } }).verdict, 'ASK');
+  assert.equal(evaluate(cache.table, ectx, { tool: 'Write', input: { file_path: join(dir, 'run.ts'), content: 'x' } }).verdict, 'ALLOW');
 });

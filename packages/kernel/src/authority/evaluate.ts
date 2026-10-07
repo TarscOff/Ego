@@ -717,10 +717,22 @@ export function splitShellPipeline(command: string): ShellStage[] {
   const functionBodyGroups = new Map<number, string>();
   /** the name and end position of the most recent function body, for the `&` that may background it */
   let lastFnDefEnd: { name: string; at: number } | null = null;
+  /** THE PENDING TEXT, READ AGAIN - AND PAID FOR. Every grouping metacharacter asks what stands before it, and the answer re-reads `cur`
+   *  from its start: a run of seven hundred thousand `(` after one word re-read the whole buffer at every one of them, thirty to sixty
+   *  seconds of CPU for a single command while the counter saw only the characters once (exit review 2026-10-07, RB-EXIT-1). The
+   *  host kills a hook that has not answered, and a killed hook has refused nothing. The re-read is priced at the length it reads,
+   *  so the bound is reached - as a question - long before the clock is. */
+  const pending = (): string => {
+    chargeWork(cur.length);
+    return cur.trim();
+  };
   /** true where a COMMAND may begin: nothing pending, or only a shell keyword */
-  const atCommandStart = (): boolean => cur.trim() === '' || KEYWORD_PREFIX_RE.test(cur.trim());
+  const atCommandStart = (): boolean => {
+    const t = pending();
+    return t === '' || KEYWORD_PREFIX_RE.test(t);
+  };
   /** true where a FUNCTION BODY may begin: the pending text is the definition header and nothing else */
-  const atFunctionBody = (): boolean => FUNC_DEF_RE.test(cur.trim());
+  const atFunctionBody = (): boolean => FUNC_DEF_RE.test(pending());
   while (i < command.length) {
     const ch = command[i]!;
     const next = command[i + 1];
@@ -960,7 +972,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
       // ...BUT `((` IS ALSO WHERE BASH AND ZSH EVALUATE AN EXPRESSION - the arithmetic command, and the header of `for ((;;))` - and a
       // quote in it keeps nothing from running: `(( 'a[$(git push origin main)]' ))` runs the push. Read by the one reader of arithmetic
       // (shell-lexer.ts), in addition to the subshell reading below, which is the one that sees more where dash is the shell.
-      if (ch === '(' && next === '(' && (atCommandStart() || /^(?:(?:if|then|else|elif|while|until|do|!|time|coproc)\s+)*for\s*$/.test(cur.trim()))) {
+      if (ch === '(' && next === '(' && (atCommandStart() || /^(?:(?:if|then|else|elif|while|until|do|!|time|coproc)\s+)*for\s*$/.test(pending()))) {
         const arith = arithmeticSpanAt(command, i);
         if (arith !== null) pushArithmetic(arith.body);
       }
@@ -972,14 +984,14 @@ export function splitShellPipeline(command: string): ShellStage[] {
         openScope();
         // a keyword that introduced the group is structure too: pushing `time` or `if` as its own segment made it
         // an unknown command
-        if (cur.trim()) cur = '';
+        if (pending()) cur = '';
         i++;
         continue;
       }
       // ...but the `)` of a function HEADER is not the end of a subshell: in `( f() { …; }; f )` the first `)` closes the
       // parentheses of `f()`, and reading it as the subshell's end cut the definition in two - `f(` became a command, the
       // body became a group that ran at once, and a binding or an `unset -f` inside it was never seen
-      if (ch === ')' && subshell > 0 && !/^(?:function\s+)?[^\s()<>|&;'"$`=]+\s*\($/.test(cur.trim())) {
+      if (ch === ')' && subshell > 0 && !/^(?:function\s+)?[^\s()<>|&;'"$`=]+\s*\($/.test(pending())) {
         push();
         subshell--;
         subshellIds.pop();
@@ -1004,7 +1016,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         // The header is not a command — but it IS a BINDING: the name it declares re-points every later use in
         // this unit. Discarding it outright lost that, so the marker carries the name to the binding dimension
         // while nothing classifies it as a program.
-        const declared = /([A-Za-z_][A-Za-z0-9_:.-]*)\s*(?:\(\s*\))?$/.exec(cur.trim());
+        const declared = /([A-Za-z_][A-Za-z0-9_:.-]*)\s*(?:\(\s*\))?$/.exec(pending());
         // ...and NOT inside a `case` branch, where the splitter has already swallowed the pattern list so no
         // segment says `case` any more. A definition there binds nothing unless that branch is the one taken
         // (exit review 8).
@@ -1029,7 +1041,7 @@ export function splitShellPipeline(command: string): ShellStage[] {
         continue;
       }
       if (ch === '{' && atCommandStart() && (next === ' ' || next === '\t' || next === '\n')) {
-        if (cur.trim()) cur = '';
+        if (pending()) cur = '';
         groupStack.push(++groupSeq);
         openScope();
         i++;
@@ -1760,11 +1772,29 @@ function joinWords(words: readonly string[]): string {
     .join(' ');
 }
 
+/** A REDIRECTION IN FRONT OF THE COMMAND IS THE SAME REDIRECTION. `>/dev/null nohup kubectl …` and `2>/dev/null timeout 5 psql …` apply
+ *  to the whole simple command wherever the operator stands (POSIX 2.7), and an agent writes it first as readily as last. Read in
+ *  place, the operator WAS the head: no carrier was peeled, no structural reader ran, and a production delete arrived as
+ *  command.unknown - an ASK where the floor is DENY - while `>/dev/null nohup ls` asked for nothing (exit review 2026-10-07,
+ *  SH-EXIT-1). The operators and their targets are moved behind the command, where every reader below expects them; the words
+ *  of the command are the same words (commandWords is the one reader of what is an operator and what is a word). */
+function redirectionsBehindTheCommand(text: string): string {
+  const marked = tokenizeMarked(text);
+  let k = 0;
+  while (k < marked.length && commandWords(marked.slice(0, k + 1)).length === 0) k++;
+  if (k === 0 || k >= marked.length) return text;
+  const at = marked[k]!.at;
+  return `${text.slice(at).trim()} ${text.slice(0, at).trim()}`;
+}
+
 function normalizeSegmentInner(segment: string): string[] {
   chargeWork(segment.length);
   // A redirection ends the word in front of it, whether or not the author left a space (see separateGluedRedirections):
   // every matcher below reads the words of THIS text
   let s = separateGluedRedirections(segment.trim());
+  s = redirectionsBehindTheCommand(s);
+  // zsh's `=NAME` in command position is the path of NAME (`=rm -rf …` runs /bin/rm; exit review 2026-10-07, SH-EXIT-3): the head is NAME
+  s = s.replace(/^=(?=[A-Za-z_][\w.+-]*(?:\s|$))/, '');
   // `npx --package=<spec> -c "<benign>"` FETCHES and runs that package; the command after `-c` is a decoy, and
   // every layer below treats `npx` as transparent and `-c` as a carrier, so the acquisition vanished entirely.
   // A runner carrying `--package`/`-p` is NOT transparent: the head survives so the vocabulary can classify it.
@@ -4073,7 +4103,10 @@ export function matchPathPattern(pattern: string, absPath: string, ctx: Evaluati
       base = homeBase;
     }
     const re = globToRegExp(pat);
-    if (base) return re.test(posix.startsWith(base + '/') ? posix.slice(base.length + 1) : '\0');
+    // A `~/` PATTERN NAMES THE HOME DIRECTORY'S CONTENTS AND NOTHING ELSE. A path not under HOME used to be tested as the sentinel
+    // "\0", which `**` matches - so an overlay rule `~/**` matched every path on the machine, a repository file included (found while
+    // pinning AX-1, exit review 2026-10-07).
+    if (base) return posix.startsWith(base + '/') && re.test(posix.slice(base.length + 1));
     // a pattern that starts with `/` is a path on the filesystem, as `~/` is one under the home directory
     if (pat.startsWith('/')) return re.test(posix);
     // repo-relative patterns: test against every registered root, then against the cwd root
@@ -4687,6 +4720,23 @@ function classifyResolvedPath(
       };
     }
   }
+  // THE SEAL KEY IS A CREDENTIAL. `policy-seal.key` under EGO_HOME is what makes a policy cache "written by this machine" (AUTH-5);
+  // with it, a forged cache that says every widening was accepted is believed. EGO_HOME counts as inside the workspace for a
+  // READ (the runtime reads its own state), so `cat ~/.ego/policy-seal.key` and the Read tool on it were ordinary reads at ALLOW
+  // while `cat ~/.ego/*.key` was refused through the glob (exit review 2026-10-07, AX-3). Every key file under EGO_HOME is a
+  // credential store for every reader, as `~/.ssh/*` is.
+  if (tool === 'Read' && ctx.egoHome && 'fs.credential-store.read' in table.capabilities) {
+    const home = canonicalPath(ctx.egoHome).split(sep).join('/');
+    const posix = canonicalPath(abs).split(sep).join('/');
+    if (posix.startsWith(home + '/') && /\.key$/i.test(posix)) {
+      return {
+        capability: 'fs.credential-store.read',
+        verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+        via: 'EGO_HOME seal key',
+        absolute: isAbsoluteCap(table, 'fs.credential-store.read'),
+      };
+    }
+  }
   // THE CORE'S FIRST MATCHING PATH RULE, AND EVERY RULE OF THE OVERLAY, with the strictest of them deciding. The overlay may only narrow, and
   // appended after the core's rules under first-match-wins a narrowing was shadowed by any core rule that matched the same path
   // first - a project that protected a tree the core already asks about got the core's answer, not its own (exit review 11, #120)
@@ -4712,7 +4762,25 @@ function classifyResolvedPath(
       else coreHit = hit;
     }
   }
-  if (coreHit !== null || overlayHits.length > 0) return worstHit([...(coreHit ? [coreHit] : []), ...overlayHits]);
+  if (coreHit !== null || overlayHits.length > 0) {
+    const ruleHits = [...(coreHit ? [coreHit] : []), ...overlayHits];
+    // A RULE CANNOT STAND IN FOR THE FLOOR. A path outside every registered root is judged by the outside-workspace fallback below,
+    // and for a write that fallback is an absolute. A rule that happened to match such a path (`~/**`, `/**`, a tree-relative name
+    // pattern like `**/*.sh` met by `/usr/local/bin/x.sh`) used to REPLACE the fallback with its own capability: an overlay file in
+    // the working tree - which an agent may write, and which the pending-widening gate reads as a narrowing because a rule only adds
+    // a gate - turned DENY HARD_LOCKED into the rule's ASK, and a session grant for that capability then into ALLOW (exit review
+    // 2026-10-07, AX-1). The fallback is a hit like any other, and the strictest of them decides.
+    if (!insideRoots(abs, ctx) && !isScratchPath(abs)) {
+      const fallback = tool === 'Read' ? 'fs.outside-workspace.read' : 'fs.outside-workspace.write';
+      ruleHits.push({
+        capability: fallback,
+        verdict: verdictFor(table, ctx, fallback),
+        via: 'outside registered repositories',
+        absolute: isAbsoluteCap(table, fallback),
+      });
+    }
+    return worstHit(ruleHits);
+  }
   // ...and the directory `core.hooksPath` names, wherever it is: a rule cannot list a place the repository chose
   if (tool !== 'Read' && 'fs.hook-config.write' in table.capabilities) {
     const posix = canonicalPath(abs).split(sep).join('/');
@@ -4886,7 +4954,9 @@ const OPACITY_CLASSES = new Set(['command.unknown', 'command.interpreter-script'
 // missing, so `while psql -h prod-db… -c 'DROP TABLE users'; do break; done` kept the keyword in the segment and
 // no target-aware rule could match it (exit review 8). `for` and `case` are deliberately absent: what follows
 // them is a variable name and a word to match, not a command.
-const PREFIX_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'time']);
+// (`coproc CMD` runs CMD as a bash coprocess: the command is the one after the keyword; the named form `coproc NAME CMD` leaves NAME
+// as the head, which asks - exit review 2026-10-07, SH-EXIT-2)
+const PREFIX_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'time', 'coproc']);
 /** statements that are shell structure, never an external effect: the whole segment is skipped */
 const PACKAGE_MANAGER_BUILTINS = new Set([
   'install',
@@ -6528,6 +6598,9 @@ const CLI_IMAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/(^|\/)hashicorp\/vault$/i, 'vault'],
   [/(^|\/)hashicorp\/terraform$/i, 'terraform'],
   [/(^|\/)(google\/cloud-sdk|cloudsdktool\/[a-z-]+)$/i, 'gcloud'],
+  // (the official curl image: its argv is curl's, so `docker run curlimages/curl -X POST … https://api.example.com/deploy` is the request it
+  // makes - exit review 2026-10-07, CX-02)
+  [/(^|\/)curlimages\/curl$/i, 'curl'],
   [/(^|\/)(azure-cli|azuresdk\/azure-cli-python)$/i, 'az'],
   [/(^|\/)(bitnami\/kubectl|rancher\/kubectl|lachlanevenson\/k8s-kubectl)$/i, 'kubectl'],
   [/(^|\/)(alpine\/helm|dtzar\/helm-kubectl)$/i, 'helm'],
@@ -9924,27 +9997,40 @@ function resolveK8sTarget(
 /** Bind-mount sources of a container run: `-v SRC:DST`, `--volume SRC:DST`, `--mount type=bind,source=SRC,...`.
  *  Handing a host path to a container reads and writes it, so the source is classified like any other path. */
 export function containerMountSources(tokens: string[]): string[] {
-  const out: string[] = [];
+  return containerMountSpecs(tokens).map((s) => s.src);
+}
+
+/** The host paths a container run binds in, each with whether the mount is READ-ONLY: `-v SRC:DST:ro`, `--mount …,readonly` and
+ *  `--mount …,ro`. A read-only mount of `/etc/localtime` or the CA bundle is in a large share of real `docker run` lines and was an
+ *  absolute refusal, because every bind mount was judged as a write (exit review 2026-10-07, CX-05). */
+export function containerMountSpecs(tokens: string[]): Array<{ src: string; readOnly: boolean }> {
+  const out: Array<{ src: string; readOnly: boolean }> = [];
   for (const v of optionValues(tokens, 'v', ['--volume'])) {
-    const src = v.split(':')[0];
+    // `-v /data` with no colon is an ANONYMOUS VOLUME at that container path (the documented data-volume form): no host path is named.
+    // Read as a bind mount of /data it was an absolute refusal of a plain local run (exit review 2026-10-07, CX-04)
+    if (!v.includes(':')) continue;
+    const parts = v.split(':');
+    const src = parts[0];
+    const readOnly = parts.length >= 3 && parts[2]!.split(',').includes('ro');
     if (src && (src.startsWith('/') || src.startsWith('~') || src.startsWith('.') || src.startsWith('$')))
-      out.push(src);
+      out.push({ src, readOnly });
   }
   for (const m of tokens.join(' ').matchAll(/--mount[= ]\s*([^\s]+)/g)) {
     const spec = m[1]!;
+    const readOnly = /(?:^|,)(?:readonly|ro)(?:=(?:true|1))?(?:,|$)/.test(spec);
     // A "VOLUME" WITH A DEVICE IS A BIND MOUNT WEARING A DIFFERENT WORD. The local volume driver takes the same
     // options `mount(8)` does, so `type=volume,volume-driver=local,volume-opt=type=none,volume-opt=device=/Users/…,
     // volume-opt=o=bind` hands the container that host directory exactly as `type=bind,source=…` would — and it
     // was not a bind mount by spelling, so the source was never judged (exit review 8).
     if (/type=bind/.test(spec)) {
       const src = /(?:^|,)(?:source|src)=([^,\s]+)/.exec(spec)?.[1];
-      if (src) out.push(src);
+      if (src) out.push({ src, readOnly });
       continue;
     }
     if (!/(?:^|,)volume-opt=device=/.test(spec)) continue;
     const dev = /(?:^|,)volume-opt=device=([^,\s]+)/.exec(spec)?.[1];
     // a device that is a PATH is a host directory; a real block device is the privileged class, not this one
-    if (dev && /^(~|\.\.?)?\//.test(dev) && !/^\/dev\//.test(dev)) out.push(dev);
+    if (dev && /^(~|\.\.?)?\//.test(dev) && !/^\/dev\//.test(dev)) out.push({ src: dev, readOnly });
   }
   return out;
 }
@@ -11620,6 +11706,11 @@ function retargetLocalCapability(
  *  `COPY` from the build context and a `--secret` are the host's, and are judged where the build is, in `hostBody`.) */
 function confinedToImage(table: CompiledAuthorityTable, h: CapabilityHit): boolean {
   if (h.onPath === true) return true;
+  // (NOT confined: a rule that names a governed path - a credential store, a hooks directory, the hooks-path setting - matched by the
+  // TEXT of a RUN line. `ssh-keyscan github.com >> ~/.ssh/known_hosts` and the `.npmrc` token idiom write the IMAGE's files, and the
+  // exit review of 2026-10-07 (CX-06) asked for them to pass; the decision of U-04 - a relative name and a `~` in a RUN line are judged
+  // as the place they would be on this machine, because the image's WORKDIR is not known - stands until the owner takes the other one,
+  // and the corpus pins it. Recorded in phase-1-residuals.md as an over-gating the owner decides.)
   const head = commandHead(h.segment ?? '');
   // (a deletion of paths: `rm`, `shred`; a clean of a repository or a `find -delete` is a command on a tree, and is not this)
   if (h.capability === 'command.destructive') return /^(rm|rmdir|shred|unlink)$/.test(head);
@@ -12673,6 +12764,32 @@ function patternEntersHome(abs: string, reach: string, home: string): boolean {
   return rest.length > 0 && globCouldReachCredentials(`${home}/${rest.join('/')}`);
 }
 
+/** Whether a RECURSIVE READ rooted at the glob REACH, matched from the directory BASE, reads the home directory or a credential store
+ *  below it: `ho*` from `/Users` reaches `/Users/home`, `h??e/.ssh` reaches its keys. The pattern is matched component by component
+ *  against the way down to HOME with the shell's own rules - a wildcard matches what it matches, and never a leading dot it does not
+ *  spell - so `*.ts` from the directory above HOME reaches nothing (a pattern that is read as "any wildcard matches" refused `find .
+ *  -name '*.ts'` on a machine whose checkout sits beside its home). A `..` or a `**` reaches anything. Reaching HOME itself is
+ *  reaching everything below it: this is a read of the whole tree, not a listing. */
+function globRootReachesHome(base: string, reach: string, home: string): boolean {
+  const comps = reach.split('/').filter(Boolean);
+  if (comps.some((c) => c === '..' || c.includes('**'))) return true;
+  const down = home.slice(base === '/' ? 1 : base.length + 1).split('/').filter(Boolean);
+  if (comps.length === 0 || down.length === 0) return false;
+  for (let i = 0; i < down.length; i++) {
+    const c = comps[i];
+    if (c === undefined) return false;
+    const name = down[i]!;
+    if (!/[*?[{]/.test(c)) {
+      if (foldName(c) !== foldName(name)) return false;
+      continue;
+    }
+    if (name.startsWith('.') && !c.startsWith('.')) return false;
+    if (!globToRegExp(c).test(name)) return false;
+  }
+  const rest = comps.slice(down.length);
+  return rest.length === 0 || globCouldReachCredentials(`${home}/${rest.join('/')}`);
+}
+
 /** THE WORDS OF A SEGMENT WHOSE VALUE THE NEXT READER OF THE NORMALIZED TEXT WOULD READ DIFFERENTLY (words.ts): `hostile` hold a quote or a
  *  backslash (which exist in a value only because they were quoted or escaped), or an angle bracket that was written as a character and
  *  not as an operator (the tokenizer's shape: `literal` or `mixed`; a `real` one is a redirection, and stays one); `braces` were QUOTED and
@@ -13278,7 +13395,7 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
   // because only docker and podman reached the resolver that judges the SOURCE path (exit review 8). A tool the
   // matchers name and the analyzer does not is a hole with a sign on it.
   if (/^(docker|podman|nerdctl)$/.test(head)) {
-    for (const src of containerMountSources(tokenize(text))) {
+    for (const { src, readOnly } of containerMountSpecs(tokenize(text))) {
       const entries = pathEntries(cwd, src, old);
       if (entries.some((e) => e.abs === null && e.why === undefined)) {
         hits.push({
@@ -13295,8 +13412,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           hits.push({ ...unknownHit(table, ctx, `bind mount source ${src}: ${entry.why}`), segment: seg });
           continue;
         }
-        // a bind mount is read-write by default: judge it as BOTH, and keep whichever is more restrictive
-        for (const tool of ['Write', 'Read'] as const) {
+        // a bind mount is read-write by default: judge it as BOTH, and keep whichever is more restrictive - and a read-only one
+        // (`:ro`, `readonly`) as the read it is (CX-05)
+        for (const tool of (readOnly ? ['Read'] : ['Write', 'Read']) as ReadonlyArray<'Write' | 'Read'>) {
           const h = classifyPath(table, ctx, tool, entry.lex ?? entry.abs);
           // (the source of a bind mount is a path of the ENGINE's host, whatever runs the command: in a RUN line it is not the image's
           // path, and is not confined to it)
@@ -14146,6 +14264,38 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
           segment: seg,
           absolute: false,
         });
+      // A RECURSIVE READ ROOTED AT A GLOB ABOVE HOME expands to the home directory itself when the pattern matches its name -
+      // `grep -r . ~/../ho*`, `find $HOME/../hom? -type f` - and then descends into every credential store. The root was judged by
+      // the glob's literal prefix (`/Users/ho`), which names nothing, so the bare `*` and the literal name were refused and the
+      // partial glob between them was ALLOW (exit review 2026-10-07, RVP6-3). The pattern is walked down to HOME component by
+      // component, as a search pattern is (patternEntersHome); reaching HOME itself is reaching everything below it.
+      else if (recursive && p.glob) {
+        const wc = p.raw.search(/[*?[{]/);
+        const prefix = p.raw.slice(0, wc);
+        const reach = p.raw.slice(prefix.lastIndexOf('/') + 1);
+        // the directory the pattern is matched in: the literal prefix's directory, or the prefix itself when it ends at a slash (or is empty)
+        const base = foldName(prefix === '' || prefix.endsWith('/') ? posix : posix.slice(0, posix.lastIndexOf('/')) || '/');
+        if ((base === '/' || home.startsWith(base + '/')) && globRootReachesHome(base, reach, home))
+          hits.push({
+            capability: 'fs.credential-store.read',
+            verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+            via: `recursive read of ${p.raw} can expand to the home directory and its credential stores`,
+            segment: seg,
+            absolute: false,
+          });
+      }
+      // ...and a recursive read of EGO_HOME, or of a directory above it, reads the seal key (AX-3)
+      if (recursive && ctx.egoHome) {
+        const egoHomeF = foldName(canonicalPath(ctx.egoHome).split(sep).join('/'));
+        if (foldedPosix === egoHomeF || egoHomeF.startsWith(foldedPosix + '/'))
+          hits.push({
+            capability: 'fs.credential-store.read',
+            verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+            via: `recursive read of ${p.raw} reaches the EGO_HOME seal key`,
+            segment: seg,
+            absolute: false,
+          });
+      }
     }
     if (write && isDest) {
       if (p.glob) {
@@ -14847,7 +14997,7 @@ function awkShellCommands(seg: string, ctx?: EvaluationContext, cwd?: string): s
 /** The command line `kubectl exec pod -- CMD …` and its neighbours carry after the separator. Against a LOCAL
  *  cluster the verb kept its ALLOW while that command was never analysed at all (exit review 3), so it is fed
  *  back into the canonical pipeline as its own segment. */
-function execCarriedCommand(seg: string): { text: string; container: boolean } | null {
+function execCarriedCommand(seg: string): { text: string; container: boolean; imageArgv?: boolean } | null {
   const t = tokenize(seg);
   const head = t[0] ?? '';
   if (!/^(kubectl|oc|docker|podman|nerdctl)$/.test(head)) return null;
@@ -14859,7 +15009,23 @@ function execCarriedCommand(seg: string): { text: string; container: boolean } |
   if (/^(docker|podman|nerdctl)$/.test(head)) {
     const cc = readContainerCommand(t);
     const carried = cc === null ? null : carriedHostCommand(cc);
-    return carried === null ? null : { text: requote(carried), container: cc !== null && cc.modelled };
+    if (carried !== null) return { text: requote(carried), container: cc !== null && cc.modelled };
+    // THE ARGV AFTER THE IMAGE IS A COMMAND, AND IT IS ON THE COMMAND LINE BYTE FOR BYTE: `docker run --rm postgres:16 psql
+    // postgresql://admin:pw@prod-db.example.com/db -c 'drop table x'` drops the table on the production host exactly as the same
+    // words do on this machine or behind `sh -c` in the same container - and only the `sh -c` body and a short list of locked
+    // operations were analysed, so the direct argv of a generic image was ALLOW (exit review 2026-10-07, CX-02). It is analysed as
+    // what it is, inside the container (its paths are the image's; a production host, a cluster, a URL are what they are anywhere).
+    if (cc !== null && cc.modelled && cc.carriedAt >= 0 && cc.carriedAt < cc.words.length) {
+      const argv = cc.words.slice(cc.carriedAt);
+      // ...and only the argv of a program whose TARGET the kernel reads - a database client, a cluster tool, a network tool, a cloud CLI,
+      // git - is analysed: `make`, `npm test` or a program only the image has run against the IMAGE's files, which no reader of this
+      // machine's files can see (a `make` analysed here read this checkout's Makefile for a container that mounts another directory),
+      // and they stay the container run they were (the recorded residual). A `sh -c` body is read by containerShellBodies.
+      const head = (argv[0] ?? '').replace(/^.*\//, '');
+      if (!IMAGE_ARGV_READ_HEADS.has(head) && !DB_CLIENT_HEADS.has(head)) return null;
+      return { text: requote(argv), container: true, imageArgv: true };
+    }
+    return null;
   }
   if (!t.some((x) => /^(exec|attach|debug)$/.test(x))) return null;
   const dd = t.indexOf('--');
@@ -14868,6 +15034,12 @@ function execCarriedCommand(seg: string): { text: string; container: boolean } |
   // erased the quoting that said so (exit review 7, cross-product).
   return dd >= 0 && dd + 1 < t.length ? { text: requote(t.slice(dd + 1)), container: true } : null;
 }
+
+/** the programs whose argv names a TARGET the kernel judges wherever it runs: a cluster, a host, a URL, a remote, a cloud account */
+const IMAGE_ARGV_READ_HEADS: ReadonlySet<string> = new Set([
+  'kubectl', 'oc', 'helm', 'curl', 'wget', 'wget2', 'http', 'https', 'xh', 'xhs', 'ssh', 'scp', 'sftp', 'rsync', 'git', 'gh', 'glab',
+  'aws', 'gcloud', 'az', 'terraform', 'tofu', 'vault', 'pulumi', 'docker', 'podman', 'nerdctl',
+]);
 
 /** THE SHELL BODIES THAT RUN INSIDE A CONTAINER: the `sh -c BODY` that stands where a container's own argv begins (`docker run IMG sh -c
  *  BODY`, `docker exec C sh -c BODY`, `docker compose run S sh -c BODY`, `kubectl exec P -- sh -c BODY`). */
@@ -15017,7 +15189,21 @@ function flowReadersFor(ctx: EvaluationContext, cwd: string, written: ReadonlySe
         else if (o.name === 'arg-file') argFile = o.value;
       }
       if (peeled.at >= marked.length) return null;
-      return { payload: tail.slice(marked[peeled.at]!.at), placeholder, argFile };
+      let payload = tail.slice(marked[peeled.at]!.at);
+      // the here-string, if the stage has one: its word is xargs's input, not an operand of the command, and is cut out of the payload
+      // (the word as typed decides whether the shell expands it: a quoted one is the text it holds)
+      let hereString: { body: string; expanded: boolean } | null = null;
+      const hs = marked.findIndex((t, i) => i > peeled.at && t.text === '<<<');
+      if (hs >= 0 && marked[hs + 1]) {
+        const wordAt = marked[hs + 1]!.at;
+        const wordEnd = marked[hs + 2]?.at ?? tail.length;
+        const raw = tail.slice(wordAt, wordEnd).trim();
+        hereString = { body: marked[hs + 1]!.text, expanded: !/^['"]/.test(raw) };
+        const from = marked[hs]!.at - marked[peeled.at]!.at;
+        const to = wordEnd - marked[peeled.at]!.at;
+        payload = (payload.slice(0, from) + ' ' + payload.slice(to)).replace(/\s+/g, ' ').trim();
+      }
+      return { payload, placeholder, argFile, hereString };
     },
     substitute: (text, vars) => substituteKnownVars(text, vars),
     expand: (text) => expandBraces(text),
@@ -15287,8 +15473,13 @@ function analyzeSegmentsInto(
     const binding = bindings[stageIndex]!;
     const functionNames = binding.must;
     const bindingIsProven = binding.unconditional;
-    const stdinFrom = stage.pipedFromPrevious ? upstream : null;
-    const stdinParts = stage.pipedFromPrevious ? upstreamParts : [];
+    // A PIPE INSIDE A GROUP READS THE STAGE BEFORE IT, NOT THE GROUP. `( ls; echo 'git push origin main' | bash )` feeds bash the echo
+    // alone; the group's earlier stages are its standard output only when the pipe stands AFTER the group (`( a; b ) | bash`). Taking the
+    // whole group as the producer made the literal unreadable (`ls` is not a literal) and a HARD_LOCK effect an approvable question
+    // (exit review 2026-10-07, RB-EXIT-2).
+    const pipeInsideGroup = stage.pipedFromPrevious && stage.groupId !== undefined && stage.groupId === upstreamGroup;
+    const stdinFrom = stage.pipedFromPrevious ? (pipeInsideGroup ? (upstreamParts[upstreamParts.length - 1] ?? upstream) : upstream) : null;
+    const stdinParts = stage.pipedFromPrevious && !pipeInsideGroup ? upstreamParts : [];
     const upstreamHeredoc = stage.pipedFromPrevious ? upstreamBody : null;
     // a word this kernel refused to expand is a word it has not read: report the opacity rather than treating
     // the unexpanded braces as the text that will run
@@ -15508,12 +15699,30 @@ function analyzeSegmentsInto(
     // THE COMMAND AFTER `--` IS FOUND IN THE SEGMENT AND IN EVERY NORMALIZATION OF IT: behind `sudo`, `env`, `timeout` or
     // `sh -c` the head of the segment is the wrapper, and `docker pass run -- psql -h prod-db …` was analysed only when
     // nothing stood in front of `docker`.
-    const carriedByExec = new Map<string, boolean>();
+    const carriedByExec = new Map<string, { container: boolean; imageArgv: boolean }>();
     for (const c of [seg, ...normalizeSegment(seg)].map(execCarriedCommand))
-      if (c !== null) carriedByExec.set(c.text, (carriedByExec.get(c.text) ?? true) && c.container);
-    for (const [carried, container] of carriedByExec)
-      for (const h of analyzeSegments(table, ctx, compiled, [carried], { ...state, env: container ? { ...env, inContainer: true } : env }, true))
+      if (c !== null) {
+        const was = carriedByExec.get(c.text);
+        carriedByExec.set(c.text, { container: (was?.container ?? true) && c.container, imageArgv: (was?.imageArgv ?? true) && c.imageArgv === true });
+      }
+    for (const [carried, { container, imageArgv }] of carriedByExec)
+      for (const h of analyzeSegments(
+        table,
+        ctx,
+        compiled,
+        [carried],
+        // (inside the container the paths are the image's, as they are for a `sh -c` body there)
+        { ...state, env: container ? { ...env, inContainer: true, containerPaths: true } : env },
+        true,
+      )) {
+        // A PROGRAM OF THE IMAGE THAT NOTHING CLASSIFIES IS THE CONTAINER RUN IT WAS: `docker run --rm node:22 tool --builder prod` runs a
+        // program only the image has, and "unknown command" is no finding about it (the residual that a container's reach is not
+        // analysed stands, phase-1-residuals.md). What IS read - a client, a cluster, a host, a URL - is judged as it is anywhere (CX-02).
+        if (container && (h.unmatched === true || h.capability === 'command.unknown')) continue;
+        // (and what the image's argv does at ALLOW adds nothing to the container run, which stays the decision)
+        if (imageArgv && h.verdict === 'ALLOW') continue;
         hits.push({ ...h, via: `${h.via ?? ''} (carried by exec)`.trim() });
+      }
     // A CARRIER WHOSE OWN OPTION THIS KERNEL CANNOT PLACE HAS NO KNOWN COMMAND. `timeout --future-flag 5 sed ...` reads one
     // way if the flag takes a value and another if it does not, so the position of the carried command is unknown and
     // nothing may be granted on it (the carrier table, carriers.ts): an approvable question, never a silent yes
@@ -15943,7 +16152,16 @@ function analyzeSegmentsInto(
       // a command that MAKES NAMES: a wildcard that matches nothing now may match what it made (the ledger below holds the files it can name; this holds
       // the fact that the line made some - a directory, a file, a copy - which the wildcard destinations ask about, PA-09)
       if (MAKES_NAMES.has((lnTokens[lh] ?? '').replace(/^.*\//, ''))) written.add('\0made');
-      if ((lnTokens[lh] ?? '') === 'ln' && lnTokens.some((t) => /^-[a-zA-Z]*s/.test(t))) {
+      // A NEW NAME FOR A FILE IS MADE BY `ln` - symbolic or hard - AND BY GNU `cp -s`/`--symbolic-link` and `cp -l`/`--link`, which
+      // copy nothing and link exactly as `ln` does. Only `ln -s` was recorded, so `cp -s .harness/./generated/x nl && echo evil > nl`
+      // wrote EGO's generated state through a name that did not exist yet, at ALLOW, with the `/./` keeping the literal-text
+      // backstop from seeing the governed path (exit review 2026-10-07, RVP6-1). A hard link is a second name for the same inode and
+      // is recorded the same way.
+      const linkHead = (lnTokens[lh] ?? '').replace(/^.*\//, '');
+      const makesLink =
+        linkHead === 'ln' ||
+        (linkHead === 'cp' && lnTokens.some((t) => /^-[a-zA-Z]*[sl]/.test(t) || t === '--symbolic-link' || t === '--link'));
+      if (makesLink) {
         const lnOps = lnTokens.slice(lh + 1).filter((t) => !t.startsWith('-'));
         if (lnOps.length >= 2) {
           // the link in every place it may be made, and what it names from the directory it is made IN
@@ -16452,6 +16670,17 @@ function searchToolHits(
         via: `${tool} over ${base} can reach credential stores`,
         absolute: false,
       });
+    // ...and a search over EGO_HOME, or over a directory above it, reaches the seal key (AX-3)
+    if (ctx.egoHome) {
+      const egoHomeF = foldName(canonicalPath(ctx.egoHome).split(sep).join('/'));
+      if (foldedAbs === egoHomeF || egoHomeF.startsWith(foldedAbs + '/'))
+        hits.push({
+          capability: 'fs.credential-store.read',
+          verdict: verdictFor(table, ctx, 'fs.credential-store.read'),
+          via: `${tool} over ${base} reaches the EGO_HOME seal key`,
+          absolute: false,
+        });
+    }
   }
   return hits;
 }
