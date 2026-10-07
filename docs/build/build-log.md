@@ -30,6 +30,10 @@ the containment requirement on issue #26, and 1 non-bypass.
 A further **independent challenge of the new layered contract** (not of the shell-syntax surface) ran on 2026-09-22
 and confirmed **22 findings against the contract itself**, 17 of them HIGH. They are unresolved. Phase 1 therefore
 does NOT meet exit-criterion point 10 and is not complete.
+*(Correction, 2026-10-07: true when written. The challenge rounds that followed in the same sitting (2–12, recorded
+under the phase-1 check lines) fixed them; the register of 2026-10-01 records the 83 findings of challenge rounds
+10–12 as NOT_REPLAYABLE — severity kept, command not — rather than as closed. Phase 1 closed on 2026-10-07 under the
+amended criterion: see "Phase 1 — closure record" at the end of this file.)*
 
 - CONFORMANCE: NOT RUN (nothing to conform yet)
 
@@ -326,6 +330,9 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   repository (pinned by `packages/kernel/test/githooks.test.ts`).
 
 ### Check lines
+
+*(These four lines are the record as it accreted from 2026-09-15 to 2026-09-30, corrections included; they are kept
+as history. The lines in force at closure are in "Phase 1 — closure record (2026-10-07)" at the end of this file.)*
 
 - DETERMINISTIC CHECKS: PASSED — `npm run typecheck`, `npm run lint` (packages and tests), `node --test`
   (152 tests), `npm run build` (dist/ego.js, development identity `-dev.<sha>.dirty`, built from the uncommitted
@@ -640,6 +647,11 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   reviewer's floor** — 19 of them DENY-arriving-as-ASK, which is the designed human gate, and 26 of them
   proportionality rows where EGO asks about something the reviewer would allow. The three CRITICAL/HIGH rows that
   remain are an unclassified kubeconfig context (`make deploy`) and `git merge FETCH_HEAD`.
+  *(Correction, 2026-10-07: "closed" above is a measurement at HEAD 161c610, not a property that held afterwards. The
+  closure audit of 2026-10-01 found r8-39 — the fourth spelling of the function-binding finding, `git() { echo hi; }
+  | cat`, newline, `git push origin main` — ALLOW again on `c54d8b2`; it is DENY since `0111e63`, and on the closure
+  tree all 131 review-8 rows are CLOSED by replay (`docs/architecture/phase-1-findings-register.md`). A row is held
+  closed by the test that pins it, and the register's pin column says which rows have one.)*
 
   **THE LAST BATCH WAS A CLASS OF ITS OWN, AND IT RUNS THE OTHER WAY: LOOKING AT SOMETHING IS NOT DOING IT.**
   Ten commands arrived as an ABSOLUTE DENY, which is the one verdict a human cannot approve — so EGO was refusing
@@ -842,7 +854,9 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
 
   Every finding of this pass is closed, refuted or recorded (commit cd9fe65): 12 exact-verdict tests, each of which fails
   against the tree before the fixes; 10 new corpus classes (6,300 generated variants); a differential test for the
-  directory model. The in-repo cross-product now asserts **40,452** combinations across **101** root semantic
+  directory model. *(Correction, 2026-10-07: not every one. Replayed on `0111e63` (2026-10-01), 14 of the 121 rows
+  were OPEN, two of them CRITICAL through neighbours the reviewer listed (sa10-33, sa10-34); on the closure tree 119
+  are CLOSED and 2 are OPEN and recorded, neither above MEDIUM. The register is the record; this sentence was not.)* The in-repo cross-product now asserts **40,452** combinations across **101** root semantic
   classes, 379 canonical spellings, 97 transformations, 5,605 producer-carried variants and 103 ordinary commands; the
   suite is 268 tests and takes about eleven minutes.
 
@@ -997,3 +1011,162 @@ Q98 opened and implemented under the recommended default, awaiting confirmation)
   modes, managed tier, prompt-hook caller marker) is a phase 6 deliverable; `claude-code` capabilities marked
   SUPPORTED in the host matrix rest on the pre-build verification recorded in the baseline (section C), `codex-cli`
   capabilities are UNVERIFIED and the Codex dialect fails closed on everything but ALLOW.
+
+## Phase 1 — closure record (2026-10-07; HEAD 19cca14)
+
+Phase 1 closes under the exit criterion the product owner amended on 2026-10-01, recorded in
+`docs/architecture/phase-1-taxonomy.md`: (1) the class list is closed; (2) every class is a property asserted over the
+generated cross-product, and that suite passes; (3) every KNOWN finding is closed and pinned, or recorded with class,
+severity and one disposition; (4) no CRITICAL is unresolved; (5) the residual — an unauthorized ALLOW for an input
+nobody listed — is a containment dependency owned by issue #26 (the classifier is defense in depth; the OS sandbox is
+the boundary). **The original criterion — "a fresh high-risk review finds no instance that crosses an authority
+floor" — was NOT met and was replaced, not satisfied**: thirteen fresh reviews found instances every time while the
+class count stayed at eleven. Every PASSED line below is PASSED against the amended criterion and says so.
+
+### What happened between exit review 11 (2026-09-30) and closure
+
+199 local commits (`f993e8a..HEAD`), 154 files, +61,249/−4,876 lines; 274 → about 1,020 tests in 52 files (993 before the day's pins; the exact count is the cold run's) (25 of them
+`closure-*.test.ts`); 42 modules under `packages/kernel/src/authority/` where `evaluate.ts` alone used to hold the
+readers. Nothing pushed; no remote exists.
+
+- **Two decisions by the product owner.** 2026-09-30: a plain `SELECT` against a production database is a read
+  (`isPlainSelect`, a positive grammar; `select-read.test.ts`). Four attack lenses were planned on that grammar; two
+  ran (PostgreSQL, MySQL) and two — the lexical seams and the other clients — were stopped by a safety classifier
+  and are recorded NOT RUN; the db reviewer of the exit review below was given them instead. 2026-10-01: option 1 —
+  amend the criterion as above — rather than invert the default on the riskiest surfaces (option 2) or keep the loop
+  (option 3). Both are in `phase-1-residuals.md`, "The decision".
+- **The closure audit (2026-10-01, 11 agents).** It measured the documents' claims against the tree and found three
+  of them false (corrected above, in place, with the date): 124 of 177 replayable review-11 unauthorized-ALLOW
+  findings were still ALLOW, CRITICALs among them; review 8's "every unauthorized ALLOW is closed" had regressed at
+  `c54d8b2`; the self-attack-10 "every one closed" was not true of 14 rows. Its product is
+  `docs/architecture/phase-1-findings-register.md`: every per-finding record of exit reviews 7–11 and of self-attacks
+  9 and 10 (935 rows) replayed against `evaluate()` in a fresh fixture, neighbours included, with severity, class,
+  cause, status and one disposition per open row — the table behind condition 3.
+- **Wave 1 (2026-10-01, seven branches, merged at `0111e63`).** CRITICALs first and failing-first: the
+  database-client escape family (sqlite3 `writefile()` into `.git/hooks`, `\o |cmd`, `pager`, `.shell`, mongosh
+  `require`), dry-run flag order, function bindings, `find -exec chmod`, the leading-space and dangling-symlink forms
+  of the structured tools; authority tiers; secret evidence; manifests; containment docs. Register after it: 214 OPEN.
+- **Wave 2 (2026-10-01, five branches).** Q98 / issue #16: the naming migration (`organization-locked` →
+  `admin-governed`, read aliases in `control-plane/legacy-names.ts`), typed reason codes (`authority/reasons.ts`),
+  the vocabulary in `doctor`, `capabilities` and `explain`, `ego authority diff`, the local-target registry with
+  `ego init` flags and human acceptance (`control-plane/local-targets.ts`), grants clamped at ASK for external
+  effects; producers (lint-staged below the cwd, `npm_config_*` by npm's keys, make target names by make's grammar);
+  paths; the register itself.
+- **Wave 3 (2026-10-01 → 02, seven branches and one direct commit).** k8s (`k8sEffect`), containers (the verb
+  table), make (the model rewritten: `make.ts`, `make-reader.ts`, `make-builtins.ts`), carriers and options
+  (`carriers.ts`, `options.ts`, `tools.ts`), db-paths, proportionality, git/environment/overlay/time (`PSQLRC` and
+  `PSQL_*` injection; the first evaluation deadline); the head detector and the cwd model reading separated
+  redirections.
+- **Wave 4 (2026-10-02, integration).** A producer's body reaches the same readers as the command line it holds
+  (`d1504f5`, `d22e0cb`); three tables became modules of their own (`local-reads.ts`, `env-vars.ts`, the directory
+  selector; `9f51ec8`); three producer-carried variants under their floor (`c51d620`).
+- **Wave 5 (2026-10-02): an independent review of the waves.** Seven reviewers (db clients; shell structure against
+  real bash and zsh; paths against the real filesystem; the authority layer; cluster, container and make; robustness;
+  ordinary development), each with a differential oracle, reported 92 findings — 5 CRITICAL, about 25 HIGH — and
+  proposed two properties no class expressed: a deterministic work bound and channel integrity. Their scripts are in
+  `.probe/rv-*/` (gitignored); the report in the session scratchpad (`wave5.json`).
+- **Wave 6 (2026-10-02 → 03, eight branches, merged `0c2dc61` … `74c2ea5`).** Fixes by root cause: the work bound
+  (`authority/work-bound.ts`: every reader charges `chargeWork` before it reads; the bound is ASK, never ALLOW),
+  channel integrity (`util/shown-text.ts`; a structural scan of every `@untrusted` source), the policy-cache seal (a
+  keyed MAC under `EGO_HOME`; a removed overlay narrowing is a pending widening; caches written before the seal are
+  re-accepted by a human `ego init`), one reader for paths (`pathCandidates`: the lexical and the physical reading),
+  shell lexing (`shell-lexer.ts`, `evaluated-words.ts`), dataflow, hosts and target kinds; and the seeded differential
+  tests `closure-shell2`, `closure-db2`, `closure-paths2`, `closure-authority2`, `closure-make2`,
+  `closure-usability-a/b`, `closure-clusters2` with oracles against real bash, zsh, GNU make 3.81 and sqlite3. The
+  work bound's timing line was set to 2.5 s of CPU (`de1d79d`).
+- **2026-10-07.** The final replay found two register rows to re-measure by hand. r11-119 had been recorded OPEN by a
+  script that imported an earlier worktree: on this tree the removal of an overlay narrowing is pending until a human
+  accepts it (CLOSED). r11-255 was real: `command.build` and `command.test` were in the hook's pre-promotion
+  read-only set, so `black .` and `npm test` passed the gate under STRICT before trust promotion — fixed and pinned
+  (`590547e`). The cold validation found `package-lock.json` without its seven workspace packages, so `npm ci`
+  refused a clean clone — regenerated (`b44bdb6`).
+
+### The register on the closure tree
+
+935 rows (measured in the morning on `64d1494`+; re-measured on the final tree: 869 CLOSED, 38 OPEN, 28 not replayable - r11-122 re-opened as FAIL_SAFE, because a recursive CONTENT read of EGO_HOME is a credential read since AX-3): **870 CLOSED** (424 with the reported spelling literally in a test file; the rest pinned by a differently
+spelled test of the same class or by the cross-product, which the register cannot tell apart); **37 OPEN and
+recorded** — 25 MUST_FIX (0 CRITICAL, 0 HIGH, 20 MEDIUM, 5 LOW; the largest group is the mode-narrowing reader,
+RC-MODE: `git branch`, `git pull --rebase`, `black .` under a mode that should narrow them), 8
+CONTAINMENT_DEPENDENCY (a runner told to load a program; `kustomize build` with a remote resource), 2 FAIL_SAFE
+over-gatings, 2 ACCEPTED_PRODUCT_BEHAVIOR; and **28 NOT_REPLAYABLE** review-7 rows (the data kept the command and
+not the Makefile, manifest or hook it needed; 7 are CRITICAL by the reviewer's rating and their families are CLOSED
+with fixtures in review 8 — recorded, not closed). The 83 findings of contract-challenge rounds 10–12 kept a severity
+and no command and are recorded the same way. The cross-product on this tree: 232 root semantic classes in the 11
+families (1,374 canonical cases) × 115 transformations × 77 producers; 412 ordinary commands in 25 groups, 17 of
+which gate, each with its reason in `EXPECTED_GATES`; 30 commands against real Makefiles.
+
+### The exit review of 2026-10-07
+
+Seven independent reviewers - database clients; shell structure against real bash and zsh; paths against the real filesystem and the
+host-tool surface; the authority layer and the Q98 model; cluster, container and make readers; robustness and the hook's fail-closed
+paths; ordinary development at the base commit and at HEAD - each with a differential oracle and seeds different from the permanent
+tests', reviewed `64d1494` (the code of `de1d79d`) in the morning of 2026-10-07. Six returned in the sitting: **52 findings - 5 CRITICAL,
+11 HIGH, 19 MEDIUM, 17 LOW - and no twelfth class.** By lens: authority 11 (1 C, 3 H, 1 M, 6 L), database 9 (5 M, 4 L), paths 6 (1 C, 2 H,
+2 M, 1 L), shell 4 (1 H, 2 M, 1 L), cluster/container/make 20 (2 C, 4 H, 9 M, 5 L), robustness 2 (1 C, 1 H). The ordinary-development
+reviewer (1,500 commands evaluated at `05083c9` and at HEAD, per ecosystem) had not returned when this record was written: that lens is
+recorded INCOMPLETE, not passed.
+
+**Every CRITICAL and ten of the eleven HIGH findings were fixed the same day by root cause and pinned by a test that fails on `64d1494`;
+three MEDIUM findings were fixed with them; the rest are recorded with a disposition** (the table in `phase-1-residuals.md`, "Exit
+review 13"). The review ran on the tree BEFORE these fixes; the fixes were not independently re-reviewed, and this record says so rather
+than hides it. The CRITICAL findings, one line each: an overlay path rule that matched a path outside every registered root REPLACED the
+outside-workspace floor (an absolute) with its own ASK, and a session grant then lifted it to ALLOW - the fallback is a hit like any other
+now, and a `~/**` rule, which also matched every path on the machine through a sentinel `**` accepts, matches only under HOME (AX-1); GNU
+`cp -s` and `cp -l` make a second name for a file exactly as `ln` does and were recorded as neither (RVP6-1: `cp -s .harness/./generated/x
+nl && echo evil > nl`); `kubectl --context production get -- secrets` read the Secrets after a `--` the parser handed to nobody (CX-01);
+the argv after the image in `docker run` was never analysed, so a production `psql`, `kubectl` or `helm` in a generic image was ALLOW
+(CX-02: the argv is analysed inside the container now, and a program only the image has stays the container run it was); and a run of
+seven hundred thousand `(` cost thirty to sixty seconds of CPU while the work counter saw the characters once - a hook the host kills has
+refused nothing - because the segment splitter re-read its pending text at every grouping metacharacter without paying for it (RB-EXIT-1:
+**the bounded-work invariant was FALSE for that path**; every re-read is priced now, and the same input is a question in three
+milliseconds). The HIGH findings fixed: a human approving `env -u CLAUDECODE ego init` from a tool call accepted every pending widening
+unseen - the question names them now (AX-2); the seal key under EGO_HOME was readable at ALLOW (AX-3); a production marker glued to a word
+(`appprod`, `proddb`) under an accepted wildcard was LOCAL (AX-4); a here-string fed to `xargs` was not read (RVP6-2); a recursive read rooted
+at a glob matching the home directory's name reached every credential store (RVP6-3); a redirection written IN FRONT of a carrier was read
+as the head, so `>/dev/null nohup kubectl --context production delete pod x` asked instead of refusing and `>/dev/null nohup ls` asked at
+all (SH-EXIT-1, with `coproc` and zsh's `=cmd`); `--iidfile`, `--metadata-file` and `--cidfile` are files the CLI writes on the host (CX-03,
+run for real: a hook replaced by an image id); an anonymous volume `-v /data` and a `:ro` mount were absolute refusals of a plain local run
+(CX-04, CX-05; CX-04 is no longer an absolute refusal and still asks, through the path scan, with CX-07); and a pipe INSIDE a group read the
+whole group as its producer, so `( ls; echo 'git commit --no-verify -m x' | bash )` was an approvable question on a HARD_LOCK (RB-EXIT-2).
+The HIGH finding recorded, not fixed: CX-06 asks that `RUN ssh-keyscan github.com >> ~/.ssh/known_hosts` and the `.npmrc` token idiom in a
+Dockerfile be the image's writes, where the decision U-04 of 2026-10-02 judges a `~` or a relative name in a RUN line as the place it would
+be on this machine and the corpus pins it; that is a product decision for the owner, recorded as an over-gating until it is taken.
+
+The cold validation (a clone of HEAD on a machine whose temporary directory is its own real path, not reached through `/var`) found
+three things of its own before the suite was green: `package-lock.json` without its seven workspace packages, so `npm ci` refused the clone
+(`b44bdb6`); a verdict that depended on the machine - a redirection to a path longer than the kernel opens was DENY only where the
+temporary directory is reached through a link, and an ordinary repository write elsewhere (the word is uncertain and asks everywhere now;
+`closure-paths` G); and a test whose fake HOME sat under `/tmp` on that machine, where the kernel reads it as scratch space, which is right
+(the test says so now; `closure-authority2` RB-7).
+
+### Cold validation of HEAD 19cca14 (2026-10-07)
+
+IN PROGRESS when this record was written. On the closure tree, typecheck, lint and every test file touched by the day's fixes pass (closure-paths, closure-paths2, closure-tools, closure-authority2 71/71, closure-shell, closure-shell2, closure-containers, closure-clusters2, closure-k8s, closure-usability-a/b, bypass, hooks, q98-vocabulary, q98-local-targets, monotonicity, cwd-timeline, closure-docs). The cold validation of `19cca14` - a clean clone, a fresh TMPDIR, no `~/.ego`, `npm ci`, typecheck, lint, the dev build, the whole suite in parallel and with `--test-concurrency=1`, then the release build against a throwaway tag in the clone - was running when the session's usage limit cut the sitting off; its log is `/private/tmp/claude-501/-Users-tarik-Desktop-EGO/db777c35-78cc-43d1-80d9-74d3156c0d46/scratchpad/cold-validate.log` (and `cold-test-parallel.log`, `cold-test-serial.log`). An earlier cold run of `b44bdb6` had passed `npm ci`, typecheck, lint and the dev build and found the three defects recorded above. This line becomes PASSED when a human reads that log green; it is not marked passed here.
+
+### Check lines at closure
+
+- DETERMINISTIC CHECKS: IN PROGRESS - see "Cold validation" above: typecheck, lint and every touched test file pass on the closure tree; the full cold run (both suite passes and the release build) had not finished when the sitting was cut off, and its log is named there. Never marked passed on a run nobody read.
+- IN-SESSION REVIEW: PASSED — the closure audit's replay of every recorded finding, regenerated on this tree
+  (`.probe/replay.ts` → `build.mjs` → `mkmd.mjs` → `mkresid2.mjs` → `splice2.py`, all gitignored scaffolding); the
+  differential oracles against real bash, zsh, GNU make 3.81 and sqlite3 in the closure tests; the three false
+  claims of this log corrected in place with the date; the two wrongly recorded register rows re-measured by hand.
+- INDEPENDENT-AGENT REVIEW: PASSED against the AMENDED criterion of 2026-10-01, and only against it, with two qualifications
+  written here rather than hidden. **The original criterion - a fresh independent review finds no unauthorized ALLOW - was NOT met**: the
+  exit review of 2026-10-07 found 52 instances (5 CRITICAL, 11 HIGH), as every review before it found some. What the amended criterion
+  asks, the review answers: no class outside the eleven (condition 1); the cross-product passes (2); every finding it reported is fixed and
+  pinned, or recorded with class, severity and disposition (3; the table in `phase-1-residuals.md`); no CRITICAL is unresolved (4: the
+  five were fixed and pinned the same day); the residual is stated (5). The qualifications: the fixes of 2026-10-07 were not themselves
+  independently re-reviewed, and one of the seven lenses (ordinary development) had not returned when this line was written and is
+  recorded INCOMPLETE. Rounds 1-15, the contract challenges and exit reviews 1-11 are recorded above; this line replaces the IN PROGRESS
+  that stood there.
+- CONFORMANCE: NOT RUN — the host conformance suite (real Claude Code and Codex CLI hook semantics, permission modes,
+  managed tier, prompt-hook caller marker; real podman, nerdctl and `oc`) is a phase 6 deliverable; the `codex-cli`
+  dialect fails closed on everything but ALLOW until then. GNU make 4.x behaviour is unverified (the oracle is 3.81).
+
+### Carried into Phase 2, explicitly
+
+- The 25 recorded MUST_FIX rows, by root cause (register: "Root causes of the OPEN rows, and the single reader that
+  would close each"); the 8 containment rows go to issue #26 with the residual.
+- Issue #16 leftovers: the interactive `ego init` local-target wizard (the flags exist, the wizard does not);
+  receipts (issue #10); the MCP trust resolver (phase 2); Jira/Confluence/DOCX adapters (phases 2 and 5).
+- The paste-ready text for issues #1 and #26 is in `docs/build/phase-1-handoff.md`. Nothing was posted.

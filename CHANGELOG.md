@@ -57,6 +57,21 @@ discipline of decision Q84 (authority changes are never patch releases).
   and how reversible it is (`authority/approval.ts`). Durable tasks do not exist before phase 2, so the task line says so.
 
 ### Changed (authority — MAJOR under Q84)
+- **A plain `SELECT` against a production database is a read** (product owner, 2026-09-30; `isPlainSelect`,
+  `select-read.test.ts`). `psql -h prod-db.acme.com -U ro -c 'SELECT 1'` is ALLOW when a strict positive grammar
+  proves the statement is one SELECT with nothing in it that acts: `INTO`, `FOR UPDATE`, `LOCK IN SHARE MODE`,
+  `PROCEDURE`, `WITH`, a comment of any kind, a user-variable assignment, a dollar-quoted body, a qualified or quoted
+  call, any function not on the short pure list, a second statement, and a statement over 4,000 characters stay the
+  act they are (DENY against production). It used to be DENY whatever the statement said. A comparison `<` or `>`
+  inside the statement is not a redirection; a real redirection beside it still is.
+- **The Phase-1 exit criterion was amended** (product owner, 2026-10-01; `docs/architecture/phase-1-taxonomy.md`):
+  the phase closes on class closure, a passing generated cross-product, every known finding closed or recorded, no
+  CRITICAL unresolved, and the residual stated as a containment dependency on issue #26. The original criterion, a
+  fresh independent review finding no unauthorized ALLOW, was not met and was replaced, not satisfied. Phase 1 closed
+  under the amended criterion on 2026-10-07 (`docs/build/build-log.md`, closure record).
+- **Before trust promotion, a build, a formatter and a test runner are governed mutation** (exit review 11,
+  r11-255). `READ_ONLY_CAPABILITIES` in the hook listed `command.build` and `command.test`, so under STRICT before
+  signed-release trust `black .` and `npm test` passed the pre-promotion gate; both are refused now, like `Write`.
 - **Ordinary development, second half of the closure audit** (independent reviews of wave 5: `U-10` .. `U-19`, `PA-12`, `PA-13`,
   `AUTH-13`). The reviewer who measured 52,825 commands found that the waves had left 62% of typed ordinary commands asking and 45 of
   6,197 refused outright, and that a refusal is the verdict nobody can approve. Each finding is a cause with ONE reader now:
@@ -731,3 +746,21 @@ discipline of decision Q84 (authority changes are never patch releases).
     `foo.c` of this directory, found nothing, and never read the rule that runs `$(CC)` on the `sub/foo.c` that is there (ALLOW over a `CC` that
     is a `git push`); the join was named `makeDir`, which the structural rule H of `closure-paths.test.ts` does not look for. Stricter, never looser; a built-in rule's probes of a goal are paid for
     (about five thousand units a goal), so a single command that names more than about fifteen hundred goals is "too large to classify".
+
+### Fixed
+- `package-lock.json` did not list the seven workspace packages, so `npm ci` refused a clean clone (found by the
+  cold validation of the Phase-1 closure, 2026-10-07). Regenerated with `npm install --package-lock-only`; no
+  dependency version changed.
+- **The exit review of 2026-10-07** (seven independent lenses on the closure tree; `docs/build/build-log.md`, closure record): an
+  overlay path rule that matched a path outside every registered root no longer replaces the outside-workspace floor, and a `~/**` rule
+  matches only under HOME (AX-1); GNU `cp -s`, `cp -l` and `ln` make a second name for their source, so a write through it is the write
+  it is (RVP6-1); `kubectl get -- secrets` is the Secret read it is (CX-01); the argv after the image of `docker run`, `create` and
+  `compose run` is analysed as the command it is, inside the container, while a program only the image has stays the container run it was
+  (CX-02); a run of grouping metacharacters is a question within the work bound, not a hook the host kills (RB-EXIT-1); the question for
+  `ego init`/`ego sync` from a tool call names the pending widenings it would accept (AX-2); `policy-seal.key` under EGO_HOME is a
+  credential store for every reader (AX-3); a production marker glued to a word - `appprod`, `proddb` - is that environment (AX-4); a
+  here-string is what `xargs` reads (RVP6-2); a recursive read rooted at a glob that matches the home directory's name reaches its
+  credential stores (RVP6-3); a redirection in front of the command, `coproc` and zsh's `=cmd` are the command they carry (SH-EXIT-1..3);
+  `--iidfile`, `--metadata-file` and `--cidfile` are host writes (CX-03); an anonymous volume `-v /data` and a `:ro`/`readonly` mount are no
+  longer absolute refusals (CX-04, CX-05); a pipe inside a group reads the stage before it, not the group (RB-EXIT-2). A path longer than
+  the kernel opens is uncertain and asks on every machine (cold validation).

@@ -2,7 +2,8 @@
 
 > Status: **FROZEN** for Phase 1 (2026-09-24). A new finding is classified against this list. It is an *instance*
 > of a class unless it cannot be expressed as one — and only a class that cannot be expressed here reopens the
-> architecture.
+> architecture. The exit criterion below was **amended by the product owner on 2026-10-01**; two cross-cutting
+> invariants (not classes) were added on 2026-10-02. The class list itself has not changed.
 
 ## Why a taxonomy rather than a count
 
@@ -11,15 +12,28 @@ almost nothing: rounds 9 through 12 produced 25, 28, 29 and 26 *instances* and *
 while the single most severe defect of the whole phase — `echo "$(git push origin main)"` reaching ALLOW — was an
 instance of a class that had been known and closed for weeks.
 
-So the exit criterion is not "no findings". It is:
+So the exit criterion is not "no findings". As amended by the product owner on 2026-10-01 (the original is kept
+below, with the reason it was replaced), Phase 1 closes when:
 
 1. the class list below is **closed** — a fresh review produces no class that is not on it;
 2. every class is enforced as a **general property**, asserted over a generated cross-product rather than over the
-   spellings that happened to be reported (`packages/kernel/test/support/corpus.ts`);
-3. a fresh high-risk review finds **no instance that crosses an authority floor**.
+   spellings that happened to be reported (`packages/kernel/test/support/corpus.ts`), and that cross-product passes;
+3. every **known** finding is either closed and pinned by a deterministic test, or recorded with its class, its
+   severity and one disposition ([`phase-1-findings-register.md`](phase-1-findings-register.md));
+4. no CRITICAL finding is unresolved;
+5. the residual — an unauthorized ALLOW for an input nobody has listed — is stated as a **containment dependency**
+   owned by issue #26: the classifier is defense in depth, the OS sandbox is the boundary.
 
-Criterion 3 is what the command-substitution defect proved criterion 1 alone cannot give: a known class can still
-contain an implementation gap that turns a denied effect into ALLOW.
+**The original criterion 3 was NOT met and was replaced.** It read: "a fresh high-risk review finds no instance
+that crosses an authority floor." Twelve reviews measured it (exit reviews 8–11 alone found 187, 86, 179 and 258
+instances, zero new classes each time); each round closed the set it was shown and the next found a set of the same
+size or larger. A criterion over an unbounded instance set is not reachable by review volume, and the owner replaced
+it rather than let the phase claim it. Where a check line is recorded PASSED against the exit criterion, it is
+PASSED against the AMENDED criterion and says so.
+
+The original criterion 3 is what the command-substitution defect proved criterion 1 alone cannot give: a known class
+can still contain an implementation gap that turns a denied effect into ALLOW. That is why condition 4 is a floor and
+not a count, and why condition 5 names the boundary instead of promising one.
 
 ## The classes
 
@@ -198,7 +212,36 @@ class 6 (target classification), 32 in class 7 (provenance and the freshness led
 a twelfth class produced ten findings, all instances. **What the classification cannot say is that the instance set is
 bounded**: class 9 alone (a path judged by its spelling) produced 24 findings in review 10 and 62 in review 11.
 The taxonomy's exit criterion 3 - "a fresh high-risk review finds no instance that crosses an authority floor" - is
-therefore a claim about an unbounded set, and is recorded as unmet and not reachable by review volume alone.
+therefore a claim about an unbounded set, and is recorded as unmet and not reachable by review volume alone. This
+is the measurement behind the amendment of 2026-10-01 at the top of this document.
+
+### Exit review 13 (2026-10-07): the closure review, no twelfth class
+
+52 findings from six of seven independent reviewers (5 CRITICAL, 11 HIGH, 19 MEDIUM, 17 LOW; the seventh lens, ordinary development,
+had not returned when this was written), every one classified by its reviewer as an instance of classes 1, 2, 6, 9, 10 or 11, or of one of
+the two invariants below. One reviewer showed invariant I false for one path - the segment splitter re-read its pending text at every
+grouping metacharacter without paying for it, and a run of seven hundred thousand `(` outlived the host's patience - which is repaired
+and pinned. No reviewer proposed a class the list lacks. The CRITICAL and HIGH findings were fixed and pinned the same day (one HIGH is a
+product decision, recorded); the rest are recorded with a disposition in [`phase-1-residuals.md`](phase-1-residuals.md).
+
+## Two cross-cutting invariants (not classes)
+
+The eleven classes are classes of MISREADING: each names a way the kernel could take a command for another one. The
+closure audit of 2026-10-01 added two properties that are not about what a command means, but about whether a
+correct reading ARRIVES and whether what EGO says is EGO's. Exit review 13's reviewers proposed each as a candidate
+twelfth class; neither is a misreading, so they are recorded here as invariants that every class is subject to.
+
+- **I. BOUNDED WORK.** Every decision ends, with a verdict, after a deterministic amount of work counted from the
+  text itself (`packages/kernel/src/authority/work-bound.ts`: every reader charges `chargeWork` before it reads;
+  the bound is reached as ASK "too large to classify" — never ALLOW, never a late DENY). A hook that has not
+  answered within the host's thirty seconds has not refused. *Asserted by* the `I. BOUNDED WORK` tests of
+  `closure-authority2.test.ts` over one seeded pathological generator per reader family
+  (`test/support/pathological.ts`); a new reader must name its family there or that test fails.
+- **II. CHANNEL INTEGRITY.** Text that is not EGO's — a layer entry, a repository name, a command line, a tool
+  input — reaches a person or a model only as quoted data on one line (`packages/kernel/src/util/shown-text.ts`:
+  `shownText`, `terminalSafe`). No verdict depends on it; the CHANNEL does. *Asserted by* the `H.` tests of
+  `closure-authority2.test.ts`, including a structural scan that fails when a source file under `packages/*/src`
+  builds a message from a value declared `@untrusted` without the boundary.
 
 ## What is deliberately NOT a class
 

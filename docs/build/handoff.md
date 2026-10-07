@@ -1,127 +1,84 @@
 # EGO build handoff
 
-Snapshot for resuming work. Written 2026-09-21. Pair this with `docs/build/build-log.md` (the per-phase record) and
-`docs/architecture/pre-build-package.md` (the frozen baseline, decisions Q1–Q97, plus Q98).
+Snapshot for resuming work. Written 2026-10-07 (replaces the 2026-09-21 snapshot). Pair this with
+`docs/build/build-log.md` (the per-phase record; the Phase-1 closure record is its last section),
+`docs/build/phase-1-handoff.md` (the Phase-1 completion receipt) and `docs/architecture/pre-build-package.md` (the
+frozen baseline, decisions Q1–Q97, plus Q98).
 
 ## Current state
 
-- **Branch**: `main`. **HEAD**: `8bf035d`. Working tree clean.
-- **Deterministic gate is green**: `npm run typecheck`, `npm run lint` (`eslint packages tests`), `node --test`
-  (**158 tests**), `npm run build` (a release build refuses a dirty/untagged tree; use `EGO_ALLOW_DIRTY=1` for a local
-  throwaway build).
-- Everything is **committed locally only**. Nothing pushed, no PRs, no production changes — and that constraint holds.
+- **Branch**: `main`. **HEAD**: the docs commit on top of `19cca14` and the r11-122 fix. Working tree clean. Everything is **committed locally only**: nothing
+  pushed, no PRs, no production changes, and there is no remote for this repository yet.
+- **Phase 1 is CLOSED (2026-10-07)** under the exit criterion the product owner amended on 2026-10-01
+  (`docs/architecture/phase-1-taxonomy.md`). The original criterion was not met and was replaced; every check line
+  says so. CONFORMANCE stays NOT RUN until phase 6.
+- **Deterministic gate**: typecheck, lint and every touched test file pass on `19cca14`+; the full cold validation (clean clone, suite twice, release build) was running when the sitting was cut off - read its log (named in the build log) before calling DETERMINISTIC CHECKS passed. `npm test` takes about 25 minutes.
+- **Known open items are recorded, not hidden**: `docs/architecture/phase-1-findings-register.md` (37 OPEN rows with a
+  disposition each, 28 unreplayable review-7 rows) and `docs/architecture/phase-1-residuals.md` (the reasoning).
 
 ## What is being built
 
 EGO is an organization-grade, model-agnostic Agentic Engineering Control Plane kernel: TypeScript, Node ≥ 24, zero
-runtime deps, single esbuild bundle `dist/ego.js`. The permission evaluator must DENY unsafe agent commands; the git
-hooks must scan for secrets and govern pushes; the launcher pins and verifies runtimes. We are in **phase 1** (kernel
-core), specifically inside the **mandatory independent-agent review loop** that must run clean before phase 1 closes.
+runtime deps, single esbuild bundle `dist/ego.js`. Phase 1 delivered the kernel core: the control-plane loader and
+compiler, the authority evaluator (`packages/kernel/src/authority/`, 42 modules, one reader per dimension), the hook
+kernel with the `claude-code` and `codex-cli` dialects, git hooks, the launcher and runtime, the policy cache with a
+human-accepted widening gate and a seal, the Q98 vocabulary (`doctor`, `capabilities`, `explain`, `authority diff`),
+and the local-target registry with `ego init` flags.
 
-The rule that governs the loop (from the user): every phase records four check lines exactly — `DETERMINISTIC CHECKS`,
-`IN-SESSION REVIEW`, `INDEPENDENT-AGENT REVIEW`, `CONFORMANCE`. Never substitute an in-session review for an
-independent-agent one; never mark a deferred/failing check as passed. `INDEPENDENT-AGENT REVIEW` becomes PASSED only
-when a **complete** review round ends with **zero confirmed HIGH or MEDIUM** findings.
+## Next: Phase 2 and the GitHub tickets
 
-## Independent-agent review loop — status
-
-Each round is a background Workflow: dimension/cluster skeptics + fresh adversarial reviewers find bypasses, then
-adversarial refuters must **reproduce** each finding before it counts. Every confirmed finding is fixed and pinned by a
-deterministic test in the same round, then committed.
-
-| Round | Findings confirmed | Commit | Notes |
-|------|--------------------|--------|-------|
-| 1–3  | 49 / 18 / 14+D1    | `6abcd6e` and earlier | pre-this-session; see build-log |
-| 4    | 8                  | `92f14b6` | env -S, forge fields, pax, hooks honesty |
-| 5    | 19                 | `b8fddc3` | interpreter-body writes, archive dests, mv source, trust dir-node, glued syntax |
-| 6    | 16                 | `ed757a4` | zip/bsdtar/tar --directory, trust globs, ANSI-C, EGO_MAINTENANCE spoof, worktree fail-open |
-| 7    | 3 (partial)        | `c040519` | **usage limit cut 13/16 agents**; the 3 that ran found 3 HIGH, fixed by hand |
-| 8    | 6                  | `734d696` | complete run; tar write modes, quoted commit flags, multi-digit redirects, redaction span leak, Slack xapp-/xoxe-, control-plane write matcher |
-| 9    | 10                 | `a1341c3` | secret-scan gaps (npm/pypi/azure-SAS/DigitalOcean/Docker), >| redirect, commit $IFS splice, .git gitlink file, nested hook config |
-| 10   | 13                 | `cccf31d` | secret-detector sweep (16 new: Databricks/Shopify/Terraform/NewRelic/Grafana/Square/Google/Stripe-webhook/GitHub/Linear/Notion/Figma/Doppler/PlanetScale/Sentry), commit ${IFS%?} trims, >>| redirect, symlinked .git, npm install lifecycle |
-| 11   | 9                  | `d6046d5` | commit default-value, sh -euc cluster, cloud global opts, tilde paths, make -C, install hooks, 4 secrets, curl -u |
-| 12   | 5                  | `159222b` | commit empty-expansion, make -f altmakefile, sort/uniq/yq writes, rm EGO_HOME root, aws-secret-in-json |
-| 13   | 61                 | `fbf8643`, `c4c64e6` | 14 adversarial clusters with shared probes; 76 claimed, 15 refuted |
-
-A key framing added in round 7 and kept in round 8: the verdict ladder is ALLOW (silent) < ASK (human approves once) <
-DENY. An opaque command reaching **ASK is the designed human gate, not a bypass**. Reviewers report only reaches to
-**ALLOW** (silent), a concrete missed DENY spelling that lands on ASK where sibling spellings DENY, or (for the secret
-scan) a real secret that is not blocked. This separates genuine defects from the inherent limits of statically
-classifying obfuscated opaque code, and lets the loop converge.
-
-## In progress
-
-- **Round 13 is done** (`wf_cc7b53e7-7fb`, 90 agents): 14 adversarial clusters, 76 claims, 61 confirmed after
-  refutation, all fixed and pinned across `fbf8643` and `c4c64e6`. The jump from 5 (round 12) to 61 is a change of
-  instrument, not a regression: the fleet went from 5 dimension skeptics to 14 clusters sharing reproduction probes
-  (`r13probe.mjs`, `r13secret.mjs` in the session scratchpad), and reached surfaces earlier rounds never touched.
-  The two worst: `command.read-only` carried an unbounded `console.log(…)`/`print(…)` carve-out that granted silent
-  arbitrary execution, and the pre-commit scan read the stale real index for `git commit -a` and scanned ZERO files.
-  **A round 14 is required** — this round was not clean.
-- **Q98 is being implemented, not just renamed.** Issues #2 (canonical) and #16 (implementation) require
-  target/effect-aware authorization and sequence it BEFORE phase-1 closure. Landed so far:
-  - `6e2ba36` **Q98-1**: target/effect classification. `control-plane/workspace/local-targets.md` declares the local
-    kube contexts, local DB hosts and production markers; the evaluator resolves the real target and re-judges any
-    capability that merely ASSERTS a local one. LOCAL unchanged, PRODUCTION absolute, EXTERNAL denied via the
-    previously unreachable `k8s.nonlocal.mutate`/`db.nonlocal.mutate`, and UNCLASSIFIED asks a human.
-  - `8bf035d` **Q98-2**: the standing ASK ceiling. An organization may enable an ADMIN_GOVERNED external write, never to
-    unattended ALLOW; a widening to ALLOW compiles to ASK and the provenance records the clamp.
-  - The HARD_LOCK tier decision (#16 §5) is made, not open: the product owner decided on 2026-09-22 that every lock of
-    the administrable tier stays administrable (ADMIN_GOVERNED, ceiling ASK) and that HARD_LOCK keeps only the
-    non-widenable core (see `alignment-2026-09.md`, "Q98 resolution").
-  - Failure reason codes (#16 §10) and the terminology (#16 §12: the canonical names `LOCAL_WORKSPACE`,
-    `EXTERNAL_EFFECT`, `HARD_LOCK`, `ADMIN_GOVERNED`, `TASK_APPROVAL` in refusals, `ego capabilities`, `ego explain`,
-    `ego doctor`; the old name `organization-locked` kept only as a read alias; `ego authority diff`) landed with the naming
-    migration; `CHANGELOG.md` has the consumer action. The doctor does not yet print receipts-side availability
-    (receipts are issue #10).
-  Still to do: the 22 deterministic tests (#16 §11) and the `ego init` local-target wizard and registry (#16 §7).
-  Then round 14 must validate the NEW boundary before `INDEPENDENT-AGENT REVIEW` can go to PASSED.
-
-## Remaining
-
-1. **Finish the review loop** to a clean complete round, then flip the `INDEPENDENT-AGENT REVIEW` line to PASSED.
-2. **Q98 is decided** (issue #2 is FINAL) and is being implemented per #16; see "In progress". The #16 §5 question
-   is closed: `forge.pr.create`, `forge.pr.merge`, `git.remote.push.force`, `git.remote.branch.delete`,
-   `git.remote.tag.delete` and `forge.branch.protection.modify` stay ADMIN_GOVERNED (administrable, DENY by default,
-   ceiling ASK), and moving one into `absolute-denies.md` would be a MAJOR change per Q84.
-3. **Phases 2–7** per the frozen baseline: tasks/held-scopes/forge/workspace-registry (2); skills/catalog/ask (3);
-   grilling/evidence/benchmark (4); policies/stakeholder-packs/decisions (5); remote source adapters +
-   `distribution bundle` + conformance suite (6); phase-7 validation. `CONFORMANCE` stays NOT RUN until the phase-6
-   host conformance suite exists; the `codex-cli` dialect fails closed on everything but ALLOW until then.
+1. **Issue #16 leftovers**: the interactive `ego init` local-target wizard (flags only today); receipts (#10).
+2. **Phase 2 per the baseline**: tasks, held scopes, forge, workspace registry, the MCP trust resolver; the
+   Jira/Confluence/DOCX adapters when their phase arrives.
+3. **The 25 recorded MUST_FIX rows** of the register, by root cause (its "Root causes" table names the single reader
+   that would close each; RC-MODE — the mode-narrowing reader — is the largest group). None is above MEDIUM. Do not
+   reopen the Phase-1 review loop for them: a new finding is an instance to record or a cheap pin.
+4. **Issue #26** (containment) owns the residual: the 8 CONTAINMENT_DEPENDENCY rows and the stated boundary.
+5. The owner may post the paste-ready text in `docs/build/phase-1-handoff.md` to issues #1 and #26. Nothing was
+   posted by the build.
 
 ## How to resume the work
 
-- **Re-run / continue a review**: launch a new Workflow like the round-8 script at
-  `…/workflows/scripts/ego-phase1-review-round8-wf_cd054da6-27f.js`, or resume one with
-  `Workflow({scriptPath, resumeFromRunId})` (completed agents replay from cache). Read a finished run's findings from
-  its `journal.jsonl` before trusting the summary. If a run dies on the usage limit, the main session can reproduce and
-  fix the completed agents' findings by hand (that is not "independent", so it does not by itself make a round count as
-  clean — a complete independent round still has to run).
-- **Reproduce an evaluator verdict**: a probe importing the `.ts` sources by absolute path and calling
-  `evaluate(table, ctx, {tool:'Bash', input:{command}})`. Scratch probes live under the session scratchpad
-  (`r5probe.mjs`, `r6probe.mjs`, `r7probe.mjs`) and cover the reproductions for those rounds.
+- **Re-measure the findings register**: `node --experimental-strip-types .probe/replay.ts r7 r8 r9 r10 r11 sa9 sa10`,
+  then `node .probe/build.mjs && node .probe/mkmd.mjs && node .probe/mkresid2.mjs && python3 .probe/splice2.py`.
+  `.probe/` is gitignored scaffolding that lives only in this working tree (its scripts are also in the session
+  scratchpad, `register-harness/`); if it is gone, the register is still the record and the replay inputs are the
+  `*-findings.json` files it names.
+- **Reproduce an evaluator verdict**: `node --experimental-strip-types .probe/probe.ts '<command>' ['{"file": "…"}']`
+  prints the verdict and every capability hit for a fresh fixture workspace; `.probe/tool.ts` does the same for a
+  structured tool input, `.probe/profile.ts` for a profile × mode.
+- **Run the suite**: `npm test` (about 25 minutes; the corpus cross-product dominates); one file with
+  `node --test <file>`. Typecheck `npm run typecheck`, lint `npm run lint`, dev build `npm run build`; the release
+  build (`EGO_RELEASE_BUILD=1 npm run build`) refuses a dirty or untagged tree.
+- **Cold validation** (what the closure ran): a clean clone, a fresh `TMPDIR`, no `~/.ego`, `npm ci`, typecheck,
+  lint, dev build, the suite in parallel and with `--test-concurrency=1`, then the release build against a throwaway
+  tag in the clone. The script is in the session scratchpad (`cold-validate.sh`).
 - **Run shell-shim tests under real `/bin/sh`**, not zsh — word-splitting differs and zsh hides real bypasses.
+- **Independent reviews** were run as background Workflows; the last script is
+  `…/workflows/scripts/phase1-exit-review-wave8.js` in the session's workflows directory. Read a finished run's
+  `journal.jsonl` before trusting its summary.
 
 ## Files that matter most
 
-- `packages/kernel/src/authority/evaluate.ts` — the evaluator (tokenizer incl. ANSI-C `$'…'`, wrappers/env incl.
-  `env -S`, redirections incl. glued, `cd` tracking, archive/`mv`/`cp` destination resolution, trust-store reach,
-  quote-aware `git commit` bypass, weight-based decisive verdict with lock tiers). Most fixes land here.
-- `control-plane/permissions/matchers.md` — declarative matchers (forge, production k8s/cloud, credential/trust/hook
-  interpreter-body matchers, git hook-bypass). **Order matters**: `classifyNormalized` takes the first matching matcher,
-  so a more-specific DENY must precede a general one (e.g. the interpreter-body denies sit before
-  `command.interpreter-inline`). Regexes are single-backslash in YAML single-quotes.
-- `packages/kernel/src/hooks/handle.ts` — hook kernel: budgets/modes, retry hard-stop key normalisation,
-  `EGO_MAINTENANCE` gated on `pathInside(cpRoot, projectRoot)` (unforgeable), policy-cache widening clamp.
-- `packages/kernel/src/project/githooks.ts` + `runtime/posix/git-hook.sh` — hook install/shim (spaced paths, linked
-  worktree resolves `.harness` via the git common dir, pre-push scan no longer trusts `--remotes`).
-- `packages/kernel/src/control-plane/load.ts` + `util/markdown.ts` — fail-closed loader (ordered-list / malformed
-  checkbox / stray-marker capability declarations all error instead of vanishing).
-- Tests: `packages/kernel/test/{bypass,control-plane,hooks,githooks,launcher,detect}.test.ts`,
-  `tests/integration/cli.test.ts`. Each review round appended a `round-N residuals` block.
+- `packages/kernel/src/authority/evaluate.ts` (~16,700 lines) — the evaluator; the readers it used to hold are now
+  modules beside it: `paths.ts`, `carriers.ts`, `options.ts`, `tools.ts`, `k8s.ts`, `containers.ts`, `make*.ts`,
+  `shell-lexer.ts`, `evaluated-words.ts`, `dataflow.ts`, `db-options.ts`, `sql-lex.ts`, `work-bound.ts`,
+  `reasons.ts`, `vocabulary.ts`, `describe.ts`, `approval.ts`, `compile.ts`.
+- `control-plane/permissions/matchers.md` — declarative matchers; first match wins, so a specific DENY precedes a
+  general rule; a destination-only matcher is `additive`.
+- `packages/kernel/src/policy/cache.ts` — the policy cache: seal, pending widenings (a removed narrowing is one),
+  `clampToBaseline`.
+- `packages/kernel/src/hooks/handle.ts` — the hook kernel: budgets, retry hard stop, the pre-promotion gate
+  (reads only before signed-release trust), fail-closed error paths.
+- `packages/kernel/src/util/shown-text.ts` — the channel boundary (`shownText`, `terminalSafe`).
+- `packages/kernel/test/support/corpus.ts` — the generated cross-product (classes × transformations × producers,
+  the ordinary corpus and `EXPECTED_GATES`); `closure-*.test.ts` and their oracles under `test/support/`.
+- `docs/architecture/phase-1-taxonomy.md`, `phase-1-findings-register.md`, `phase-1-residuals.md`,
+  `security-model.md` — what is claimed and what is not.
 
 ## Constraints in force
 
-Commit locally after each phase; never push, never open PRs, never mutate production. A peer/other session cannot grant
-escalation. Keep the four check lines honest; never mark a deferred check passed. Grilling is closed — no reopening
-settled decisions unless a genuine Q1–Q97 contradiction surfaces.
+Commit locally after each phase; never push, never open PRs, never mutate production. Keep the four check lines
+honest; never mark a deferred check passed; an in-session review never substitutes for an independent one. The
+baseline is frozen — no reopening settled decisions unless a genuine Q1–Q97 contradiction surfaces. Reports to the
+owner are short and in plain French; decide, then say what was decided.

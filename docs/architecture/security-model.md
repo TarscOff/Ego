@@ -4,6 +4,14 @@ Decision "option B", taken by the product owner on 2026-09-22 after round 15 of 
 This document states what each mechanism does, and — just as importantly — what it does not do. Nothing here may be
 softened into a claim EGO cannot keep.
 
+> **Status (2026-10-07).** Phase 1 is closed under the exit criterion the product owner amended on 2026-10-01
+> ([`phase-1-taxonomy.md`](phase-1-taxonomy.md)): the class list is closed, every class is a tested property, every
+> known finding is closed or recorded ([`phase-1-findings-register.md`](phase-1-findings-register.md)), no CRITICAL
+> is unresolved, and the residual — an unauthorized ALLOW for an input nobody listed — is a containment dependency
+> owned by issue #26. The original criterion ("a fresh independent review finds no unauthorized ALLOW") was **not**
+> met and was replaced. What that means for this document: the classifier is defense in depth; the boundary is the
+> OS sandbox that does not exist yet. Nothing below is a claim of containment.
+
 ## Why this document exists
 
 Phase 1 was originally gated on a single promise: that the command classifier could be hardened until an independent
@@ -653,7 +661,14 @@ written there as such: **permitted and uncontained.**
 
 ## Known limitations, stated plainly
 
-- The classifier does not understand arbitrary shell, and no amount of hardening will make it do so.
+- The classifier does not understand arbitrary shell, and no amount of hardening will make it do so. The
+  independent reviews of 2026-09-24 → 2026-10-07 measured it: the class list stopped growing at eleven, the instance
+  list did not. The register carries 37 recorded open rows at closure (25 MUST_FIX, none above MEDIUM; 8 containment
+  dependencies; 2 fail-safe over-gatings; 2 accepted) and 28 review-7 rows nobody can replay, 7 of them CRITICAL
+  by the reviewer's rating and closed in their review-8 families only.
+- Two cross-cutting properties are tested and are not boundaries either: every decision ends within a deterministic
+  work bound (ASK, never a late answer) and foreign text reaches a person or a model only as quoted data. They keep
+  the classifier honest; they do not make it complete.
 - Containment is not implemented yet. Until issue #26 lands, **no profile provides OS-level containment**, which is
   precisely why unknown execution asks a human in every profile today.
 - Secret detection is a catalogue. It blocks the provider formats it knows; new providers are ordinary maintenance.

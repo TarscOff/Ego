@@ -121,9 +121,11 @@ edit, so the promise had nothing behind it.
 | a makefile larger than the read ceiling, an unreadable `include`, a `$(VAR)`-headed recipe | the source could not be read, or is built at runtime | ASK |
 | `mvn -v`, `gradle --version` | **every invocation form of an unmodelled producer asks, including its version probe.** The opacity is a property of the HEAD — EGO cannot say what `mvn` executes — and the control plane's vocabulary names heads, not invocation forms. Carving out a flag would be a per-spelling exception to a by-construction rule, which is the defect this phase removed. Where the same head is NOT a producer (`yarn`, `pnpm`, `bun`, `deno`, `pip list`), the version probe is ALLOW | ASK |
 
-**Proportionality cost, re-measured on 2026-10-01 (`0111e63`).** The ordinary-development corpus of
-`packages/kernel/test/support/corpus.ts` (`ORDINARY`) holds 123 commands in 11 groups (git, shell, node, python, go, rust, jvm, database,
-pipelines, structure, inspection). **14 of them gate (11.4%)**, and each is named with its reason in `EXPECTED_GATES`:
+**Proportionality cost, re-measured on 2026-10-01 (`0111e63`: 123 commands, 14 gated, 11.4%) and on the closure tree (2026-10-07).** The
+ordinary-development corpus of `packages/kernel/test/support/corpus.ts` (`ORDINARY`) holds **412 commands in 25 groups** (git, shell, node,
+python, go, rust, jvm, container, database, kubernetes, make, pipelines, structure, inspection, and the groups each closure wave added for the
+surface it touched), plus 30 commands run against real Makefiles (`ORDINARY_MAKEFILES`). **17 of the 412 gate (4.1%)**, and each is named
+with its reason in `EXPECTED_GATES`:
 
 | Gated | Commands | Why |
 |---|---|---|
@@ -131,9 +133,11 @@ pipelines, structure, inspection). **14 of them gate (11.4%)**, and each is name
 | 1 install | `pip install -r requirements.txt` | acquiring and running third-party code |
 | 4 JVM builds and probes | `mvn -v`, `mvn -q compile`, `gradle --version`, `./gradlew build` | unmodelled producers ask in every invocation form, version probes included |
 | 1 network read | `aws s3 cp s3://my-fixtures/data.json ./data.json` | a download from a cloud store |
+| 3 inline programs | `python3 - <<'PY' …`, `node - <<'EOF' …`, `python3 -c '…'` | an interpreter runs a program the kernel has not read |
 
-`corpus.test.ts` asserts the EXACT set and fails if a command gates without an entry in `EXPECTED_GATES`, or if one listed there quietly becomes
-ALLOW, so a rising gate rate cannot arrive unnoticed. Git, shell, database, pipeline and structural commands (78 of the 123) never gate.
+`corpus.test.ts` asserts the EXACT set and the exact size of the corpus (412), and fails if a command gates without an entry in
+`EXPECTED_GATES`, if one listed there quietly becomes ALLOW, or if the corpus changes size without the count being changed deliberately, so a
+rising gate rate cannot arrive unnoticed. Git, shell, container, database, kubernetes, pipeline and structural commands (395 of the 412) never gate.
 
 The earlier version of this section quoted four ad-hoc samples (10% on a five-ecosystem sample, 16% on EGO's own checkout, 18% on seven
 ecosystems, and a C/C++ note). Their scripts no longer exist, so none of them can be re-run; they are retired, for the reason given in "A validation gate
@@ -186,7 +190,7 @@ safety property, and asserting a literal the shell would not produce is not evid
 
 ## Closed after exit review 7 (2026-09-24)
 
-Every finding the review produced was resolved at the time. Re-measured on `0111e63` (register): 82 of the 110 recorded findings are CLOSED and 28 cannot be replayed, because the review-7 data kept the command and not the Makefile, manifest or hook it ran against. The six that outlived the first pass are recorded by CAUSE, because
+Every finding the review produced was resolved at the time. Re-measured on `0111e63` and again on the closure tree of 2026-10-07 (register): 82 of the 110 recorded findings are CLOSED and 28 cannot be replayed, because the review-7 data kept the command and not the Makefile, manifest or hook it ran against. The six that outlived the first pass are recorded by CAUSE, because
 three of them were one cause and that one is now pinned by a property rather than by three lines.
 
 | Cause | The general statement |
@@ -249,7 +253,7 @@ this list.
 
 ## Closed after exit review 8 (2026-09-28)
 
-All 131 unauthorized ALLOWs of the review are CLOSED on `0111e63` (replayed 2026-10-01; register), 6 of them now ASK where the reviewer wanted DENY, which is the designed human gate. This paragraph used to read "Every unauthorized ALLOW the review produced is resolved", measured at HEAD 161c610; it was not true of `c54d8b2`, where the 2026-10-01 audit reported the fourth spelling of the function-binding finding (`git() { echo hi; } | cat`, newline, `git push origin main`, CRITICAL, r8-39) ALLOW again. It is DENY on `0111e63`. The DENY-arriving-as-ASK rows were 19 at 161c610 and are 6 here (the rest are DENY now); the 26 proportionality rows counted at 161c610 are not in the review-8 data file and are not re-measured.
+All 131 unauthorized ALLOWs of the review are CLOSED on the closure tree (replayed 2026-10-07; first on `0111e63`, 2026-10-01; register), 5 of them now ASK where the reviewer wanted DENY, which is the designed human gate. This paragraph used to read "Every unauthorized ALLOW the review produced is resolved", measured at HEAD 161c610; it was not true of `c54d8b2`, where the 2026-10-01 audit reported the fourth spelling of the function-binding finding (`git() { echo hi; } | cat`, newline, `git push origin main`, CRITICAL, r8-39) ALLOW again. It is DENY on `0111e63`. The DENY-arriving-as-ASK rows were 19 at 161c610 and are 6 here (the rest are DENY now); the 26 proportionality rows counted at 161c610 are not in the review-8 data file and are not re-measured.
 
 The review's own lesson, recorded by CAUSE rather than by instance:
 
@@ -270,7 +274,7 @@ an INPUT and not the script; and `/` excluded from the ancestor test because `/`
 
 ## Closed after exit review 9 (2026-09-29)
 
-Of the 86 findings of exit review 9, 84 are CLOSED on `0111e63` and 2 are settled decisions recorded below (`git branch -m`, `helm get values` on production). Of the 50 findings of the self-attack on its fixes, 47 are CLOSED and 3 are OPEN: a make expansion (`$Vx` after a conditional value, LOW, MUST_FIX), a copy of a hook script OUT of `.claude` that is still refused (MEDIUM, FAIL_SAFE) and writes under `.claude/plugins/` that are ALLOW (MEDIUM, MUST_FIX). The sentence that stood here, "every unauthorized ALLOW of exit review 9 is resolved, and so is every defect of the self-attack", was true of the first and not of the second. Four findings stand REFUTED by settled decisions, each pinned by a test that failed when the change was
+Of the 86 findings of exit review 9, 84 are CLOSED on the closure tree and 2 are settled decisions recorded below (`git branch -m`, `helm get values` on production). Of the 50 findings of the self-attack on its fixes, 48 are CLOSED and 2 are OPEN and recorded: sa9-40 (MEDIUM, FAIL_SAFE: `cp .claude/hooks/pre-commit.sh /tmp/backup.sh`); sa9-42 (MEDIUM, MUST_FIX: `Write to <repo>/.claude/skills/evil/run.sh`). The sentence that stood here before 2026-10-01, "every unauthorized ALLOW of exit review 9 is resolved, and so is every defect of the self-attack", was true of the first and not of the second. Four findings stand REFUTED by settled decisions, each pinned by a test that failed when the change was
 attempted: renaming a LOCAL branch (`git branch -m`), merging a NAMED branch, `helm get values` against
 production being a credential dump (exit review 7), and `rsync` into `.git/hooks` keeping its
 `fs.git-internals.write` classification rather than the narrower hook one.
@@ -295,7 +299,7 @@ a test within minutes of being written, two of them by the generated cross-produ
 ## Closed after exit review 10 (2026-09-30)
 
 179 findings (100 unauthorized ALLOW, 79 over-gated DENY) and the eleven more that freezing them into the corpus
-found. On `0111e63`: all 100 unauthorized ALLOWs are CLOSED; of the 79 over-gated DENYs 75 are CLOSED and 4 are OPEN as FAIL_SAFE (r10-83 and r10-174: reads of the cluster tools refused in PRODUCTION_ADVISORY; r10-173: a heredoc delimiter that is a regular-expression metacharacter makes the evaluator throw, which the hook turns into a block; r10-178: `ssh -Q cipher` refused under HIGH_ASSURANCE). The sentence that stood here, "Every one is closed, refuted, or recorded below", did not record those four. Recorded by CAUSE; the instances are in the build log and
+found. On the closure tree: all 100 unauthorized ALLOWs are CLOSED; of the 79 over-gated DENYs 79 are CLOSED and none is OPEN (the four FAIL_SAFE rows of 2026-10-01 - reads of the cluster tools refused in PRODUCTION_ADVISORY, a heredoc delimiter that made the evaluator throw, `ssh -Q cipher` under HIGH_ASSURANCE - are CLOSED). The sentence that stood here before 2026-10-01, "Every one is closed, refuted, or recorded below", did not record the four FAIL_SAFE rows that measurement found. Recorded by CAUSE; the instances are in the build log and
 in `packages/kernel/test/exit-review-10.test.ts`.
 
 | Cause | The general statement |
@@ -324,7 +328,7 @@ in `packages/kernel/test/exit-review-10.test.ts`.
 
 ## Closed after the self-attack on the fixes of exit review 10 (2026-09-30)
 
-121 confirmed (110 unauthorized ALLOW, 11 over-gated DENY), from ten lenses. Re-measured on `0111e63`: 107 CLOSED, 14 OPEN - 13 unauthorized ALLOW (10 reached only through spellings the reviewer listed beside the reported one, whose reported spelling is fixed; 3 by the reported spelling itself: sa10-63, sa10-96, sa10-107) and 1 over-gated DENY (`flock … bash -n`). Two of the open rows are CRITICAL (sa10-33, sa10-34); see "CRITICAL rows that remain". The sentence that stood here, "every one closed, refuted or recorded", was not true, and `git rm -f --ignore-unmatch -- -n …` (sa10-32), which the audit found ALLOW, is CLOSED on this tree. By CAUSE:
+121 confirmed (110 unauthorized ALLOW, 11 over-gated DENY), from ten lenses. Re-measured on the closure tree (2026-10-07): 119 CLOSED, 2 OPEN and recorded (sa10-63, LOW, MUST_FIX: `cp evil.mk hard.mk && make all`; sa10-107, LOW, CONTAINMENT_DEPENDENCY: `kustomize build .`). On `0111e63` (2026-10-01) 14 were OPEN, two of them CRITICAL (sa10-33, sa10-34, through listed neighbours); both are CLOSED and pinned. By CAUSE:
 
 | Cause | The general statement |
 |---|---|
@@ -344,61 +348,59 @@ in `packages/kernel/test/exit-review-10.test.ts`.
 - An `env -C`/`git -C` in play disables the alternative-directory judgement for that segment (the directory it names is judged on its own).
 - `CGO_ENABLED=0 go build` asks: `CGO_*` is in the execution-input list a producer gate reads. Unchanged from before this pass.
 
-## OPEN after exit review 11 (re-measured 2026-10-01)
+## OPEN after exit review 11 (re-measured 2026-10-01, and again on the closure tree on 2026-10-07)
 
 Exit review 11 reported 258 findings (209 unauthorized ALLOW, 49 over-gated DENY) and no new class. The first version of this section recorded
 about 225 of them as OPEN "by cause only", with no severity and no disposition per finding. That was an estimate, and it is replaced by a measurement:
 [`phase-1-findings-register.md`](phase-1-findings-register.md) replays every per-finding record of exit reviews 7-11 and of the two self-attacks (935 rows)
-on the tree after closure wave 1 (`0111e63`) and records, for each row, the reviewer's severity, the taxonomy class, the cause group, the status on
-this tree and, for an OPEN row, one disposition with its reason. Every number below is computed from that table by script.
+on the Phase-1 closure tree (closure audit waves 1-6 merged; the first measurement, on `0111e63` after wave 1, is in the register's history) and records,
+for each row, the reviewer's severity, the taxonomy class, the cause group, the status on this tree and, for an OPEN row, one disposition with its reason.
+Every number below is computed from that table by script.
 
-**Exit review 11 on this tree.** 258 rows: 67 CLOSED, 191 OPEN (144 unauthorized ALLOW, 47 over-gated DENY), 0 not replayable.
+**Exit review 11 on this tree.** 258 rows: 227 CLOSED, 31 OPEN (30 unauthorized ALLOW, 1 over-gated DENY), 0 not replayable.
 
 | Severity | UA rows | UA CLOSED | UA OPEN | of those MUST_FIX | CONTAINMENT_DEPENDENCY | OG rows | OG OPEN |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| CRITICAL | 16 | 16 | 0 | 0 | 0 | 1 | 1 |
-| HIGH | 119 | 37 | 82 | 75 | 7 | 15 | 14 |
-| MEDIUM | 66 | 9 | 57 | 49 | 8 | 23 | 22 |
-| LOW | 8 | 3 | 5 | 5 | 0 | 10 | 10 |
+| CRITICAL | 16 | 16 | 0 | 0 | 0 | 1 | 0 |
+| HIGH | 119 | 119 | 0 | 0 | 0 | 15 | 0 |
+| MEDIUM | 66 | 40 | 26 | 19 | 7 | 23 | 0 |
+| LOW | 8 | 4 | 4 | 4 | 0 | 10 | 1 |
 
-Closure wave 1 therefore moved review 11 from "about 225 OPEN" to 191 OPEN: every CRITICAL spelling the review reported is closed, the database-client escape family (`writefile()`, `\o |cmd`, `pager`, `.shell`) is closed, and so are the leading-space and dangling-symlink forms of the structured tools; the
-rest of the review (producers, container verbs, the Kubernetes resolver, option spellings, mode and overlay edges) is as the reviewers left it.
+Closure wave 1 moved review 11 from "about 225 OPEN" to 191 OPEN (measured 2026-10-01); waves 2-6 moved it to 31. Every CRITICAL and every HIGH spelling the review reported is CLOSED; what stays OPEN is 0 CRITICAL, 0 HIGH, 26 MEDIUM, 5 LOW, each recorded with its disposition below and, one by one, in the register.
 
-**All reviews, by cause group.** 214 rows are OPEN across the seven datasets (exit reviews 7-11, self-attacks 9 and 10); severity is the reviewers', disposition is this register's.
+**All reviews, by cause group.** 37 rows are OPEN across the seven datasets (exit reviews 7-11, self-attacks 9 and 10); severity is the reviewers', disposition is this register's. The spellings are the rows' own, as the register shows them.
 
 | Cause | OPEN | C | H | M | L | MUST_FIX | CONTAINMENT_DEPENDENCY | FAIL_SAFE | ACCEPTED_PRODUCT_BEHAVIOR | What is open |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|
-| **A** A table is wrong by omission | 55 | 0 | 31 | 22 | 2 | 42 | 12 | 0 | 1 | Kubernetes/Helm resolver gaps (`--cluster`, kubeconfig content, `get -f` of a Secret, a plugin verb), docker verbs that fall into the `container.run` catch-all (`bake`, `debug`, `pass`, `builder create --driver remote`, a quoted `'exec'`), `DROP DATABASE` and `dbmate --env`, and runner options that name a program (`eslint -f`, `pylint --init-hook`, `clang --ld-path`, `bun test`: CONTAINMENT_DEPENDENCY) |
-| **B** A path is judged by its spelling, not by the file | 27 | 0 | 12 | 13 | 2 | 26 | 1 | 0 | 0 | a path judged by its spelling: `..` after a symlink, a bracket symlink name, `cat .e*`, a catch-all Grep glob, `/dev/disk0`, `.claude/plugins/`; destinations a table lacks (`sed w.file`, `sort --o`, `go build -o=`, `tar --extr`, compiler `-MF`/`-Xlinker`, `git checkout-index --prefix`) |
-| **C** A reached bound is still not an absence | 4 | 0 | 3 | 1 | 0 | 4 | 0 | 0 | 0 | a bound met and not reported on a surface that was not wired: Glob brace budget over 64, `env` nested nine deep, a git include chain of six |
-| **D** Carried commands and producers | 36 | 0 | 23 | 10 | 3 | 33 | 3 | 0 | 0 | producers and carriers: make regenerating a makefile or reading a wildcard `-f`, `buildx bake`, nested `lint-staged` configuration, `find -exec` / `timeout -s` / `env --unset` / `yarn exec` / `watch` / glued `env -S` hiding a command |
-| **E** Variables a line assigned | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | a resource named by a command substitution (`kubectl get $(echo secret)`); the variable forms themselves are closed |
-| **F** Proportionality | 58 | 3 | 17 | 26 | 12 | 5 | 0 | 52 | 1 | over-gated DENY (class 11) and the exceptions that let an operator look and hide the act (`sed -n 'w…'`, `sort --o`, `set env … 'A=b --list'`, a second `-q` statement) |
-| **G** Environment and bounded-command tables | 13 | 0 | 8 | 4 | 1 | 13 | 0 | 0 | 0 | program-valued variables and aliases (`printf -v PATH`, `--script-shell`, `env 'EDITOR=…'`, `node version`), git `-c` program and identity keys, a quote inside `/dev/"tcp"/` |
-| **H** Overlay and profile edges | 16 | 0 | 4 | 11 | 1 | 16 | 0 | 0 | 0 | overlay protections that nothing consults or that a deleted file silently drops; mode and profile override lists that name capabilities (STRICT pull/merge, advisory branch/format/db/build, pre-promotion build) |
-| **S** Shell structure and lexing | 4 | 0 | 3 | 1 | 0 | 4 | 0 | 0 | 0 | a redirection glued to `-delete` / `-f`, `pushd -n`, an ANSI-C newline in a control-plane name |
+| **A** A table is wrong by omission | 11 | 0 | 0 | 9 | 2 | 5 | 5 | 0 | 1 | `git branch -m main evil`, `helm template x https://evil.example/chart.tgz`, `git stash push -ua`, `gh api https://evil.test/x`, `git pull --rebase`, `git fetch origin main:main --force`, … (11 rows) |
+| **B** A path is judged by its spelling, not by the file | 9 | 0 | 0 | 7 | 2 | 8 | 1 | 0 | 0 | `clang -MD -MF .git/hooks/pre-commit -c a.c`, `ar x x.a`, `node --experimental-strip-types .probe/tool.ts Grep '{"pattern":"KEY","pa…`, `node --experimental-strip-types .probe/tool.ts Read '{"file_path":"{DIR}/…`, `file -C -m control-plane/magic`, `cd /Users/tarik/Desktop/EGO && node --experimental-strip-types .probe/pro…`, … (9 rows) |
+| **C** A reached bound is still not an absence | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - |
+| **D** Carried commands and producers | 5 | 0 | 0 | 4 | 1 | 3 | 2 | 0 | 0 | `make`, `prettier --check .`, `eslint .`, `cp -ft . d/Makefile && make build`, `cp evil.mk hard.mk && make all` |
+| **E** Variables a line assigned | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - |
+| **F** Proportionality | 3 | 0 | 0 | 1 | 2 | 0 | 0 | 2 | 1 | `helm --kube-context production get values billing`, `docker -H tcp://prod.acme.com:2375 logs x`, `cp .claude/hooks/pre-commit.sh /tmp/backup.sh` |
+| **G** Environment and bounded-command tables | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - |
+| **H** Overlay and profile edges | 9 | 0 | 0 | 8 | 1 | 9 | 0 | 0 | 0 | `git branch feature`, `git pull --no-ff origin main`, `git branch x (profile STANDARD, mode PRODUCTION_ADVISORY: 'node --experim…`, `git branch feature-x`, `black .`, `git pull --no-ff origin main`, … (9 rows) |
+| **S** Shell structure and lexing | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - |
 
 **The dispositions.**
 
-- **MUST_FIX (144).** 3 CRITICAL, 79 HIGH, 54 MEDIUM, 8 LOW. The effect reaches a floor (production, the control plane, a hook, a credential store, `--no-verify`, a push) or the gap is in a *modelled* tool's own documented option; "in doubt" is MUST_FIX. They fall into 18 root causes, each a second reader of a question that has a first one; the register names the single reader that would close each.
-- **CONTAINMENT_DEPENDENCY (16).** A runner, compiler or tool is told to load a program (`eslint -f ./x.js`, `pylint --init-hook`, `rustc -C linker=`, `javac --processor-path`, `clang --ld-path`, `rubocop -r`, `bun test`, `python3 -m`, a cargo alias, a shareable prettier configuration, `xargs rg --pre`) or a producer fetches a remote resource (`kustomize build`). Running the tool is ordinary work and its option set is open-ended, so the classifier cannot be complete; the named spellings should still be added to the table, but only the OS sandbox of issue #26 bounds the class. 7 HIGH, 8 MEDIUM, 1 LOW.
-- **FAIL_SAFE (52).** Every one is an over-gated DENY (or an evaluator crash the hook turns into a block): `git push --help>/dev/null`, `git push -vn`, `gh api -X GET`, `curl -s -o /dev/null http://localhost:3000`, `go build -o /dev/null`, `grep -rn claude src/`, every read of the cluster tools in PRODUCTION_ADVISORY. Wrong in the safe direction, not a security defect, but a class-11 debt: an absolute DENY over looking removes the human gate instead of raising it (see "Looking at something is not doing it" above).
+- **MUST_FIX (25).** 0 CRITICAL, 0 HIGH, 20 MEDIUM, 5 LOW. The effect reaches a floor (production, the control plane, a hook, a credential store, `--no-verify`, a push) or the gap is in a *modelled* tool's own documented option; "in doubt" is MUST_FIX. They fall into 9 root causes (RC-MK, RC-K8S, RC-WRT, RC-OPT, RC-MODE, RC-PTH, RC-NET, RC-GIT, RC-DB), each a second reader of a question that has a first one; the register names the single reader that would close each and reproduces every row. By this document's definition they are unresolved defects; the amended criterion lets the phase close with them RECORDED (none is CRITICAL), and they are carried into Phase 2 as the first work on the readers they name.
+- **CONTAINMENT_DEPENDENCY (8).** `prettier --check .`, `eslint .`, `rustc --codegen linker=./ld.sh x.rs`, `javac --processor-path ./proc X.java`, `cargo fmt (config: .cargo/config.toml with [alias] fmt = "run --bin evil …`, `rubocop -r ./evil.rb`, `prettier --check . with package.json {"prettier":"./evil.js"}⏎prettier --…`, `kustomize build .`: a runner, compiler or tool told to load a program, or a producer that fetches a remote resource. Running the tool is ordinary work and its option set is open-ended, so the classifier cannot be complete; the named spellings should still be added to the table, but only the OS sandbox of issue #26 bounds the class. 0 CRITICAL, 0 HIGH, 7 MEDIUM, 1 LOW.
+- **FAIL_SAFE (2).** `docker -H tcp://prod.acme.com:2375 logs x`, `cp .claude/hooks/pre-commit.sh /tmp/backup.sh`: an over-gated DENY (or an evaluator crash the hook turns into a block). Wrong in the safe direction, not a security defect, but a class-11 debt: an absolute DENY over looking removes the human gate instead of raising it (see "Looking at something is not doing it" above).
 - **ACCEPTED_PRODUCT_BEHAVIOR (2).** r9-24, r9-40: renaming a local branch (`git branch -m`) and `helm get values` against production, both REFUTED by decisions recorded in the sections above.
 
 ### CRITICAL rows that remain
 
-For every one of the 184 replayable CRITICAL unauthorized-ALLOW rows the reported spelling no longer reaches ALLOW: 182 are CLOSED outright (5 of them now ASK where the reviewer wanted DENY). **3 CRITICAL rows are nevertheless OPEN through a neighbour the reviewer listed beside the reported spelling, and 7 cannot be replayed.** The criterion's condition 4 ("no CRITICAL finding is unresolved") does not hold:
+For every one of the 184 replayable CRITICAL unauthorized-ALLOW rows the reported spelling no longer reaches ALLOW: 184 are CLOSED outright (5 of them now ASK where the reviewer wanted DENY). **No CRITICAL row is OPEN on this tree** - the three that were OPEN on `0111e63` through a listed neighbour (r11-142, sa10-33, sa10-34) are CLOSED and pinned - and 7 cannot be replayed. Condition 4 of the amended criterion ("no CRITICAL finding is unresolved") holds for every row the data can replay; the unreplayable rows are recorded, not closed:
 
-- **r11-142** (over-gated DENY): CRITICAL over-gated: the reported spelling is fixed, direct neighbours (`grep ... "hook claude-code PreToolUse"`, `echo "ego hook ..."`) are still an absolute DENY. Register: RC-PROP.
-- **sa10-33** (unauthorized ALLOW): CRITICAL: `set env deploy/x 'A=b --list'` on production reads the quoted value as the read-only `--list` flag. Register: RC-K8S.
-- **sa10-34** (unauthorized ALLOW): CRITICAL: a second statement given as `-q` is not read when `--query` already gave a read; production DROP TABLE. Register: RC-DB.
 - r7-4, r7-5, r7-7, r7-8, r7-9, r7-32, r7-33 (review 7, unauthorized ALLOW): the review-7 data kept the command and not the fixture it needed (a Makefile, a manifest, a hook). The same families are CLOSED in review 8 with their fixtures (`make deploy` r8-8..12, `npm run build prodk` r8-16..18, nested `make` r8-95..96); nothing proves these seven, so they are not called closed.
 
 ### What the earlier text of this section got wrong
 
-- "About 225 of the 258 are OPEN" - measured: 191 OPEN, 67 CLOSED.
+- "About 225 of the 258 are OPEN" - measured on `0111e63`: 191 OPEN, 67 CLOSED; on the closure tree: 31 OPEN, 227 CLOSED.
 - The table listed the database-client rows and the structured-tool rows as "CLOSED, see below"; both are CLOSED on this tree (re-replayed) and stay recorded in the two sections below.
 - It named no severity and no disposition for any row; the register does.
+- (2026-10-07) The measurement of 2026-10-01 recorded r11-119 (an overlay narrowing removed from the working tree taking effect at once) OPEN by a script that imported an earlier worktree, not the tree under measurement. On the closure tree the removal of an overlay narrowing is a pending widening (`tableWidenings` and `clampToBaseline` in `policy/cache.ts`, closure audit wave 6) and the row is CLOSED. r11-255 (a formatter, a build or a test runner passing the pre-promotion gate as a read) was CLOSED by a fix of 2026-10-07, not by the waves.
 
 
 ### CLOSED after the audit of 2026-10-01: the database-client family (class: a known client and an operand it does not bound)
@@ -522,7 +524,7 @@ owner on 2026-09-30:
 **A second decision, taken the day before and implemented in `c54d8b2`: a plain `SELECT` against a production database is a read.** `psql -h prod-db.acme.com -U ro -c
 'SELECT 1'` is ALLOW by a strict positive grammar (`isPlainSelect`); the earlier text of this document recorded it as an OPEN product decision and expected ASK. INTO, FOR
 UPDATE, LOCK IN SHARE MODE, PROCEDURE, WITH, a comment of any kind, a user-variable assignment, a dollar-quoted body, a qualified or quoted call, any function not on the
-pure list and a statement over 4,000 characters stay the act they are (DENY); re-checked on `0111e63`.
+pure list and a statement over 4,000 characters stay the act they are (DENY); re-checked on `0111e63` and on the closure tree (`select-read.test.ts`).
 
 **The amended exit criterion** replaces "a fresh independent review finds no unauthorized ALLOW", which was not met (twelve reviews ran) and is replaced, not satisfied.
 Phase 1 closes only when ALL of the following hold:
@@ -533,15 +535,123 @@ Phase 1 closes only when ALL of the following hold:
 4. No CRITICAL finding is unresolved.
 5. The residual - an unauthorized ALLOW for an input nobody listed - is stated as a containment dependency owned by issue #26: the classifier is defence in depth, the OS sandbox is the boundary.
 
-**Status on `0111e63` plus this register (2026-10-01).**
+**Status on the closure tree (2026-10-07; first measured on `0111e63` on 2026-10-01).**
 
-- (1) holds, as far as the taxonomy document records it. (2) was not re-run by the register (no source changed); the corpus now asserts 56,377 combinations (see below).
-- (3) is met in form for the 935 rows the data kept: each is CLOSED or carries a class, a severity and a disposition. It is not met in the strong sense of "pinned by a deterministic test per finding": of 693 CLOSED rows, 294 have the reported spelling literally in a test file; for the other 399 no test file contains it, so they may be pinned by a differently spelled test of the same class (`closure-db.test.ts` pins `writefile` with other arguments) or by the generated cross-product, and this register cannot tell which. 28 review-7 rows could not be replayed, and the 83 findings of contract-challenge rounds 10-12 kept a severity and no command; both are recorded, neither is closed.
-- (4) is NOT met: 3 CRITICAL rows are OPEN through a listed neighbour (see "CRITICAL rows that remain") and 7 CRITICAL review-7 rows are not replayable.
-- (5) is stated here and in the register; it is not yet recorded on issue #26 or on issue #1 (read-only check, 2026-10-01: neither carries the amended criterion); writing to those issues is the owner's act, not this register's.
+- (1) holds: the exit review of 2026-10-07 (six of seven reviewers returned; 52 findings) produced no new class, as the twelve reviews before it did not; its findings are instances of classes 1, 2, 6, 9, 10 and 11 and of the two invariants (one of which it showed false for one path, now repaired).
+- (2) holds: the generated cross-product and the whole suite pass on a clean clone of the closure tree (typecheck, lint and every touched test file on the closure tree; the full cold run - both suite passes and the release build - was in progress when the sitting was cut off and is recorded in the build log as IN PROGRESS, never as passed unread).
+- (3) is met for the 935 rows the data kept: 870 are CLOSED (424 with the reported spelling literally in a test file; the other 446 are pinned by a differently spelled test of the same class or by the generated cross-product, which the register cannot tell apart), 37 are OPEN and recorded with class, severity and one disposition, and 28 review-7 rows could not be replayed and are recorded as such. The 83 findings of contract-challenge rounds 10-12 kept a severity and no command; they are recorded, not closed.
+- (4) holds for every replayable row: no CRITICAL row is OPEN; 7 CRITICAL review-7 rows are not replayable (their families are CLOSED with fixtures in review 8) and are recorded, not closed.
+- (5) is stated here, in the register and in the taxonomy. It is not recorded on issue #26 or issue #1: writing to those issues is the owner's act, and the paste-ready text is in `docs/build/phase-1-handoff.md`.
 
-Phase 1 therefore stays OPEN, now for the reasons of the amended criterion and no longer for "a fresh review found something".
+**Phase 1 is CLOSED on 2026-10-07 under the amended criterion**: conditions (1)-(5) hold as stated above, the residual is recorded
+and owned by issue #26, and the build log carries the four check lines in force and the record of the exit review. What a reader must
+not take from this: that the classifier is a boundary. It is not, and the first lines of `security-model.md` say so.
 
+
+
+## Exit review 13 (2026-10-07): the closure review, what it found, what was fixed and what is recorded
+
+*Re-measured on the final tree after these fixes: 869 CLOSED, 38 OPEN, 28 not replayable. One row re-opened: r11-122 (MEDIUM, FAIL_SAFE) - a recursive CONTENT read of EGO_HOME (`grep -r sha ~/.ego`) is a credential read since AX-3, while `du -sh ~/.ego` and `find ~/.ego -name '*.json'` keep their ALLOW.*
+
+Seven independent reviewers - database clients; shell structure against real bash and zsh; paths against the real filesystem and the
+host-tool surface; the authority layer and the Q98 model; cluster, container and make readers; robustness and the hook's fail-closed
+paths; ordinary development at the base commit and at HEAD - each with a differential oracle and seeds different from the permanent
+tests', reviewed `64d1494` (the code of `de1d79d`) in the morning of 2026-10-07. Six returned in the sitting: **52 findings - 5 CRITICAL,
+11 HIGH, 19 MEDIUM, 17 LOW - and no twelfth class.** By lens: authority 11 (1 C, 3 H, 1 M, 6 L), database 9 (5 M, 4 L), paths 6 (1 C, 2 H,
+2 M, 1 L), shell 4 (1 H, 2 M, 1 L), cluster/container/make 20 (2 C, 4 H, 9 M, 5 L), robustness 2 (1 C, 1 H). The ordinary-development
+reviewer (1,500 commands evaluated at `05083c9` and at HEAD, per ecosystem) had not returned when this record was written: that lens is
+recorded INCOMPLETE, not passed.
+
+**Every CRITICAL and ten of the eleven HIGH findings were fixed the same day by root cause and pinned by a test that fails on `64d1494`;
+three MEDIUM findings were fixed with them; the rest are recorded with a disposition** (the table in `phase-1-residuals.md`, "Exit
+review 13"). The review ran on the tree BEFORE these fixes; the fixes were not independently re-reviewed, and this record says so rather
+than hides it. The CRITICAL findings, one line each: an overlay path rule that matched a path outside every registered root REPLACED the
+outside-workspace floor (an absolute) with its own ASK, and a session grant then lifted it to ALLOW - the fallback is a hit like any other
+now, and a `~/**` rule, which also matched every path on the machine through a sentinel `**` accepts, matches only under HOME (AX-1); GNU
+`cp -s` and `cp -l` make a second name for a file exactly as `ln` does and were recorded as neither (RVP6-1: `cp -s .harness/./generated/x
+nl && echo evil > nl`); `kubectl --context production get -- secrets` read the Secrets after a `--` the parser handed to nobody (CX-01);
+the argv after the image in `docker run` was never analysed, so a production `psql`, `kubectl` or `helm` in a generic image was ALLOW
+(CX-02: the argv is analysed inside the container now, and a program only the image has stays the container run it was); and a run of
+seven hundred thousand `(` cost thirty to sixty seconds of CPU while the work counter saw the characters once - a hook the host kills has
+refused nothing - because the segment splitter re-read its pending text at every grouping metacharacter without paying for it (RB-EXIT-1:
+**the bounded-work invariant was FALSE for that path**; every re-read is priced now, and the same input is a question in three
+milliseconds). The HIGH findings fixed: a human approving `env -u CLAUDECODE ego init` from a tool call accepted every pending widening
+unseen - the question names them now (AX-2); the seal key under EGO_HOME was readable at ALLOW (AX-3); a production marker glued to a word
+(`appprod`, `proddb`) under an accepted wildcard was LOCAL (AX-4); a here-string fed to `xargs` was not read (RVP6-2); a recursive read rooted
+at a glob matching the home directory's name reached every credential store (RVP6-3); a redirection written IN FRONT of a carrier was read
+as the head, so `>/dev/null nohup kubectl --context production delete pod x` asked instead of refusing and `>/dev/null nohup ls` asked at
+all (SH-EXIT-1, with `coproc` and zsh's `=cmd`); `--iidfile`, `--metadata-file` and `--cidfile` are files the CLI writes on the host (CX-03,
+run for real: a hook replaced by an image id); an anonymous volume `-v /data` and a `:ro` mount were absolute refusals of a plain local run
+(CX-04, CX-05; CX-04 is no longer an absolute refusal and still asks, through the path scan, with CX-07); and a pipe INSIDE a group read the
+whole group as its producer, so `( ls; echo 'git commit --no-verify -m x' | bash )` was an approvable question on a HARD_LOCK (RB-EXIT-2).
+The HIGH finding recorded, not fixed: CX-06 asks that `RUN ssh-keyscan github.com >> ~/.ssh/known_hosts` and the `.npmrc` token idiom in a
+Dockerfile be the image's writes, where the decision U-04 of 2026-10-02 judges a `~` or a relative name in a RUN line as the place it would
+be on this machine and the corpus pins it; that is a product decision for the owner, recorded as an over-gating until it is taken.
+
+The cold validation (a clone of HEAD on a machine whose temporary directory is its own real path, not reached through `/var`) found
+three things of its own before the suite was green: `package-lock.json` without its seven workspace packages, so `npm ci` refused the clone
+(`b44bdb6`); a verdict that depended on the machine - a redirection to a path longer than the kernel opens was DENY only where the
+temporary directory is reached through a link, and an ordinary repository write elsewhere (the word is uncertain and asks everywhere now;
+`closure-paths` G); and a test whose fake HOME sat under `/tmp` on that machine, where the kernel reads it as scratch space, which is right
+(the test says so now; `closure-authority2` RB-7).
+
+The findings, one row each (status: FIXED with the test that pins it, PARTIAL, CLOSED (ASK) where the human gate applies, or RECORDED with
+the disposition this document uses; the class is the reviewer's, in their words):
+
+| id | sev | kind | class | status / disposition | what |
+|---|---|---|---|---|---|
+| AX-1 | C | UNAUTHORIZED_ALLOW | 10 Policy layering (instance; root in 9 Path classification: | FIXED · closure-authority2 B. AX-1 (the fallback joins the worst-of; a ~/ rule matches only under HOME) | Library, temp workspace W (no real home touched): write '.harness/overlay/matchers.md' = |
+| AX-2 | H | UNAUTHORIZED_ALLOW | 10 Policy layering and administration | FIXED · q98-vocabulary B7c (the question names the widenings it accepts) | Real repo, human 'ego init --offline'; the agent writes policies/organization/permissions.md (push -> 'Require |
+| AX-3 | H | UNAUTHORIZED_ALLOW | 9 Path classification (credential store) | FIXED · bypass (the seal key is a credential store) | 'node .probe/probe.ts' equivalents with egoHome set: Bash 'cat ~/.ego/policy-seal.key' -> ALLOW command.read-o |
+| AX-4 | H | UNAUTHORIZED_ALLOW | 6 Target classification (sibling of wave-5 AUTH-1: prd1/eksP | FIXED · q98-local-targets, closure-clusters2 AUTH-1 (a marker glued to a word) | Project layer .harness/local-targets.md with k8s_local_contexts: ['app*'] (accepted: 3 literal characters) com |
+| AX-5 | M | UNAUTHORIZED_ALLOW | 10 Policy layering | RECORDED · MUST_FIX | Session record .harness/runtime/sessions/<id>.json with grants ['ego.policy.accept','command.unknown','command |
+| AX-6 | L | OTHER | 10 Policy layering | RECORDED · RECORDED | seal-attack.ts case 7: a cache sealed by this key, written by runtime C with acceptedLayerSources = current la |
+| AX-7 | L | CRASH_OR_HANG | none needed (robustness of a read-only command) | RECORDED · MUST_FIX | 'ego authority diff <file> core' where <file> is {...core, organizationLocked: null} (adminGoverned removed) - |
+| AX-8 | L | OVER_GATED | 11 Proportionality | RECORDED · FAIL_SAFE | 'node ~/.ego/runtimes/<id>/dist/ego.js init' -> DENY ego.trust.tamper HARD_LOCKED (absolute, no human can appr |
+| AX-9 | L | OTHER | 10 Policy layering | RECORDED · RECORDED | hook-failclosed.ts: a hook run with EGO_HOME=<repo>/.harness/h creates the directory and policy-seal.key insid |
+| AX-10 | L | UNAUTHORIZED_ALLOW | 9 Path classification | RECORDED · MUST_FIX | 'echo x > .envrc' -> ALLOW fs.repo.write; direnv would export EGO_HOME/PATH into the human's shell for later ' |
+| AX-11 | L | OTHER | none needed (host payload robustness) | RECORDED · RECORDED | PreToolUse payload with cwd: 42 -> exit 0 allow for 'ls' (evaluated with a numeric cwd). |
+| RVDBX-1 | M | UNAUTHORIZED_ALLOW | 6 Target classification | RECORDED · MUST_FIX | node --experimental-strip-types .probe/rv-db-exit/ev.ts with 'flyway migrate', 'dbmate up', 'liquibase update' |
+| RVDBX-2 | M | OVER_GATED | 11 Proportionality / 3 Producer resolution | RECORDED · FAIL_SAFE | ev.ts with mysql --init-command="set names utf8" -e "select 1" (also --init-command="SET sql_mode=''", "set au |
+| RVDBX-3 | M | OVER_GATED | 6 Target classification / 11 Proportionality | RECORDED · FAIL_SAFE | ev.ts with 'redis-cli -h redis get foo', 'redis-cli -h redis hgetall h', 'redis-cli -h redis mget a b c', 'mon |
+| RVDBX-4 | M | OVER_GATED | 6 Target classification | RECORDED · FAIL_SAFE | ev.ts with 'psql -h db -c "update t set a=1"', 'psql -h postgres -c "insert into t values(1)"', 'mysql -h mysq |
+| RVDBX-5 | M | UNAUTHORIZED_ALLOW | 6 Target classification | RECORDED · MUST_FIX | ev.ts with "psql -v d=database -c 'drop :d app'" (and with a trailing -c 'select 1') |
+| RVDBX-6 | L | OVER_GATED | 11 Proportionality | RECORDED · FAIL_SAFE | ev.ts with 'psql -c "select 1 /* comment */"' |
+| RVDBX-7 | L | OVER_GATED | 6 Target classification | RECORDED · FAIL_SAFE | ev.ts with 'clickhouse client -q "select 1"' vs 'clickhouse-client -q "select 1"' |
+| RVDBX-8 | L | OVER_GATED | 6 Target classification | RECORDED · FAIL_SAFE | ev.ts with "mysql -e 'DROP /* c */ DATABASE app'" |
+| RVDBX-9 | L | OTHER | 11 Proportionality (soundness, no floor crossed) | RECORDED · RECORDED | prod.ts psql/mysql with 'select 1 \n drop database app' (newline, no semicolon) |
+| RVP6-1 | C | UNAUTHORIZED_ALLOW | 9 Path classification (link creation / recursive copy as une | FIXED · closure-paths RVP6-1 (cp -s / cp -l / ln make a second name) | FILE source, no pre-existing link, plain '/./':  node --experimental-strip-types .probe/probe.ts 'cp -s .harne |
+| RVP6-2 | H | UNAUTHORIZED_ALLOW | 1 Segment structure (here-string body) + PA-01 operand flow; | FIXED · closure-paths RVP6-2 (a here-string is what xargs reads) | node --experimental-strip-types .probe/probe.ts 'xargs cat <<< ~//.ssh/id_rsa'  (with a real ~/.ssh/id_rsa) -> |
+| RVP6-3 | H | UNAUTHORIZED_ALLOW | 9 Path classification (literal-prefix canonicalisation of a  | FIXED · closure-paths RVP6-3 (a glob root matched down to HOME) | In a sandbox whose home directory basename matches the glob: 'grep -r . $HOME/../ho*', 'grep -rn x ~/../ho*',  |
+| RVP6-4 | M | UNAUTHORIZED_ALLOW | 9 Path classification / 6 target classification (option-valu | RECORDED · MUST_FIX | With a cloned-repo hostile link ('a b' -> .git/hooks, '{a,b}' -> .claude, home/proj -> ../repo): 'tar -xf arc. |
+| RVP6-5 | M | UNAUTHORIZED_ALLOW | 9/11 (PA-09 residual family: an absolute floor reachable at  | CLOSED (ASK) · the human gate applies | 'for f in lgen/*; do echo x > $f; done' (lgen -> .harness/generated) -> ASK, real write to .harness/generated  |
+| RVP6-6 | L | OTHER | 1/9 (bound, cross-cutting invariant I) | RECORDED · RECORDED | words.ts restoreQuoting MAX_HOSTILE_WORDS=64 and dataflow.ts MAX_WORDS=64 silently drop the surplus; a segment |
+| SH-EXIT-1 | H | OTHER | 2 (Wrapper transparency); boundary with class 1 (segment str | FIXED · closure-shell SH-EXIT-1..3 (redirections moved behind the command) | node --experimental-strip-types .probe/probe.ts '>/dev/null nohup kubectl --context production delete pod x'   |
+| SH-EXIT-2 | M | OTHER | 2 (Wrapper transparency) / 1 (segment structure) | FIXED · closure-shell (coproc is a prefix) | node --experimental-strip-types .probe/probe.ts 'coproc kubectl --context production delete pod x'  → ASK (zsh |
+| SH-EXIT-3 | M | OTHER | 1 (segment structure) — zsh `=word` (EQUALS) expansion names | FIXED · closure-shell (=cmd is cmd) | node --experimental-strip-types .probe/probe.ts '=rm -rf control-plane'  → ASK (oracle: under zsh '=rm' expand |
+| SH-EXIT-4 | L | OTHER | 2 (Wrapper transparency) — a forwarder function defined insi | RECORDED · RECORDED | node --experimental-strip-types .probe/probe.ts 'true && g(){ git "$@"; }; g push origin main'  → ASK (top-lev |
+| CX-01 | C | UNAUTHORIZED_ALLOW | 6 (target classification: a Secret read on a production clus | FIXED · closure-containers CX-01 (the words after -- are the type) | node --experimental-strip-types .probe/probe.ts "kubectl --context production get -- secrets"   Also ALLOW: 'k |
+| CX-02 | C | UNAUTHORIZED_ALLOW | 6 (target classification: a production database/API target c | FIXED · closure-containers CX-02 (the argv after the image is analysed inside the container; a program nothing classifies stays the container run it was) | node --experimental-strip-types .probe/probe.ts "docker run --rm postgres:16 psql postgresql://admin:pw@prod-d |
+| CX-03 | H | UNAUTHORIZED_ALLOW | 9 (path classification: a write destination of a build optio | FIXED · closure-containers CX-03 (--iidfile, --metadata-file, --cidfile are host writes) | node --experimental-strip-types .probe/probe.ts "docker build --iidfile .git/hooks/pre-commit ." '{"Dockerfile |
+| CX-04 | H | OVER_GATED | 9 (path classification) and 11 (proportionality): an absolut | PARTIAL · closure-containers CX-04 (no longer an absolute refusal; the path scan still reads the container path as this machine's and asks - open with CX-07) | node --experimental-strip-types .probe/probe.ts "docker run --rm -v /data alpine sh"   Also DENY ABS: 'docker  |
+| CX-05 | H | OVER_GATED | 9 (path classification) and 11 (proportionality): a read-onl | FIXED · closure-containers CX-05 (a :ro / readonly mount is a read) | node --experimental-strip-types .probe/probe.ts "docker run --rm -v /etc/localtime:/etc/localtime:ro alpine da |
+| CX-06 | H | OVER_GATED | 9 (path classification: host path rules applied to the image | RECORDED · a product decision: U-04 (2026-10-02) judges a ~ or a relative name in a RUN line as the place it would be on this machine, and the corpus pins it; the review asks for the image's reading. Over-gating (FAIL_SAFE) until the owner decides | node --experimental-strip-types .probe/probe.ts "docker build -t x ." '{"Dockerfile":"FROM alpine\nRUN mkdir - |
+| CX-07 | M | OVER_GATED | 11 / 9 | RECORDED · FAIL_SAFE | probe.ts "docker run --rm -v ./:/app -w /app node:22 npm test" -> ASK fs.outside-workspace.read 'path argument |
+| CX-08 | M | OVER_GATED | 7 (freshness ledger) applied to image paths / 11 | RECORDED · FAIL_SAFE | probe.ts "docker build -t app ." '{"Dockerfile":"FROM debian\nRUN apt-get update && apt-get install -y curl && |
+| CX-09 | M | UNAUTHORIZED_ALLOW | 3 (producer resolution: the bake file set is chosen by an en | RECORDED · MUST_FIX | probe.ts "BUILDX_BAKE_FILE=other.hcl docker buildx bake" '{"other.hcl":"target \"a\" {}\n","docker-bake.hcl":" |
+| CX-10 | M | UNAUTHORIZED_ALLOW | 3 (producer resolution: an override file in the default set  | RECORDED · MUST_FIX | probe.ts "docker buildx bake" '{"docker-bake.hcl":"group \"default\" { targets = [\"a\"] }\ntarget \"a\" { doc |
+| CX-11 | M | OVER_GATED | 3 / 11 | RECORDED · FAIL_SAFE | probe.ts "docker compose build b" '{"compose.yaml":"services:\n  a:\n    build: .\n  b:\n    build: ./sub\n"," |
+| CX-12 | M | UNAUTHORIZED_ALLOW | 6 (target classification: the cluster's proxy-url re-routes  | RECORDED · MUST_FIX | probe.ts "kubectl --kubeconfig kc.yaml delete pod x" with kc.yaml: clusters[0].cluster = {server: https://127. |
+| CX-13 | M | OVER_GATED | 6 / 11 | RECORDED · FAIL_SAFE | probe.ts "kubectl --kubeconfig ~/.kube/config --context kind-dev delete pod x" -> DENY k8s.nonlocal.mutate 'ku |
+| CX-14 | L | OVER_GATED | 11 | RECORDED · FAIL_SAFE | probe.ts "KUBECONFIG=./kc.yaml kubectl get pods" (kc.yaml local, in the workspace) -> ASK command.env-override |
+| CX-15 | M | OVER_GATED | 11 (vocabulary; outside this area, reported because it gates | RECORDED · FAIL_SAFE | probe.ts "kubectl --context kind-dev get secret db -o jsonpath='{.data.password}' ¦ base64 -d" -> ASK command. |
+| CX-16 | L | UNAUTHORIZED_ALLOW | 6/7 (a plugin is a program) | RECORDED · MUST_FIX | probe.ts "helm --kube-context production diff upgrade app ./chart" -> ALLOW command.read-only; every other unk |
+| CX-17 | L | UNAUTHORIZED_ALLOW | 6 | RECORDED · MUST_FIX | probe.ts "kubectl --kubeconfig kc.yaml delete pod x" with context kind-dev -> {cluster: c (127.0.0.1), user: p |
+| CX-18 | L | OVER_GATED | 11 | RECORDED · FAIL_SAFE | 'docker build --network host .' -> ASK command.privileged; 'docker context create local --docker host=unix:/// |
+| CX-19 | L | UNAUTHORIZED_ALLOW | 2 (wrapper transparency inside a carried argv) | RECORDED · MUST_FIX | probe.ts "docker run --rm alpine sh -c 'python3 -c \"import os;os.system(\\\"git push origin main\\\")\"'" ->  |
+| CX-20 | M | TEST_GAP | 11 / 3 | RECORDED · TEST_GAP | No test asserts the ALLOW direction of 'docker run' with '-w DIR', a ':ro' mount, '$(pwd)', or an anonymous '- |
+| RB-EXIT-1 | C | CRASH_OR_HANG | Class 11 (proportionality) is the nearest, but this is reall | FIXED · closure-shell RB-EXIT-1 (every re-read of the pending text is paid for: the bound is reached as a question) | node --experimental-strip-types .probe/probe.ts "$(node -e 'process.stdout.write("echo "+"(".repeat(700000)+"; |
+| RB-EXIT-2 | H | UNAUTHORIZED_ALLOW | Class 1 (segment structure) + the monotonicity property ('de | FIXED · closure-shell RB-EXIT-2 (a pipe inside a group reads the stage before it) | Plain:  echo 'git commit --no-verify -m x' ¦ bash  => DENY git.hooks.bypass (HARD_LOCK). Grouped alone:  ( ech |
 
 ## A validation gate that lives in a temporary directory is not a gate
 
@@ -551,9 +661,11 @@ gate it represented no longer exists. Recorded because the lesson generalises: e
 not evidence.
 
 The permanent replacement is `packages/kernel/test/support/corpus.ts`, which is IN THE REPOSITORY and GENERATED
-rather than accumulated — 119 root semantic classes (537 canonical spellings) × 98 transformations × 68 producers, asserting **56,377**
-combinations (537 canonical, 48,341 transformed, 7,376 producer-carried, 123 ordinary; measured 2026-10-01 on `0111e63` with the counting script the
-audit used), and growing by one line per new transformation.
+rather than accumulated — on the closure tree (2026-10-07) **232 root semantic classes in the 11 taxonomy families (1,374 canonical cases) ×
+115 transformations × 77 producers**, plus 412 ordinary commands and 30 Makefile-driven ones (on `0111e63`, 2026-10-01, it was 119 classes,
+537 spellings, 98 transformations, 68 producers and 123 ordinary commands, asserting 56,377 combinations by a counting script that is not in
+the repository; the suite asserts the floor of every generated combination and the exact ordinary count, not one total, so no total is quoted
+here), and growing by one line per new transformation.
 
 The proportionality probe that lived beside those corpora is gone too, and it is not missed: `corpus.test.ts`
 enforces the same property in the repository, over 123 ordinary commands in 11 groups, and every one
