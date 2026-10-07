@@ -14284,8 +14284,9 @@ function pathspecPath(spec: string, repoRoot: string | null): string | null {
             absolute: false,
           });
       }
-      // ...and a recursive read of EGO_HOME, or of a directory above it, reads the seal key (AX-3)
-      if (recursive && ctx.egoHome) {
+      // ...and a recursive read of EGO_HOME, or of a directory above it, reads the seal key (AX-3) - a read of CONTENTS: `du -sh ~/.ego`,
+      // `find ~/.ego -name '*.json'` and `tree ~/.ego` measure and list, and read no file (r11-122 keeps its ALLOW)
+      if (recursive && ctx.egoHome && !/^(du|find|fd|fdfind|tree|ls|lsd|exa|eza|stat|wc)$/.test(head)) {
         const egoHomeF = foldName(canonicalPath(ctx.egoHome).split(sep).join('/'));
         if (foldedPosix === egoHomeF || egoHomeF.startsWith(foldedPosix + '/'))
           hits.push({
