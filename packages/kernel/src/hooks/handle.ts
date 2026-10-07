@@ -50,13 +50,13 @@ export interface HookRuntime {
   env?: NodeJS.ProcessEnv;
 }
 
-/** Capabilities that are never "governed mutation": reads, searches, status queries (Q96 pre-promotion set). */
+/** Capabilities that are never "governed mutation": reads, searches, status queries (Q96 pre-promotion set).
+ *  A build, a formatter or a test runner is not one of them: `black .` rewrites the tree and `npm test` runs repository
+ *  code, and before trust promotion STRICT permits reads only (exit review 11, r11-255: both were listed here). */
 const READ_ONLY_CAPABILITIES = new Set([
   'fs.repo.read',
   'fs.repo.search',
   'command.read-only',
-  'command.test',
-  'command.build',
   'git.local.status',
   'git.remote.inspect',
   'forge.repo.read',

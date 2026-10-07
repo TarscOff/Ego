@@ -234,6 +234,12 @@ test('STRICT before trust promotion permits reads and refuses governed mutation 
     ).action,
     'deny',
   );
+  // a formatter, a build and a test runner are not reads: they rewrite the tree or run repository code (r11-255)
+  for (const command of ['black .', 'npm run build', 'npm test', 'npx prettier --write .']) {
+    const r = handleHook(ev(root, 'PreToolUse', { tool: { name: 'Bash', input: { command } } }), strict);
+    assert.equal(r.action, 'deny', command);
+    assert.match(r.reason ?? '', /signed-release trust/, command);
+  }
 });
 
 test('claude-code dialect: payload parsing, output shapes, settings merge keeps foreign hooks and puts EGO first', () => {
