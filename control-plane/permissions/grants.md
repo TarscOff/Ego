@@ -7,7 +7,9 @@ notes: >
   folded, punctuation collapsed) and each phrase is matched as a whole-word sequence. A negation token within the
   negation window before the phrase cancels the grant. A grant moves one ASK capability to ALLOW for the current task
   only and expires with the task or the session, whichever ends first. Grants never touch DENY and never reach absolute
-  denies. Intent recognition for routing is a separate, fuzzy mechanism (lexicon/); this table is exact.
+  denies. A grant lifts only a capability whose effect stays on this machine: for one that leaves it (a forge write, a
+  request sent to a remote host) the phrase is heard and reported, nothing is recorded, and every occurrence asks again
+  (the ceiling is ASK). Intent recognition for routing is a separate, fuzzy mechanism (lexicon/); this table is exact.
 negation_window_tokens: 4
 negations:
   - "don't"
@@ -49,10 +51,10 @@ grants:
     phrases: ["prune docker", "you can prune", "nettoie docker"]
   - capability: k8s.local.delete
     phrases: ["delete the local cluster", "delete the namespace", "you can delete the cluster", "supprime le cluster local"]
-  - capability: harness.skills.install
+  - capability: ego.skills.install
     phrases: ["install the skill", "install the skills", "you can install the skill", "installe le skill", "installe les skills"]
-  - capability: harness.pin.change
-    phrases: ["upgrade the harness", "upgrade ego", "rollback the harness", "you can upgrade the harness", "mets a jour le harness", "upgrade le harness"]
+  - capability: ego.pin.change
+    phrases: ["upgrade ego", "rollback ego", "you can upgrade ego", "mets a jour ego", "upgrade the harness", "rollback the harness"]
   - capability: command.privileged
     phrases: ["you can use sudo", "run it with sudo", "tu peux utiliser sudo"]
   - capability: command.network-tool
@@ -61,5 +63,24 @@ grants:
 # Human grant verb table
 
 Grants are the only way a human widens authority for a task, and only from ASK to ALLOW. The table is exact on
-purpose: a grant is authority, and authority is never inferred from fuzzy intent. Organizations may add phrases and
-languages in their overlay for existing ASK capabilities; they cannot add a grant for a DENY or absolute capability.
+purpose: a grant is authority, and authority is never inferred from fuzzy intent. A grant can never apply to a DENY
+or an absolute capability.
+
+**A grant is a bounded approval of local work, never a standing licence to change shared state** (issue #16 sections
+4 and 8). Whether a capability leaves the machine is read from its identifier (`effectScope` in the compiler): `git.local.*`,
+`db.local.*`, `k8s.local.*`, `container.prune`, `command.*`, `fs.*` and `ego.*` stay here; `forge.*`, `git.remote.*`,
+`network.*`, `mcp.remote.*`, `cloud.*`, `production.*` and every `*.nonlocal.*`, `*.registry.*` or `*.target.*` do not,
+and an identifier in a namespace nobody has classified is treated as leaving. The phrases below for `forge.issue.assign`,
+`forge.issue.comment`, `forge.review.comment` and `forge.review.thread.resolve` are therefore recognised and reported
+but lift nothing: a person who says "you can comment on the issue" approved a comment, not every comment on every issue
+of every repository for the rest of the session. The clamp is recorded in the capability's provenance. The phrases for
+`command.network-tool` ("you can curl it") cover a FETCH, or a write to a declared local target; a request that sends
+to any other host is `network.external-write` or the forge act it spells, and is not reached by them.
+
+**This table is the whole vocabulary today.** There is no overlay layer for grant phrases: an organization that
+needs another phrase or another language edits this file in its own control plane, which is a control-plane change
+and is reviewed as one. An earlier revision of this paragraph said organizations "may add phrases and languages in
+their overlay", and no such layer existed — the kind of promise this control plane must not make. The layer that
+does exist is `policies/organization/permissions.md` for capability verdicts and
+`policies/organization/bounded-commands.md` for the command vocabulary; both are widenings, refused from the
+working tree until a human accepts them with `ego init`.

@@ -5,7 +5,7 @@ title: Credentials and sensitive parameters in URLs
 detectors:
   - id: url.embedded-credentials
     name: user:password@ in URLs
-    pattern: '\b((?:https?|ftp|sftp|ssh|git):\/\/[^:\/\s@]+:)([^@\/\s]+)(@)'
+    pattern: '\b((?:https?|ftp|sftp|ssh|git|cloudinary|redis|rediss|amqp|amqps|mongodb|mongodb\+srv|postgres|postgresql|mysql|mssql|clickhouse|s3|smtp|smtps|imap|imaps)://[^:/\s@]+:)([^@/\s]+)(@)'
     group: 2
     severity: block
     locked: true

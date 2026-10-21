@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -50,6 +50,7 @@ import {
   bootstrapDoctor,
   syncProject,
 } from '../src/launcher/sync.ts';
+import { resolveLauncher, LAUNCHER_NAMES } from '../src/util/path-resolve.ts';
 
 const CP = new URL('../../../control-plane/', import.meta.url).pathname;
 const NOW = '2026-09-14T10:00:00.000Z';
@@ -586,4 +587,31 @@ test('a symlink planted in the immutable cache fails verification; bootstrap doc
   });
   assert.ok(!r.ok);
   assert.match(r.lines.join('\n'), /IDENTITY_CONFLICT: the launcher itself/);
+});
+
+test('the launcher is resolved by the name the package actually installs', () => {
+  // The rename from `harness` to `ego` left doctor and the hook shims resolving the OLD name on PATH, so a correct
+  // installation reported "not resolvable" and the shims failed closed. The name now lives in exactly one place.
+  const dir = tmp('ego-bin-');
+  const env = { PATH: dir } as NodeJS.ProcessEnv;
+  assert.equal(resolveLauncher(env), null, 'nothing on PATH resolves to nothing');
+
+  writeFileSync(join(dir, 'ego'), '#!/bin/sh\n');
+  chmodSync(join(dir, 'ego'), 0o755);
+  assert.equal(resolveLauncher(env), join(dir, 'ego'), 'the installed name must resolve');
+
+  // the pre-rename name keeps working for an installation made before it
+  const legacy = tmp('ego-bin-legacy-');
+  writeFileSync(join(legacy, 'harness'), '#!/bin/sh\n');
+  chmodSync(join(legacy, 'harness'), 0o755);
+  assert.equal(resolveLauncher({ PATH: legacy }), join(legacy, 'harness'));
+
+  // and the package the bin belongs to is declared under that same name
+  const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')) as {
+    bin: Record<string, string>;
+  };
+  assert.ok(
+    LAUNCHER_NAMES.some((n) => n in pkg.bin),
+    `package.json bin (${Object.keys(pkg.bin).join(', ')}) must be a name the resolver knows`,
+  );
 });

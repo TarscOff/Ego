@@ -29,15 +29,21 @@ function cleanGitEnv(): NodeJS.ProcessEnv {
 export function git(
   args: string[],
   cwd: string,
-  opts: { input?: string; timeoutMs?: number; maxBuffer?: number } = {},
+  opts: { input?: string; timeoutMs?: number; maxBuffer?: number; indexFile?: string } = {},
 ): GitResult {
+  const env = cleanGitEnv();
+  // A hook invoked by git itself may run against a TEMPORARY index: `git commit -a` stages into one and passes it as
+  // GIT_INDEX_FILE. Stripping it (the default, against agent-supplied redirection) made the pre-commit scan read the
+  // stale real index and find zero staged files, so `git commit -am` committed unscanned content (round 13). The
+  // caller re-supplies it only after checking it belongs to this repository's git directory.
+  if (opts.indexFile) env['GIT_INDEX_FILE'] = opts.indexFile;
   const r = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
     input: opts.input,
     timeout: opts.timeoutMs ?? 10_000,
     maxBuffer: opts.maxBuffer ?? 16 * 1024 * 1024,
-    env: cleanGitEnv(),
+    env,
   });
   if (r.error) return { ok: false, stdout: '', stderr: String(r.error.message), status: null };
   return {

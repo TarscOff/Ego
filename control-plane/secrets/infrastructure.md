@@ -3,15 +3,39 @@ schema: ego.secrets/1
 family: infrastructure
 title: Infrastructure credentials and private keys
 detectors:
+  - id: infra.dockerhub.pat
+    name: Docker Hub personal access token
+    pattern: '\bdckr_(pat|oat)_[A-Za-z0-9_-]{20,}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:dockerhub-pat]'
   - id: infra.private-key-block
     name: PEM private key block
     pattern: '-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----'
     severity: block
     locked: true
     replacement: '[REDACTED:private-key]'
+  - id: infra.flyio
+    name: Fly.io API token
+    pattern: '\bFlyV1\s+[A-Za-z0-9+/=_,-]{40,}'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:flyio-token]'
+  - id: infra.sonarqube
+    name: SonarQube / SonarCloud token
+    pattern: '\bsq[apu]_[a-f0-9]{40}\b'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:sonarqube-token]'
+  - id: infra.putty-private-key
+    name: PuTTY private key file
+    pattern: 'PuTTY-User-Key-File-\d+:[\s\S]*?Private-MAC:\s*\S+'
+    severity: block
+    locked: true
+    replacement: '[REDACTED:putty-private-key]'
   - id: infra.kube.token
     name: Kubernetes service account or kubeconfig token
-    pattern: '(\btoken\s*:\s*)([A-Za-z0-9._-]{20,})'
+    pattern: '(["'']?\btoken["'']?\s*:\s*["'']?)([A-Za-z0-9._-]{20,})'
     group: 2
     severity: block
     locked: true

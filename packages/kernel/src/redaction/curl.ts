@@ -65,7 +65,12 @@ function redactHeaderValue(v: string): string | null {
 
 function redactUserPass(v: string): string {
   const idx = v.indexOf(':');
-  return idx < 0 ? '[REDACTED:credentials]' : `${v.slice(0, idx)}:[REDACTED:password]`;
+  if (idx < 0) return '[REDACTED:credentials]';
+  const user = v.slice(0, idx);
+  // the -u username is frequently the secret itself (e.g. Stripe `-u sk_live_…:`), so redact a long token-like
+  // username too; a short human username (alice, admin) is kept for debugging
+  const userOut = /^[A-Za-z0-9_.+/=-]{16,}$/.test(user) ? '[REDACTED:credentials]' : user;
+  return `${userOut}:[REDACTED:password]`;
 }
 
 function redactDataBody(v: string): { text: string; hit: boolean } {
@@ -132,9 +137,14 @@ const OAUTH_FLAGS = new Set(['--oauth2-bearer']);
 export function redactCurl(text: string): CurlRedaction {
   const counts = new Map<string, number>();
   const bump = (k: string) => counts.set(k, (counts.get(k) ?? 0) + 1);
-  const lines = text.split('\n');
+  // a backslash-newline continuation joins the logical command: splitting on '\n' first hid every flag that sat on
+  // a continuation line, so `-u user:pass` on line 2 was never seen (round 14). The pair is DELETED, as the shell
+  // deletes it, and what follows it is left alone: replacing it with a space cut `-u alice:pass\<nl>word` into the
+  // credential `pass` and a stray `word`, so half of a secret reached the redacted text (closure evidence, finding 17).
+  const lines = text.replace(/\\\r?\n/g, '').split('\n');
   const outLines = lines.map((line) => {
-    if (!/(^|[\s;&|(])curl(\s|$)/.test(line)) return line;
+    // a curl inside a command substitution or assignment (`RESP=`curl -u u:p …``, `x=$(curl …)`) is still a curl
+    if (!/(^|[\s;&|(`=$])curl(\s|$)/.test(line)) return line;
     const tokens = shellTokens(line);
     let out = '';
     let last = 0;
@@ -178,8 +188,22 @@ export function redactCurl(text: string): CurlRedaction {
           replacement = `-H${r}`;
           bump('curl.header');
         }
-      } else if (/^-u.+/.test(t.raw) && !t.raw.startsWith('--')) {
-        replacement = `-u${redactUserPass(t.value.slice(2))}`;
+      } else if (/^-[a-zA-Z]*[uU]$/.test(t.raw) && !t.raw.startsWith('--')) {
+        // a combined short-option cluster ending in `u` (`-sSu`, `-fsSLu`) takes the credentials as the NEXT token
+        expect = 'user';
+      } else if (/^-[a-zA-Z]*[uU].+/.test(t.raw) && !t.raw.startsWith('--')) {
+        // glued credentials, plain (`-uUSER:PASS`) or after a cluster (`-sSuUSER:PASS`); `-U` is --proxy-user
+        // the option letter is the FIRST u/U whose cluster prefix is itself option letters; Math.max() could pick a
+        // `U` inside the credential and split the secret, leaving half of it visible (round 15)
+        let at = -1;
+        for (let k = 1; k < t.value.length; k++) {
+          if ((t.value[k] === 'u' || t.value[k] === 'U') && /^-[a-zA-Z]*$/.test(t.value.slice(0, k))) {
+            at = k;
+            break;
+          }
+        }
+        if (at < 0) at = 1;
+        replacement = `${t.value.slice(0, at + 1)}${redactUserPass(t.value.slice(at + 1))}`;
         bump('curl.user');
       } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t.value)) {
         const r = redactUrl(t.value);

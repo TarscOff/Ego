@@ -19,7 +19,7 @@ detectors:
     replacement: '[REDACTED:secret]'
   - id: app.generic-secret-assignment
     name: Generic *_SECRET or *_TOKEN assignment
-    pattern: '(\b[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PRIVATE_KEY|API_KEY)\s*=\s*["'']?)([^"''\s]{8,})'
+    pattern: '(\b[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PRIVATE_KEY|API_KEY)\s*=\s*["'']?)(?!-----BEGIN)([^"''\s]{8,})'
     flags: 'g'
     group: 2
     severity: warn

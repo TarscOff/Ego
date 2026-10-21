@@ -28,13 +28,31 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
 ## Requires human approval
 
 - [x] `fs.outside-workspace.read` — read files outside registered repositories and outside the EGO home.
-- [x] `fs.env-file.read` — read `.env` and similar local secret files.
+- [x] `fs.env-file.read` — read `.env` and similar local secret files. A committed template (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`) is not one: it is the file the README tells a developer to copy, and reading it is ordinary.
+- [x] `fs.env-file.write` — write `.env` and similar local secret files. Creating the first `.env` from its template is the first-run step of most projects, so in the STANDARD profile a human is asked once and the write is not refused outright; STRICT and HIGH_ASSURANCE still refuse it, and so does PRODUCTION_ADVISORY, the mode in which no file of the checkout is written. A template is written like any other file.
 - [x] `fs.local-config.write` — change local tool configuration outside the checkout (shell profiles, global git config).
 - [x] `command.unknown` — a command the matchers cannot classify; the host's own permission prompt decides.
 - [x] `command.destructive` — destructive but non-root deletions and history rewrites inside the checkout.
 - [x] `command.privileged` — commands requiring elevated privileges.
-- [x] `command.network-tool` — commands that themselves perform network transfers (curl, wget, scp, rsync to remote).
+- [x] `command.network-tool` — commands that themselves perform network transfers (curl, wget, scp, rsync to remote),
+  including a bash `/dev/tcp` or `/dev/udp` redirection, which opens a socket with no network binary on the line.
+- [x] `command.credential-exposure` — a secret handed on the command line, where the shell history and the process
+  table both keep it (`docker login -p`, `npm publish --//registry:_authToken=…`). The act may be intended; the
+  human decides, because the analyzer cannot un-leak it afterwards.
 - [x] `command.script-opaque` — a shell script or Makefile target whose effect cannot be classified statically (missing, outside the workspace, too large, or using `eval`, variable commands or dynamic sourcing).
+- [x] `command.unmodelled-closure` — a command that DISCOVERS and executes content EGO was never shown: test
+  files matched by a pattern, a configuration file and the plugins it loads, or another package's scripts.
+  Declared in `control-plane/workspace/bounded-commands.md`. EGO does not emulate these tools, so they cannot
+  hold a positive semantic claim; an organization that accepts the risk for a given tool moves it to the
+  `bounded` list in its overlay, and that decision is recorded rather than assumed.
+- [x] `fs.dependency-tree.write` — writing inside `node_modules/`. A package manager writes there in a
+  subprocess EGO never sees; an agent writing there directly is replacing a program the toolchain will run
+  by bare name, which is worth a human look. Reading and running the tree is untouched.
+- [x] `command.ambient-unresolved` — an operation whose EXECUTION CLOSURE includes executable content attached to
+  repository state rather than named in the command, which EGO could not read: the dependency tree's install
+  lifecycle scripts (`npm install` without `--ignore-scripts`), or a git hook that fires for the verb and could
+  not be resolved. EGO's own governance shim is recognised by provenance and contributes nothing. Widen this
+  only with a containment boundary in force, or by running installs with `--ignore-scripts`.
 - [x] `command.interpreter-script` — running a program file through an interpreter (`python x.py`, `node x.js`, `tsx`, `ruby`, …) whose effect the kernel cannot see; overlays may declare known non-mutating scripts.
 - [x] `command.interpreter-inline` — inline code passed to an interpreter (`node -e`, `python -c`) beyond simple printing.
 - [x] `command.archive-extract` — extracting an archive whose contents the kernel cannot see into a directory that contains protected paths (the repository root, `.harness/`, `.git/`); extraction into an ordinary subdirectory is a local mutation.
@@ -42,11 +60,12 @@ Command classes are recognised by the matchers in `../matchers.md`; an unrecogni
 
 ## Denied
 
+`fs.outside-workspace.write` (a write outside the registered repositories and the EGO home) is an absolute deny and
+lives in `../absolute-denies.md`.
+
 - [x] `command.env-inject` — a leading environment assignment that changes what a command executes or where governance looks (`LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `NODE_OPTIONS`, `GIT_CONFIG_*`, `GIT_DIR`, `EGO_*`, `CLAUDE_*`, `CODEX_*`, `IFS`).
 
 - [x] `fs.generated.write` — hand-editing generated artifacts (`.harness/generated/`, `policies/generated/`, generated adapter configs); regenerate through the approved generators instead.
-- [x] `fs.outside-workspace.write` — write files outside registered repositories and the EGO home.
-- [x] `fs.env-file.write` — write `.env` and similar local secret files.
 - [x] `fs.credential-store.read` — read SSH keys, cloud credential files, kubeconfig credentials, password stores, netrc, npmrc, pypirc.
-- [x] `fs.hook-config.write` — edit host hook or permission configuration (`.claude/settings*.json`, `.codex/**`, `.git/hooks/**`, `.husky/**`, `core.hooksPath`) outside HARNESS_MAINTENANCE in the EGO repository.
+- [x] `fs.hook-config.write` — edit host hook or permission configuration (`.claude/settings*.json`, `.codex/**`, `.git/hooks/**`, `.husky/**`, `core.hooksPath`) outside EGO_MAINTENANCE in the EGO repository.
 - [x] `fs.git-internals.write` — write inside `.git/` (refs, config, index, objects) from a file tool or a shell write; git operates on its internals through governed git commands only.

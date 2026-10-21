@@ -1,10 +1,18 @@
 // Hook handlers: one kernel for every host. Deterministic, no model, fail closed on any internal error (the adapter
 // converts a thrown error into exit 2 with a one-line message).
 import { join, resolve, sep } from 'node:path';
-import { evaluate, type EvaluationContext } from '../authority/evaluate.ts';
+import { evaluate, type Evaluation, type EvaluationContext } from '../authority/evaluate.ts';
+import { approvalPresentation, externalAskHit, renderApproval } from '../authority/approval.ts';
 import { evaluateBudget, applyBudgetExtension, type BudgetCounters } from '../authority/budget.ts';
+import {
+  POLICY_STALE_RULE,
+  renderFailure,
+  type ReasonCode,
+  type RuleExplanation,
+} from '../authority/reasons.ts';
 import type { ExecutionBudgets } from '../control-plane/types.ts';
 import { ensurePolicyCache, type PolicyCache } from '../policy/cache.ts';
+import { sealFor } from '../policy/seal.ts';
 import {
   openRuntimeRoot,
   readSession,
@@ -24,9 +32,11 @@ import { isEgoSourceRepository, controlPlaneDir, selfIdentity, selfVersion } fro
 import { egoHome } from '../launcher/home.ts';
 import { isFile } from '../util/fs.ts';
 import { realpathSync } from 'node:fs';
+import { sha256Hex } from '../util/hash.ts';
+import { flatText } from '../util/shown-text.ts';
 import type { HookEvent, HookDecision } from './events.ts';
 import { frameForContext, provenance } from '../context/trust.ts';
-import { resolveOnPath } from '../util/path-resolve.ts';
+import { resolveLauncher } from '../util/path-resolve.ts';
 
 export interface HookRuntime {
   projectRoot: string;
@@ -40,13 +50,13 @@ export interface HookRuntime {
   env?: NodeJS.ProcessEnv;
 }
 
-/** Capabilities that are never "governed mutation": reads, searches, status queries (Q96 pre-promotion set). */
+/** Capabilities that are never "governed mutation": reads, searches, status queries (Q96 pre-promotion set).
+ *  A build, a formatter or a test runner is not one of them: `black .` rewrites the tree and `npm test` runs repository
+ *  code, and before trust promotion STRICT permits reads only (exit review 11, r11-255: both were listed here). */
 const READ_ONLY_CAPABILITIES = new Set([
   'fs.repo.read',
   'fs.repo.search',
   'command.read-only',
-  'command.test',
-  'command.build',
   'git.local.status',
   'git.remote.inspect',
   'forge.repo.read',
@@ -56,7 +66,7 @@ const READ_ONLY_CAPABILITIES = new Set([
   'network.localhost',
   'mcp.local.discover',
   'mcp.local.read',
-  'harness.runtime.write',
+  'ego.runtime.write',
 ]);
 
 const NETWORK_CAPABILITY_PREFIXES = [
@@ -68,6 +78,37 @@ const NETWORK_CAPABILITY_PREFIXES = [
   'forge.',
   'mcp.remote.',
 ];
+
+/** What the hook says when IT refuses, rather than the evaluator: an execution budget, a retry stop, a payload that names
+ *  no tool, a pin not yet at the trust its profile requires. Same shape as an evaluated refusal (code, rule source,
+ *  whether configuration can change it) so a human reads one kind of message. */
+function hookRefusal(code: ReasonCode, detail: string, rule: RuleExplanation): string {
+  return `EGO: ${renderFailure(code, detail, rule)}`;
+}
+
+/** THE HOOK REFUSES WHAT THE HOST SENT, with a code: a payload that is not an object, that names another event than the one registered, that
+ *  nests past what can be read, whose session id no file name can hold. Every one of them was an exception that main() printed as an
+ *  uncoded line (closure audit 2026-10-02, RB-4 / RB-5); the host reads this as the refusal it is, in its own dialect, with exit 2. */
+export function refuseHookPayload(event: HookDecision['event'], detail: string): HookDecision {
+  const code: ReasonCode = 'TARGET_UNCLASSIFIED';
+  return {
+    event,
+    action: 'deny',
+    reason: hookRefusal(code, `${detail}; failing closed`, {
+      source: 'the host payload: it cannot be read as the event this hook answers',
+      changeable: false,
+      changeBy: 'there is nothing to configure; the host must send a well-formed payload for the event the hook is registered for',
+    }),
+    code,
+    exitCode: 2,
+  };
+}
+
+const budgetRule = (profile: string, what: string): RuleExplanation => ({
+  source: `profile ${profile}, ${what}`,
+  changeable: true,
+  changeBy: 'a human extends them for this session with `ego budget extend` from their own terminal, or selects a profile with larger budgets',
+});
 
 let detectorCache: { root: string; detectors: SecretDetector[] } | null = null;
 function detectorsFor(controlPlaneRoot: string): SecretDetector[] {
@@ -102,10 +143,20 @@ function budgetsFor(cache: PolicyCache, profile: string, session: SessionRecord)
   return applyBudgetExtension(p.budgets, session.budgetExtensions as Partial<ExecutionBudgets>);
 }
 
-function countersOf(s: SessionRecord, now: string): BudgetCounters {
-  const elapsedMinutes = Math.max(0, (Date.parse(now) - Date.parse(s.startedAt)) / 60000);
+/** A gap between two events of one session longer than this is the person being away, and counts as this much. */
+export const IDLE_GAP_MINUTES = 30;
+
+/** The session's minutes of ACTIVITY as of `now`: what it had, plus the time since its last event, the idle limit at most. A record
+ *  written before the field existed is credited with the span it had already covered. */
+function activeMinutesAt(s: SessionRecord, now: string): number {
+  const had = s.activeMinutes ?? Math.max(0, (Date.parse(s.heartbeatAt) - Date.parse(s.startedAt)) / 60000);
+  const gap = (Date.parse(now) - Date.parse(s.heartbeatAt)) / 60000;
+  return (Number.isFinite(had) ? had : 0) + (Number.isFinite(gap) ? Math.min(Math.max(0, gap), IDLE_GAP_MINUTES) : 0);
+}
+
+function countersOf(s: SessionRecord): BudgetCounters {
   return {
-    elapsedMinutes,
+    elapsedMinutes: s.activeMinutes ?? 0,
     iterations: s.counters.iterations,
     toolCalls: s.counters.toolCalls,
     maxRetriesForOneStep: s.counters.maxRetriesForOneStep,
@@ -118,9 +169,70 @@ function countersOf(s: SessionRecord, now: string): BudgetCounters {
 export function handleHook(ev: HookEvent, rt: HookRuntime): HookDecision {
   const cpRoot = rt.controlPlaneRoot ?? controlPlaneDir();
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
-  const { cache } = ensurePolicyCache(cpRoot, rt.projectRoot, self);
+  // (a cache this machine did not write is not read - AUTH-5: the seal is checked in the one reader, with the key of THIS home)
+  const { cache } = ensurePolicyCache(cpRoot, rt.projectRoot, self, { seal: sealFor(rt.env ?? process.env) });
   const root = openRuntimeRoot(rt.projectRoot, self, rt.now());
-  return withSessionLock(root, ev.sessionId, () => handleLocked(ev, rt, cpRoot, cache, root));
+  // THE DECISION IS MADE BEFORE THE LOCK IS TAKEN (RB-2). Deciding a line costs processes and files - milliseconds for `ls`, seconds for
+  // a line of git commands - and it was done while holding the session's lock, so twenty parallel tool calls of one session (a
+  // subagent fan-out) queued behind each other for the sum of their decisions and the ones that waited past three seconds were
+  // refused. The evaluator reads the session through exactly two things, the mode and the grants; they are read here, the decision is
+  // made, and the locked section keeps the decision when the record still says the same (and decides again, under the lock, when a
+  // prompt changed either meanwhile). What the lock protects is the read-modify-write of the record, and that takes no time.
+  const early = precomputeEvaluation(ev, rt, cpRoot, cache, root);
+  return withSessionLock(root, ev.sessionId, () => handleLocked(ev, rt, cpRoot, cache, root, early));
+}
+
+/** What the evaluator is asked in, for a session record (or for none yet): ONE reader, so the decision taken before the lock and the one
+ *  taken under it cannot be asked in two different contexts. */
+function contextFor(
+  ev: HookEvent,
+  rt: HookRuntime,
+  cpRoot: string,
+  cache: PolicyCache,
+  root: RuntimeRoot,
+  session: Pick<SessionRecord, 'mode' | 'grants'> | null,
+): { ctx: EvaluationContext; inEgo: boolean } {
+  // The three files isEgoSourceRepository checks (root package.json name, control-plane/…/absolute-denies.md,
+  // packages/kernel/package.json) are all writable in a consumer repo, so an agent could forge them to unlock the
+  // authority-widening EGO_MAINTENANCE mode. The unforgeable signal is that the RUNNING kernel's control-plane
+  // lives inside this repo (the EGO source repo runs its own dev build); a consumer runs the installed/cached kernel,
+  // whose control-plane is elsewhere. An agent cannot relocate the running kernel, so it cannot satisfy this.
+  const inEgo = isEgoSourceRepository(rt.projectRoot) && pathInside(cpRoot, rt.projectRoot);
+  // the session record is not trusted to widen authority: a mode the record names is honoured only when it exists in
+  // the compiled table and, for EGO_MAINTENANCE, only inside the EGO source repository (never a governed repo)
+  const knownModes = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {});
+  const mode = session?.mode ?? cache.table.defaultMode;
+  const effectiveMode =
+    knownModes.includes(mode) && !(mode === 'EGO_MAINTENANCE' && !inEgo) ? mode : cache.table.defaultMode;
+  return {
+    inEgo,
+    ctx: {
+      profile: rt.pin.profile,
+      mode: effectiveMode,
+      repoRoots: [rt.projectRoot, root.workspaceRoot],
+      egoHome: egoHome(rt.env ?? process.env).root,
+      grants: session?.grants ?? [],
+      inEgoRepository: inEgo,
+      cwd: ev.cwd || rt.projectRoot,
+    },
+  };
+}
+
+interface EarlyEvaluation {
+  ctx: EvaluationContext;
+  evaluation: Evaluation;
+}
+
+function precomputeEvaluation(
+  ev: HookEvent,
+  rt: HookRuntime,
+  cpRoot: string,
+  cache: PolicyCache,
+  root: RuntimeRoot,
+): EarlyEvaluation | null {
+  if (ev.event !== 'PreToolUse' || !ev.tool || !ev.tool.name) return null;
+  const { ctx } = contextFor(ev, rt, cpRoot, cache, root, readSession(root, ev.sessionId));
+  return { ctx, evaluation: evaluate(cache.table, ctx, { tool: ev.tool.name, input: ev.tool.input }) };
 }
 
 function handleLocked(
@@ -129,33 +241,14 @@ function handleLocked(
   cpRoot: string,
   cache: PolicyCache,
   root: RuntimeRoot,
+  early: EarlyEvaluation | null,
 ): HookDecision {
   const self = { runtimeSha256: cache.runtimeSha256, version: cache.runtimeVersion };
   const session = loadSession(root, ev, rt, cache);
   const now = rt.now();
+  session.activeMinutes = activeMinutesAt(session, now);
   session.heartbeatAt = now;
-  // The three files isEgoSourceRepository checks (root package.json name, control-plane/…/absolute-denies.md,
-  // packages/kernel/package.json) are all writable in a consumer repo, so an agent could forge them to unlock the
-  // authority-widening HARNESS_MAINTENANCE mode. The unforgeable signal is that the RUNNING kernel's control-plane
-  // lives inside this repo (the EGO source repo runs its own dev build); a consumer runs the installed/cached kernel,
-  // whose control-plane is elsewhere. An agent cannot relocate the running kernel, so it cannot satisfy this.
-  const inEgo = isEgoSourceRepository(rt.projectRoot) && pathInside(cpRoot, rt.projectRoot);
-  // the session record is not trusted to widen authority: a mode the record names is honoured only when it exists in
-  // the compiled table and, for HARNESS_MAINTENANCE, only inside the EGO source repository (never a governed repo)
-  const knownModes = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {});
-  const effectiveMode =
-    knownModes.includes(session.mode) && !(session.mode === 'HARNESS_MAINTENANCE' && !inEgo)
-      ? session.mode
-      : cache.table.defaultMode;
-  const ctx: EvaluationContext = {
-    profile: rt.pin.profile,
-    mode: effectiveMode,
-    repoRoots: [rt.projectRoot, root.workspaceRoot],
-    egoHome: egoHome(rt.env ?? process.env).root,
-    grants: session.grants,
-    inEgoRepository: inEgo,
-    cwd: ev.cwd || rt.projectRoot,
-  };
+  const { ctx, inEgo } = contextFor(ev, rt, cpRoot, cache, root, session);
   const ledger = (kind: string, data: Record<string, unknown>) => {
     const entry: Parameters<typeof appendLedger>[1] = { at: now, kind, sessionId: ev.sessionId, data };
     if (ev.agentId) entry.agentId = ev.agentId;
@@ -167,10 +260,17 @@ function handleLocked(
     case 'SessionStart': {
       if (ev.source === 'startup' || ev.source === 'clear') session.counters.iterations = 0; // compact / resume continue the same budget
       writeSession(root, session);
-      const launcher = resolveOnPath('harness', rt.env ?? process.env);
+      const launcher = resolveLauncher(rt.env ?? process.env);
       const lines = [
         `EGO ${self.version} (runtime ${self.runtimeSha256.slice(0, 12)}) governs this repository. Profile ${rt.pin.profile}, mode ${session.mode}, task source ${rt.pin.taskSource ?? 'ad-hoc'}.`,
-        `Authority: ${cache.table.absoluteDenies.length} absolute denies and ${cache.table.organizationLocked.length} organization-locked denies are enforced deterministically; ASK capabilities prompt the human once per grant.`,
+        `Authority: ${cache.table.absoluteDenies.length} HARD_LOCK capabilities (no layer can widen them) and ${cache.table.adminGoverned.length} ADMIN_GOVERNED capabilities (DENY until the organization policy enables them, then never past ASK) are enforced deterministically; an ASK capability that stays on this machine (LOCAL_WORKSPACE) prompts the human once per grant, and one that leaves it (EXTERNAL_EFFECT: a forge write, a request sent to a remote host) prompts on every occurrence (TASK_APPROVAL, one bounded approval).`,
+        cache.pendingWidening
+          ? renderFailure(
+              'POLICY_STALE',
+              `${cache.pendingWidening.widenings.length} policy widening(s) in the layer files are NOT applied (${cache.pendingWidening.widenings.slice(0, 3).join('; ')}${cache.pendingWidening.widenings.length > 3 ? '; …' : ''}); the policy in force is the last accepted one`,
+              POLICY_STALE_RULE,
+            )
+          : '',
         session.grants.length
           ? `Active grants (this session): ${session.grants.join(', ')}.`
           : 'No grants active.',
@@ -179,11 +279,11 @@ function handleLocked(
           : '',
         launcher
           ? ''
-          : 'WARNING: the `harness` launcher is not resolvable on PATH; hook shims fail closed until it is.',
+          : 'WARNING: the `ego` launcher is not resolvable on PATH; hook shims fail closed until it is.',
         ev.source === 'compact' || ev.source === 'resume'
-          ? 'Resumed: durable task state, not this transcript, is the source of truth. Run `harness status` before continuing.'
+          ? 'Resumed: durable task state, not this transcript, is the source of truth. Run `ego status` before continuing.'
           : '',
-        'Use `harness help` for what you can do here, `harness status` for the current state, `harness explain capability <id>` for any refusal.',
+        'Use `ego help` for what you can do here, `ego status` for the current state, `ego explain capability <id>` for any refusal.',
       ].filter(Boolean);
       ledger('session.start', {
         host: ev.host,
@@ -219,9 +319,9 @@ function handleLocked(
       if (marker) {
         const mode = Object.keys(cache.table.profiles[rt.pin.profile]?.modes ?? {}).find((m) => m === marker);
         if (!mode) notes.push(`EGO: unknown mode "${marker}" ignored.`);
-        else if (mode === 'HARNESS_MAINTENANCE' && !inEgo)
+        else if (mode === 'EGO_MAINTENANCE' && !inEgo)
           notes.push(
-            'EGO: HARNESS_MAINTENANCE is available only in the EGO source repository; mode unchanged.',
+            'EGO: EGO_MAINTENANCE is available only in the EGO source repository; mode unchanged.',
           );
         else if (mode === 'BENCHMARK')
           notes.push(
@@ -245,11 +345,22 @@ function handleLocked(
           notes.push(`EGO: ${g.capability} is ${verdict} here; a grant changes nothing.`);
           continue;
         }
+        // AN EXTERNAL EFFECT IS NEVER AN UNATTENDED ALLOW (issue #16 sections 4 and 8). The phrase is heard and said so,
+        // not silently dropped, but it is not recorded: a recorded grant would read "ALLOW for this session" for a
+        // write to shared state, on every issue and every repository, and the human approved one comment.
+        if (cache.table.capabilities[g.capability]?.effect !== 'local') {
+          ledger('grant.clamped', { capability: g.capability, phrase: g.phrase });
+          notes.push(
+            `EGO: ${g.capability} is an external effect; "${g.phrase}" does not lift it. Every occurrence asks a human (the ceiling is ASK).`,
+          );
+          continue;
+        }
         if (!session.grants.includes(g.capability)) {
           session.grants.push(g.capability);
           ledger('grant.recorded', { capability: g.capability, phrase: g.phrase });
         }
-        notes.push(`EGO: grant recorded, ${g.capability} is ALLOW for this session.`);
+        // (true of the capability, not of every command: one that other rules also gate - an unread program, a path, a target - still asks)
+        notes.push(`EGO: grant recorded, ${g.capability} is ALLOW for this session; a command that other rules also gate still asks.`);
       }
       const correctionRaw = recognizeCorrection(prompt);
       const correction = correctionRaw ? redactForLedger(correctionRaw, cpRoot) : null; // runtime state never holds a secret
@@ -265,18 +376,26 @@ function handleLocked(
     case 'PreToolUse': {
       if (!ev.tool || !ev.tool.name) {
         // a payload without a tool is not a decision the kernel can make: fail closed, never allow by default
-        ledger('tool.pre', { tool: null, verdict: 'DENY', reason: 'payload without tool_name' });
+        ledger('tool.pre', { tool: null, verdict: 'DENY', reason: 'payload without tool_name', code: 'TARGET_UNCLASSIFIED' });
         writeSession(root, session);
         return {
           event: ev.event,
           action: 'deny',
-          reason: 'EGO: PreToolUse payload has no tool_name; failing closed',
+          reason: hookRefusal('TARGET_UNCLASSIFIED', 'PreToolUse payload has no tool_name; failing closed', {
+            source: 'the host payload: a PreToolUse event that names no tool',
+            changeable: false,
+            changeBy: 'there is nothing to configure; the host must say which tool it is about to run, because EGO cannot classify an operation it cannot name',
+          }),
+          code: 'TARGET_UNCLASSIFIED',
           exitCode: 2,
         };
       }
       const tool = ev.tool;
       session.counters.toolCalls += 1;
-      const evaluation = evaluate(cache.table, ctx, { tool: tool.name, input: tool.input });
+      const evaluation =
+        early && JSON.stringify(early.ctx) === JSON.stringify(ctx)
+          ? early.evaluation
+          : evaluate(cache.table, ctx, { tool: tool.name, input: tool.input });
       // a denied call never executes: only calls that may run count against the network budget
       const isNetwork =
         evaluation.verdict !== 'DENY' &&
@@ -284,7 +403,7 @@ function handleLocked(
       if (isNetwork) session.counters.networkOperations += 1;
       // execution budgets (alignment item 8): breach blocks or escalates until a human extends
       const budgets = budgetsFor(cache, rt.pin.profile, session);
-      const bv = evaluateBudget(budgets, countersOf(session, now));
+      const bv = evaluateBudget(budgets, countersOf(session));
       // a DENY is never weakened into an escalation: budgets only ever tighten what the table allows
       if (bv.action !== 'CONTINUE' && evaluation.verdict !== 'DENY') {
         session.budgetState = {
@@ -295,19 +414,25 @@ function handleLocked(
         writeSession(root, session);
         const what = bv.breaches.map((b) => `${b.dimension} ${b.observed} > ${b.limit}`).join(', ');
         ledger('budget.breach', { action: bv.action, breaches: bv.breaches, tool: tool.name });
-        const reason = `EGO execution budget exceeded (${what}); ${bv.action === 'BLOCK' ? 'governed tool calls are blocked' : 'human decision required'} until a human runs \`harness budget extend\` for this session.`;
+        const code: ReasonCode = bv.action === 'BLOCK' ? 'ADMIN_DENIED' : 'HUMAN_APPROVAL_REQUIRED';
+        const reason = hookRefusal(
+          code,
+          `execution budget exceeded (${what}); ${bv.action === 'BLOCK' ? 'governed tool calls are blocked' : 'human decision required'} until a human runs \`ego budget extend\` for this session`,
+          budgetRule(rt.pin.profile, 'execution budgets'),
+        );
         return {
           event: ev.event,
           action: bv.action === 'BLOCK' ? 'deny' : 'ask',
           reason,
+          code,
           userMessage: reason,
           exitCode: 0,
-          details: { budget: bv },
+          details: { budget: bv, code },
         };
       }
       const summary = summarizeInput(tool.name, tool.input, cpRoot);
       // retry hard stop (alignment item 8): the same step may not run again once it failed more than the profile's retries
-      const stepKey = `${tool.name}:${normalizeStep(summary).slice(0, 80)}`;
+      const stepKey = retryKey(tool.name, tool.input, cpRoot);
       const failures = session.counters.failuresByStep[stepKey] ?? 0;
       if (failures > budgets.maxRetriesPerStep && evaluation.verdict !== 'DENY') {
         writeSession(root, session);
@@ -317,11 +442,17 @@ function handleLocked(
           limit: budgets.maxRetriesPerStep,
           action: budgets.onExceed,
         });
-        const reason = `EGO: this step already failed ${failures} times (${budgets.maxRetriesPerStep} retries allowed); ${budgets.onExceed === 'BLOCK' ? 'it is blocked' : 'a human decision is required'}: change approach or ask for a decision.`;
+        const code: ReasonCode = budgets.onExceed === 'BLOCK' ? 'ADMIN_DENIED' : 'HUMAN_APPROVAL_REQUIRED';
+        const reason = hookRefusal(
+          code,
+          `this step already failed ${failures} times (${budgets.maxRetriesPerStep} retries allowed); ${budgets.onExceed === 'BLOCK' ? 'it is blocked' : 'a human decision is required'}: change approach or ask for a decision`,
+          budgetRule(rt.pin.profile, 'retries per step'),
+        );
         return {
           event: ev.event,
           action: budgets.onExceed === 'BLOCK' ? 'deny' : 'ask',
           reason,
+          code,
           userMessage: reason,
           exitCode: 0,
         };
@@ -340,26 +471,66 @@ function handleLocked(
           summary,
           prePromotion: true,
         });
-        const reason = `EGO: profile ${rt.pin.profile} permits no governed mutation (${cap}) until the pinned runtime reaches signed-release trust; run \`harness sync\` (Q96).`;
-        return { event: ev.event, action: 'deny', reason, userMessage: reason, exitCode: 0 };
+        const reason = hookRefusal(
+          'POLICY_STALE',
+          `profile ${rt.pin.profile} permits no governed mutation (${cap}) until the pinned runtime reaches signed-release trust; run \`ego sync\` (Q96)`,
+          POLICY_STALE_RULE,
+        );
+        return { event: ev.event, action: 'deny', reason, code: 'POLICY_STALE', userMessage: reason, exitCode: 0 };
       }
       ledger('tool.pre', {
         tool: tool.name,
         verdict: evaluation.verdict,
         capability: evaluation.decisive?.capability,
+        ...(evaluation.code ? { code: evaluation.code } : {}),
         summary,
       });
       const action = evaluation.verdict === 'ALLOW' ? 'allow' : evaluation.verdict === 'ASK' ? 'ask' : 'deny';
       const decision: HookDecision = {
         event: ev.event,
         action,
-        reason: `EGO: ${evaluation.reason}`,
+        // (the evaluator's reason carries the text of the command it is about: on one line, with nothing in it a host reads as other than a glyph)
+        reason: `EGO: ${flatText(evaluation.reason)}`,
         exitCode: 0,
-        details: { hits: evaluation.hits },
+        details: { hits: evaluation.hits, ...(evaluation.code ? { code: evaluation.code } : {}) },
       };
+      if (evaluation.code) decision.code = evaluation.code;
       if (action === 'deny') {
         const cap = evaluation.decisive?.capability ?? 'unknown';
-        decision.userMessage = `EGO refused ${tool.name}: ${cap} is DENY. \`harness explain capability ${cap}\` explains why.`;
+        decision.userMessage = `EGO refused ${flatText(tool.name, 80)}: ${evaluation.code ?? 'DENY'}, ${cap} is DENY. \`ego explain capability ${cap}\` explains why.`;
+      }
+      // TASK_APPROVAL (issue #16 section 8): an ASK on an operation that leaves this machine tells the human WHAT they
+      // are approving - action, target, branch or cluster or database, a bounded summary, why, how reversible - instead
+      // of the capability id and the matcher that fired. A local ASK keeps the evaluator's own short reason.
+      if (action === 'ask') {
+        const hit = externalAskHit(cache.table, evaluation.hits);
+        // A PRESENTATION IS A COURTESY TO THE PERSON WHO DECIDES, NEVER A GATE: whatever goes wrong while the fields are being read
+        // degrades to the evaluator's own short reason. A throw here left the hook, the host exited 2, and an ASK became a block no
+        // human could approve (AUTH-12).
+        let presented: ReturnType<typeof approvalPresentation> = null;
+        try {
+          presented = hit
+            ? approvalPresentation(cache.table, ctx, { tool: tool.name, input: tool.input }, hit, {
+                summary: summary.replace(/^[^:]*: /, ''),
+              })
+            : null;
+        } catch (e) {
+          ledger('approval.presentation-failed', { tool: tool.name, capability: hit?.capability, error: redactForLedger((e as Error).message, cpRoot).slice(0, 200) });
+        }
+        if (hit && presented) {
+          decision.reason = renderApproval(presented, ctx, hit.capability);
+          decision.details = { ...decision.details, approval: presented };
+        }
+        // WHAT A PERSON ACCEPTS IS WHAT THEY WERE SHOWN (AUTH-4), on this road too. Approving `ego init` or `ego sync` from a tool
+        // call runs it as a human would (an agent that drops its own CLAUDECODE marker: `env -u CLAUDECODE ego init`), and that
+        // accepts every widening waiting in the layer files - while the question said only "ego.policy.accept requires human
+        // approval" (exit review 2026-10-07, AX-2). The widenings are the question.
+        if (cache.pendingWidening && evaluation.hits.some((h) => h.capability === 'ego.policy.accept')) {
+          const w = cache.pendingWidening.widenings;
+          const shown = w.slice(0, 8).map((x) => flatText(x, 200)).join('; ');
+          decision.reason += ` Approving this ACCEPTS ${w.length} policy widening(s) waiting in the layer files, which take effect at once: ${shown}${w.length > 8 ? `; … and ${w.length - 8} more (\`ego doctor\` lists them)` : ''}.`;
+          decision.details = { ...decision.details, pendingWidenings: [...w] };
+        }
       }
       return decision;
     }
@@ -368,7 +539,7 @@ function handleLocked(
       const summary = summarizeInput(tool.name, tool.input, cpRoot);
       const failed = toolFailed(tool.response);
       if (failed) {
-        const key = `${tool.name}:${normalizeStep(summary).slice(0, 80)}`;
+        const key = retryKey(tool.name, tool.input, cpRoot);
         const n = (session.counters.failuresByStep[key] ?? 0) + 1;
         session.counters.failuresByStep[key] = n;
         session.counters.maxRetriesForOneStep = Math.max(session.counters.maxRetriesForOneStep, n - 1);
@@ -398,7 +569,7 @@ function handleLocked(
       const decision: HookDecision = { event: ev.event, action: 'continue', exitCode: 0 };
       const budgets = budgetsFor(cache, rt.pin.profile, session);
       const stepFailures = failed
-        ? (session.counters.failuresByStep[`${tool.name}:${normalizeStep(summary).slice(0, 80)}`] ?? 0)
+        ? (session.counters.failuresByStep[retryKey(tool.name, tool.input, cpRoot)] ?? 0)
         : 0;
       if (failed && stepFailures > budgets.maxRetriesPerStep) {
         decision.context = `EGO: this step has failed ${stepFailures} times, the profile allows ${budgets.maxRetriesPerStep} retries; the next identical attempt is ${budgets.onExceed === 'BLOCK' ? 'blocked' : 'escalated'}. Report the failure and ask for a decision.`;
@@ -424,7 +595,7 @@ function handleLocked(
         depth: depthOf(session, agentId),
       });
       const budgets = budgetsFor(cache, rt.pin.profile, session);
-      const bv = evaluateBudget(budgets, countersOf(session, now));
+      const bv = evaluateBudget(budgets, countersOf(session));
       const decision: HookDecision = { event: ev.event, action: 'continue', exitCode: 0 };
       if (bv.action !== 'CONTINUE') {
         decision.context = `EGO: subagent budget exceeded (${bv.breaches.map((b) => `${b.dimension} ${b.observed} > ${b.limit}`).join(', ')}); further governed tool calls are ${bv.action === 'BLOCK' ? 'blocked' : 'escalated'} until a human extends the budget.`;
@@ -528,7 +699,19 @@ function pathInside(child: string, parent: string): boolean {
   return c === p || c.startsWith(p + sep);
 }
 
-function summarizeInput(tool: string, input: Record<string, unknown>, cpRoot: string): string {
+/**
+ * WHICH STEP A TOOL CALL IS, for the retry hard stop: ONE reader, used when a step fails and when it is about to run again. The key
+ * was the tool and the first eighty characters of the normalised step, so two different commands that begin the same way (a long
+ * path to a script, then a different target) were one step and four failures of one stopped the other (RB-3). It is now the
+ * normalised step IN FULL: a readable head for the person who reads the record, and a hash of all of it (redacted, so a secret in a
+ * command is never part of what is stored) for the identity.
+ */
+function retryKey(tool: string, input: Record<string, unknown>, cpRoot: string): string {
+  const step = normalizeStep(summarizeInput(tool, input, cpRoot, 20_000));
+  return `${tool}:${step.slice(0, 60)}~${sha256Hex(step).slice(0, 12)}`;
+}
+
+function summarizeInput(tool: string, input: Record<string, unknown>, cpRoot: string, max = 400): string {
   const raw =
     typeof input['command'] === 'string'
       ? input['command']
@@ -539,7 +722,7 @@ function summarizeInput(tool: string, input: Record<string, unknown>, cpRoot: st
           : typeof input['pattern'] === 'string'
             ? input['pattern']
             : JSON.stringify(input).slice(0, 200);
-  return `${tool}: ${redactForLedger(raw.slice(0, 400), cpRoot)}`;
+  return `${tool}: ${redactForLedger(raw.slice(0, max), cpRoot)}`;
 }
 
 function toolFailed(response: unknown): boolean {
@@ -548,6 +731,11 @@ function toolFailed(response: unknown): boolean {
   if (r['is_error'] === true || r['isError'] === true) return true;
   if (typeof r['exit_code'] === 'number' && r['exit_code'] !== 0) return true;
   if (typeof r['exitCode'] === 'number' && r['exitCode'] !== 0) return true;
+  // the shapes a host that sends no exit code puts a failure in: the call was interrupted, said it did not succeed, or carries an error text
+  // (a Bash response of {stdout, stderr, interrupted: false} says nothing about failure and is not one: a non-zero exit with no code in the
+  // payload cannot be told from a success here, and that is the host's to report - see the known limits in docs)
+  if (r['interrupted'] === true || r['success'] === false) return true;
+  if (typeof r['error'] === 'string' && r['error'] !== '') return true;
   return false;
 }
 

@@ -235,7 +235,7 @@ export function promoteTrustFromSources(
         return {
           promoted: false,
           trust: current,
-          message: `TAMPERED: cached runtime ${pin.integrity.slice(0, 12)} recomputes to ${check.actual.slice(0, 12)}; run \`harness distribution import\` to re-materialize`,
+          message: `TAMPERED: cached runtime ${pin.integrity.slice(0, 12)} recomputes to ${check.actual.slice(0, 12)}; run \`ego distribution import\` to re-materialize`,
           skipped,
         };
       }
@@ -312,7 +312,7 @@ export function syncProject(
       const got = acquireFromFileSources(home, pin, now, messages);
       if (!got) {
         messages.push(
-          `EGO ${pin.version} (runtime ${pin.integrity.slice(0, 12)}) is pinned but not installed and no local source provides it${opts.offline ? ' (offline: cache and file: sources only)' : ' (remote source adapters land in phase 6)'}. Run \`harness distribution import <bundle-or-tarball>\` or add a file: source with \`harness sources add\`.`,
+          `EGO ${pin.version} (runtime ${pin.integrity.slice(0, 12)}) is pinned but not installed and no local source provides it${opts.offline ? ' (offline: cache and file: sources only)' : ' (remote source adapters land in phase 6)'}. Run \`ego distribution import <bundle-or-tarball>\` or add a file: source with \`ego sources add\`.`,
         );
         return { ok: false, messages, cached: false, trust: null };
       }
@@ -322,7 +322,7 @@ export function syncProject(
     if (!check.ok) {
       setIdentityState(home, pin.name, pin.version, 'TAMPERED');
       messages.push(
-        `TAMPERED: cached runtime ${pin.integrity.slice(0, 12)} recomputes to ${check.actual.slice(0, 12)}${check.unlisted.length ? ` (unlisted files: ${check.unlisted.join(', ')})` : ''}; move it aside with \`harness distribution import --re-materialize\``,
+        `TAMPERED: cached runtime ${pin.integrity.slice(0, 12)} recomputes to ${check.actual.slice(0, 12)}${check.unlisted.length ? ` (unlisted files: ${check.unlisted.join(', ')})` : ''}; move it aside with \`ego distribution import --re-materialize\``,
       );
       return { ok: false, messages, cached: true, trust: null };
     }

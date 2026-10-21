@@ -1,6 +1,6 @@
 // Loads and validates the authored control plane. Every problem is collected and reported together; any problem
 // fails the load so a malformed file can never silently weaken enforcement (decision Q10).
-import { join, basename } from 'node:path';
+import { join, basename, relative } from 'node:path';
 import { readdirSync } from 'node:fs';
 import {
   parseMarkdown,
@@ -12,16 +12,19 @@ import {
   type MarkdownDoc,
   type Section,
 } from '../util/markdown.ts';
+import type { BoundedCommands } from './types.ts';
 import { readText, isFile, isDir, toPosix } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
 import type { YamlValue } from '../util/yaml.ts';
 import {
+  CONTROL_KINDS,
   ControlPlaneValidationError,
   type AuthorityMode,
   type BudgetExceedAction,
   type CapabilityDecl,
   type CapabilityLock,
   type ContainmentControl,
+  type ControlKind,
   type ExecutionBudgets,
   type CapabilityDoc,
   type ControlPlane,
@@ -29,6 +32,7 @@ import {
   type GrantsDoc,
   type Intent,
   type LayerName,
+  type LocalTargets,
   type Matcher,
   type MatcherTool,
   type ModelFlagPolicy,
@@ -44,6 +48,7 @@ import {
   type Verdict,
 } from './types.ts';
 import { HOST_IDS } from '../hosts/matrix.ts';
+import { legacyNamingNotice, readFamilyValue, readLockValue } from './legacy-names.ts';
 
 const SECTION_VERDICTS: Array<{ keys: string[]; verdict: Verdict }> = [
   { keys: ['allowed', 'allow'], verdict: 'ALLOW' },
@@ -92,6 +97,7 @@ export function parseCapabilityDoc(
   source: string,
   layer: LayerName,
   problems: string[],
+  notices: string[] = [],
 ): CapabilityDoc | null {
   let doc: MarkdownDoc;
   try {
@@ -106,13 +112,22 @@ export function parseCapabilityDoc(
     return null;
   }
   const id = requireString(doc, 'id');
-  const family = requireString(doc, 'family');
+  // THE PREVIOUS SPELLING OF THE ADMIN_GOVERNED TIER IS A READ ALIAS (issue #16 section 12): a control-plane fork or an
+  // organization file written under it keeps its meaning, and the file is named once in `notices` so it gets renamed.
+  // The alias is translated here and nowhere else; everything below sees only the canonical values.
+  const familyRead = readFamilyValue(requireString(doc, 'family'));
+  const family = familyRead.value;
   const title = doc.title ?? optionalString(doc, 'title') ?? id;
   const absolute = optionalBoolean(doc, 'absolute', false);
-  const lockRaw = optionalString(doc, 'lock') ?? (absolute ? 'absolute' : 'none');
-  if (lockRaw !== 'absolute' && lockRaw !== 'organization' && lockRaw !== 'none')
-    problems.push(`${file}: lock must be absolute, organization or none`);
-  const lock: CapabilityLock = lockRaw === 'absolute' || lockRaw === 'organization' ? lockRaw : 'none';
+  const lockRead = readLockValue(optionalString(doc, 'lock') ?? (absolute ? 'absolute' : 'none'));
+  const lockRaw = lockRead.value;
+  const spelled = [familyRead.legacy && 'family', lockRead.legacy && 'lock'].filter((x): x is string => !!x);
+  if (spelled.length) notices.push(legacyNamingNotice(file, spelled.map((k) => `\`${k}:\``)));
+  if (lockRaw !== 'absolute' && lockRaw !== 'admin-governed' && lockRaw !== 'none')
+    problems.push(
+      `${file}: lock must be absolute, admin-governed or none (HARD_LOCK and ADMIN_GOVERNED name the tiers; a file spells them absolute and admin-governed)`,
+    );
+  const lock: CapabilityLock = lockRaw === 'absolute' || lockRaw === 'admin-governed' ? lockRaw : 'none';
   if (absolute && lock !== 'absolute') problems.push(`${file}: absolute: true requires lock: absolute`);
   if (lock === 'absolute' && !absolute) problems.push(`${file}: lock: absolute requires absolute: true`);
   if (lock !== 'none' && layer !== 'core') problems.push(`${file}: only the core layer may declare a lock`);
@@ -286,6 +301,11 @@ function parseContainment(file: string, problems: string[]): ContainmentControl[
       return;
     }
     if (!CAP_ID_RE.test(c['id'])) problems.push(`${file}: invalid control identifier "${c['id']}"`);
+    // Required, with no default: a control that did not say what it is would be reported under the word the loader
+    // happened to pick, and "containment" is the word a reader trusts most.
+    const kind = c['kind'];
+    if (typeof kind !== 'string' || !(CONTROL_KINDS as readonly string[]).includes(kind))
+      problems.push(`${file}: control ${c['id']} kind must be one of ${CONTROL_KINDS.join(', ')}`);
     const list = (k: string): string[] => {
       const v = c[k];
       if (v === undefined || v === null) return [];
@@ -313,6 +333,7 @@ function parseContainment(file: string, problems: string[]): ContainmentControl[
     }
     out.push({
       id: c['id'],
+      kind: kind as ControlKind,
       description: c['description'],
       requiredIn: list('required_in'),
       recommendedIn: list('recommended_in'),
@@ -347,6 +368,10 @@ function parseMatchers(file: string, problems: string[]): Matcher[] {
     if (!['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'any'].includes(tool))
       problems.push(`${file}: matcher #${index + 1} has invalid tool "${tool}"`);
     const matcher: Matcher = { capability, tool, index, file };
+    // An ADDITIVE matcher describes something a segment ALSO does — a write destination, an extra effect — not
+    // what the segment IS. It contributes a hit and never wins first-match for the segment's semantic class,
+    // because a class that describes only a destination cannot bound the rest of the command.
+    if (m['additive'] === true) matcher.additive = true;
     const cmd = m['command'];
     const path = m['path'];
     const url = m['url'];
@@ -653,11 +678,57 @@ function parseCoordination(file: string, problems: string[]): CoordinationConsta
   };
 }
 
-export function loadControlPlane(root: string): ControlPlane {
+/** Decision Q98: the authored local-development targets. Fails closed — a malformed or empty list is a problem, not a
+ *  silently empty set, because an empty `k8s_local_contexts` would make every cluster unclassified. */
+function parseLocalTargets(file: string, problems: string[]): LocalTargets {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.local-targets/1')
+    problems.push(`${file}: schema must be ego.local-targets/1`);
+  const list = (key: string): string[] => {
+    const v = optionalStringList(doc, key);
+    if (v.length === 0) problems.push(`${file}: ${key} must list at least one entry`);
+    return v;
+  };
+  return {
+    k8sLocalContexts: list('k8s_local_contexts'),
+    dbLocalHosts: list('db_local_hosts'),
+    productionMarkers: list('production_markers'),
+    file,
+    // what the project and the organization declare is merged in by the compiler (`mergeLocalTargets`), not here
+    declared: [],
+    ignored: [],
+  };
+}
+
+/** The authored bounded/discovering command vocabulary. Fails closed: an empty `discovers` list would silently
+ *  restore the defect this file exists to close. */
+function parseBoundedCommands(file: string, problems: string[]): BoundedCommands {
+  const doc = parseMarkdown(file, readText(file));
+  if (optionalString(doc, 'schema') !== 'ego.bounded-commands/1')
+    problems.push(`${file}: schema must be ego.bounded-commands/1`);
+  const list = (key: string): string[] => {
+    const v = optionalStringList(doc, key);
+    if (v.length === 0) problems.push(`${file}: ${key} must list at least one entry`);
+    return v;
+  };
+  return {
+    bounded: list('bounded'),
+    installsDependencies: list('installs_dependencies'),
+    discoversContent: list('discovers_content'),
+    discoversConfig: list('discovers_config'),
+    imageSetup: list('image_setup'),
+    file,
+  };
+}
+
+export function loadControlPlane(rootAsGiven: string): ControlPlane {
+  // THE SAME CONTROL PLANE GIVEN AS `/x/control-plane` AND AS `/x/control-plane/` IS THE SAME TABLE: a trailing separator cost the
+  // first character of every source-hash key and changed the table hash (AUTH-11)
+  const root = rootAsGiven.length > 1 ? rootAsGiven.replace(/[\\/]+$/, '') : rootAsGiven;
   const problems: string[] = [];
   const sourceHashes: Record<string, string> = {};
   const rec = (file: string) => {
-    sourceHashes[toPosix(file.slice(root.length + 1))] = sha256Hex(readText(file));
+    sourceHashes[toPosix(relative(root, file))] = sha256Hex(readText(file));
   };
   const req = (rel: string): string => {
     const f = join(root, rel);
@@ -669,23 +740,24 @@ export function loadControlPlane(root: string): ControlPlane {
     return f;
   };
 
+  const notices: string[] = [];
   const absFile = req('permissions/absolute-denies.md');
-  const absoluteDenies = absFile ? parseCapabilityDoc(absFile, readText(absFile), 'core', problems) : null;
+  const absoluteDenies = absFile
+    ? parseCapabilityDoc(absFile, readText(absFile), 'core', problems, notices)
+    : null;
   if (absoluteDenies && !absoluteDenies.absolute) problems.push(`${absFile}: must declare absolute: true`);
 
   const capabilityDocs: CapabilityDoc[] = [];
-  let organizationLocked: CapabilityDoc | null = null;
+  let adminGoverned: CapabilityDoc | null = null;
   for (const f of listMarkdown(join(root, 'permissions', 'capabilities'))) {
     rec(f);
-    const d = parseCapabilityDoc(f, readText(f), 'core', problems);
+    const d = parseCapabilityDoc(f, readText(f), 'core', problems, notices);
     if (d) {
       if (d.absolute) problems.push(`${f}: only absolute-denies.md may be absolute`);
-      if (d.lock === 'organization') {
-        if (organizationLocked)
-          problems.push(
-            `${f}: only one organization-locked file is allowed (also ${organizationLocked.file})`,
-          );
-        organizationLocked = d;
+      if (d.lock === 'admin-governed') {
+        if (adminGoverned)
+          problems.push(`${f}: only one admin-governed file is allowed (also ${adminGoverned.file})`);
+        adminGoverned = d;
       }
       capabilityDocs.push(d);
     }
@@ -720,6 +792,14 @@ export function loadControlPlane(root: string): ControlPlane {
     .filter((s): s is SecretsDoc => s !== null);
   const coordFile = req('workspace/coordination.md');
   const coordination = coordFile ? parseCoordination(coordFile, problems) : parseCoordinationDefaults();
+  const boundedFile = req('workspace/bounded-commands.md');
+  const boundedCommands = boundedFile
+    ? parseBoundedCommands(boundedFile, problems)
+    : { bounded: [], installsDependencies: [], discoversContent: [], discoversConfig: [], imageSetup: [], file: '' };
+  const targetsFile = req('workspace/local-targets.md');
+  const localTargets = targetsFile
+    ? parseLocalTargets(targetsFile, problems)
+    : { k8sLocalContexts: [], dbLocalHosts: [], productionMarkers: [], file: '', declared: [], ignored: [] };
 
   // cross-document validation
   const allIds = new Map<string, string>();
@@ -744,22 +824,28 @@ export function loadControlPlane(root: string): ControlPlane {
       if (!allIds.has(n.capability))
         problems.push(`${p.file}: narrow references unknown capability "${n.capability}"`);
   const absoluteIds = new Set(absoluteDenies?.capabilities.map((c) => c.id) ?? []);
-  const lockedIds = new Set(organizationLocked?.capabilities.map((c) => c.id) ?? []);
+  const lockedIds = new Set(adminGoverned?.capabilities.map((c) => c.id) ?? []);
   for (const m of modes) {
     for (const o of m.overrides) {
       if (!allIds.has(o.capability))
         problems.push(`${m.file}: override references unknown capability "${o.capability}"`);
       if (absoluteIds.has(o.capability))
         problems.push(`${m.file}: mode may not override absolute deny "${o.capability}"`);
-      if (lockedIds.has(o.capability))
-        problems.push(`${m.file}: mode may not override organization-locked deny "${o.capability}"`);
+      // A MODE MAY NARROW AN ADMIN_GOVERNED CAPABILITY AND MAY NEVER WIDEN IT. The loader refused a mode that named one at all, so BENCHMARK
+      // ("denies every forge write so a run can never leak into a real tracker") and PRODUCTION_ADVISORY ("nothing executes") could not
+      // say so about the capabilities an organization enables - the very writes they exist to stop - and `git push` and `gh pr create`
+      // asked in both (AUTH-9). The core verdict of the tier is DENY, so DENY is the only verdict that cannot widen it.
+      if (lockedIds.has(o.capability) && o.verdict !== 'DENY')
+        problems.push(
+          `${m.file}: mode may not widen ADMIN_GOVERNED capability "${o.capability}" (${o.verdict}); a mode may only DENY it`,
+        );
     }
   }
   for (const g of grants.grants) {
     if (absoluteIds.has(g.capability))
       problems.push(`${grants.file}: grant may not reference absolute deny "${g.capability}"`);
     if (lockedIds.has(g.capability))
-      problems.push(`${grants.file}: grant may not reference organization-locked deny "${g.capability}"`);
+      problems.push(`${grants.file}: grant may not reference ADMIN_GOVERNED capability "${g.capability}"`);
   }
   const profileIds = new Set(profiles.map((p) => p.id));
   for (const c of containment)
@@ -792,7 +878,7 @@ export function loadControlPlane(root: string): ControlPlane {
   return {
     root,
     absoluteDenies: absoluteDenies!,
-    organizationLocked,
+    adminGoverned,
     capabilityDocs,
     containment,
     matchers,
@@ -803,7 +889,10 @@ export function loadControlPlane(root: string): ControlPlane {
     secrets,
     releaseKeys,
     coordination,
+    localTargets,
+    boundedCommands,
     sourceHashes,
+    notices,
   };
 }
 
@@ -824,10 +913,11 @@ function parseCoordinationDefaults(): CoordinationConstants {
 export function loadOverlayCapabilities(
   file: string,
   layer: 'organization' | 'overlay',
+  notices: string[] = [],
 ): CapabilityDoc | null {
   if (!isFile(file)) return null;
   const problems: string[] = [];
-  const doc = parseCapabilityDoc(file, readText(file), layer, problems);
+  const doc = parseCapabilityDoc(file, readText(file), layer, problems, notices);
   if (problems.length) throw new ControlPlaneValidationError(problems);
   if (doc && (doc.absolute || doc.lock !== 'none'))
     throw new ControlPlaneValidationError([`${file}: an overlay may not be absolute or locked`]);

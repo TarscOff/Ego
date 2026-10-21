@@ -1,7 +1,8 @@
 // Commands executed by the runtime that governs a project (or by the global runtime outside a project). Every
 // command answers with the response contract: what happened, current state, what next, one suggested phrase.
 import { join } from 'node:path';
-import { parseFlags, flagString, type CliIo } from './io.ts';
+import { readSync } from 'node:fs';
+import { parseFlags, flagString, flagValues, type CliIo } from './io.ts';
 import { initProject } from '../../kernel/src/project/init.ts';
 import { runDoctor, formatDoctor } from '../../kernel/src/project/doctor.ts';
 import { runCheck, formatCheck } from '../../kernel/src/project/check.ts';
@@ -16,8 +17,9 @@ import {
 } from '../../kernel/src/launcher/self.ts';
 import { egoHome } from '../../kernel/src/launcher/home.ts';
 import { ensurePolicyCache, readPolicyCache } from '../../kernel/src/policy/cache.ts';
-import { handleHook } from '../../kernel/src/hooks/handle.ts';
-import { isHookEventName } from '../../kernel/src/hooks/events.ts';
+import { sealFor } from '../../kernel/src/policy/seal.ts';
+import { handleHook, refuseHookPayload } from '../../kernel/src/hooks/handle.ts';
+import { HookPayloadError, isHookEventName, type HookDecision } from '../../kernel/src/hooks/events.ts';
 import { parseClaudeCodeEvent, renderClaudeCodeOutput } from '../../adapter-claude-code/src/dialect.ts';
 import { parseCodexEvent, renderCodexOutput } from '../../adapter-codex-cli/src/dialect.ts';
 import { isHostId } from '../../kernel/src/hosts/matrix.ts';
@@ -35,6 +37,23 @@ import { indexSummary, parseSource } from '../../kernel/src/launcher/sync.ts';
 import { isSignedTrust } from '../../kernel/src/launcher/home.ts';
 import { isFile, readTextIfExists } from '../../kernel/src/util/fs.ts';
 import { detectProject } from '../../kernel/src/project/detect.ts';
+import {
+  describeCapabilities,
+  describeCapability,
+  formatCapabilityRow,
+} from '../../kernel/src/authority/describe.ts';
+import { authorityCommand } from './authority.ts';
+import { flatText, terminalSafe } from '../../kernel/src/util/shown-text.ts';
+
+/** a deprecation note is one line, said once per process however many times the control plane is loaded */
+const noticesSaid = new Set<string>();
+export function sayNoticesOnce(io: CliIo, notices: readonly string[] | undefined): void {
+  for (const n of notices ?? [])
+    if (!noticesSaid.has(n)) {
+      noticesSaid.add(n);
+      io.err(n);
+    }
+}
 
 export interface ProjectContext {
   root: string;
@@ -56,6 +75,7 @@ export const PRE_PROMOTION_SET = new Set([
   'context',
   'capabilities',
   'explain',
+  'authority',
   'modes',
   'catalog',
   'init',
@@ -84,7 +104,7 @@ export const PHASE_LATER: Record<string, string> = {
   conformance: 'phase 6',
   upgrade: 'phase 6 (upgrade protocol)',
   rollback: 'phase 6 (rollback protocol)',
-  verify: 'phase 6 (`harness verify --range`)',
+  verify: 'phase 6 (`ego verify --range`)',
 };
 
 export async function runCommand(argv: string[], io: CliIo, project: ProjectContext | null): Promise<number> {
@@ -92,7 +112,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
   const { positional, flags } = parseFlags(rest);
   if (project && project.prePromotion && !PRE_PROMOTION_SET.has(cmd)) {
     io.err(
-      `EGO: profile ${project.pin.profile} permits only the pre-promotion set until the pinned runtime reaches signed-release trust (Q96). Run \`harness sync\`; \`harness doctor\` shows the trust transition.`,
+      `EGO: profile ${project.pin.profile} permits only the pre-promotion set until the pinned runtime reaches signed-release trust (Q96). Run \`ego sync\`; \`ego doctor\` shows the trust transition.`,
     );
     return 2;
   }
@@ -100,7 +120,7 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
     case 'help':
       return help(io, project, positional);
     case 'init':
-      return init(io, flags);
+      return init(io, flags, rest);
     case 'doctor': {
       const hostFlag = flagString(flags, 'host');
       if (hostFlag !== undefined && !isHostId(hostFlag)) {
@@ -112,18 +132,19 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
         env: io.env,
         now: io.now,
         offline: flags['offline'] === true || io.env['EGO_OFFLINE'] === '1',
+        authority: flags['capabilities'] === true ? 'all' : 'governed',
       };
       if (hostFlag !== undefined && isHostId(hostFlag)) dopts.host = hostFlag;
       const r = runDoctor(dopts);
       io.out(formatDoctor(r));
       io.out(
-        r.ok ? 'next: `harness status`' : 'next: fix the NOT SATISFIED lines, then `harness doctor` again',
+        r.ok ? 'next: `ego status`' : 'next: fix the NOT SATISFIED lines, then `ego doctor` again',
       );
       return r.ok ? 0 : 1;
     }
     case 'check': {
       if (!project) return notInitialized(io);
-      const r = runCheck(project.root);
+      const r = runCheck(project.root, io.env);
       io.out(formatCheck(r));
       return r.ok ? 0 : 1;
     }
@@ -133,6 +154,8 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
       return capabilities(io, project, positional, flags);
     case 'explain':
       return explain(io, project, positional, flags);
+    case 'authority':
+      return authorityCommand(io, project, positional, flags);
     case 'modes':
       return modes(io, project, positional, flags);
     case 'context':
@@ -157,18 +180,18 @@ export async function runCommand(argv: string[], io: CliIo, project: ProjectCont
       const later = PHASE_LATER[cmd];
       if (later) {
         io.err(
-          `harness ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`,
+          `ego ${cmd}: not available yet; it lands in ${later}. This is honest scope, not a fallback.`,
         );
         return 2;
       }
-      io.err(`unknown command "${cmd}". Try \`harness help\`.`);
+      io.err(`unknown command "${cmd}". Try \`ego help\`.`);
       return 2;
     }
   }
 }
 
 function notInitialized(io: CliIo): number {
-  io.err('not initialized; run `harness init`');
+  io.err('not initialized; run `ego init`');
   return 2;
 }
 
@@ -179,7 +202,7 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
     io.out(
       isFile(doc)
         ? (readTextIfExists(doc) ?? '')
-        : 'Installation docs ship with the runtime under docs/installation/ (authored in a later phase). Online: `npm install -g @tarscoff/ego` then `harness init`. Offline: `npm install -g ./ego-X.Y.Z.tgz`, `harness distribution import <bundle>`, `harness init --offline`.',
+        : 'Installation docs ship with the runtime under docs/installation/ (authored in a later phase). Online: `npm install -g @tarscoff/ego` then `ego init`. Offline: `npm install -g ./ego-X.Y.Z.tgz`, `ego distribution import <bundle>`, `ego init --offline`.',
     );
     return 0;
   }
@@ -188,8 +211,8 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
     const det = detectProject(io.cwd);
     lines.push(
       `You are ${det.gitRoot ? `in ${det.gitRoot} (not initialized)` : 'outside a git repository'}.`,
-      'What you can do now: `harness init` (in a git checkout), `harness version`, `harness bootstrap doctor`, `harness distribution verify <tarball>`, `harness help installation`.',
-      'Next: `harness init`',
+      'What you can do now: `ego init` (in a git checkout), `ego version`, `ego bootstrap doctor`, `ego distribution verify <tarball>`, `ego help installation`.',
+      'Next: `ego init`',
       'Say: "Initialize EGO."',
     );
   } else {
@@ -197,10 +220,10 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
     lines.push(
       `You are in ${project.root}, governed by EGO ${project.pin.version} (${project.pin.integrity.slice(0, 12)}), profile ${project.pin.profile}, task source ${project.pin.taskSource ?? 'ad-hoc'}, trust ${idx.trust ?? 'none'}.`,
       project.prePromotion
-        ? 'Only the pre-promotion set is available until `harness sync` promotes trust.'
-        : 'Available now: `status`, `doctor`, `check`, `capabilities`, `explain capability <id>`, `modes`, `context explain`, `sources`, `budget extend`, `redact`, `sync`, `version`.',
+        ? 'Only the pre-promotion set is available until `ego sync` promotes trust.'
+        : 'Available now: `status`, `doctor`, `check`, `capabilities`, `explain capability <id>`, `authority diff <old> <new>`, `modes`, `context explain`, `sources`, `budget extend`, `redact`, `sync`, `version`.',
       'Coming in later phases: tasks and issues (2), skills and catalog (3), grilling and benchmark (4), policies and decisions (5), upgrade and conformance (6).',
-      'Next: `harness status`',
+      'Next: `ego status`',
       'Say: "Is EGO healthy?"',
     );
   }
@@ -208,7 +231,26 @@ function help(io: CliIo, project: ProjectContext | null, positional: string[]): 
   return 0;
 }
 
-function init(io: CliIo, flags: Record<string, string | boolean>): number {
+/** The question a person is asked before widenings that arrived in the layer files are accepted. The lines are EGO's (each carries the text of a
+ *  layer file only as quoted data, `authority/table-diff.ts`); the boundary escapes the rest. */
+export function wideningQuestion(widenings: readonly string[]): string {
+  return `${widenings.length} widening(s) are waiting in the layer files and would take effect now:\n${widenings.map((w) => `  - ${w}`).join('\n')}\nAccept?`;
+}
+
+/** A yes/no on the human's terminal. Only ever called when stdin AND stdout are TTYs; any failure to read is a no. */
+function ttyConfirm(question: string): boolean {
+  try {
+    // (the boundary: the text of the question is not allowed to rewrite the line the answer is typed on)
+    process.stdout.write(`${terminalSafe(question)} [y/N] `);
+    const buf = Buffer.alloc(64);
+    const n = readSync(0, buf, 0, buf.length, null);
+    return /^y(es)?$/i.test(buf.toString('utf8', 0, n).trim());
+  } catch {
+    return false;
+  }
+}
+
+function init(io: CliIo, flags: Record<string, string | boolean>, argv: string[]): number {
   const opts: Parameters<typeof initProject>[0] = {
     cwd: io.cwd,
     now: io.now,
@@ -226,6 +268,14 @@ function init(io: CliIo, flags: Record<string, string | boolean>): number {
     }
     opts.repin = true;
   }
+  // local-development targets (issue #16 section 7): the decisions are flags, the proposal is printed text, and the
+  // only question this ever asks is on a human terminal - stdin and stdout both TTYs - about widenings already waiting
+  const localTargets = flagValues(argv, 'local-target');
+  if (localTargets.length) opts.localTargets = localTargets;
+  const declined = flags['no-local-targets'];
+  if (declined !== undefined && declined !== 'false') opts.noLocalTargets = true;
+  if (process.stdin.isTTY && process.stdout.isTTY && io.env['EGO_NONINTERACTIVE'] !== '1')
+    opts.confirmWidening = (widenings) => ttyConfirm(wideningQuestion(widenings));
   const r = initProject(opts);
   const lines = [
     `EGO ${r.pinned === 'created' ? 'initialized' : 're-synchronized'} ${r.projectRoot}`,
@@ -237,7 +287,7 @@ function init(io: CliIo, flags: Record<string, string | boolean>): number {
       r.detection.siblings.length
         ? `, siblings ${r.detection.siblings
             .slice(0, 8)
-            .map((s) => s.name)
+            .map((s) => flatText(s.name, 60))
             .join(
               ', ',
             )}${r.detection.siblings.length > 8 ? ` (+${r.detection.siblings.length - 8} more)` : ''}`
@@ -245,10 +295,11 @@ function init(io: CliIo, flags: Record<string, string | boolean>): number {
     }`,
     ...r.notes.map((n) => `- ${n}`),
     ...r.moved.map((m) => `- moved ${m.from} -> ${m.to}`),
+    ...r.localTargets.lines,
     `generated: ${r.generated.join(', ')}`,
     '',
     r.doctorText,
-    'next: `harness doctor` any time; `harness help` for what you can do here',
+    'next: `ego doctor` any time; `ego help` for what you can do here',
     'Say: "What can I do here?"',
   ];
   io.out(lines.join('\n'));
@@ -265,6 +316,7 @@ function status(io: CliIo, project: ProjectContext | null): number {
     io.now(),
   );
   const cp = loadControlPlane(controlPlaneDir());
+  sayNoticesOnce(io, cp.notices);
   const ttl = cp.coordination.heartbeatTtlSeconds * 1000;
   const now = Date.parse(io.now());
   const sessions = listSessions(root).filter((s) => !s.endedAt && now - Date.parse(s.heartbeatAt) < ttl);
@@ -278,15 +330,17 @@ function status(io: CliIo, project: ProjectContext | null): number {
         `  ${s.sessionId} on ${s.host} mode ${s.mode} grants [${s.grants.join(', ')}] tool calls ${s.counters.toolCalls} network ${s.counters.networkOperations} subagents ${s.counters.concurrentSubagents}${s.budgetState ? ` BUDGET ${s.budgetState.action}` : ''}${s.activeCorrections.length ? ` corrections ${s.activeCorrections.length}` : ''}`,
     ),
     'decisions waiting: none (decision gate lands in phase 5)',
-    'next: `harness help`',
+    'next: `ego help`',
   ];
   io.out(lines.join('\n'));
   return 0;
 }
 
-function tableFor(project: ProjectContext) {
+function tableFor(io: CliIo, project: ProjectContext) {
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
-  return ensurePolicyCache(controlPlaneDir(), project.root, self).cache.table;
+  const { cache } = ensurePolicyCache(controlPlaneDir(), project.root, self, { seal: sealFor(io.env) });
+  sayNoticesOnce(io, cache.notices);
+  return cache.table;
 }
 
 function capabilities(
@@ -296,7 +350,7 @@ function capabilities(
   flags: Record<string, string | boolean>,
 ): number {
   if (!project) return notInitialized(io);
-  const table = tableFor(project);
+  const table = tableFor(io, project);
   const profile = flagString(flags, 'profile') ?? project.pin.profile;
   const mode = flagString(flags, 'mode') ?? table.defaultMode;
   const verdicts = table.profiles[profile]?.modes[mode];
@@ -305,15 +359,15 @@ function capabilities(
     return 2;
   }
   const family = positional[0];
-  const rows = Object.entries(verdicts)
-    .filter(([id]) => !family || table.capabilities[id]?.family === family || id.startsWith(family + '.'))
-    .sort(([a], [b]) => a.localeCompare(b));
+  const rows = describeCapabilities(table, profile, mode).filter(
+    (v) => !family || v.family === family || v.id.startsWith(family + '.'),
+  );
   io.out(`profile ${profile}, mode ${mode} (${rows.length} capabilities)`);
-  for (const [id, v] of rows) {
-    const c = table.capabilities[id]!;
-    io.out(`${v.padEnd(5)} ${id}${c.lock !== 'none' ? ` [${c.lock}]` : ''} — ${c.description}`);
+  for (const v of rows) {
+    io.out(formatCapabilityRow(v));
+    if (v.targetRule) io.out(`  target: ${v.targetRule}`);
   }
-  io.out('next: `harness explain capability <id>`');
+  io.out('next: `ego explain capability <id>`');
   return 0;
 }
 
@@ -326,33 +380,36 @@ function explain(
   if (!project) return notInitialized(io);
   const [what, id] = positional;
   if (what !== 'capability' || !id) {
-    io.err('usage: harness explain capability <id>');
+    io.err('usage: ego explain capability <id>');
     return 2;
   }
-  const table = tableFor(project);
+  const table = tableFor(io, project);
   const c = table.capabilities[id];
   if (!c) {
-    io.err(`unknown capability "${id}"; see \`harness capabilities\``);
+    io.err(`unknown capability "${id}"; see \`ego capabilities\``);
     return 2;
   }
   const profile = flagString(flags, 'profile') ?? project.pin.profile;
+  const mode = flagString(flags, 'mode') ?? table.defaultMode;
+  const v = describeCapability(table, profile, mode, id)!;
   const lines = [
     `${id}: ${c.description}`,
-    `family ${c.family}; lock ${c.lock}; core verdict ${c.core}; effective ${table.effective[id]}`,
+    `effect class ${v.effectClass}; lock tier ${v.lockTier}; family ${c.family}; core verdict ${c.core}; effective ${v.verdict} (profile ${profile}, mode ${mode}); ceiling ${v.ceiling}; source ${v.source}`,
     `provenance: ${(table.provenance[id] ?? []).map((p) => `${p.layer} (${p.file}) -> ${p.verdict}`).join('; ')}`,
+    ...(v.targetRule ? [`target rule: ${v.targetRule}`] : []),
     ...Object.keys(table.profiles)
       .sort()
       .map(
         (p) =>
           `  ${p}: ${Object.entries(table.profiles[p]!.modes)
-            .map(([m, v]) => `${m}=${v[id]}`)
+            .map(([m, vv]) => `${m}=${vv[id]}`)
             .join(', ')}`,
       ),
   ];
   const matchers = table.matchers.filter((m) => m.capability === id);
   if (matchers.length)
     lines.push(
-      `matchers: ${matchers.map((m) => `${m.tool} ${m.command ? `/${m.command}/` : (m.path ?? m.url)}`).join(' | ')}`,
+      `matchers: ${matchers.map((m) => `${m.tool} ${m.command ? `/${flatText(m.command, 400)}/` : flatText(m.path ?? m.url, 200)}`).join(' | ')}`,
     );
   const grants = table.grants.filter((g) => g.capability === id);
   if (grants.length)
@@ -360,17 +417,21 @@ function explain(
       `human grant phrases: ${grants
         .flatMap((g) => g.phrases)
         .slice(0, 6)
-        .join(' / ')}`,
+        .join(' / ')}${
+        c.effect === 'local'
+          ? ''
+          : ' (recognised, but they lift nothing: this effect leaves the machine, so every occurrence asks)'
+      }`,
     );
   if (c.lock === 'absolute')
     lines.push(
-      'This is an absolute core deny: no organization policy, profile, overlay, grant, mode, skill, issue or model can widen it.',
+      'This is a HARD_LOCK capability (an absolute core deny): no organization policy, profile, overlay, grant, mode, skill, issue, task approval or model can widen it.',
     );
-  else if (c.lock === 'organization')
+  else if (c.lock === 'admin-governed')
     lines.push(
-      'This is an organization-locked deny: only the organization policy layer (policies/organization/permissions.md in the governance repository) can widen it; overlays, grants, modes, skills and models never can.',
+      'This is an ADMIN_GOVERNED capability: only the organization policy layer (policies/organization/permissions.md, read from this checkout; a human accepts any widening with `ego init`) can enable it; overlays, grants, modes, skills and models never can. Enabled, it still asks a human for every use: the ceiling is ASK (TASK_APPROVAL, one bounded approval, never a durable grant).',
     );
-  lines.push(`next: \`harness capabilities ${c.family}\` for profile ${profile}`);
+  lines.push(`next: \`ego capabilities ${c.family}\` for profile ${profile}`);
   io.out(lines.join('\n'));
   return 0;
 }
@@ -383,12 +444,13 @@ function modes(
 ): number {
   if (!project) return notInitialized(io);
   const cp = loadControlPlane(controlPlaneDir());
+  sayNoticesOnce(io, cp.notices);
   const inEgo = isEgoSourceRepository(project.root);
   if (positional[0] === 'set') {
     const mode = positional[1];
     const sessionId = flagString(flags, 'session');
     if (!mode || !sessionId) {
-      io.err('usage: harness modes set <MODE> --session <id> (a human act from your own terminal)');
+      io.err('usage: ego modes set <MODE> --session <id> (a human act from your own terminal)');
       return 2;
     }
     if (isAgentShell(io.env)) {
@@ -428,10 +490,10 @@ function modes(
       `${m.id}${m.isDefault ? ' (default)' : ''}${m.onlyInEgoRepository ? (inEgo ? ' (available here)' : ' (EGO source repository only)') : ''}: ${m.title}; overrides ${m.overrides.length ? m.overrides.map((o) => `${o.capability}=${o.verdict}`).join(', ') : 'none'}`,
     );
   io.out(
-    'Intents (audit, documentation, grilling-room, harness-upgrade, policy-review, workspace-discovery) route work and never change authority.',
+    'Intents (audit, documentation, grilling-room, ego-upgrade, policy-review, workspace-discovery) route work and never change authority.',
   );
   io.out(
-    'next: put `EGO MODE: <MODE>` on its own line in a prompt (HARNESS_MAINTENANCE only in the EGO repository), or `harness modes set <MODE> --session <id>`',
+    'next: put `EGO MODE: <MODE>` on its own line in a prompt (EGO_MAINTENANCE only in the EGO repository), or `ego modes set <MODE> --session <id>`',
   );
   return 0;
 }
@@ -439,17 +501,17 @@ function modes(
 function context(io: CliIo, project: ProjectContext | null, positional: string[]): number {
   if (!project) return notInitialized(io);
   if (positional[0] !== 'explain') {
-    io.err('usage: harness context explain');
+    io.err('usage: ego context explain');
     return 2;
   }
-  const inv = contextInventory(project.root, project.pin, tableFor(project));
+  const inv = contextInventory(project.root, project.pin, tableFor(io, project));
   io.out(`budget ${inv.budget} tokens (profile ${project.pin.profile}); loaded ~${inv.loadedTokens}`);
   for (const i of inv.items)
     io.out(
       `${i.loaded ? 'LOADED    ' : 'NOT LOADED'} ~${String(i.tokens).padStart(5)} ${i.item}: ${i.reason}`,
     );
   io.out(
-    'next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `harness init`',
+    'next: edit .harness/overlay/standing-rules.md to change what is always loaded, then `ego init`',
   );
   return 0;
 }
@@ -460,7 +522,7 @@ function sources(io: CliIo, project: ProjectContext | null, positional: string[]
   if (!sub || sub === 'list') {
     for (const s of project.pin.sources) io.out(s);
     io.out(
-      'order governs acquisition; any release-metadata source may promote trust. next: `harness sources add file:/path/to/releases`',
+      'order governs acquisition; any release-metadata source may promote trust. next: `ego sources add file:/path/to/releases`',
     );
     return 0;
   }
@@ -469,7 +531,7 @@ function sources(io: CliIo, project: ProjectContext | null, positional: string[]
     return 2;
   }
   if (!value) {
-    io.err('usage: harness sources add|remove <source>');
+    io.err('usage: ego sources add|remove <source>');
     return 2;
   }
   parseSource(value);
@@ -481,7 +543,7 @@ function sources(io: CliIo, project: ProjectContext | null, positional: string[]
       : [...project.pin.sources, value];
   else if (sub === 'remove') base.sources = project.pin.sources.filter((s) => s !== value);
   else {
-    io.err('usage: harness sources add|remove <source>');
+    io.err('usage: ego sources add|remove <source>');
     return 2;
   }
   writePin(project.root, base);
@@ -498,19 +560,19 @@ function budget(
   if (!project) return notInitialized(io);
   if (positional[0] !== 'extend') {
     io.err(
-      'usage: harness budget extend --session <id> [--tool-calls N] [--iterations N] [--duration-minutes N] [--network-operations N] [--retries N] [--subagents N] [--delegation-depth N]',
+      'usage: ego budget extend --session <id> [--tool-calls N] [--iterations N] [--duration-minutes N] [--network-operations N] [--retries N] [--subagents N] [--delegation-depth N]',
     );
     return 2;
   }
   if (isAgentShell(io.env)) {
     io.err(
-      'refused: harness.budget.extend is a human act from your own terminal (ASK), never from an agent shell',
+      'refused: ego.budget.extend is a human act from your own terminal (ASK), never from an agent shell',
     );
     return 2;
   }
   const sessionId = flagString(flags, 'session');
   if (!sessionId) {
-    io.err('--session <id> is required (see `harness status`)');
+    io.err('--session <id> is required (see `ego status`)');
     return 2;
   }
   const root = openRuntimeRoot(
@@ -570,7 +632,7 @@ function hook(io: CliIo, project: ProjectContext | null, positional: string[]): 
   }
   if (!host || !event || !isHostId(host) || !isHookEventName(event)) {
     io.err(
-      'usage: harness hook <claude-code|codex-cli> <HookEvent> (payload on stdin) | harness hook git <pre-commit|pre-push>',
+      'usage: ego hook <claude-code|codex-cli> <HookEvent> (payload on stdin) | ego hook git <pre-commit|pre-push>',
     );
     return 2;
   }
@@ -578,15 +640,27 @@ function hook(io: CliIo, project: ProjectContext | null, positional: string[]): 
     io.err('EGO hook: not inside an initialized project; failing closed');
     return 2;
   }
+  // WHAT THE HOST SENT IS REFUSED WITH A CODE, IN ITS OWN DIALECT, when it cannot be read as the event this hook answers: `null`, an
+  // array or a number where an object belongs (the first property read threw a TypeError), a payload nested past what can be walked (a
+  // RangeError out of the summary), a session id no file name can hold (ENAMETOOLONG), a payload that names another event. Each of
+  // them used to leave as an exception that main() printed as one uncoded line (closure audit 2026-10-02, RB-4 / RB-5). A policy
+  // that does not load is not the payload's fault and keeps its own coded failure (describeFailure).
+  const refuse = (detail: string): number => {
+    const d: HookDecision = refuseHookPayload(event, detail);
+    const r = host === 'claude-code' ? renderClaudeCodeOutput(d) : renderCodexOutput(d);
+    io.out(r.stdout);
+    return 2;
+  };
   let payload: Record<string, unknown> = {};
   if (io.stdin.trim()) {
     try {
       payload = JSON.parse(io.stdin) as Record<string, unknown>;
     } catch {
       io.err('EGO hook: unparsable payload; failing closed');
-      return 2;
+      return refuse('the payload is not parsable JSON');
     }
   }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return refuse('the payload is not a JSON object');
   const rt = {
     projectRoot: project.root,
     pin: project.pin,
@@ -594,17 +668,25 @@ function hook(io: CliIo, project: ProjectContext | null, positional: string[]): 
     prePromotion: project.prePromotion,
     env: io.env,
   };
-  if (host === 'claude-code') {
-    const ev = parseClaudeCodeEvent(event, payload, io.env, io.cwd);
-    const r = renderClaudeCodeOutput(handleHook(ev, rt));
+  try {
+    const ev = host === 'claude-code' ? parseClaudeCodeEvent(event, payload, io.env, io.cwd) : parseCodexEvent(event, payload, io.cwd);
+    if (ev.sessionId.length > MAX_SESSION_ID_LENGTH) return refuse(`the session id is ${ev.sessionId.length} characters long`);
+    const decision = handleHook(ev, rt);
+    const r = host === 'claude-code' ? renderClaudeCodeOutput(decision) : renderCodexOutput(decision);
     io.out(r.stdout);
     return r.exitCode;
+  } catch (e) {
+    if (e instanceof HookPayloadError) return refuse(e.message);
+    if (e instanceof Error && e.name === 'ControlPlaneValidationError') throw e;
+    const name = e instanceof Error ? e.name : typeof e;
+    const code = e instanceof Error ? (e as NodeJS.ErrnoException).code : undefined;
+    if (io.env['EGO_DEBUG'] === '1' && e instanceof Error && e.stack) io.err(e.stack);
+    return refuse(e instanceof RangeError ? 'the payload nests deeper than it can be read' : `the payload could not be processed (${name}${typeof code === 'string' ? ` ${code}` : ''})`);
   }
-  const ev = parseCodexEvent(event, payload, io.cwd);
-  const r = renderCodexOutput(handleHook(ev, rt));
-  io.out(r.stdout);
-  return r.exitCode;
 }
+
+/** the longest session id a hook accepts: it names a file in the runtime directory (and the lock beside it), and a file name has 255 bytes */
+const MAX_SESSION_ID_LENGTH = 200;
 
 export function projectPrePromotion(pin: Pin, env: NodeJS.ProcessEnv): boolean {
   if (pin.profile === 'STANDARD') return false;

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { isFile, readJson } from '../util/fs.ts';
 import { computeRuntimeIdentity, isDevelopmentVersion, type RuntimeIdentity } from './identity.ts';
 import { git } from '../util/git.ts';
+import { LAUNCHER_NAMES } from '../util/path-resolve.ts';
 
 declare const __EGO_VERSION__: string | undefined;
 declare const __EGO_PACKAGE_NAME__: string | undefined;
@@ -35,7 +36,7 @@ export function packageRoot(): string {
     const pkg = join(dir, 'package.json');
     if (isFile(pkg)) {
       const p = readJson<{ name?: string; bin?: Record<string, string> }>(pkg);
-      if (p.name === EGO_PACKAGE_NAME || (p.bin && 'harness' in p.bin)) {
+      if (p.name === EGO_PACKAGE_NAME || (p.bin && LAUNCHER_NAMES.some((n) => n in p.bin!))) {
         cachedRoot = dir;
         return dir;
       }
@@ -57,12 +58,20 @@ export function isBundled(): boolean {
  * (tests, `node --experimental-strip-types`) is `-dev.<sha>.src`, a distinct version string, so a source checkout and
  * the bundle built from the same commit never claim one version with two identities (IDENTITY_CONFLICT, Q79).
  */
+let cachedVersion: string | null = null;
+
 export function selfVersion(): string {
-  if (typeof __EGO_VERSION__ !== 'undefined') return __EGO_VERSION__;
+  // COMPUTED ONCE PER PROCESS, exactly like `selfIdentity()`. This shelled out to git on EVERY call — twelve call
+  // sites, several of them inside a single `ego init` — so a git invocation that failed or timed out under load
+  // would have given ONE process two different versions, and a pin, an index entry and a policy cache written
+  // under versions that disagree. Nothing observed that happening; it is removed because an identity must not
+  // depend on a subprocess succeeding the same way twice.
+  if (cachedVersion !== null) return cachedVersion;
+  if (typeof __EGO_VERSION__ !== 'undefined') return (cachedVersion = __EGO_VERSION__);
   const root = packageRoot();
   const pkg = readJson<{ version?: string }>(join(root, 'package.json'));
   const sha = git(['rev-parse', '--short=12', 'HEAD'], root);
-  return `${pkg.version ?? '0.0.0'}-dev.${sha.ok && sha.stdout ? sha.stdout : 'nogit'}.src`;
+  return (cachedVersion = `${pkg.version ?? '0.0.0'}-dev.${sha.ok && sha.stdout ? sha.stdout : 'nogit'}.src`);
 }
 
 export function selfBuildEpoch(): string | null {
@@ -82,7 +91,7 @@ export function selfIsDevelopment(): boolean {
   return isDevelopmentVersion(selfVersion()) || !isBundled();
 }
 
-/** True when `dir` is the EGO source repository itself (HARNESS_MAINTENANCE is available only there). */
+/** True when `dir` is the EGO source repository itself (EGO_MAINTENANCE is available only there). */
 export function isEgoSourceRepository(dir: string): boolean {
   const pkg = join(dir, 'package.json');
   if (!isFile(pkg)) return false;

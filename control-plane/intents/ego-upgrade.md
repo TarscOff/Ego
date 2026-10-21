@@ -1,12 +1,12 @@
 ---
 schema: ego.intent/1
-id: HARNESS_UPGRADE
+id: EGO_UPGRADE
 kind: intent
-title: HARNESS_UPGRADE
+title: EGO_UPGRADE
 routes_skills: []
 changes_authority: false
 ---
-# HARNESS_UPGRADE
+# EGO_UPGRADE
 
 Migrate a consumer between EGO versions with a migration and compatibility report. Routes the upgrade protocol.
 

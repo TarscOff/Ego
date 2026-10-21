@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, existsSync, readdirSync, writeFileSync, chmodSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { installGitHooks, shimScript } from '../src/project/githooks.ts';
+import { installGitHooks, shimScript, runGitHook } from '../src/project/githooks.ts';
 
 test('git hooks are never installed into an enclosing repository of a non-toplevel directory', () => {
   const outer = mkdtempSync(join(tmpdir(), 'ego-outer-'));
@@ -31,15 +31,15 @@ test('git hooks are never installed into an enclosing repository of a non-toplev
 
 test('chained hooks run and do not word-split when the repository path contains a space', () => {
   const noGit = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k)));
-  // a real repo whose absolute path contains a space, plus a fake `harness` on PATH so the shim exits 0
+  // a real repo whose absolute path contains a space, plus a fake `ego` on PATH so the shim exits 0
   const base = mkdtempSync(join(tmpdir(), 'ego sp-'));
   const repo = join(base, 'my repo');
   mkdirSync(repo, { recursive: true });
   spawnSync('git', ['init', '-q'], { cwd: repo, env: noGit() });
   const bin = join(base, 'bin');
   mkdirSync(bin);
-  writeFileSync(join(bin, 'harness'), '#!/bin/sh\nexit 0\n');
-  chmodSync(join(bin, 'harness'), 0o755);
+  writeFileSync(join(bin, 'ego'), '#!/bin/sh\nexit 0\n');
+  chmodSync(join(bin, 'ego'), 0o755);
   const env = { ...noGit(), PATH: `${bin}:${process.env.PATH ?? ''}` };
 
   // (1) governed path: a pre-existing executable pre-commit hook is chained by installGitHooks (runs git-hook.sh)
@@ -98,4 +98,31 @@ test('a linked worktree still runs EGO governance: the shim finds .harness in th
   const run = spawnSync('sh', [join(main, '.git', 'hooks', 'pre-commit')], { cwd: linked, env: noGit() });
   assert.ok(existsSync(marker), `EGO governance must run in a linked worktree (stderr: ${run.stderr})`);
   assert.doesNotMatch(String(run.stderr), /not governed by EGO/, 'must not fail open as ungoverned');
+});
+
+test('round-13 residuals: `git commit -a` stages into a temporary index and the scan must read THAT index', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'ego-idx-'));
+  const run = (args: string[], env: NodeJS.ProcessEnv = {}) =>
+    spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, ...env } });
+  run(['init', '-q', '.']);
+  run(['config', 'user.email', 't@e.x']);
+  run(['config', 'user.name', 'T']);
+  writeFileSync(join(repo, 'a.txt'), 'clean\n');
+  run(['add', 'a.txt']);
+  run(['-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'init']);
+
+  // `git commit -a` does not touch .git/index: it stages into a temporary index named by GIT_INDEX_FILE
+  writeFileSync(join(repo, 'a.txt'), 'AKIAIOSFODNN7EXAMPLE\n');
+  const tempIndex = join(repo, '.git', 'next-index-test');
+  run(['add', 'a.txt'], { GIT_INDEX_FILE: tempIndex });
+
+  const withTemp = runGitHook('pre-commit', repo, { ...process.env, GIT_INDEX_FILE: tempIndex }, '');
+  assert.equal(withTemp.ok, false, 'the secret staged in the temporary index must be found');
+  assert.match(withTemp.messages.join('\n'), /cloud\.aws\.access-key/);
+
+  // an agent-supplied index OUTSIDE the git directory is ignored: the scan falls back to the real index and is not
+  // aimed at an attacker-chosen file
+  const foreign = join(tmpdir(), 'ego-foreign-index');
+  const withForeign = runGitHook('pre-commit', repo, { ...process.env, GIT_INDEX_FILE: foreign }, '');
+  assert.equal(withForeign.ok, true, 'a foreign index must not be honoured, and the real index has nothing staged');
 });

@@ -19,7 +19,7 @@ detectors:
     replacement: '[REDACTED:basic]'
   - id: http.authorization.generic
     name: Authorization header with any scheme
-    pattern: '((?:proxy-)?authorization\s*[:=]\s*["'']?)([A-Za-z0-9._~+/=-]{12,})'
+    pattern: '((?:proxy-)?authorization\s*[:=]\s*["'']?(?:[A-Za-z][A-Za-z0-9-]{1,20}\s+)?)([A-Za-z0-9._~+/=-]{12,})'
     group: 2
     severity: block
     locked: true

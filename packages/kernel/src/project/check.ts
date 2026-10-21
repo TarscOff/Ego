@@ -1,12 +1,15 @@
-// `harness check`: generated freshness, policy compilation, context budget, pin integrity. Exit non-zero on any failure.
+// `ego check`: generated freshness, policy compilation, context budget, pin integrity. Exit non-zero on any failure.
 import { join } from 'node:path';
-import { readPin } from '../launcher/pin.ts';
+import { PinError, readPin } from '../launcher/pin.ts';
 import { selfIdentity, selfVersion, controlPlaneDir } from '../launcher/self.ts';
-import { policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { formatFreshness, policyCacheFreshness, readPolicyCache } from '../policy/cache.ts';
+import { sealFor } from '../policy/seal.ts';
+import { POLICY_INVALID_RULE, POLICY_STALE_RULE, renderFailure } from '../authority/reasons.ts';
 import { readGeneratedManifest } from './init.ts';
 import { gitHookStatus } from './githooks.ts';
 import { isFile, readTextIfExists } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
+import { flatText } from '../util/shown-text.ts';
 import { approxTokens } from '../context/root-instructions.ts';
 
 export interface CheckItem {
@@ -20,7 +23,7 @@ export interface CheckReport {
   items: CheckItem[];
 }
 
-export function runCheck(projectRoot: string): CheckReport {
+export function runCheck(projectRoot: string, env: NodeJS.ProcessEnv = process.env): CheckReport {
   const items: CheckItem[] = [];
   const self = { runtimeSha256: selfIdentity().runtimeSha256, version: selfVersion() };
   let pinOk = true;
@@ -31,13 +34,14 @@ export function runCheck(projectRoot: string): CheckReport {
       ok: true,
       detail: `${pin.version} (${pin.integrity.slice(0, 12)}), profile ${pin.profile}`,
     });
-    const fresh = policyCacheFreshness(controlPlaneDir(), projectRoot, self);
+    const seal = sealFor(env);
+    const fresh = policyCacheFreshness(controlPlaneDir(), projectRoot, self, seal);
     items.push({
       name: 'policy cache',
       ok: fresh.fresh,
-      detail: fresh.fresh ? 'fresh' : fresh.reasons.join('; '),
+      detail: formatFreshness(fresh),
     });
-    const cache = readPolicyCache(projectRoot);
+    const cache = readPolicyCache(projectRoot, seal);
     const budget = cache?.table.profiles[pin.profile]?.budgetTokens ?? 2000;
     const root = readTextIfExists(join(projectRoot, 'AGENTS.md'));
     const tokens = root ? approxTokens(root) : 0;
@@ -48,17 +52,24 @@ export function runCheck(projectRoot: string): CheckReport {
     });
   } catch (e) {
     pinOk = false;
-    items.push({ name: 'pin', ok: false, detail: (e as Error).message });
+    items.push({
+      name: 'pin',
+      ok: false,
+      detail:
+        e instanceof PinError
+          ? renderFailure('POLICY_INVALID', e.message, POLICY_INVALID_RULE)
+          : (e as Error).message,
+    });
   }
   const hooks = gitHookStatus(projectRoot);
   items.push({
     name: 'git hooks',
     ok: hooks.ok,
-    detail: hooks.ok ? `installed in ${hooks.dir}` : hooks.problems.join('; '),
+    detail: hooks.ok ? `installed in ${flatText(hooks.dir)}` : hooks.problems.join('; '),
   });
   const manifest = readGeneratedManifest(projectRoot);
   if (!manifest)
-    items.push({ name: 'generated artifacts', ok: false, detail: 'manifest missing; run `harness init`' });
+    items.push({ name: 'generated artifacts', ok: false, detail: 'manifest missing; run `ego init`' });
   else {
     const stale: string[] = [];
     for (const [rel, hash] of Object.entries(manifest.files)) {
@@ -70,7 +81,7 @@ export function runCheck(projectRoot: string): CheckReport {
     for (const [rel, hash] of Object.entries(manifest.sources ?? {})) {
       const full = join(projectRoot, rel);
       const current = isFile(full) ? sha256Hex(readTextIfExists(full) ?? '') : null;
-      if (current !== hash) stale.push(`${rel} changed since generation (regenerate with \`harness init\`)`);
+      if (current !== hash) stale.push(`${rel} changed since generation (regenerate with \`ego init\`)`);
     }
     if (manifest.runtimeSha256 !== self.runtimeSha256)
       stale.push(
@@ -79,7 +90,9 @@ export function runCheck(projectRoot: string): CheckReport {
     items.push({
       name: 'generated artifacts',
       ok: stale.length === 0,
-      detail: stale.length ? stale.join('; ') : `${Object.keys(manifest.files).length} files fresh`,
+      detail: stale.length
+        ? renderFailure('POLICY_STALE', stale.join('; '), POLICY_STALE_RULE)
+        : `${Object.keys(manifest.files).length} files fresh`,
     });
   }
   return { ok: pinOk && items.every((i) => i.ok), items };
@@ -88,6 +101,6 @@ export function runCheck(projectRoot: string): CheckReport {
 export function formatCheck(r: CheckReport): string {
   return [
     ...r.items.map((i) => `${i.ok ? 'OK  ' : 'FAIL'} ${i.name}: ${i.detail}`),
-    r.ok ? 'check: PASSED' : 'check: FAILED (run `harness init` to regenerate, or fix the listed sources)',
+    r.ok ? 'check: PASSED' : 'check: FAILED (run `ego init` to regenerate, or fix the listed sources)',
   ].join('\n');
 }

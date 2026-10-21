@@ -27,16 +27,18 @@ narrow: []
 ---
 # STANDARD
 
-A reasonable engineering baseline. Deterministic enforcement of absolute and organization-locked denies is still required; what STANDARD
+A reasonable engineering baseline. Deterministic enforcement of HARD_LOCK and ADMIN_GOVERNED capabilities is still required; what STANDARD
 relaxes is ceremony, not authority. Where a guarantee cannot be met, STANDARD continues with explicit disclosure in
 `doctor`, `status` and the receipt: unsigned runtime trust, relayed presentation, an unavailable model-assisted review,
 a stale forge snapshot.
 
 `narrow` lists capability identifiers this profile moves toward DENY relative to the core table; STANDARD narrows
-nothing.
+nothing. The profiles are ordered STANDARD, STRICT, HIGH_ASSURANCE and a stricter one is never looser than a weaker
+one, for any capability in any mode: `narrow` is not inherited, so each page lists everything it narrows, and the
+compiler refuses a control plane that breaks the order.
 
 Execution budgets (`budgets`) bound one task: wall-clock duration, agent iterations, tool calls, retries of one step,
 delegation depth, concurrent subagents and network operations. Token and cost limits apply only where the host reports
 them (`null` = not observable). Exceeding a budget stops the task with `on_exceed`: BLOCK refuses further governed tool
-calls until a human extends the budget (`harness.budget.extend`, ASK); ESCALATE raises a decision and continues only
+calls until a human extends the budget (`ego.budget.extend`, ASK); ESCALATE raises a decision and continues only
 with an answer. Repeated failure of one step never loops: once a step has used its retries, BLOCK profiles refuse the next identical attempt and ESCALATE profiles require a human decision for it.

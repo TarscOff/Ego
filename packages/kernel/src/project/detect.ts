@@ -11,11 +11,14 @@ import { isEgoSourceRepository } from '../launcher/self.ts';
 export type ForgeProvider = 'github' | 'gitlab' | 'azure-devops' | 'bitbucket' | 'unknown' | 'none';
 
 export interface RemoteIdentity {
+  /** @untrusted a remote's name, from the repository's own configuration */
   name: string;
+  /** @untrusted */
   url: string;
   provider: ForgeProvider;
-  /** owner/repo (or org/project/repo for Azure DevOps) when parseable */
+  /** @untrusted owner/repo (or org/project/repo for Azure DevOps) when parseable */
   path?: string;
+  /** @untrusted */
   host?: string;
 }
 
@@ -38,7 +41,9 @@ export interface LegacyFinding {
 }
 
 export interface SiblingRepo {
+  /** @untrusted a directory on the disk */
   path: string;
+  /** @untrusted a directory name on the disk */
   name: string;
   hasPin: boolean;
   hasWorkspaceRegistry: boolean;

@@ -38,6 +38,11 @@ function effectiveSeverity(d: SecretDetector, overlay?: Record<string, Severity>
   return requested;
 }
 
+/** A label this engine (or the curl pass) already wrote. It is not a secret, so no later rule may report it again.
+ *  Only a rule whose VALUE class is permissive can match one - the generic key/value rules take `[^"'\s]{8,}` - and
+ *  those are the rules that capture a group, so the check lives in that branch alone. */
+const PLACEHOLDER_RE = /^\[REDACTED:[^\]]*\]$/;
+
 export function redact(
   input: string,
   detectors: SecretDetector[],
@@ -52,10 +57,17 @@ export function redact(
   const curl = redactCurl(input);
   let text = curl.text;
   for (const f of curl.findings) note(f.kind, 'http', 'block', f.count);
-  const list = [...detectors, ...(opts.extraDetectors ?? [])];
-  for (const d of list) {
+  // WHICH DETECTOR REPORTS A SPAN IS DECIDED BY ORDER, so the order must not be able to lose the stronger report. The
+  // generic `NAME_TOKEN=value` and `.env` rules are warn-level and sit first in the catalogue; they redacted the value
+  // out from under the specific detector, so `export GITHUB_TOKEN=ghp_…` and `STRIPE_SECRET_KEY=sk_live_…` in a file
+  // were a WARNING - and the pre-commit and pre-push scans refuse on `blocked`, so the secret was committed (closure
+  // evidence, finding 18). Block-severity detectors therefore run first, in catalogue order, then the warn ones; the
+  // severity is the EFFECTIVE one, so an overlay that raises a generic rule to block moves it up with the rest.
+  const list = [...detectors, ...(opts.extraDetectors ?? [])]
+    .map((d) => ({ d, severity: effectiveSeverity(d, opts.overlaySeverities) }))
+    .sort((a, b) => Number(a.severity !== 'block') - Number(b.severity !== 'block'));
+  for (const { d, severity } of list) {
     if (d.onlyForFiles && !opts.isFile) continue;
-    const severity = effectiveSeverity(d, opts.overlaySeverities);
     const re = new RegExp(
       d.pattern.source,
       d.pattern.flags.includes('g') ? d.pattern.flags : d.pattern.flags + 'g',
@@ -69,18 +81,30 @@ export function redact(
       continue;
     }
     let count = 0;
-    text = text.replace(re, (...args: unknown[]) => {
-      const match = args[0] as string;
-      if (d.group > 0) {
-        const groups = args.slice(1, -2) as Array<string | undefined>;
-        const target = groups[d.group - 1];
-        if (!target) return match;
+    if (d.group > 0) {
+      // Redact the captured group at its EXACT span, not by string search: a naive match.replace(password, …) would
+      // redact the first textual occurrence, which is the username/scheme when they equal the password
+      // (postgres://admin:admin@… , postgres://postgres:postgres@…), leaving the real secret in the output.
+      const reD = new RegExp(re.source, re.flags.includes('d') ? re.flags : re.flags + 'd');
+      let out = '';
+      let last = 0;
+      for (const mm of text.matchAll(reD)) {
+        const span = mm.indices?.[d.group];
+        if (!span) continue; // the group did not participate in this match
+        // a value an earlier (block) detector already replaced is reported once, under its own label
+        if (PLACEHOLDER_RE.test(mm[d.group] ?? '')) continue;
+        out += text.slice(last, span[0]) + d.replacement;
+        last = span[1];
         count++;
-        return match.replace(target, d.replacement);
       }
-      count++;
-      return d.replacement;
-    });
+      out += text.slice(last);
+      text = out;
+    } else {
+      text = text.replace(re, () => {
+        count++;
+        return d.replacement;
+      });
+    }
     if (count > 0) note(d.id, d.family, severity, count);
   }
   const all = [...findings.values()].sort((a, b) => a.detector.localeCompare(b.detector));

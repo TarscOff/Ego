@@ -2,7 +2,7 @@
 // index/ mutable mappings, mirror/ skills and docs, pins/ bounded local pin history.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { cpSync, renameSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { cpSync, renameSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { ensureDir, readJsonIfExists, writeJsonAtomic, isDir, writeAtomic, isFile } from '../util/fs.ts';
 import { computeInternalManifest, identityFromManifest, listRuntimeFiles } from './identity.ts';
@@ -214,19 +214,42 @@ export function materializeRuntime(
   ensureHome(home);
   const target = runtimeDir(home, expectedIdentity);
   if (existsSync(target)) return { created: false, dir: target };
-  const manifest = computeInternalManifest(sourceRoot);
-  const actual = identityFromManifest(manifest);
-  if (actual !== expectedIdentity)
-    throw new Error(
-      `refusing to materialize: computed identity ${actual.slice(0, 12)}… does not match expected ${expectedIdentity.slice(0, 12)}…`,
-    );
   const tmp = `${target}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   ensureDir(tmp);
   for (const rel of listRuntimeFiles(sourceRoot)) {
     cpSync(join(sourceRoot, rel), join(tmp, rel), { recursive: false, force: true, dereference: true });
   }
+  // HASH WHAT WAS STORED, NOT WHAT WAS READ A MOMENT BEFORE STORING IT. Verifying the live tree and copying it
+  // afterwards named the cache directory after bytes it might not contain: a write landing between the two left
+  // an entry whose contents hash to something else, with no error at all, and `verifyRuntimeDirectory` later
+  // reported it TAMPERED — EGO corrupting its own cache and then blaming tampering. Hashing the COPY makes the
+  // name a fact about the bytes, which is what a runtime identity is supposed to be.
+  const manifest = computeInternalManifest(tmp);
+  const actual = identityFromManifest(manifest);
+  if (actual !== expectedIdentity) {
+    rmSync(tmp, { recursive: true, force: true });
+    // A MISMATCH HAS TWO CAUSES AND THEY NEED DIFFERENT ANSWERS: these are not the bytes the pin names — the
+    // tampering case this check exists for — or the directory is being WRITTEN while we read it, in which case
+    // neither reading is a fact about anything. Two readings of the SOURCE tell them apart.
+    const first = identityFromManifest(computeInternalManifest(sourceRoot));
+    const again = identityFromManifest(computeInternalManifest(sourceRoot));
+    throw new Error(
+      again !== first || first !== actual
+        ? `refusing to materialize: ${sourceRoot} is being written while this runs — the copy hashes to ${actual.slice(0, 12)}… and the source now reads ${again.slice(0, 12)}…. A runtime identity is a claim about bytes; let the tree settle and run again.`
+        : `refusing to materialize: computed identity ${actual.slice(0, 12)}… does not match expected ${expectedIdentity.slice(0, 12)}…`,
+    );
+  }
   writeAtomic(join(tmp, 'manifest.internal.json'), JSON.stringify(manifest, null, 2) + '\n');
-  renameSync(tmp, target);
+  try {
+    renameSync(tmp, target);
+  } catch (e) {
+    // ANOTHER PROCESS MATERIALIZED THE SAME IDENTITY FIRST, and by construction its bytes hash to the same value:
+    // losing that race is SUCCESS, not failure. An unguarded rename made the loser throw ENOTEMPTY, which
+    // `initProject` turned into a half-initialised project — 18 of 24 concurrent materializations failed this way.
+    rmSync(tmp, { recursive: true, force: true });
+    if (existsSync(target)) return { created: false, dir: target };
+    throw e;
+  }
   return { created: true, dir: target };
 }
 

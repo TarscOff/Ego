@@ -1,4 +1,4 @@
-// `harness init`: detect, propose, pin (never re-pin), generate the thin overlay, adapter files and git hooks, verify
+// `ego init`: detect, propose, pin (never re-pin), generate the thin overlay, adapter files and git hooks, verify
 // freshness, run doctor, explain. Authored overlays are never overwritten; generated files carry provenance.
 import { join, relative } from 'node:path';
 import { chmodSync, copyFileSync, existsSync, renameSync } from 'node:fs';
@@ -22,7 +22,28 @@ import {
   isRuntimeCached,
   listIndexEntries,
 } from '../launcher/home.ts';
-import { ensurePolicyCache, POLICY_CACHE_RELATIVE } from '../policy/cache.ts';
+import {
+  ensurePolicyCache,
+  readPolicyCache,
+  POLICY_CACHE_RELATIVE,
+  type WideningAcceptance,
+} from '../policy/cache.ts';
+import { sealKeyIn } from '../policy/seal.ts';
+import { compileAuthority } from '../authority/compile.ts';
+import { loadControlPlane } from '../control-plane/load.ts';
+import type { IgnoredLocalTarget } from '../control-plane/types.ts';
+import { authorityDiffReport, type AuthorityDiffReport } from './authority-diff.ts';
+import {
+  detectLocalSurfaces,
+  parseLocalTargetSpec,
+  PROJECT_LOCAL_TARGETS_FILE,
+  planAdoption,
+  renderLocalSurfaces,
+  workingTreeTargets,
+  writeAdoption,
+  type AdoptionPlan,
+  type LocalSurfaces,
+} from './local-surfaces.ts';
 import { generateRootInstructions, STANDING_RULES_RELATIVE } from '../context/root-instructions.ts';
 import { openRuntimeRoot } from '../runtime/root.ts';
 import {
@@ -31,9 +52,10 @@ import {
   readTextIfExists,
   writeAtomic,
   writeJsonAtomic,
-  readJsonIfExists,
+  readJsonIfReadable,
 } from '../util/fs.ts';
 import { sha256Hex } from '../util/hash.ts';
+import { shownToken } from '../util/shown-text.ts';
 import { writeClaudeSettings, writeSlashCommands } from '../../../adapter-claude-code/src/dialect.ts';
 import { writeCodexHooks } from '../../../adapter-codex-cli/src/dialect.ts';
 import { installGitHooks, isAgentShell } from './githooks.ts';
@@ -49,6 +71,14 @@ export interface InitOptions {
   env?: NodeJS.ProcessEnv;
   /** a human act: replace a hand-edited (stamp-mismatched) pin with a fresh pin on the executing runtime */
   repin?: boolean;
+  /** `kube:<context>` | `db:<host>` | `container:<context>`: adopt targets into `.harness/local-targets.md`. A human act,
+   *  refused from an agent shell exactly as a profile change is (issue #16 section 7) */
+  localTargets?: string[];
+  /** decline the local-development proposals (they are not listed, nothing is adopted) */
+  noLocalTargets?: boolean;
+  /** Asked, on a human terminal only, before widenings that arrived in the layer files since the last accepted init are
+   *  accepted. Absent in every non-interactive run, so nothing here ever needs an answer to finish. */
+  confirmWidening?: (widenings: string[]) => boolean;
 }
 
 const TASK_SOURCES = ['issue-preferred', 'issue-required', 'ad-hoc'];
@@ -65,6 +95,23 @@ export interface InitReport {
   notes: string[];
   doctorText: string;
   doctorOk: boolean;
+  localTargets: InitLocalTargets;
+}
+
+/** What `init` found, did and changed about the project's local-development targets (issue #16 section 7). */
+export interface InitLocalTargets {
+  /** `kube:team-dev`, written this run to `.harness/local-targets.md` */
+  adopted: string[];
+  /** requested and not written, with why (already local, already declared) */
+  already: string[];
+  /** the repository's local-development surfaces and the proposals; empty when declined */
+  surfaces: LocalSurfaces;
+  /** declarations in the layer files that the registry did not take, with the reason */
+  ignored: IgnoredLocalTarget[];
+  /** the AUTHORITY DIFF against the table accepted before this run; null when nothing changed */
+  authorityDiff: AuthorityDiffReport | null;
+  /** every line the CLI prints for this, in order */
+  lines: string[];
 }
 
 export const DEFAULT_SOURCES = ['npm:@tarscoff/ego', 'github-release:tarscoff/ego'];
@@ -89,6 +136,20 @@ export function initProject(opts: InitOptions): InitReport {
   if (!detection.gitRoot)
     throw new Error(`not a git repository: ${opts.cwd}. EGO governs git checkouts; run \`git init\` first.`);
   const projectRoot = detection.gitRoot;
+  // ---- local-development targets the human asked to adopt: decided BEFORE anything is written, so one refusal
+  // leaves the repository as it was. Declaring a target local turns refusals into allowed operations, so it is a
+  // human act from the human's own terminal, never from an agent shell (the same rule as --profile and --repin)
+  const agentShell = isAgentShell(env);
+  const specs = (opts.localTargets ?? []).map(parseLocalTargetSpec);
+  if (specs.length && opts.noLocalTargets)
+    throw new Error('--local-target and --no-local-targets contradict each other');
+  if (specs.length && agentShell)
+    throw new Error(
+      'refused: adopting a local development target is a human act from your own terminal, never from an agent shell (it turns refusals into allowed operations)',
+    );
+  const plan: AdoptionPlan = specs.length
+    ? planAdoption(specs, workingTreeTargets(controlPlaneDir(), projectRoot))
+    : { add: [], already: [] };
   const notes: string[] = [];
   const generated: string[] = [];
   const moved: Array<{ from: string; to: string }> = [];
@@ -96,6 +157,12 @@ export function initProject(opts: InitOptions): InitReport {
   const version = selfVersion();
   const home = egoHome(env);
   ensureHome(home);
+  // the key the policy cache is sealed with (AUTH-5): made here, by the command a person runs on their machine, in the home no working tree reaches
+  const seal = sealKeyIn(home, { create: true, repair: true });
+  if (!seal)
+    notes.push(
+      'the policy cache could not be sealed (no key could be made in EGO_HOME): it was not written, and every hook compiles the policy afresh with the layer widenings pending',
+    );
 
   // ---- pin (Q78, section C): never re-pin an initialized project
   let pin: Pin;
@@ -106,7 +173,7 @@ export function initProject(opts: InitOptions): InitReport {
   if (hasPin(projectRoot) && opts.repin) {
     try {
       readPin(projectRoot);
-      throw new Error('--repin refused: the pin is intact; use `harness upgrade` (phase 6) to change it');
+      throw new Error('--repin refused: the pin is intact; use `ego upgrade` (phase 6) to change it');
     } catch (e) {
       if (!(e instanceof PinError)) throw e;
       tamperedPin = e.message;
@@ -120,7 +187,7 @@ export function initProject(opts: InitOptions): InitReport {
     } catch (e) {
       if (e instanceof PinError)
         throw new PinError(
-          `${e.message.split(';')[0]}; a human may run \`harness init --repin\` from their own terminal to pin this repository to the executing runtime again`,
+          `${e.message.split(';')[0]}; a human may run \`ego init --repin\` from their own terminal to pin this repository to the executing runtime again`,
         );
       throw e;
     }
@@ -147,7 +214,7 @@ export function initProject(opts: InitOptions): InitReport {
     pin = profile !== existing.profile || ts !== existing.taskSource ? writePin(projectRoot, base) : existing;
     pinned = 'kept';
     notes.push(
-      `pinned to ${existing.version} (installed ${version}); use \`harness upgrade\` to change the pin`,
+      `pinned to ${existing.version} (installed ${version}); use \`ego upgrade\` to change the pin`,
     );
     if (existing.integrity !== self.runtimeSha256)
       notes.push(
@@ -159,14 +226,14 @@ export function initProject(opts: InitOptions): InitReport {
     const own = readIndex(home, self.name, version);
     if (own?.state === 'TAMPERED' || own?.state === 'REVOKED')
       throw new Error(
-        `refused: the executing runtime ${self.runtimeSha256.slice(0, 12)}… is ${own.state} in the index; a pin written now would be refused by every launch (see \`harness bootstrap doctor\`)`,
+        `refused: the executing runtime ${self.runtimeSha256.slice(0, 12)}… is ${own.state} in the index; a pin written now would be refused by every launch (see \`ego bootstrap doctor\`)`,
       );
     const clash = listIndexEntries(home).find(
       (e) => e.version === version && e.identity !== self.runtimeSha256,
     );
     if (clash)
       throw new Error(
-        `IDENTITY_CONFLICT: version ${version} is already mapped to runtime ${clash.identity.slice(0, 12)}… (${clash.name}) but the executing runtime is ${self.runtimeSha256.slice(0, 12)}…; a pin written now would be refused by every launch. Rebuild from a clean tree or resolve the index with \`harness bootstrap doctor\`.`,
+        `IDENTITY_CONFLICT: version ${version} is already mapped to runtime ${clash.identity.slice(0, 12)}… (${clash.name}) but the executing runtime is ${self.runtimeSha256.slice(0, 12)}…; a pin written now would be refused by every launch. Rebuild from a clean tree or resolve the index with \`ego bootstrap doctor\`.`,
       );
     const taskSource = opts.taskSource ?? detection.proposedTaskSource;
     if (!TASK_SOURCES.includes(taskSource))
@@ -193,8 +260,17 @@ export function initProject(opts: InitOptions): InitReport {
     );
     // materialize and index the launcher runtime (section J)
     if (!isRuntimeCached(home, self.runtimeSha256) && isFile(join(packageRoot(), 'dist', 'ego.js'))) {
-      materializeRuntime(home, packageRoot(), self.runtimeSha256);
-      notes.push(`materialized runtime ${self.runtimeSha256.slice(0, 12)} into ${home.runtimes}`);
+      // THE RUNTIME CACHE IS A LAUNCHER OPTIMISATION, AND FAILING TO POPULATE IT MUST NOT LEAVE THE PROJECT
+      // PINNED AND UNGOVERNED. The pin is written above; an unguarded throw here skipped the policy cache, the
+      // generated artifacts and the git hooks, so `ego check` reported a project that looked initialised and
+      // enforced nothing. One write to any distributed file while `ego init` ran produced exactly that, and this
+      // repository's own process edits `docs/build/build-log.md` — a distributed file — every phase.
+      try {
+        materializeRuntime(home, packageRoot(), self.runtimeSha256);
+        notes.push(`materialized runtime ${self.runtimeSha256.slice(0, 12)} into ${home.runtimes}`);
+      } catch (e) {
+        notes.push(`the runtime cache was NOT populated: ${(e as Error).message}`);
+      }
     } else if (!isFile(join(packageRoot(), 'dist', 'ego.js')))
       notes.push('executing from source (no dist/ego.js): the runtime was not materialized into the cache');
     if (!readIndex(home, self.name, version)) {
@@ -216,7 +292,7 @@ export function initProject(opts: InitOptions): InitReport {
       notes.push(promo.message);
     } else if (opts.offline)
       notes.push(
-        'trust promotion skipped: offline; run `harness sync` when a release-metadata source is reachable',
+        'trust promotion skipped: offline; run `ego sync` when a release-metadata source is reachable',
       );
   }
 
@@ -273,18 +349,62 @@ export function initProject(opts: InitOptions): InitReport {
 
   // ---- runtime root and policy cache
   openRuntimeRoot(projectRoot, { runtimeSha256: self.runtimeSha256, version }, now());
-  const agentShell = isAgentShell(env);
-  const { cache } = ensurePolicyCache(
-    controlPlaneDir(),
+  const policySelf = { runtimeSha256: self.runtimeSha256, version };
+  // the table accepted before this run, for the AUTHORITY DIFF (the kernel default when there was none)
+  const before =
+    readPolicyCache(projectRoot, seal)?.table ??
+    compileAuthority(loadControlPlane(controlPlaneDir()), { projectRoot });
+  // Widenings that reached the layer files since the last accepted init - an agent's edit, a teammate's commit - are
+  // shown to a person BEFORE they are accepted, when there is a person to ask. They are asked about first and alone:
+  // what the human adopts with a flag below is their own act and needs no second question.
+  // WHAT A PERSON ACCEPTS IS WHAT THEY WERE SHOWN (AUTH-4). With a question asked, the acceptance below is bound to the layer
+  // files as they were when the widenings were listed - and, when nothing was waiting, to the files as they were then, so a
+  // widening that arrives in the seconds after "nothing to accept" is not accepted by the call that follows.
+  let acceptWidening: WideningAcceptance = !agentShell;
+  if (acceptWidening && opts.confirmWidening) {
+    const seen = ensurePolicyCache(controlPlaneDir(), projectRoot, policySelf, { seal }).cache;
+    const waiting = seen.pendingWidening;
+    if (waiting && !opts.confirmWidening(waiting.widenings)) {
+      if (plan.add.length)
+        throw new Error(
+          'declined: widenings are waiting in the layer files; accept or remove them before adopting another target',
+        );
+      acceptWidening = false;
+    } else
+      acceptWidening = waiting
+        ? { layerSources: { ...waiting.layerSources }, widenings: [...waiting.widenings] }
+        : { layerSources: { ...seen.layerSources }, widenings: [] };
+  }
+  const adoption = writeAdoption(
     projectRoot,
-    { runtimeSha256: self.runtimeSha256, version },
-    { acceptWidening: !agentShell },
+    plan.add,
+    typeof acceptWidening === 'object' ? { hash: acceptWidening.layerSources[PROJECT_LOCAL_TARGETS_FILE] } : undefined,
   );
+  // what the person adopts with a flag is their own act: the file they changed is bound by the hash of the text just written
+  if (adoption && typeof acceptWidening === 'object')
+    acceptWidening = { layerSources: { ...acceptWidening.layerSources, [adoption.file]: adoption.sha256 } };
+  const adoptedFile = adoption?.file ?? null;
+  const { cache, acceptanceRefused } = ensurePolicyCache(controlPlaneDir(), projectRoot, policySelf, {
+    acceptWidening,
+    seal,
+  });
+  if (acceptanceRefused)
+    notes.push(
+      `policy widening NOT accepted: ${acceptanceRefused}. Nothing in the layer files was applied; run \`ego init\` again and read what is shown`,
+    );
   generated.push(rel(projectRoot, join(projectRoot, POLICY_CACHE_RELATIVE)));
   if (cache.pendingWidening)
     notes.push(
-      `policy widening NOT applied (${cache.pendingWidening.widenings.length} cell(s)): widenings take effect only when a human runs \`harness init\` from their own terminal`,
+      `policy widening NOT applied (${cache.pendingWidening.widenings.length} cell(s)): widenings take effect only when a human runs \`ego init\` from their own terminal`,
     );
+  const localTargets = describeLocalTargets({
+    projectRoot,
+    plan,
+    adoptedFile,
+    cache,
+    before,
+    declined: opts.noLocalTargets === true,
+  });
 
   // ---- generated root instructions
   const root = generateRootInstructions({
@@ -309,7 +429,7 @@ export function initProject(opts: InitOptions): InitReport {
   } else notes.push('EGO source repository: AGENTS.md is authored here, not generated');
   if (root.overBudget)
     notes.push(
-      `WARNING: generated root instructions use ~${root.tokens} tokens, over the ${pin.profile} budget of ${root.budget}; trim .harness/overlay/standing-rules.md (\`harness check\` fails until then)`,
+      `WARNING: generated root instructions use ~${root.tokens} tokens, over the ${pin.profile} budget of ${root.budget}; trim .harness/overlay/standing-rules.md (\`ego check\` fails until then)`,
     );
 
   // ---- hook shims, adapter configuration, git hooks
@@ -346,7 +466,8 @@ export function initProject(opts: InitOptions): InitReport {
   }
   writeJsonAtomic(join(projectRoot, GENERATED_MANIFEST_RELATIVE), manifest);
 
-  const doctor = runDoctor({ cwd: projectRoot, env, now, offline: opts.offline ?? false });
+  // the capability matrix is a summary here: `ego init` already prints a page, and `ego doctor` has the rest
+  const doctor = runDoctor({ cwd: projectRoot, env, now, offline: opts.offline ?? false, authority: 'summary' });
   return {
     projectRoot,
     detection,
@@ -358,7 +479,44 @@ export function initProject(opts: InitOptions): InitReport {
     doctorText: formatDoctor(doctor),
     authored: [...new Set(authored)].sort(),
     doctorOk: doctor.ok,
+    localTargets,
   };
+}
+
+/** The local-development part of the report: what was adopted, what the repository suggests, what a layer file said
+ *  that the registry did not take, and the authority diff the whole run produced. */
+function describeLocalTargets(a: {
+  projectRoot: string;
+  plan: AdoptionPlan;
+  adoptedFile: string | null;
+  cache: NonNullable<ReturnType<typeof readPolicyCache>>;
+  before: NonNullable<ReturnType<typeof readPolicyCache>>['table'];
+  declined: boolean;
+}): InitLocalTargets {
+  const table = a.cache.table;
+  const surfaces: LocalSurfaces = a.declined
+    ? { detected: [], proposals: [] }
+    : detectLocalSurfaces(a.projectRoot, table.localTargets);
+  const adopted = a.plan.add.map((s) => `${s.kind}:${s.name}`);
+  const already = a.plan.already.map((s) => `${s.kind}:${s.name} (${s.why})`);
+  const ignored = table.localTargets.ignored;
+  const authorityDiff = a.before.tableHash === table.tableHash ? null : authorityDiffReport(a.before, table);
+  const lines: string[] = [];
+  if (adopted.length)
+    lines.push(
+      `adopted LOCAL_DEV target(s) into ${a.adoptedFile}: ${adopted.join(', ')}${a.cache.pendingWidening ? ' (NOT applied yet: see the policy widening note)' : ''}`,
+    );
+  for (const x of already) lines.push(`not written: ${x}`);
+  lines.push(...renderLocalSurfaces(surfaces));
+  for (const i of ignored)
+    lines.push(
+      `ignored by the local-target registry: ${i.kind === 'file' ? 'file' : i.kind}${i.kind === 'file' ? '' : `:${shownToken(i.name)}`} from the ${i.layer} (${i.file}) - ${i.reason}`,
+    );
+  if (authorityDiff) {
+    lines.push(`AUTHORITY DIFF against the previously accepted table (${authorityDiff.level}):`);
+    lines.push(...authorityDiff.lines.map((l) => `  ${l}`));
+  }
+  return { adopted, already, surfaces, ignored, authorityDiff, lines };
 }
 
 function validateProfile(profile: string, dev: boolean, isEgo: boolean): void {
@@ -391,7 +549,19 @@ function ensureGitignore(projectRoot: string): void {
 }
 
 export function readGeneratedManifest(projectRoot: string): GeneratedManifest | null {
-  return readJsonIfExists<GeneratedManifest>(join(projectRoot, GENERATED_MANIFEST_RELATIVE));
+  // (derived state: one that cannot be read is absent, and `ego init` writes it again)
+  const m = readJsonIfReadable<GeneratedManifest>(join(projectRoot, GENERATED_MANIFEST_RELATIVE));
+  const strings = (v: unknown): boolean =>
+    v !== null && typeof v === 'object' && !Array.isArray(v) && Object.values(v as object).every((x) => typeof x === 'string');
+  // (valid JSON of another shape is no more a manifest than an empty file is)
+  return m !== null &&
+    typeof m === 'object' &&
+    m.schema === 'ego.generated-manifest/1' &&
+    typeof m.runtimeSha256 === 'string' &&
+    strings(m.files) &&
+    (m.sources === undefined || strings(m.sources))
+    ? m
+    : null;
 }
 
 const PERMISSIONS_TEMPLATE = `---
@@ -403,7 +573,7 @@ title: Product permission overlay
 # Product permission overlay
 
 This file narrows EGO's compiled authority table for this product. It can move a capability toward DENY (ALLOW → ASK,
-ASK → DENY) and never widen. Absolute denies cannot be referenced. Identifiers come from \`harness capabilities\`.
+ASK → DENY) and never widen. Absolute denies cannot be referenced. Identifiers come from \`ego capabilities\`.
 
 ## Requires human approval
 
@@ -414,7 +584,7 @@ ASK → DENY) and never widen. Absolute denies cannot be referenced. Identifiers
 <!-- example: - [x] \`command.network-tool\` — no curl/wget from agent shells in this product -->
 `;
 
-const MCP_TRUST_TEMPLATE = `---
+export const MCP_TRUST_TEMPLATE = `---
 schema: ego.mcp-trust/1
 id: mcp-trust
 title: MCP server trust
@@ -422,10 +592,17 @@ servers: []
 ---
 # MCP server trust
 
-Reachability never implies trust. List each MCP server this product trusts with its class and per-tool capability
-grants; an unlisted server or tool is \`mcp.unknown\` (DENY). Privileged or destructive tools are DENY by default.
+**Listing a server here currently has NO EFFECT.** Nothing reads this file yet: the resolver that turns a listed
+server into per-tool capabilities is phase-2 work (EGO issue #10). Until it lands, EVERY \`mcp__<server>__<tool>\` call
+is \`mcp.unknown\` and is DENIED, whether the server is listed below or not. The file is kept so that the declaration
+exists when the resolver does; do not rely on it to enable anything today, and do not treat a listed server as trusted.
+
+Reachability never implies trust. The intended contract: list each MCP server this product trusts with its class and
+per-tool capability grants; an unlisted server or tool stays \`mcp.unknown\` (DENY), and privileged or destructive
+tools are DENY by default.
 
 \`\`\`yaml
+# not read by anything yet (see above)
 servers:
   - id: filesystem
     scope: local            # local | remote
@@ -439,7 +616,7 @@ const STANDING_RULES_TEMPLATE = `---
 schema: ego.standing-rules/1
 ---
 <!-- Standing rules for this product: folded into the generated root AGENTS.md under the profile context budget.
-     Keep them short; \`harness context explain\` shows their token cost. Run \`harness init\` after editing. -->
+     Keep them short; \`ego context explain\` shows their token cost. Run \`ego init\` after editing. -->
 `;
 
 const OVERLAY_README = `# .harness/overlay
@@ -450,7 +627,7 @@ Authored product overlay. EGO never overwrites files here.
 - \`matchers.md\` (optional, schema \`ego.matchers/1\`): extra operation → capability matchers; narrowing only.
 - \`skills/\` (phase 3): product skills.
 
-Generated artifacts live in \`.harness/generated/\` and are regenerated by \`harness init\`, \`sync\`, \`upgrade\`,
+Generated artifacts live in \`.harness/generated/\` and are regenerated by \`ego init\`, \`sync\`, \`upgrade\`,
 \`rollback\` and \`check\`; runtime state lives in \`.harness/runtime/\`. Both are gitignored.
 `;
 
